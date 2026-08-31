@@ -21,15 +21,20 @@ build_skarnet() {
     cd ${name}-${version}
 
     # skalibs was installed with a plain --prefix=/usr (no
-    # --enable-slashpackage), so its sysdeps/include/lib land under
-    # ${ROOTFS}/usr/lib/skalibs and ${ROOTFS}/usr/include -- not the
-    # slashpackage-style /package/<category>/<name> layout.
+    # --enable-slashpackage), so its sysdeps/include land under
+    # ${ROOTFS}/usr/lib/skalibs/sysdeps and ${ROOTFS}/usr/include -- not
+    # the slashpackage-style /package/<category>/<name> layout. skalibs
+    # was also built --enable-shared --disable-static, so libskarnet
+    # only exists as a shared lib, installed via skalibs' dynlibdir
+    # default ($prefix/lib, i.e. flat in usr/lib) rather than its
+    # package-specific libdir (usr/lib/skalibs, static-only) -- pass
+    # --with-dynlib so the linker actually finds -lskarnet.
     ./configure \
         --target="${TARGET_TRIPLE}" \
         --prefix="/usr" \
         --with-sysdeps="${ROOTFS}/usr/lib/skalibs/sysdeps" \
         --with-include="${ROOTFS}/usr/include" \
-        --with-lib="${ROOTFS}/usr/lib/skalibs" \
+        --with-dynlib="${ROOTFS}/usr/lib" \
         ${extra_flags}
 
     make -j${NPROC}
