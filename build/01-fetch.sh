@@ -70,7 +70,25 @@ fetch "https://gitlab.freedesktop.org/wayland/wayland/-/archive/${WAYLAND_VERSIO
 fetch "https://gitlab.freedesktop.org/wayland/wayland-protocols/-/archive/${WAYLAND_PROTOCOLS_VERSION}/wayland-protocols-${WAYLAND_PROTOCOLS_VERSION}.tar.gz"
 fetch "https://gitlab.freedesktop.org/pixman/pixman/-/archive/pixman-${PIXMAN_VERSION}/pixman-pixman-${PIXMAN_VERSION}.tar.gz"
 fetch "https://gitlab.freedesktop.org/libevdev/libevdev/-/archive/libevdev-${LIBEVDEV_VERSION}/libevdev-libevdev-${LIBEVDEV_VERSION}.tar.gz"
-fetch "https://gitlab.freedesktop.org/libevdev/mtdev/-/archive/${MTDEV_VERSION}/mtdev-${MTDEV_VERSION}.tar.gz"
+# mtdev specifically (not the other gitlab.freedesktop.org projects
+# fetched here -- confirmed by re-running the plain fetch() request
+# repeatedly and inspecting the actual response) gets bounced by
+# freedesktop.org's Anubis anti-bot challenge on its archive endpoint,
+# which needs a JS proof-of-work solve no plain HTTP client can pass --
+# curl -fL doesn't treat this as a failure since the challenge page
+# itself returns 200, so it silently downloads an HTML page named
+# mtdev-1.1.7.tar.gz instead of a tarball. Debian's source mirror
+# carries the identical pristine upstream tarball (mtdev_X.orig.tar.gz)
+# with no such wall. Fetched under our own "<name>-<version>.tar.gz"
+# name directly (not via fetch()) so the idempotency check on re-runs
+# looks at the name we actually keep, not Debian's .orig naming.
+if [ ! -f "mtdev-${MTDEV_VERSION}.tar.gz" ]; then
+    echo "[fetch] mtdev-${MTDEV_VERSION}.tar.gz (via Debian mirror)"
+    curl -fL --retry 3 -o "mtdev-${MTDEV_VERSION}.tar.gz" \
+        "http://deb.debian.org/debian/pool/main/m/mtdev/mtdev_${MTDEV_VERSION}.orig.tar.gz"
+else
+    echo "[skip]  mtdev-${MTDEV_VERSION}.tar.gz already exists"
+fi
 fetch "https://gitlab.freedesktop.org/libinput/libinput/-/archive/${LIBINPUT_VERSION}/libinput-${LIBINPUT_VERSION}.tar.gz"
 fetch "https://gitlab.freedesktop.org/mesa/drm/-/archive/libdrm-${LIBDRM_VERSION}/drm-libdrm-${LIBDRM_VERSION}.tar.gz"
 fetch "https://gitlab.freedesktop.org/wlroots/wlroots/-/archive/${WLROOTS_VERSION}/wlroots-${WLROOTS_VERSION}.tar.gz"
