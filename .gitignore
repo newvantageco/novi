@@ -12,6 +12,9 @@ build/isoroot/
 build/cache/
 build/tmp/
 build/out/
+build/initramfs-work/
+build/initramfs.cpio.gz
+build/novi.iso
 
 # Disk images, ISOs, and virtual machine drives
 *.iso
