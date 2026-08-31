@@ -266,9 +266,19 @@ find_live_device() {
         # Fallback: scan all block devices with blkid
         # (includes /dev/vd* -- virtio-blk's device naming, used for both
         # the ISO and the installer disk in scripts/mkvm.sh)
+        #
+        # BusyBox's blkid applet ignores "-s LABEL -o value" entirely and
+        # always prints its plain default-format line (confirmed with
+        # set -x tracing: `blkid -s LABEL -o value /dev/vda` printed
+        # `/dev/vda: LABEL="NOVI" TYPE="iso9660"`, not a bare "NOVI") --
+        # so the exact-equality comparison this used to do could never
+        # match, even against the correct device, every single loop
+        # iteration. Parse LABEL="..." out of the plain output instead,
+        # which is what both BusyBox's and util-linux's blkid print by
+        # default with no -o flag at all.
         for blkdev in /dev/sd?? /dev/sd? /dev/vd?? /dev/vd? /dev/sr? /dev/nvme?n? /dev/mmcblk?; do
             [ -b "${blkdev}" ] || continue
-            found_label="$(blkid -s LABEL -o value "${blkdev}" 2>/dev/null || true)"
+            found_label="$(blkid "${blkdev}" 2>/dev/null | sed -n 's/.*[ :]LABEL="\([^"]*\)".*/\1/p')"
             if [ "${found_label}" = "${label}" ]; then
                 echo "${blkdev}"
                 return 0
