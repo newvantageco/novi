@@ -12,7 +12,7 @@ set -euo pipefail
 source "$(dirname "$0")/00-versions.sh"
 
 NPROC=$(nproc)
-mkdir -p "${TOOLS}" "${SYSROOT}/usr"
+mkdir -p "${TOOLS}" "${SYSROOT}/usr/include"
 
 cd "${SOURCES}"
 
