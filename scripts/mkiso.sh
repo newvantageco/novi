@@ -8,13 +8,23 @@ set -euo pipefail
 # ─── Defaults ────────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# shellcheck source=../build/00-versions.sh
+source "${REPO_ROOT}/build/00-versions.sh"
 
-ROOTFS_DIR="${ROOTFS_DIR:-${REPO_ROOT}/rootfs}"
+# ROOTFS_DIR/KERNEL_IMAGE default to where build/*.sh actually produce them
+# (${ROOTFS}, i.e. /build/rootfs -- BUILD_DIR in 00-versions.sh is hardcoded
+# absolute, unrelated to REPO_ROOT). BUILD_DIR below is this script's own,
+# unrelated concept: where mkiso.sh stages the ISO it's building.
+ROOTFS_DIR="${ROOTFS_DIR:-${ROOTFS}}"
 BUILD_DIR="${BUILD_DIR:-${REPO_ROOT}/build}"
 ISO_DIR="${BUILD_DIR}/isoroot"
-OUTPUT_ISO="${1:-${BUILD_DIR}/novi.iso}"
+# Not "${1:-...}": this script takes --flag value pairs, not a bare
+# positional arg, so grabbing raw $1 here would take the *next flag
+# name* (e.g. "--rootfs") as the output path whenever --output isn't
+# the first argument passed.
+OUTPUT_ISO="${OUTPUT_ISO:-${BUILD_DIR}/novi.iso}"
 SQUASHFS_COMP="${SQUASHFS_COMP:-zstd}"     # xz | zstd | lz4
-KERNEL_IMAGE="${KERNEL_IMAGE:-${REPO_ROOT}/kernel/vmlinuz}"
+KERNEL_IMAGE="${KERNEL_IMAGE:-${ROOTFS}/boot/vmlinuz-${LINUX_VERSION}}"
 INITRAMFS_IMAGE="${INITRAMFS_IMAGE:-${BUILD_DIR}/initramfs.cpio.gz}"
 GRUB_TIMEOUT="${GRUB_TIMEOUT:-5}"
 ISO_LABEL="NOVI"
