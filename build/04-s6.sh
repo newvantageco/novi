@@ -23,17 +23,18 @@ build_skarnet() {
     # skalibs was installed with a plain --prefix=/usr (no
     # --enable-slashpackage), so its sysdeps/include land under
     # ${ROOTFS}/usr/lib/skalibs/sysdeps and ${ROOTFS}/usr/include -- not
-    # the slashpackage-style /package/<category>/<name> layout. skalibs
-    # was also built --enable-shared --disable-static, so libskarnet
-    # only exists as a shared lib, installed via skalibs' dynlibdir
-    # default ($prefix/lib, i.e. flat in usr/lib) rather than its
-    # package-specific libdir (usr/lib/skalibs, static-only) -- pass
-    # --with-dynlib so the linker actually finds -lskarnet.
+    # the slashpackage-style /package/<category>/<name> layout. Pass
+    # both --with-lib (static libskarnet.a, used to link this package's
+    # own command binaries -- omitting it makes configure fall back to
+    # guessing /usr/lib/<depname> for every declared dependency) and
+    # --with-dynlib (shared libskarnet.so, used for this package's own
+    # .so build).
     ./configure \
         --target="${TARGET_TRIPLE}" \
         --prefix="/usr" \
         --with-sysdeps="${ROOTFS}/usr/lib/skalibs/sysdeps" \
         --with-include="${ROOTFS}/usr/include" \
+        --with-lib="${ROOTFS}/usr/lib/skalibs" \
         --with-dynlib="${ROOTFS}/usr/lib" \
         ${extra_flags}
 
@@ -58,11 +59,15 @@ cd skalibs-${SKALIBS_VERSION}
 # vfork()-equivalent (CLONE_VM|CLONE_VFORK) semantics, which structurally
 # cannot return to the parent before the child has exec'd or exited --
 # i.e. it does not return early.
+#
+# Build both shared and static (skalibs' own configure default is
+# shared=true static=true -- previously overridden to shared-only here,
+# which broke execline's link step: it needs static libskarnet.a to
+# link its own command binaries, only libexecline.so needs the shared
+# variant).
 ./configure \
     --target="${TARGET_TRIPLE}" \
     --prefix="/usr" \
-    --enable-shared \
-    --disable-static \
     --with-sysdep-devurandom=yes \
     --with-sysdep-posixspawnearlyreturn=no
 
