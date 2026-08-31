@@ -93,9 +93,11 @@ require qemu-system-x86_64
 
 # Check KVM availability
 KVM_ARGS=()
+KVM_ENABLED=false
 if [[ -e /dev/kvm ]]; then
     if [[ -r /dev/kvm && -w /dev/kvm ]]; then
         KVM_ARGS=(-enable-kvm -cpu host)
+        KVM_ENABLED=true
         echo ">>> KVM acceleration enabled (host CPU passthrough)"
     else
         echo "WARNING: /dev/kvm exists but is not accessible. Running without KVM." >&2
@@ -285,7 +287,7 @@ QEMU_CMD=(
     -qmp "unix:${BUILD_DIR}/qemu-qmp.sock,server,nowait"
 
     # Misc
-    -name "ScamShield Linux"
+    -name "Novi Linux"
     -rtc base=utc,clock=host
     -boot order=dc,menu=on,reboot-timeout=5000
     -no-user-config
@@ -298,11 +300,11 @@ QEMU_CMD=(
 # ─── Launch ───────────────────────────────────────────────────────────────────
 echo ""
 echo "╔════════════════════════════════════════════════════╗"
-echo "║  Launching ScamShield Linux in QEMU/KVM            ║"
+echo "║  Launching Novi Linux in QEMU/KVM                  ║"
 echo "╠════════════════════════════════════════════════════╣"
 printf "║  RAM   : %-41s║\n" "${RAM_MB} MB"
 printf "║  vCPUs : %-41s║\n" "${VCPUS}"
-printf "║  KVM   : %-41s║\n" "$( [[ ${#KVM_ARGS[@]} -gt 0 ]] && echo enabled || echo disabled )"
+printf "║  KVM   : %-41s║\n" "$( "${KVM_ENABLED}" && echo enabled || echo "disabled (tcg)" )"
 printf "║  Disk  : %-41s║\n" "$( "${MODE_DISK}" && echo "${DISK_IMAGE}" || echo "(none)" )"
 printf "║  ISO   : %-41s║\n" "$( "${MODE_NO_ISO}" && echo "(none)" || echo "${ISO_PATH}" )"
 printf "║  Net   : %-41s║\n" "virtio-net (SSH→:2222, HTTP→:8080)"
