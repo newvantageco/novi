@@ -88,3 +88,7 @@ HOME_URL="https://novilinux.org"
 - [ ] Package repository
 - [ ] Installer
 - [ ] Boot splash
+
+See [`docs/PLATFORM-ROADMAP.md`](docs/PLATFORM-ROADMAP.md) for the full
+platform roadmap — package/app model, update tracks, hardware, desktop,
+gaming, developer, enterprise, security, and governance strategy.
