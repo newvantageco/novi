@@ -1,0 +1,36 @@
+name: ShellCheck Linting
+
+# Run ShellCheck on every push and pull request across all branches
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+# Concurrency group: cancel redundant in-progress workflow runs for the same branch or PR
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shellcheck:
+    name: Run ShellCheck on All Shell Scripts
+    runs-on: ubuntu-latest
+    steps:
+      # Step 1: Check out the repository source tree
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      # Step 2: Run ShellCheck across all shell scripts in the repo
+      # - Checks .sh files as well as shebang scripts without extensions (e.g. packages/mkpkg, packages/pkg, init/services)
+      # - Sets SC2034 (unused variables) to warning rather than error so it won't fail the build
+      # - Fails fast on error-level issues and automatically renders problem-matcher annotations in PRs
+      - name: Run ShellCheck Action
+        uses: ludeeus/action-shellcheck@58673a5a409f583196fb2846d0a7905c0cb4a520 # v2.0.0
+        with:
+          # Include non-.sh executable shell scripts across build, packages, and init services
+          additional_files: "packages/mkpkg packages/pkg init/services/getty-tty1/run init/services/syslog/run"
+          # Demote SC2034 (unused variables) to warning instead of failing the build
+          sc_args: "-e SC2034"
+          # Fail fast on error severity level
+          severity: error

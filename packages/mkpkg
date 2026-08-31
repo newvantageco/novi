@@ -1,0 +1,91 @@
+#!/bin/sh
+# ============================================================
+# mkpkg — Build a .pkg.tar.gz package from a staging directory
+#
+# Usage: mkpkg <staging-dir> <output-dir>
+#
+# The staging-dir must contain:
+#   MANIFEST     — package metadata (key=value)
+#   files/       — package contents (installed relative to /)
+#   scripts/     — optional: pre-install, post-install, pre-remove, post-remove
+#
+# Example MANIFEST:
+#   name=curl
+#   version=8.9.1
+#   arch=x86_64
+#   depends=musl zlib openssl
+#   description=Command-line HTTP client
+# ============================================================
+set -euo pipefail
+
+die() { echo "error: $*" >&2; exit 1; }
+
+[ $# -lt 2 ] && die "Usage: mkpkg <staging-dir> <output-dir>"
+
+STAGING="$(realpath "$1")"
+OUTDIR="$(realpath "$2")"
+
+[ -d "${STAGING}" ]         || die "Staging directory not found: ${STAGING}"
+[ -f "${STAGING}/MANIFEST" ] || die "MANIFEST not found in ${STAGING}"
+
+# ── Parse MANIFEST ────────────────────────────────────────
+get_field() { grep "^${1}=" "${STAGING}/MANIFEST" | cut -d= -f2-; }
+
+PKG_NAME="$(get_field name)"
+PKG_VERSION="$(get_field version)"
+PKG_ARCH="$(get_field arch)"
+
+[ -n "${PKG_NAME}" ]    || die "MANIFEST missing: name"
+[ -n "${PKG_VERSION}" ] || die "MANIFEST missing: version"
+[ -n "${PKG_ARCH}" ]    || die "MANIFEST missing: arch"
+
+OUTPUT="${OUTDIR}/${PKG_NAME}-${PKG_VERSION}-${PKG_ARCH}.pkg.tar.gz"
+mkdir -p "${OUTDIR}"
+
+echo "[mkpkg] Building ${PKG_NAME}-${PKG_VERSION} (${PKG_ARCH})"
+
+# ── Validate files directory ──────────────────────────────
+[ -d "${STAGING}/files" ] || die "files/ directory not found in ${STAGING}"
+
+# ── Compute installed size ────────────────────────────────
+INSTALLED_SIZE="$(du -sk "${STAGING}/files" | cut -f1)"
+# Inject size back into MANIFEST copy
+TMPMANIFEST="$(mktemp)"
+grep -v "^size=" "${STAGING}/MANIFEST" > "${TMPMANIFEST}"
+echo "size=${INSTALLED_SIZE}" >> "${TMPMANIFEST}"
+
+# ── Compute file list for MANIFEST ───────────────────────
+FILELIST="$(mktemp)"
+(cd "${STAGING}/files" && find . -type f -o -type l) | sort > "${FILELIST}"
+echo "" >> "${TMPMANIFEST}"
+echo "# files" >> "${TMPMANIFEST}"
+cat "${FILELIST}" >> "${TMPMANIFEST}"
+rm -f "${FILELIST}"
+
+# Replace MANIFEST with computed one
+cp "${TMPMANIFEST}" "${STAGING}/MANIFEST"
+rm -f "${TMPMANIFEST}"
+
+# ── Validate optional scripts ─────────────────────────────
+for script in pre-install post-install pre-remove post-remove; do
+    if [ -f "${STAGING}/scripts/${script}" ]; then
+        chmod 755 "${STAGING}/scripts/${script}"
+        echo "[mkpkg] Found script: ${script}"
+    fi
+done
+
+# ── Build the package tarball ─────────────────────────────
+echo "[mkpkg] Packing → ${OUTPUT}"
+tar -czf "${OUTPUT}" \
+    --numeric-owner \
+    --owner=0 --group=0 \
+    -C "${STAGING}" \
+    MANIFEST \
+    files \
+    $([ -d "${STAGING}/scripts" ] && echo scripts || true)
+
+# ── Verify ────────────────────────────────────────────────
+SIZE="$(du -sh "${OUTPUT}" | cut -f1)"
+echo "[mkpkg] Done: ${OUTPUT} (${SIZE})"
+tar -tzf "${OUTPUT}" | head -5
+echo "..."

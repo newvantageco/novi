@@ -1,0 +1,6 @@
+#!/bin/sh
+# ============================================================
+# getty service — run script
+# s6 keeps this supervised. If it dies, s6 restarts it.
+# ============================================================
+exec s6-setuidgid root /sbin/getty 38400 tty1

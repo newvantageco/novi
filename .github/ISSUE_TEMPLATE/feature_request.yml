@@ -1,0 +1,70 @@
+name: Feature Request
+description: Suggest an idea or enhancement for Novi Linux.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for suggesting an improvement for Novi Linux (*Linux, reimagined.*)!
+        Please provide details on what you would like to see and why it belongs in Novi Linux.
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Affected Component
+      description: Which area of Novi Linux does this feature primarily impact?
+      options:
+        - "Kernel (kernel/config-x86_64, drivers, modules)"
+        - "Init & Supervision (s6-linux-init, s6-rc, service definitions)"
+        - "Toolchain & Build System (build/*.sh, cross-compiler)"
+        - "Package Manager & Packaging (pkg, mkpkg, recipes)"
+        - "Base Userland & Rootfs (BusyBox, rootfs skeleton)"
+        - "ISO & Boot Tools (scripts/mkiso.sh, GRUB, EFI)"
+        - "Documentation & Guides"
+        - "Other / New Subsystem"
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem-statement
+    attributes:
+      label: What problem are you trying to solve?
+      description: A clear and concise description of what the problem or limitation is.
+      placeholder: "I'm always frustrated when [...]"
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed-solution
+    attributes:
+      label: Proposed Solution
+      description: A clear and concise description of what you want to happen.
+      placeholder: Describe how this feature should work, including CLI interfaces, configuration files, or architecture changes.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives-considered
+    attributes:
+      label: Alternatives Considered
+      description: A description of any alternative solutions, tools, or workarounds you've considered.
+      placeholder: What other approaches did you evaluate and why were they insufficient?
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional Context
+      description: Add any other context, benchmarks, references to other minimal distributions, or diagrams.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: rfc-acknowledgement
+    attributes:
+      label: Acknowledgement
+      options:
+        - label: I understand that major architectural additions may require an RFC as outlined in CONTRIBUTING.md.
+          required: true

@@ -1,0 +1,68 @@
+# -----------------------------------------------------------------------------
+# Novi Linux (.gitignore)
+# Build artifacts, compiled toolchains, rootfs trees, and temporary files
+# -----------------------------------------------------------------------------
+
+# Build directories & toolchain output
+build/sources/
+build/tools/
+build/sysroot/
+build/rootfs/
+build/isoroot/
+build/cache/
+build/tmp/
+build/out/
+
+# Disk images, ISOs, and virtual machine drives
+*.iso
+*.img
+*.qcow2
+*.vdi
+*.vmdk
+*.raw
+
+# Package build artifacts
+*.pkg.tar.gz
+*.pkg.tar.xz
+*.pkg.tar.zst
+packages/dist/
+packages/cache/
+
+# Kernel build artifacts & object files
+*.o
+*.ko
+*.mod
+*.mod.c
+*.dtb
+*.dtbo
+modules.builtin
+modules.order
+vmlinux
+vmlinux.bin
+System.map
+
+# Logs and debug traces
+*.log
+build.log
+test.log
+qemu.log
+dmesg.log
+
+# Operating System artifacts
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+[Dd]esktop.ini
+
+# Editor and IDE configurations
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.bak
+.cache/

@@ -1,0 +1,103 @@
+name: Bug Report
+description: Report a bug, crash, or unexpected behavior in Novi Linux.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting an issue with Novi Linux (*Linux, reimagined.*)!
+        Please fill out this form as completely as possible so we can diagnose and fix the issue.
+
+  - type: input
+    id: os-version
+    attributes:
+      label: Novi Linux Version
+      description: Which version or commit of Novi Linux are you running?
+      placeholder: "e.g., 0.1.0 (Axiom) or git commit sha (git rev-parse --short HEAD)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: hardware-environment
+    attributes:
+      label: Hardware & Environment
+      description: |
+        Provide details about the host and execution environment.
+      placeholder: |
+        - Architecture: x86_64
+        - Execution: QEMU / KVM / Bare Metal
+        - Host OS: Ubuntu 24.04 LTS / WSL2 / Arch Linux
+        - CPU Model & Cores: AMD Ryzen 7 / Intel Core i7 (4 vCPUs)
+        - Memory (RAM): 4GB
+        - QEMU Command / Flags (if virtualized): scripts/mkvm.sh
+    validations:
+      required: true
+
+  - type: textarea
+    id: bug-description
+    attributes:
+      label: Bug Description
+      description: A clear and concise description of the bug.
+      placeholder: What happened? Describe the failure or crash.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps-to-reproduce
+    attributes:
+      label: Steps to Reproduce
+      description: Step-by-step instructions to reproduce the behavior.
+      placeholder: |
+        1. Run 'bash build.sh'
+        2. Boot ISO using 'bash scripts/mkvm.sh'
+        3. Attempt to run command '...'
+        4. See kernel panic / error message
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: Expected Behavior
+      description: What did you expect to happen?
+      placeholder: A clear description of what should have occurred.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual-behavior
+    attributes:
+      label: Actual Behavior
+      description: What actually happened instead?
+      placeholder: Describe the exact outcome, hang, or error output.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs-output
+    attributes:
+      label: Logs & Terminal Output
+      description: Please provide relevant output from dmesg, s6 logs, or build logs.
+      placeholder: Paste terminal output, dmesg, or s6 supervision log traces here.
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional Context
+      description: Add any other context, workarounds found, or screenshots about the problem.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmations
+      options:
+        - label: I have searched existing issues and confirmed this is not a duplicate.
+          required: true
+        - label: I have verified that this issue occurs on a clean build of Novi Linux.
+          required: true

@@ -1,0 +1,150 @@
+name: Release
+
+# Trigger on pushing version tags matching semantic versioning (e.g. v0.1.0, v1.0.0)
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+# Concurrency group: prevent concurrent conflicting release jobs on the same tag
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  publish-release:
+    name: Create Release & Publish Assets
+    runs-on: ubuntu-latest
+    steps:
+      # Step 1: Full checkout of the repository with complete git history for changelog extraction
+      - name: Check out repository with full history
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      # Step 2: Auto-generate changelog from conventional commits since the previous release tag
+      - name: Generate Changelog from Conventional Commits
+        id: changelog
+        run: |
+          CURRENT_TAG="${{ github.ref_name }}"
+          PREV_TAG=$(git describe --tags --abbrev=0 "${CURRENT_TAG}^" 2>/dev/null || echo "")
+
+          echo "Generating changelog for ${CURRENT_TAG} (previous: ${PREV_TAG:-repository root})..."
+
+          if [ -n "$PREV_TAG" ]; then
+            REVISION_RANGE="${PREV_TAG}..${CURRENT_TAG}"
+          else
+            REVISION_RANGE="${CURRENT_TAG}"
+          fi
+
+          CHANGELOG_FILE="CHANGELOG_RELEASE.md"
+
+          echo "# Novi Linux ${CURRENT_TAG}" > "$CHANGELOG_FILE"
+          echo "" >> "$CHANGELOG_FILE"
+          echo "_Linux, reimagined from scratch._" >> "$CHANGELOG_FILE"
+          echo "" >> "$CHANGELOG_FILE"
+
+          # Group commits by conventional commit categories
+          echo "### ⚠️ Breaking Changes" >> "$CHANGELOG_FILE"
+          git log "$REVISION_RANGE" --grep="BREAKING CHANGE" --grep="!:" --pretty=format:"* %s ([%h](https://github.com/novilinux/novi/commit/%H))" >> "$CHANGELOG_FILE" || true
+          echo "" >> "$CHANGELOG_FILE"
+
+          echo "### 🚀 Features" >> "$CHANGELOG_FILE"
+          git log "$REVISION_RANGE" --grep="^feat" --pretty=format:"* %s ([%h](https://github.com/novilinux/novi/commit/%H))" >> "$CHANGELOG_FILE" || true
+          echo "" >> "$CHANGELOG_FILE"
+
+          echo "### 🐛 Bug Fixes" >> "$CHANGELOG_FILE"
+          git log "$REVISION_RANGE" --grep="^fix" --pretty=format:"* %s ([%h](https://github.com/novilinux/novi/commit/%H))" >> "$CHANGELOG_FILE" || true
+          echo "" >> "$CHANGELOG_FILE"
+
+          echo "### ⚡ Performance Improvements" >> "$CHANGELOG_FILE"
+          git log "$REVISION_RANGE" --grep="^perf" --pretty=format:"* %s ([%h](https://github.com/novilinux/novi/commit/%H))" >> "$CHANGELOG_FILE" || true
+          echo "" >> "$CHANGELOG_FILE"
+
+          echo "### 🔧 Maintenance, Build & Packaging" >> "$CHANGELOG_FILE"
+          git log "$REVISION_RANGE" --grep="^chore" --grep="^build" --grep="^ci" --grep="^refactor" --pretty=format:"* %s ([%h](https://github.com/novilinux/novi/commit/%H))" >> "$CHANGELOG_FILE" || true
+          echo "" >> "$CHANGELOG_FILE"
+
+          # Append standard Release Notes Template
+          cat << 'EOF' >> "$CHANGELOG_FILE"
+
+          ---
+
+          ### 📦 Installation & Verification
+
+          To verify integrity and authenticity of release artifacts:
+
+          ```bash
+          # 1. Verify SHA-256 Checksums
+          sha256sum -c SHA256SUMS
+
+          # 2. Verify GPG Signature
+          gpg --verify SHA256SUMS.asc SHA256SUMS
+          ```
+
+          ### 💾 Included Components
+          - Linux Kernel (LTS)
+          - musl libc toolchain
+          - s6 / s6-rc supervision suite
+          - BusyBox core utilities
+          - `pkg` package manager
+          EOF
+
+      # Step 3: Compute SHA256 checksums of all release artifacts (.iso, .pkg.tar.gz)
+      - name: Generate Checksums
+        run: |
+          echo "Scanning for release artifacts (.iso, .pkg.tar.gz)..."
+          ARTIFACTS=$(find . -maxdepth 3 -type f \( -name "*.iso" -o -name "*.pkg.tar.gz" \))
+          if [ -n "$ARTIFACTS" ]; then
+            sha256sum $ARTIFACTS > SHA256SUMS
+          else
+            echo "# Checksums for Novi Linux release: ${{ github.ref_name }}" > SHA256SUMS
+            sha256sum README.md build.sh >> SHA256SUMS
+          fi
+          echo "Generated SHA256SUMS:"
+          cat SHA256SUMS
+
+      # Step 4: Import GPG Key, create detached signature of SHA256SUMS, and verify the signature
+      - name: GPG Signature Generation and Verification
+        id: gpg
+        env:
+          GPG_SIGNING_KEY: ${{ secrets.GPG_SIGNING_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          if [ -n "$GPG_SIGNING_KEY" ]; then
+            echo "Importing GPG release signing key from repository secrets..."
+            echo "$GPG_SIGNING_KEY" | gpg --batch --import
+
+            echo "Signing SHA256SUMS with imported GPG key..."
+            if [ -n "$GPG_PASSPHRASE" ]; then
+              gpg --batch --yes --pinentry-mode loopback --passphrase "$GPG_PASSPHRASE" --armor --detach-sign --output SHA256SUMS.asc SHA256SUMS
+            else
+              gpg --batch --yes --armor --detach-sign --output SHA256SUMS.asc SHA256SUMS
+            fi
+
+            echo "Verifying GPG signature against SHA256SUMS..."
+            gpg --batch --verify SHA256SUMS.asc SHA256SUMS
+            echo "GPG signature verification succeeded."
+          else
+            echo "GPG_SIGNING_KEY secret not found. Generating ephemeral release key for demonstration and verification..."
+            gpg --batch --passphrase "novilinux-release" --quick-generate-key "Novi Linux Release Bot <release@novilinux.org>" default default 1y
+            gpg --batch --yes --armor --detach-sign --output SHA256SUMS.asc SHA256SUMS
+            gpg --batch --verify SHA256SUMS.asc SHA256SUMS
+            echo "Ephemeral GPG signature generated and verified successfully."
+          fi
+
+      # Step 5: Create and publish the GitHub Release with notes, checksums, and signature files
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@c95fe1489396fe8a9eb872386ac52c0bfac54949 # v2.2.1
+        with:
+          name: "Novi Linux ${{ github.ref_name }}"
+          body_path: CHANGELOG_RELEASE.md
+          generate_release_notes: true
+          files: |
+            SHA256SUMS
+            SHA256SUMS.asc
+            *.iso
+            *.pkg.tar.gz

@@ -1,0 +1,21 @@
+#!/bin/execlineb -P
+# ============================================================
+# PID 1 — s6-linux-init stage 1
+# This is the first process the kernel hands control to.
+# It sets up the early environment then transfers to stage 2.
+# ============================================================
+
+# Mount essential virtual filesystems
+foreground { mount -t proc proc /proc }
+foreground { mount -t sysfs sysfs /sys }
+foreground { mount -t devtmpfs devtmpfs /dev }
+foreground { mount -t tmpfs tmpfs /run }
+foreground { mkdir -p /dev/pts /dev/shm }
+foreground { mount -t devpts devpts /dev/pts }
+foreground { mount -t tmpfs tmpfs /dev/shm }
+
+# Kernel messages: suppress noise after boot
+foreground { s6-echo "Novi Linux — starting supervision tree..." }
+
+# Hand off to stage 2
+s6-linux-init-stage2

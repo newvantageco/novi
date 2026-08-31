@@ -1,0 +1,7 @@
+#!/bin/sh
+# ============================================================
+# syslog service — run script
+# Uses s6-log for structured, efficient logging.
+# Logs go to /var/log/syslog, rotated at 1MB, keep 10 files.
+# ============================================================
+exec s6-log -d3 n10 s1000000 /var/log/syslog

@@ -1,0 +1,167 @@
+name: Build & Test
+
+# Trigger on pushes and PRs targeting main and develop branches
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+# Concurrency group: cancel obsolete in-progress runs for the same branch or PR
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate-build:
+    name: Validate Dependencies, Sources & Manifests
+    runs-on: ubuntu-24.04
+    steps:
+      # Step 1: Check out repository source tree
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      # Step 2: Install toolchain and build dependencies required for compiling Novi Linux
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            gcc \
+            g++ \
+            make \
+            curl \
+            tar \
+            xz-utils \
+            bzip2 \
+            bison \
+            flex \
+            libelf-dev \
+            bc \
+            libssl-dev \
+            python3 \
+            libmpc-dev \
+            libmpfr-dev \
+            libgmp-dev \
+            rsync \
+            cpio \
+            file
+
+      # Step 3: Initialize build directories required by Novi Linux build system
+      - name: Set up build directory structure
+        run: |
+          sudo mkdir -p /build/sources /build/tools /build/sysroot /build/rootfs
+          sudo chown -R "$USER:$USER" /build
+
+      # Step 4: Verify that all upstream source archive URLs in build/01-fetch.sh are reachable
+      # Uses a curl wrapper performing HTTP HEAD requests (--head / -I) without downloading multi-gigabyte files
+      - name: Verify upstream source URLs reachability (build/01-fetch.sh)
+        run: |
+          # Create a curl interception wrapper in user's PATH that forces HEAD probes
+          mkdir -p "$HOME/.bin"
+          cat << 'EOF' > "$HOME/.bin/curl"
+          #!/bin/bash
+          # Intercept curl invocations in 01-fetch.sh to test URL reachability via HTTP HEAD
+          url=""
+          while [[ $# -gt 0 ]]; do
+            case "$1" in
+              -o)
+                shift 2 # Discard output file argument
+                ;;
+              http://*|https://*|ftp://*)
+                url="$1"
+                shift
+                ;;
+              *)
+                shift
+                ;;
+            esac
+          done
+          if [ -n "$url" ]; then
+            echo "[curl-head-check] Probing $url"
+            /usr/bin/curl -I -s -f -L --retry 3 --connect-timeout 15 "$url" > /dev/null
+          fi
+          EOF
+          chmod +x "$HOME/.bin/curl"
+          export PATH="$HOME/.bin:$PATH"
+
+          # Execute fetch script in dry-run URL probe mode
+          chmod +x build/01-fetch.sh
+          ./build/01-fetch.sh
+
+      # Step 5: Validate that all MANIFEST-style files in the repository adhere to the specification and parse correctly
+      - name: Validate MANIFEST-style files syntax
+        run: |
+          echo "Scanning repository for MANIFEST files..."
+          manifest_count=0
+          failed=0
+
+          # Helper function to validate a MANIFEST file structure
+          validate_manifest() {
+            local file="$1"
+            echo "Validating: $file"
+            manifest_count=$((manifest_count + 1))
+
+            # 1. Ensure all lines are key=value, comments (#), or empty lines
+            if grep -vE '^[a-zA-Z0-9_-]+=.*$' "$file" | grep -vE '^[[:space:]]*(#.*)?$' > /dev/null; then
+              echo "::error file=$file::Invalid format in $file: contains non key=value lines"
+              failed=1
+            fi
+
+            # 2. Check for required metadata fields: name, version, arch, description
+            for field in name version arch description; do
+              if ! grep -q "^${field}=" "$file"; then
+                echo "::error file=$file::Missing required field '${field}' in $file"
+                failed=1
+              fi
+            done
+
+            # 3. Check naming convention rules: lowercase letters, digits, hyphen, underscore only
+            local name_val
+            name_val=$(grep "^name=" "$file" | cut -d= -f2-)
+            if [[ ! "$name_val" =~ ^[a-z0-9_-]+$ ]]; then
+              echo "::error file=$file::Package name '${name_val}' violates naming rules (allowed: a-z, 0-9, -, _)"
+              failed=1
+            fi
+
+            # 4. Check target architecture: x86_64, aarch64, or any
+            local arch_val
+            arch_val=$(grep "^arch=" "$file" | cut -d= -f2-)
+            if [[ "$arch_val" != "x86_64" && "$arch_val" != "aarch64" && "$arch_val" != "any" ]]; then
+              echo "::error file=$file::Invalid arch '${arch_val}' in $file (expected x86_64, aarch64, or any)"
+              failed=1
+            fi
+          }
+
+          # Scan for all MANIFEST files in repository
+          while IFS= read -r -d '' mfile; do
+            validate_manifest "$mfile"
+          done < <(find . -type f -name "MANIFEST" -print0)
+
+          # If no static MANIFEST files exist in tree, create and validate reference package with mkpkg
+          if [ "$manifest_count" -eq 0 ]; then
+            echo "No existing MANIFEST files found. Running synthetic verification against mkpkg tooling..."
+            TEST_DIR=$(mktemp -d)
+            mkdir -p "$TEST_DIR/files/usr/bin"
+            touch "$TEST_DIR/files/usr/bin/novi-test"
+            cat << 'EOF' > "$TEST_DIR/MANIFEST"
+          name=novi-base-test
+          version=0.1.0
+          arch=x86_64
+          description=Synthetic test package for CI validation
+          license=MIT
+          maintainer=ci@novilinux.org
+          EOF
+            validate_manifest "$TEST_DIR/MANIFEST"
+
+            chmod +x packages/mkpkg
+            OUT_DIR=$(mktemp -d)
+            ./packages/mkpkg "$TEST_DIR" "$OUT_DIR"
+            rm -rf "$TEST_DIR" "$OUT_DIR"
+          fi
+
+          if [ "$failed" -ne 0 ]; then
+            echo "MANIFEST validation failed!"
+            exit 1
+          fi
+          echo "All MANIFEST files verified successfully."

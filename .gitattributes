@@ -1,0 +1,62 @@
+# -----------------------------------------------------------------------------
+# Novi Linux (.gitattributes)
+# Line endings, diff behavior, and binary file attributes
+# -----------------------------------------------------------------------------
+
+# Set default behavior for all files
+* text=auto eol=lf
+
+# Markdown and documentation
+*.md text eol=lf
+*.txt text eol=lf
+LICENSE text eol=lf
+CODEOWNERS text eol=lf
+
+# Shell scripts and executables (must always have LF line endings)
+*.sh text eol=lf
+init/s6/stage1 text eol=lf
+init/s6/stage2 text eol=lf
+init/services/**/run text eol=lf
+packages/pkg text eol=lf
+packages/mkpkg text eol=lf
+
+# Configuration and source files
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.toml text eol=lf
+*.conf text eol=lf
+*.c text eol=lf
+*.h text eol=lf
+*.patch text eol=lf
+config-* text eol=lf
+
+# Binary files
+*.iso binary
+*.img binary
+*.qcow2 binary
+*.vdi binary
+*.vmdk binary
+*.raw binary
+*.pkg.tar.gz binary
+*.pkg.tar.xz binary
+*.pkg.tar.zst binary
+*.tar.gz binary
+*.tar.xz binary
+*.tar.bz2 binary
+*.tgz binary
+*.zip binary
+*.gz binary
+*.bz2 binary
+*.xz binary
+*.zst binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.eot binary

@@ -1,0 +1,11 @@
+NAME="Novi"
+VERSION="0.1.0"
+ID=novi
+ID_LIKE=
+VERSION_CODENAME=Axiom
+PRETTY_NAME="Novi Linux 0.1.0 (Axiom)"
+ANSI_COLOR="1;36"
+HOME_URL="https://novilinux.org"
+DOCUMENTATION_URL="https://docs.novilinux.org"
+BUG_REPORT_URL="https://github.com/novilinux/novi/issues"
+BUILD_ID=0.1.0

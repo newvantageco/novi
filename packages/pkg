@@ -1,0 +1,547 @@
+﻿#!/bin/sh
+# pkg - minimal package manager for a from-scratch Linux distro
+# Busybox-compatible. Requires: tar, gzip, grep, sed, awk, find, sort, mkdir, rm, cp, ln
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+PKG_DB="/var/lib/pkg/installed"
+PKG_REPO="${PKG_REPO:-/var/cache/pkg/repo}"
+PKG_CACHE="/var/cache/pkg/archives"
+PKG_ROOT="${PKG_ROOT:-}"          # install root, empty = /
+PKG_TMP="/tmp/pkg.$$"
+
+# ---------------------------------------------------------------------------
+# Utilities
+# ---------------------------------------------------------------------------
+msg()  { printf '==> %s\n'     "$*" >&2; }
+info() { printf '  -> %s\n'   "$*" >&2; }
+warn() { printf 'WARN: %s\n'  "$*" >&2; }
+die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+
+need_root() {
+    [ "$(id -u)" -eq 0 ] || die "This operation requires root."
+}
+
+cleanup() {
+    rm -rf "$PKG_TMP"
+}
+trap cleanup EXIT INT TERM
+
+# Read a single field from a MANIFEST file (key=value format)
+# Usage: manifest_field <file> <key>
+manifest_field() {
+    local file="$1" key="$2"
+    grep "^${key}=" "$file" | head -n1 | sed "s/^${key}=//"
+}
+
+# Return the installed MANIFEST path for a package name
+db_path() { printf '%s/%s/MANIFEST' "$PKG_DB" "$1"; }
+
+# Check if a package is installed; returns 0 if yes, 1 if no
+is_installed() {
+    [ -f "$(db_path "$1")" ]
+}
+
+# Return the installed version of a package (empty string if not installed)
+installed_version() {
+    local m
+    m="$(db_path "$1")"
+    [ -f "$m" ] && manifest_field "$m" "version" || printf ''
+}
+
+# Locate a package archive in the cache or repo.
+# Sets FOUND_PKG to the absolute path.
+locate_pkg() {
+    local name="$1"
+    FOUND_PKG=""
+
+    # Exact filename supplied?
+    if [ -f "$name" ]; then
+        FOUND_PKG="$(realpath "$name")"
+        return 0
+    fi
+
+    # Search in cache first, then repo
+    local f
+    for dir in "$PKG_CACHE" "$PKG_REPO"; do
+        [ -d "$dir" ] || continue
+        # Prefer highest version: sort -V descending then take first
+        f=$(find "$dir" -maxdepth 2 \
+                \( -name "${name}-*.pkg.tar.gz" -o -name "${name}.pkg.tar.gz" \) \
+                -type f 2>/dev/null \
+            | sort -t'-' -k2 -V -r \
+            | head -n1)
+        if [ -n "$f" ]; then
+            FOUND_PKG="$f"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# ---------------------------------------------------------------------------
+# Dependency resolution - topological sort (Kahn's algorithm in shell)
+#
+# collect_deps <pkg_name> <archive_path>
+#   Appends to DEP_QUEUE (space-separated), processes transitively.
+# ---------------------------------------------------------------------------
+# Global work-lists (plain strings, space-separated)
+DEP_QUEUE=""
+DEP_VISITED=""
+
+dep_seen() {
+    local n="$1"
+    case " $DEP_VISITED " in
+        *" $n "*) return 0;;
+        *) return 1;;
+    esac
+}
+
+# resolve_deps name [archive]
+#   Recursively resolves dependencies and populates DEP_QUEUE in install order.
+resolve_deps() {
+    local name="$1"
+    local archive="${2:-}"
+
+    dep_seen "$name" && return 0
+    DEP_VISITED="$DEP_VISITED $name"
+
+    # Read depends from archive MANIFEST or installed MANIFEST
+    local depends=""
+    if [ -n "$archive" ] && [ -f "$archive" ]; then
+        local tmp_m="$PKG_TMP/manifest_${name}"
+        mkdir -p "$PKG_TMP"
+        tar -xzf "$archive" -O MANIFEST > "$tmp_m" 2>/dev/null || true
+        depends="$(manifest_field "$tmp_m" "depends")"
+        rm -f "$tmp_m"
+    elif is_installed "$name"; then
+        depends="$(manifest_field "$(db_path "$name")" "depends")"
+    fi
+
+    # depends is comma-separated list of package names (optionally with versions)
+    if [ -n "$depends" ]; then
+        local dep dep_name dep_archive
+        # Replace commas with newlines to iterate
+        printf '%s\n' "$depends" | tr ',' '\n' | while IFS= read -r dep; do
+            dep="$(printf '%s' "$dep" | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//')"
+            [ -z "$dep" ] && continue
+            # Strip version constraint (e.g. "libc>=2.0" -> "libc")
+            dep_name="$(printf '%s' "$dep" | sed 's/[><=!].*//')"
+            [ -z "$dep_name" ] && continue
+
+            if dep_seen "$dep_name"; then
+                continue
+            fi
+
+            if is_installed "$dep_name"; then
+                # Dependency already satisfied - mark visited only
+                DEP_VISITED="$DEP_VISITED $dep_name"
+                continue
+            fi
+
+            # Locate dependency archive
+            dep_archive=""
+            if locate_pkg "$dep_name" 2>/dev/null; then
+                dep_archive="$FOUND_PKG"
+            else
+                die "Dependency '$dep_name' (required by '$name') not found in repo or cache."
+            fi
+
+            resolve_deps "$dep_name" "$dep_archive"
+            DEP_QUEUE="$DEP_QUEUE $dep_name:$dep_archive"
+        done
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Extract and install a single package archive
+# ---------------------------------------------------------------------------
+install_pkg_file() {
+    local archive="$1"
+    local force="${2:-no}"
+
+    mkdir -p "$PKG_TMP/extract"
+
+    # Extract archive into temp dir
+    tar -xzf "$archive" -C "$PKG_TMP/extract" \
+        || die "Failed to extract archive: $archive"
+
+    local manifest="$PKG_TMP/extract/MANIFEST"
+    [ -f "$manifest" ] || die "Archive missing MANIFEST: $archive"
+
+    local name version arch desc size depends
+    name="$(manifest_field "$manifest" "name")"
+    version="$(manifest_field "$manifest" "version")"
+    arch="$(manifest_field "$manifest" "arch")"
+    desc="$(manifest_field "$manifest" "description")"
+    size="$(manifest_field "$manifest" "size")"
+    depends="$(manifest_field "$manifest" "depends")"
+
+    [ -n "$name" ]    || die "MANIFEST missing 'name' field in $archive"
+    [ -n "$version" ] || die "MANIFEST missing 'version' field in $archive"
+
+    if is_installed "$name" && [ "$force" != "force" ]; then
+        local iv
+        iv="$(installed_version "$name")"
+        if [ "$iv" = "$version" ]; then
+            info "Package '$name' version $version is already installed."
+            return 0
+        fi
+        info "Upgrading '$name' from $iv to $version"
+    else
+        msg "Installing $name ($version)"
+    fi
+
+    # Run pre-install script if present
+    local preinst="$PKG_TMP/extract/scripts/pre-install"
+    if [ -f "$preinst" ]; then
+        chmod +x "$preinst"
+        info "Running pre-install script..."
+        "$preinst" "$name" "$version" || die "pre-install script failed for $name"
+    fi
+
+    # Install files
+    local files_dir="$PKG_TMP/extract/files"
+    if [ -d "$files_dir" ]; then
+        # Use tar to preserve permissions, symlinks, ownership
+        ( cd "$files_dir" && tar -cf - . ) | tar -xf - -C "${PKG_ROOT:-/}" \
+            || die "Failed to install files for $name"
+    fi
+
+    # Register package in database
+    local db_dir="$PKG_DB/$name"
+    mkdir -p "$db_dir"
+    cp "$manifest" "$db_dir/MANIFEST"
+
+    # Record list of installed files (relative paths)
+    if [ -d "$files_dir" ]; then
+        ( cd "$files_dir" && find . -not -type d ) \
+            | sed 's|^\./||' \
+            > "$db_dir/files"
+    else
+        : > "$db_dir/files"
+    fi
+
+    # Copy scripts for later use (e.g. pre-remove)
+    if [ -d "$PKG_TMP/extract/scripts" ]; then
+        cp -r "$PKG_TMP/extract/scripts" "$db_dir/scripts"
+        chmod +x "$db_dir/scripts/"* 2>/dev/null || true
+    fi
+
+    # Run post-install script if present
+    local postinst="$PKG_TMP/extract/scripts/post-install"
+    if [ -f "$postinst" ]; then
+        chmod +x "$postinst"
+        info "Running post-install script..."
+        "$postinst" "$name" "$version" || warn "post-install script exited non-zero for $name"
+    fi
+
+    info "$name $version installed."
+    rm -rf "$PKG_TMP/extract"
+}
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+cmd_install() {
+    need_root
+    [ $# -ge 1 ] || die "Usage: pkg install <package|archive> [...]"
+
+    mkdir -p "$PKG_DB" "$PKG_CACHE" "$PKG_TMP"
+
+    for pkg in "$@"; do
+        msg "Resolving dependencies for: $pkg"
+
+        DEP_QUEUE=""
+        DEP_VISITED=""
+
+        # Locate the top-level archive
+        local archive=""
+        if locate_pkg "$pkg"; then
+            archive="$FOUND_PKG"
+        else
+            die "Package '$pkg' not found."
+        fi
+
+        local pkg_name
+        pkg_name="$(tar -xzf "$archive" -O MANIFEST 2>/dev/null \
+                    | grep '^name=' | head -n1 | sed 's/^name=//')"
+        [ -n "$pkg_name" ] || pkg_name="$pkg"
+
+        resolve_deps "$pkg_name" "$archive"
+
+        # Install dependencies in order, then the target
+        if [ -n "$DEP_QUEUE" ]; then
+            info "Installing dependencies..."
+            printf '%s\n' $DEP_QUEUE | while IFS=: read -r dep_name dep_archive; do
+                install_pkg_file "$dep_archive"
+            done
+        fi
+
+        install_pkg_file "$archive"
+    done
+}
+
+cmd_remove() {
+    need_root
+    [ $# -ge 1 ] || die "Usage: pkg remove <package> [...]"
+
+    for name in "$@"; do
+        is_installed "$name" || { warn "'$name' is not installed."; continue; }
+
+        msg "Removing $name"
+
+        # Check reverse dependencies (packages that depend on this one)
+        local rdeps=""
+        for other_manifest in "$PKG_DB"/*/MANIFEST; do
+            [ -f "$other_manifest" ] || continue
+            local other_name
+            other_name="$(manifest_field "$other_manifest" "name")"
+            [ "$other_name" = "$name" ] && continue
+            local other_deps
+            other_deps="$(manifest_field "$other_manifest" "depends")"
+            case ",$other_deps," in
+                *",${name},"*|*",${name}>"*|*",${name}<"*|*",${name}="*|\
+                "${name},"*|"${name}>"*|"${name}<"*|"${name}="*|\
+                *",$name"|"$name")
+                    rdeps="$rdeps $other_name";;
+            esac
+        done
+
+        if [ -n "$rdeps" ]; then
+            warn "The following installed packages depend on '$name':$rdeps"
+            warn "Removing '$name' anyway - you may break those packages."
+        fi
+
+        # Run pre-remove script
+        local prerm="$PKG_DB/$name/scripts/pre-remove"
+        if [ -f "$prerm" ]; then
+            info "Running pre-remove script..."
+            "$prerm" "$name" || warn "pre-remove script exited non-zero"
+        fi
+
+        # Remove installed files (reverse order to clear empty dirs)
+        local files_list="$PKG_DB/$name/files"
+        if [ -f "$files_list" ]; then
+            while IFS= read -r f; do
+                [ -z "$f" ] && continue
+                local target="${PKG_ROOT:-}/${f}"
+                if [ -e "$target" ] || [ -L "$target" ]; then
+                    rm -f "$target"
+                fi
+            done < "$files_list"
+
+            # Remove empty directories left behind
+            while IFS= read -r f; do
+                [ -z "$f" ] && continue
+                local dir
+                dir="$(dirname "${PKG_ROOT:-}/${f}")"
+                rmdir --ignore-fail-on-non-empty "$dir" 2>/dev/null || true
+            done < <(sort -r "$files_list")
+        fi
+
+        # Run post-remove script
+        local postrm="$PKG_DB/$name/scripts/post-remove"
+        if [ -f "$postrm" ]; then
+            info "Running post-remove script..."
+            "$postrm" "$name" || warn "post-remove script exited non-zero"
+        fi
+
+        # Remove database entry
+        rm -rf "${PKG_DB:?}/$name"
+        info "$name removed."
+    done
+}
+
+cmd_update() {
+    need_root
+    [ $# -ge 1 ] || die "Usage: pkg update <package|all> [...]"
+
+    if [ "$1" = "all" ]; then
+        # Build list of all installed packages
+        set --
+        for m in "$PKG_DB"/*/MANIFEST; do
+            [ -f "$m" ] || continue
+            set -- "$@" "$(manifest_field "$m" "name")"
+        done
+        [ $# -gt 0 ] || { info "No packages installed."; return 0; }
+    fi
+
+    for name in "$@"; do
+        is_installed "$name" || { warn "'$name' is not installed - use 'pkg install' instead."; continue; }
+
+        local cur_ver
+        cur_ver="$(installed_version "$name")"
+        msg "Checking update for $name (installed: $cur_ver)"
+
+        if ! locate_pkg "$name" 2>/dev/null; then
+            warn "No package file found for '$name' in repo/cache - skipping."
+            continue
+        fi
+        local archive="$FOUND_PKG"
+
+        local new_ver
+        new_ver="$(tar -xzf "$archive" -O MANIFEST 2>/dev/null \
+                   | grep '^version=' | head -n1 | sed 's/^version=//')"
+
+        if [ "$new_ver" = "$cur_ver" ]; then
+            info "$name is already at the latest version ($cur_ver)."
+            continue
+        fi
+
+        info "Upgrading $name: $cur_ver -> $new_ver"
+
+        DEP_QUEUE=""
+        DEP_VISITED=""
+        local pkg_name
+        pkg_name="$(tar -xzf "$archive" -O MANIFEST 2>/dev/null \
+                    | grep '^name=' | head -n1 | sed 's/^name=//')"
+        [ -n "$pkg_name" ] || pkg_name="$name"
+        resolve_deps "$pkg_name" "$archive"
+
+        if [ -n "$DEP_QUEUE" ]; then
+            printf '%s\n' $DEP_QUEUE | while IFS=: read -r dep_name dep_archive; do
+                install_pkg_file "$dep_archive" force
+            done
+        fi
+
+        install_pkg_file "$archive" force
+    done
+}
+
+cmd_search() {
+    [ $# -ge 1 ] || die "Usage: pkg search <pattern>"
+    local pattern="$1"
+    local found=0
+
+    # Search repo and cache
+    for dir in "$PKG_REPO" "$PKG_CACHE"; do
+        [ -d "$dir" ] || continue
+        find "$dir" -maxdepth 2 -name "*.pkg.tar.gz" -type f 2>/dev/null | \
+        while read -r archive; do
+            local m
+            m="$(tar -xzf "$archive" -O MANIFEST 2>/dev/null)" || continue
+            local n v d
+            n="$(printf '%s\n' "$m" | grep '^name='        | sed 's/^name=//')"
+            v="$(printf '%s\n' "$m" | grep '^version='     | sed 's/^version=//')"
+            d="$(printf '%s\n' "$m" | grep '^description=' | sed 's/^description=//')"
+            # Match pattern against name or description (case-insensitive)
+            printf '%s %s' "$n" "$d" | grep -qi "$pattern" || continue
+            local inst=""
+            is_installed "$n" && inst=" [installed]"
+            printf '%-30s %-12s %s%s\n' "$n" "$v" "$d" "$inst"
+            found=1
+        done
+    done
+
+    # Also search installed packages not necessarily in the cache
+    for m in "$PKG_DB"/*/MANIFEST; do
+        [ -f "$m" ] || continue
+        local n v d
+        n="$(manifest_field "$m" "name")"
+        v="$(manifest_field "$m" "version")"
+        d="$(manifest_field "$m" "description")"
+        printf '%s %s' "$n" "$d" | grep -qi "$pattern" || continue
+        printf '%-30s %-12s %s [installed]\n' "$n" "$v" "$d"
+        found=1
+    done
+
+    [ "$found" -eq 0 ] && info "No packages found matching '$pattern'."
+    return 0
+}
+
+cmd_list() {
+    local filter="${1:-}"
+    local found=0
+    for m in "$PKG_DB"/*/MANIFEST; do
+        [ -f "$m" ] || continue
+        local n v
+        n="$(manifest_field "$m" "name")"
+        v="$(manifest_field "$m" "version")"
+        if [ -n "$filter" ]; then
+            printf '%s' "$n" | grep -qi "$filter" || continue
+        fi
+        printf '%-30s %s\n' "$n" "$v"
+        found=1
+    done
+    [ "$found" -eq 0 ] && info "No packages installed."
+    return 0
+}
+
+cmd_info() {
+    [ $# -ge 1 ] || die "Usage: pkg info <package>"
+    local name="$1"
+    local m
+
+    # Prefer installed, fall back to repo/cache
+    if is_installed "$name"; then
+        m="$(db_path "$name")"
+    elif locate_pkg "$name" 2>/dev/null; then
+        mkdir -p "$PKG_TMP"
+        m="$PKG_TMP/info_manifest"
+        tar -xzf "$FOUND_PKG" -O MANIFEST > "$m" 2>/dev/null \
+            || die "Could not read MANIFEST from archive."
+    else
+        die "Package '$name' is not installed and not found in repo/cache."
+    fi
+
+    local name_f version arch desc size depends
+    name_f="$(manifest_field "$m" "name")"
+    version="$(manifest_field "$m" "version")"
+    arch="$(manifest_field "$m" "arch")"
+    desc="$(manifest_field "$m" "description")"
+    size="$(manifest_field "$m" "size")"
+    depends="$(manifest_field "$m" "depends")"
+
+    printf 'Name        : %s\n'        "$name_f"
+    printf 'Version     : %s\n'        "$version"
+    printf 'Architecture: %s\n'        "${arch:-any}"
+    printf 'Description : %s\n'        "$desc"
+    printf 'Size        : %s\n'        "${size:-unknown}"
+    printf 'Depends     : %s\n'        "${depends:-(none)}"
+    printf 'Status      : %s\n'        "$(is_installed "$name_f" && printf 'installed' || printf 'not installed')"
+
+    # If installed, show file count
+    if is_installed "$name_f"; then
+        local fc=0
+        [ -f "$PKG_DB/$name_f/files" ] && fc="$(wc -l < "$PKG_DB/$name_f/files")"
+        printf 'Files       : %s\n' "$fc"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Entrypoint
+# ---------------------------------------------------------------------------
+usage() {
+    cat >&2 <<'EOF'
+pkg -- minimal Linux package manager
+
+Usage:
+  pkg install <package|archive> [...]  Install one or more packages
+  pkg remove  <package> [...]          Remove installed packages
+  pkg update  <package|all> [...]      Update installed packages
+  pkg search  <pattern>                Search for packages
+  pkg list    [filter]                 List installed packages
+  pkg info    <package>                Show package information
+
+Environment:
+  PKG_REPO   Directory of available .pkg.tar.gz files  [/var/cache/pkg/repo]
+  PKG_ROOT   Alternate install root                    [/]
+EOF
+    exit 1
+}
+
+[ $# -ge 1 ] || usage
+cmd="$1"; shift
+case "$cmd" in
+    install) cmd_install "$@";;
+    remove)  cmd_remove  "$@";;
+    update)  cmd_update  "$@";;
+    search)  cmd_search  "$@";;
+    list)    cmd_list    "$@";;
+    info)    cmd_info    "$@";;
+    *)       usage;;
+esac

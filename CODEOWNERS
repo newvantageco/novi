@@ -1,0 +1,35 @@
+# -----------------------------------------------------------------------------
+# Novi Linux (CODEOWNERS)
+# GitHub Code Owners configuration
+# https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+# -----------------------------------------------------------------------------
+
+# Default global fallback owners
+*                   @novilinux/core
+
+# Build system, toolchain, and base userland
+/build/             @novilinux/core
+build.sh            @novilinux/core
+
+# Linux kernel configuration, patches, and build scripts
+/kernel/            @novilinux/kernel
+
+# Init system, PID 1, s6 supervision, and service bundles
+/init/              @novilinux/core
+
+# Package manager (pkg), package builder (mkpkg), and recipes
+/packages/          @novilinux/packaging
+
+# ISO generation, VM launch scripts, and release tooling
+/scripts/           @novilinux/release
+
+# Rootfs skeleton and distribution identity
+/rootfs/            @novilinux/core
+
+# Documentation and specifications
+*.md                @novilinux/docs
+/docs/              @novilinux/docs
+
+# Security policies and advisories
+SECURITY.md         @novilinux/security
+/.github/SECURITY.md @novilinux/security

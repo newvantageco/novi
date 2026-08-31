@@ -1,0 +1,51 @@
+name: Stale Issues Manager
+
+# Run daily to check for inactive issues
+on:
+  schedule:
+    - cron: '0 6 * * *' # Daily at 06:00 UTC
+  workflow_dispatch:
+
+# Concurrency group: prevent simultaneous overlapping runs
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  stale:
+    name: Manage Stale Issues
+    runs-on: ubuntu-latest
+    steps:
+      # Step 1: Process issues using actions/stale
+      # - Marks issues stale after 60 days of inactivity
+      # - Closes stale issues after an additional 14 days without activity
+      # - Pull requests are exempt and never marked stale
+      # - Issues with 'pinned', 'security', or 'roadmap' labels are exempt
+      - name: Process Stale Issues
+        uses: actions/stale@5bef64f19d7fafb25b37785144c931b342406300 # v9.1.0
+        with:
+          # Message left on an issue when it is flagged as stale
+          stale-issue-message: >
+            This issue has been automatically marked as stale because it has not had
+            recent activity in the last 60 days. It will be closed in 14 days if no
+            further activity occurs. Thank you for your contributions to Novi Linux!
+          # Message left when closing an abandoned stale issue
+          close-issue-message: >
+            This issue has been closed due to 74 days of inactivity. If this issue is
+            still relevant, please feel free to reopen it or provide updated context.
+          # Label applied to stale issues
+          stale-issue-label: 'stale'
+          # Mark issues stale after 60 days of inactivity
+          days-before-issue-stale: 60
+          # Close stale issues 14 days after being labeled stale
+          days-before-issue-close: 14
+          # Exempt specific labels from being processed
+          exempt-issue-labels: 'pinned,security,roadmap'
+          # Do not process or close pull requests
+          days-before-pr-stale: -1
+          days-before-pr-close: -1
+          exempt-all-pr: true

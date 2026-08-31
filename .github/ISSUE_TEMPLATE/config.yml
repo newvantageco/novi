@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions & Community Discussions
+    url: https://github.com/novilinux/novi/discussions
+    about: Have a question, need setup help, or want to discuss ideas? Join our GitHub Discussions.
+  - name: Security Vulnerability Reporting
+    url: https://github.com/novilinux/novi/security/policy
+    about: Report security vulnerabilities responsibly and privately according to our security policy.
