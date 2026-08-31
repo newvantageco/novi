@@ -128,7 +128,7 @@ APPLETS=(
     gzip gunzip zcat
     cpio
     true false test
-    [ [[
+    '[' '[['
     printf
 )
 for applet in "${APPLETS[@]}"; do
