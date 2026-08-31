@@ -35,6 +35,15 @@ maximally expensive, so it's the one area we're *not* re-litigating.
 `x86_64`-only today). Needed before "hardware strategy" can mean anything
 outside PC hardware.
 
+**Open:** BusyBox-only vs. full GNU coreutils/util-linux by default. Our
+static BusyBox userland (`build/03-base.sh`) is the right call for the
+minimal boot/install-stage rootfs, but it's a real capability gap against
+the terminal experience Arch/Debian users are used to — BusyBox's applets
+are simplified subsets (fewer flags, POSIX-only where scripts often assume
+GNU extensions). See §5's "Terminal / CLI environment" for the proposed
+resolution (BusyBox stays the base-stage userland; full coreutils becomes
+an installable `pkg` layer for any real interactive system).
+
 ---
 
 ## 2. Package / Application Model
@@ -146,6 +155,29 @@ proposes a wlroots-based compositor + `seatd` (no systemd-logind) with a
 thin `novi-shell` on top, run as an s6-rc service like everything else.
 It's a draft, not yet opened for the 7-day discussion period required by
 `CONTRIBUTING.md`.
+
+### Terminal / CLI environment
+
+The GUI is a layer *on top of* a fully capable CLI, never a replacement
+for it — this is the principle that makes "does what Arch's terminal can
+do" compatible with also having a GUI, instead of the two competing:
+
+- **Base userland stays BusyBox** (§1) for the minimal boot/install-stage
+  rootfs — that's the right minimal default for a live image.
+- **Full GNU coreutils/util-linux/bash become an ordinary `pkg install`**
+  for any real interactive system (both stable and advanced tracks) —
+  same split already implicit in the track model (§3). This closes the
+  capability gap noted in §1 without bloating the base image.
+- **`pkg` needs pacman-grade CLI ergonomics**: fast, scriptable, clear
+  output. The dependency-resolution bones already exist
+  (`packages/pkg-format.md`); an AUR-equivalent community-repo story is a
+  later addition once the native/sandboxed split (§2) has real traction.
+- **`novi-shell` (RFC 0001) defaults to a real terminal emulator** and
+  never gates a system operation behind GUI-only tooling — service
+  control (s6-rc), package management (`pkg`), and configuration all stay
+  scriptable from the shell first. GUI panels are thin wrappers calling
+  the same CLI underneath, not a separate code path with separate
+  capabilities.
 
 ---
 

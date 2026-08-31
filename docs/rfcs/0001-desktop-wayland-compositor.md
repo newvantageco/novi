@@ -75,13 +75,24 @@ Key decisions this locks in:
    switcher — built against wlroots' layer-shell protocol. This is
    where Novi's actual product identity lives; wlroots stays vendored
    upstream and unmodified so we're not maintaining a compositor fork.
+6. **GUI is a layer over the CLI, never a replacement for it.**
+   `novi-shell` defaults to a real terminal emulator (a small
+   wlroots-native one — `foot` is the reference point: fast, minimal,
+   no toolkit dependency chain) and every system operation it exposes
+   (service control via s6-rc, package management via `pkg`) calls the
+   same CLI a terminal user would run. No GUI-only capability — this is
+   what lets Novi target both an Arch-terminal-grade CLI experience
+   (`docs/PLATFORM-ROADMAP.md` §5 "Terminal / CLI environment") and a
+   real desktop without the two pulling in different directions.
 
 ## Impact on Footprint & Dependencies
 
 - New build dependencies: `wlroots`, `wayland`, `wayland-protocols`,
-  `seatd`, `libdrm`, `libinput`, `pixman` — all musl-compatible, all
-  already used by existing musl/Alpine-based Wayland setups, so this is
-  a known-good combination, not exploratory.
+  `seatd`, `libdrm`, `libinput`, `pixman`, plus a default terminal
+  emulator (`foot` — a wlroots-native Wayland terminal with no GTK/Qt
+  dependency chain) — all musl-compatible, all already used by existing
+  musl/Alpine-based Wayland setups, so this is a known-good combination,
+  not exploratory.
 - New runtime service: one `graphical` s6-rc target + `seatd`, both
   fitting the existing supervision model (`init/services/`) with no new
   process-management concept introduced.
