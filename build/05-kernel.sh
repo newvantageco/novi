@@ -41,6 +41,17 @@ if [ -f "${REPO_ROOT}/kernel/config-${TARGET_ARCH}" ]; then
     scripts/config --enable CONFIG_TTY
     scripts/config --enable CONFIG_SERIAL_8250
     scripts/config --enable CONFIG_SERIAL_8250_CONSOLE
+    # Same gap for ISO9660: the curated config never mentions it (not
+    # even disabled), so olddefconfig left it entirely out of the
+    # kernel -- confirmed via a live QEMU boot where mount -t iso9660
+    # on the GRUB-built live ISO failed outright ("Could not mount live
+    # media"), because there was no iso9660 driver, built-in or
+    # module, to try. Joliet/zisofs are what grub-mkrescue's xorriso
+    # output actually uses, so pull those in too rather than relying on
+    # bare Rock Ridge/plain ISO9660 fallback parsing.
+    scripts/config --enable CONFIG_ISO9660_FS
+    scripts/config --enable CONFIG_JOLIET
+    scripts/config --enable CONFIG_ZISOFS
     make ARCH=x86_64 CROSS_COMPILE="${CROSS}" olddefconfig
 else
     echo "   No custom config found, using tinyconfig as base"
@@ -58,6 +69,11 @@ else
     scripts/config --enable CONFIG_DEVTMPFS
     scripts/config --enable CONFIG_DEVTMPFS_MOUNT
     scripts/config --enable CONFIG_EXT4_FS
+    scripts/config --enable CONFIG_ISO9660_FS
+    scripts/config --enable CONFIG_JOLIET
+    scripts/config --enable CONFIG_ZISOFS
+    scripts/config --enable CONFIG_SQUASHFS
+    scripts/config --enable CONFIG_OVERLAY_FS
     scripts/config --enable CONFIG_NET
     scripts/config --enable CONFIG_INET
     scripts/config --enable CONFIG_VIRTIO
