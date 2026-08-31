@@ -14,11 +14,16 @@ build_skarnet() {
     local name="$1"
     local version="$2"
     local extra_flags="${3:-}"
+    local pre_configure_patch="${4:-}"
 
     echo "==> Building ${name}-${version}"
     cd "${SOURCES}"
     tar -xf ${name}-${version}.tar.gz
     cd ${name}-${version}
+
+    if [ -n "${pre_configure_patch}" ]; then
+        eval "${pre_configure_patch}"
+    fi
 
     # skalibs was installed with a plain --prefix=/usr (no
     # --enable-slashpackage), so its sysdeps/include land under
@@ -80,8 +85,19 @@ rm -rf skalibs-${SKALIBS_VERSION}
 build_skarnet "execline" "${EXECLINE_VERSION}"
 
 # ── 3. s6 (supervision suite) ─────────────────────────────
+# s6-2.12.0.2 predates a skalibs API change: socket_recv46() gained a
+# trailing flags argument (skalibs/ip46.h now declares 6 params, s6's
+# call site still passes 5), so it fails to compile against our pinned
+# skalibs-2.14.1.1. Current s6 requires skalibs >= 2.15.1.0, newer than
+# what we have; rather than chase a cascade of version bumps across the
+# whole skarnet stack (execline/s6/s6-rc/s6-linux-init all need to move
+# together), patch the one call site with the missing argument (0 = no
+# special recv flags, matching the pre-change implicit behavior). Only
+# affects s6-socklog, a network syslog receiver not used anywhere in
+# this repo's init/services/.
 build_skarnet "s6" "${S6_VERSION}" \
-    "--with-execline=${ROOTFS}/usr"
+    "--with-execline=${ROOTFS}/usr" \
+    "sed -i 's/socket_recv46(x\[2\]\.fd, line, linelen + 1, &ip, &port)/socket_recv46(x[2].fd, line, linelen + 1, \&ip, \&port, 0)/' src/daemontools-extras/s6-socklog.c"
 
 # ── 4. s6-rc (service manager / dependency resolver) ──────
 build_skarnet "s6-rc" "${S6_RC_VERSION}" \
