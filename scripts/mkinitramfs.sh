@@ -276,10 +276,25 @@ find_live_device() {
         # iteration. Parse LABEL="..." out of the plain output instead,
         # which is what both BusyBox's and util-linux's blkid print by
         # default with no -o flag at all.
+        #
+        # LABEL alone is not enough to identify the right device, either:
+        # grub-mkrescue's hybrid ISO also carries an Apple HFS+ partition
+        # (for Mac EFI boot) that xorriso stamps with the *same* volume
+        # label as the real ISO9660 filesystem. Confirmed via a live boot
+        # trace -- /dev/vda3 matched LABEL="NOVI" but was
+        # `TYPE="hfsplus"`, and mounting it as iso9660/vfat failed with
+        # "Invalid argument" every time, because /dev/vd?? (partition
+        # devices) is scanned before /dev/vd? (the whole disk, where the
+        # actual ISO9660 volume lives) and the decoy partition matched
+        # first. Requiring TYPE to be one we can actually mount (iso9660
+        # or vfat) skips the decoy regardless of scan order.
         for blkdev in /dev/sd?? /dev/sd? /dev/vd?? /dev/vd? /dev/sr? /dev/nvme?n? /dev/mmcblk?; do
             [ -b "${blkdev}" ] || continue
-            found_label="$(blkid "${blkdev}" 2>/dev/null | sed -n 's/.*[ :]LABEL="\([^"]*\)".*/\1/p')"
-            if [ "${found_label}" = "${label}" ]; then
+            blkid_out="$(blkid "${blkdev}" 2>/dev/null)"
+            found_label="$(printf '%s' "${blkid_out}" | sed -n 's/.*[ :]LABEL="\([^"]*\)".*/\1/p')"
+            found_type="$(printf '%s' "${blkid_out}" | sed -n 's/.*[ :]TYPE="\([^"]*\)".*/\1/p')"
+            if [ "${found_label}" = "${label}" ] && \
+               { [ "${found_type}" = "iso9660" ] || [ "${found_type}" = "vfat" ]; }; then
                 echo "${blkdev}"
                 return 0
             fi
