@@ -53,6 +53,25 @@ mkdir -p "${ROOTFS}"/{boot,dev,etc,home,lib,mnt,opt,proc,root,run,srv,sys,tmp,us
 chmod 1777 "${ROOTFS}/tmp"
 chmod 700  "${ROOTFS}/root"
 
+# ── Minimal user/group database ──────────────────────────
+# Nothing ever created /etc/passwd or /etc/group -- confirmed via a
+# live boot where s6-envuidgid (used by s6-rc's oneshot-runner and
+# fdholder service rules) crash-looped with "unknown user: root" and
+# s6-setuidgid (used by this repo's own getty run scripts) would hit
+# the same wall the moment boot got that far, since musl's NSS-less
+# getpwnam() only ever reads /etc/passwd -- there is no compiled-in
+# fallback. A minimal root entry is enough to unblock UID/GID
+# resolution; it deliberately says nothing about login/password
+# policy (locked vs. passwordless root, /etc/shadow) -- that is a
+# separate decision, not a boot-blocking one.
+cat > "${ROOTFS}/etc/passwd" <<-'EOF'
+	root:x:0:0:root:/root:/bin/sh
+EOF
+cat > "${ROOTFS}/etc/group" <<-'EOF'
+	root:x:0:
+EOF
+chmod 644 "${ROOTFS}/etc/passwd" "${ROOTFS}/etc/group"
+
 # ── Copy musl libc into rootfs ────────────────────────────
 echo "==> Installing musl into rootfs"
 cp -a "${SYSROOT}/usr/lib/libc.so"               "${ROOTFS}/lib/libc.musl-x86_64.so.1"
