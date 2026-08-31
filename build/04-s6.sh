@@ -95,30 +95,30 @@ build_skarnet "execline" "${EXECLINE_VERSION}"
 # special recv flags, matching the pre-change implicit behavior). Only
 # affects s6-socklog, a network syslog receiver not used anywhere in
 # this repo's init/services/.
+#
+# --with-execline=DIR (used below for s6, and --with-s6=/--with-s6-rc=
+# for s6-rc/s6-linux-init previously) is not a real option in any of
+# these configure scripts -- confirmed by reading them: only
+# --with-lib/--with-dynlib/--with-include/--with-sysdeps are recognized,
+# and the generic --with-*/--without-*/--*dir=* catchall silently no-ops
+# anything else, the same way --datadir was a no-op for skalibs earlier.
+# Each package's real build-time deps (package/deps-build) need their
+# actual install locations passed via --with-lib (accumulates across
+# repeated flags): s6 needs execline; s6-rc needs execline+s6;
+# s6-linux-init needs execline+s6 (not s6-rc -- it doesn't declare
+# s6-rc as a build dependency at all, despite the old --with-s6-rc=
+# flag suggesting otherwise).
 build_skarnet "s6" "${S6_VERSION}" \
-    "--with-execline=${ROOTFS}/usr" \
+    "--with-lib=${ROOTFS}/usr/lib/execline" \
     "sed -i 's/socket_recv46(x\[2\]\.fd, line, linelen + 1, &ip, &port)/socket_recv46(x[2].fd, line, linelen + 1, \&ip, \&port, 0)/' src/daemontools-extras/s6-socklog.c"
 
 # ── 4. s6-rc (service manager / dependency resolver) ──────
 build_skarnet "s6-rc" "${S6_RC_VERSION}" \
-    "--with-s6=${ROOTFS}/usr"
+    "--with-lib=${ROOTFS}/usr/lib/execline --with-lib=${ROOTFS}/usr/lib/s6"
 
 # ── 5. s6-linux-init (PID 1 integration) ──────────────────
-echo "==> [5/5] s6-linux-init-${S6_LINUX_INIT_VERSION}"
-cd "${SOURCES}"
-tar -xf s6-linux-init-${S6_LINUX_INIT_VERSION}.tar.gz
-cd s6-linux-init-${S6_LINUX_INIT_VERSION}
-
-./configure \
-    --target="${TARGET_TRIPLE}" \
-    --prefix="/usr" \
-    --with-s6="${ROOTFS}/usr" \
-    --with-s6-rc="${ROOTFS}/usr"
-
-make -j${NPROC}
-make DESTDIR="${ROOTFS}" install
-cd "${SOURCES}"
-rm -rf s6-linux-init-${S6_LINUX_INIT_VERSION}
+build_skarnet "s6-linux-init" "${S6_LINUX_INIT_VERSION}" \
+    "--with-lib=${ROOTFS}/usr/lib/execline --with-lib=${ROOTFS}/usr/lib/s6"
 
 echo ""
 echo "s6 stack installed. Binaries:"
