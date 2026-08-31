@@ -40,7 +40,7 @@ scamshield/
 sudo apt install -y \
     build-essential gcc g++ make \
     curl tar xz-utils bzip2 \
-    bison flex libelf-dev \
+    bison flex texinfo libelf-dev \
     bc libssl-dev python3 \
     libmpc-dev libmpfr-dev libgmp-dev \
     rsync cpio file mksquashfs xorriso grub-common

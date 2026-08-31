@@ -36,7 +36,7 @@ sudo apt update
 sudo apt install -y \
     build-essential gcc g++ make \
     curl tar xz-utils bzip2 \
-    bison flex libelf-dev \
+    bison flex texinfo libelf-dev \
     bc libssl-dev python3 \
     libmpc-dev libmpfr-dev libgmp-dev \
     rsync cpio file mksquashfs xorriso grub-common \
@@ -48,7 +48,7 @@ sudo apt install -y \
 ```bash
 sudo pacman -Syu --needed \
     base-devel gcc make curl tar xz bzip2 \
-    bison flex libelf bc openssl python \
+    bison flex texinfo libelf bc openssl python \
     libmpc mpfr gmp rsync cpio file \
     squashfs-tools libisoburn grub shellcheck qemu-system-x86
 ```
