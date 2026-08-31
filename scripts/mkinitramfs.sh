@@ -415,10 +415,26 @@ mknod -m 0666 "${WORK_DIR}/dev/tty"     c 5 0  2>/dev/null || true
 mknod -m 0666 "${WORK_DIR}/dev/tty0"    c 4 0  2>/dev/null || true
 mknod -m 0666 "${WORK_DIR}/dev/tty1"    c 4 1  2>/dev/null || true
 
-# ─── /lib/modules symlink (init will load from real root after switch) ────────
-# Modules aren't embedded in initramfs — the running kernel should have them
-# built-in, or the rootfs must provide /lib/modules/<kver>
+# ─── Kernel modules ───────────────────────────────────────────────────────────
+# /init's load_module() calls (virtio_blk, squashfs, overlay, ...) are only
+# meaningful if the .ko files + depmod metadata actually exist somewhere
+# modprobe can see -- and at this point in boot, before the live media is
+# even found, the initramfs IS the only filesystem available. Embed the
+# whole built module tree (small: ~34M/158 .ko at last count) rather than
+# hand-pick a subset and risk missing a transitive dependency.
 mkdir -p "${WORK_DIR}/lib/modules"
+MODULES_SRC="${MODULES_SRC:-/build/rootfs/lib/modules}"
+if [[ -d "${MODULES_SRC}" ]]; then
+    KVER="$(basename "$(find "${MODULES_SRC}" -mindepth 1 -maxdepth 1 -type d | head -1)")"
+    if [[ -n "${KVER}" ]]; then
+        echo ">>> Embedding kernel modules (${KVER}) ..."
+        cp -a "${MODULES_SRC}/${KVER}" "${WORK_DIR}/lib/modules/"
+    else
+        echo "WARNING: no kernel module tree found under ${MODULES_SRC} -- modprobe will find nothing in the initramfs." >&2
+    fi
+else
+    echo "WARNING: MODULES_SRC (${MODULES_SRC}) not found -- modprobe will find nothing in the initramfs." >&2
+fi
 
 # ─── Optional: copy musl libc if dynamic busybox ─────────────────────────────
 # If busybox is dynamic, we need the linker + musl/glibc
