@@ -126,6 +126,13 @@ doesn't):
 - `config/busybox.config` (a repo-provided minimal BusyBox config) doesn't
   exist yet — `03-base.sh` falls back to `make defconfig` until one is
   committed.
+- `make modules_install` needs `depmod` (package `kmod`) on the **build
+  host** to generate `modules.dep`/`modules.alias`. If it's missing, the
+  step only *warns* — `set -e` doesn't catch it — and silently ships a
+  kernel with a complete `.ko` tree but no dependency/alias metadata, so
+  `modprobe`/udev-triggered auto-loading can't find any module (including
+  `virtio_blk`, built as a module here, not built-in). `05-kernel.sh`
+  checks for `depmod` up front and fails loudly instead.
 
 ## Shellcheck signal-to-noise
 

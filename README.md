@@ -43,7 +43,7 @@ sudo apt install -y \
     bison flex texinfo libelf-dev \
     bc libssl-dev python3 \
     libmpc-dev libmpfr-dev libgmp-dev \
-    rsync cpio file mksquashfs xorriso grub-common
+    rsync cpio file mksquashfs xorriso grub-common kmod
 ```
 
 ## Build

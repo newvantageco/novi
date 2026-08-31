@@ -39,7 +39,7 @@ sudo apt install -y \
     bison flex texinfo libelf-dev \
     bc libssl-dev python3 \
     libmpc-dev libmpfr-dev libgmp-dev \
-    rsync cpio file mksquashfs xorriso grub-common \
+    rsync cpio file mksquashfs xorriso grub-common kmod \
     shellcheck qemu-system-x86
 ```
 
@@ -50,7 +50,7 @@ sudo pacman -Syu --needed \
     base-devel gcc make curl tar xz bzip2 \
     bison flex texinfo libelf bc openssl python \
     libmpc mpfr gmp rsync cpio file \
-    squashfs-tools libisoburn grub shellcheck qemu-system-x86
+    squashfs-tools libisoburn grub kmod shellcheck qemu-system-x86
 ```
 
 ### 3. Cloning the Repository

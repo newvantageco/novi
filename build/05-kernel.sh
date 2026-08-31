@@ -12,6 +12,17 @@ source "${SCRIPT_DIR}/00-versions.sh"
 NPROC=$(nproc)
 CROSS="${TARGET_TRIPLE}-"
 
+# modules_install silently WARNS (doesn't fail) and skips generating
+# modules.dep/modules.alias when depmod is missing -- set -e doesn't
+# catch it, so a build host without kmod produces a kernel that builds
+# fine but can't modprobe/auto-load any module (including virtio_blk,
+# which this config builds as a module, not built-in). Fail loudly
+# instead of shipping an incomplete module tree.
+command -v depmod >/dev/null 2>&1 || {
+    echo "ERROR: depmod not found (package: kmod). Required for module dependency metadata." >&2
+    exit 1
+}
+
 cd "${SOURCES}"
 [ -d "linux-${LINUX_VERSION}" ] || tar -xf linux-${LINUX_VERSION}.tar.xz
 cd linux-${LINUX_VERSION}
