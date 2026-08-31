@@ -5,7 +5,9 @@
 # We apply a minimal defconfig and strip anything unused.
 # ============================================================
 set -euo pipefail
-source "$(dirname "$0")/00-versions.sh"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+source "${SCRIPT_DIR}/00-versions.sh"
 
 NPROC=$(nproc)
 CROSS="${TARGET_TRIPLE}-"
@@ -15,8 +17,19 @@ cd "${SOURCES}"
 cd linux-${LINUX_VERSION}
 
 echo "==> Applying kernel config"
-if [ -f "${BUILD_DIR}/../kernel/config-${TARGET_ARCH}" ]; then
-    cp "${BUILD_DIR}/../kernel/config-${TARGET_ARCH}" .config
+if [ -f "${REPO_ROOT}/kernel/config-${TARGET_ARCH}" ]; then
+    cp "${REPO_ROOT}/kernel/config-${TARGET_ARCH}" .config
+    # The curated config doesn't mention BINFMT_ELF, TTY, SERIAL_8250,
+    # or BLK_DEV_INITRD at all (not even disabled) -- olddefconfig would
+    # fill them from Kconfig defaults, but these are too boot-critical
+    # to leave to inference (no BINFMT_ELF means the kernel can't exec
+    # anything at all). Force them explicitly, same safety net the
+    # tinyconfig fallback below already has.
+    scripts/config --enable CONFIG_BINFMT_ELF
+    scripts/config --enable CONFIG_BLK_DEV_INITRD
+    scripts/config --enable CONFIG_TTY
+    scripts/config --enable CONFIG_SERIAL_8250
+    scripts/config --enable CONFIG_SERIAL_8250_CONSOLE
     make ARCH=x86_64 CROSS_COMPILE="${CROSS}" olddefconfig
 else
     echo "   No custom config found, using tinyconfig as base"
