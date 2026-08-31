@@ -127,14 +127,51 @@ needs its own RFC since it touches the rootfs layout contract.
 ## 4. Hardware Strategy
 
 **Decided:** `kernel/config-x86_64` (280+ options), builds a `-novi`
-tagged kernel.
+tagged kernel. Already reaches beyond the QEMU-only virtio set into real
+hardware drivers (confirmed while building: AMD `amdgpu`, Intel `i915`,
+`mac80211`-based WiFi are all compiled in), so "hardware strategy" isn't
+starting from nothing.
 
-**Proposed:** widen kernel config coverage (WiFi/BT stacks, common laptop
-ACPI quirks, GPU drivers) and add a boot-time hardware detection service
-(an s6-supervised oneshot) that loads/blacklists modules and picks
-firmware, rather than shipping one monolithic config for every machine.
-Firmware blobs get their own `pkg` package (`linux-firmware`) so licensing
-stays separated from the free kernel package.
+**Guiding principle: build against open standards and device classes,
+not vendor-specific paths.** This is the actual mechanism behind "not
+gated by manufacturer or software" — not a policy statement, an
+engineering default:
+
+- **Class-compliant devices need zero vendor code at all.** A USB mouse
+  works without a Logitech/Razer driver because it advertises USB HID
+  class `03h` and one HID driver (already in the kernel) speaks the
+  whole class spec; an NVMe SSD works without a driver per vendor
+  because it speaks the NVMe class spec over PCIe, not a
+  Samsung/WD/Crucial-specific protocol. Same pattern covers USB Mass
+  Storage, USB Audio, HID (keyboards/mice/gamepads), and most storage.
+  Nothing to build here beyond keeping those class drivers enabled —
+  it's why most peripherals already "just work."
+- **Where hardware genuinely needs vendor-specific code** (GPU
+  rendering, WiFi chipsets, some laptop ACPI quirks), prefer the open,
+  upstream-maintained driver over a proprietary blob wherever one
+  exists and is competent: `amdgpu`+Mesa over AMD's proprietary stack,
+  `i915`+Mesa for Intel, in-kernel `iwlwifi`/`ath`/`rtw88` WiFi drivers
+  over vendor binary-only modules. These are already what
+  `kernel/config-x86_64` builds against — the principle already in
+  practice, not aspirational.
+- **Where only a proprietary driver exists** (NVIDIA's GPU stack is the
+  main case), package it like any other software — a `pkg` install,
+  not a kernel patch — so using it is a user choice per §2's tiering,
+  not something baked into the base image. This keeps the "runs on
+  open standards by default" property true for the base system even
+  though a proprietary option remains available.
+- **The user-facing payoff**: hardware support isn't "does Novi have a
+  driver for *this* laptop model," it's "does this hardware speak a
+  standard the kernel already implements" — which is most hardware,
+  because most hardware is built to sell into Windows/macOS/Linux
+  alike and therefore already implements the relevant class specs.
+
+**Proposed:** widen kernel config coverage (more WiFi/BT chipsets, common
+laptop ACPI quirks) and add a boot-time hardware detection service (an
+s6-supervised oneshot) that loads/blacklists modules and picks firmware,
+rather than shipping one monolithic config for every machine. Firmware
+blobs get their own `pkg` package (`linux-firmware`) so licensing stays
+separated from the free kernel package.
 
 **Open:** aarch64 support (blocks any non-x86 hardware story) and whether
 firmware packages are opt-in at install or bundled in the default ISO.
