@@ -257,6 +257,40 @@ which tier an app came from.
 
 ---
 
+## 12. Security Tooling / Pentest Track
+
+**Open.** Distinct from §9 (Security Model, which is about Novi itself
+being secure by default) — this is about giving security practitioners
+the curated offensive/defensive toolset that Kali/BlackArch/Parrot OS
+users rely on (network analysis, password/forensics tooling, exploitation
+frameworks, etc.), for legitimate security testing and research use.
+
+**Proposed shape:** an opt-in `pkg` repo/meta-package layered on top of
+the standard install — the same relationship BlackArch has to plain Arch,
+or Kali's tool metapackages have to its Debian base — rather than bundled
+into the default image:
+
+- Default install stays lean (no security-tools bloat for users who don't
+  need them), consistent with §1's "no bloat" ethos and the native/
+  sandboxed split in §2.
+- `pkg install novi-security-tools` (or individual tools) is the on-ramp
+  for anyone doing pentesting/security work — same ergonomics as any
+  other `pkg` install, no separate spin/ISO required to start.
+- A dedicated **live/forensics boot mode** (analogous to Kali's live USB
+  forensics mode — no writes to host disk, no swap auto-mount) is a
+  natural fit for the `advanced` track (§3) once on-device rollback
+  exists, but isn't required to ship the toolset itself.
+- Tool packaging follows the same signing/verification story as §8/§9 —
+  a security toolset with unverified packages would undermine the point
+  of shipping one.
+
+No RFC yet — this is packaging/repo-content work once `pkg`'s
+sandboxed-app tier (§2) and signing-by-default (§8, §9) land, not a
+base-architecture change, so it likely doesn't need the RFC weight §5's
+compositor choice does.
+
+---
+
 ## Status Summary
 
 | # | Area | State |
@@ -272,6 +306,7 @@ which tier an app came from.
 | 9 | Security model | 🟡 Small TCB + disclosure process exist, signing default open |
 | 10 | Community/governance | ✅ Decided |
 | 11 | Differentiation | ✅ Articulated above |
+| 12 | Security tooling / pentest track | 🔴 Open — packaging work, blocked on §2/§8/§9 |
 
 **Next concrete step:** open [RFC 0001](rfcs/0001-desktop-wayland-compositor.md)
 (desktop/compositor choice) for the 7-day community discussion period —
