@@ -136,6 +136,7 @@ menuentry "Novi Linux ${ISO_VERSION} — Live" --class linux {
            boot=live \
            root=live:/dev/disk/by-label/${ISO_LABEL} \
            live-media=/dev/disk/by-label/${ISO_LABEL} \
+           live-media-label=${ISO_LABEL} \
            rd.live.image \
            rd.live.squashimg=live/filesystem.squashfs \
            quiet splash \
@@ -154,6 +155,7 @@ menuentry "Novi Linux ${ISO_VERSION} — Safe Mode" --class linux {
            boot=live \
            root=live:/dev/disk/by-label/${ISO_LABEL} \
            live-media=/dev/disk/by-label/${ISO_LABEL} \
+           live-media-label=${ISO_LABEL} \
            rd.live.image \
            rd.live.squashimg=live/filesystem.squashfs \
            nomodeset \

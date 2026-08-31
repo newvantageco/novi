@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# mkinitramfs.sh — Build a minimal initramfs for ScamShield Linux
+# mkinitramfs.sh — Build a minimal initramfs for Novi Linux
 #
 # The resulting initramfs contains:
 #   - busybox (statically linked) for all shell utilities
@@ -27,6 +27,9 @@ WORK_DIR="${BUILD_DIR}/initramfs-work"
 # Busybox binary — prefer static, fallback to system
 BUSYBOX_BIN="${BUSYBOX_BIN:-}"
 BUSYBOX_CANDIDATES=(
+    # Novi's own build (build/03-base.sh installs to /build/rootfs, per
+    # BUILD_DIR=/build in build/00-versions.sh -- not repo-relative)
+    "/build/rootfs/bin/busybox"
     "${REPO_ROOT}/build/busybox-static"
     "/usr/lib/busybox/busybox-static"
     "$(command -v busybox 2>/dev/null || true)"
@@ -35,7 +38,7 @@ BUSYBOX_CANDIDATES=(
 # Squashfs image name (must match mkiso.sh)
 SQUASHFS_IMG_NAME="${SQUASHFS_IMG_NAME:-live/filesystem.squashfs}"
 # Label of the live media (must match mkiso.sh ISO_LABEL)
-LIVE_LABEL="${LIVE_LABEL:-SCAMSHIELD}"
+LIVE_LABEL="${LIVE_LABEL:-NOVI}"
 
 # ─── Argument parsing ─────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -140,7 +143,7 @@ done
 echo ">>> Writing /init script ..."
 cat > "${WORK_DIR}/init" <<'INIT_SCRIPT'
 #!/bin/sh
-# ScamShield Linux — initramfs /init
+# Novi Linux — initramfs /init
 # Mounts squashfs+overlayfs then switch_root
 # Runs in: busybox sh (ash), no bash features
 
@@ -190,7 +193,7 @@ has_param() {
 }
 
 LIVE_MEDIA_LABEL="$(get_param live-media-label)"
-LIVE_MEDIA_LABEL="${LIVE_MEDIA_LABEL:-SCAMSHIELD}"
+LIVE_MEDIA_LABEL="${LIVE_MEDIA_LABEL:-NOVI}"
 SQUASHFS_IMG="$(get_param rd.live.squashimg)"
 SQUASHFS_IMG="${SQUASHFS_IMG:-live/filesystem.squashfs}"
 INIT_PATH="$(get_param init)"
@@ -212,6 +215,7 @@ load_module sd_mod
 load_module sr_mod
 load_module usb_storage
 load_module uas
+load_module virtio_blk
 
 # Filesystems
 load_module squashfs
@@ -260,7 +264,9 @@ find_live_device() {
         fi
 
         # Fallback: scan all block devices with blkid
-        for blkdev in /dev/sd?? /dev/sd? /dev/sr? /dev/nvme?n? /dev/mmcblk?; do
+        # (includes /dev/vd* -- virtio-blk's device naming, used for both
+        # the ISO and the installer disk in scripts/mkvm.sh)
+        for blkdev in /dev/sd?? /dev/sd? /dev/vd?? /dev/vd? /dev/sr? /dev/nvme?n? /dev/mmcblk?; do
             [ -b "${blkdev}" ] || continue
             found_label="$(blkid -s LABEL -o value "${blkdev}" 2>/dev/null || true)"
             if [ "${found_label}" = "${label}" ]; then
@@ -360,7 +366,7 @@ echo ">>> /init written ($(wc -l < "${WORK_DIR}/init") lines)"
 # ─── /etc/mdev.conf (for mdev-based hotplug) ─────────────────────────────────
 mkdir -p "${WORK_DIR}/etc"
 cat > "${WORK_DIR}/etc/mdev.conf" <<'MDEV_CONF'
-# mdev.conf — minimal hotplug rules for ScamShield initramfs
+# mdev.conf — minimal hotplug rules for Novi initramfs
 # Syntax: regex  uid:gid  octal_perms  [>|=path]  [@|-|$cmd]
 
 # Disk devices

@@ -171,13 +171,18 @@ if "${MODE_DISK}"; then
 fi
 
 # ─── ISO / CDROM ──────────────────────────────────────────────────────────────
+# Attached as a plain virtio-blk device, not virtio-scsi+scsi-cd: our kernel
+# config builds CONFIG_VIRTIO_BLK=m but has no CONFIG_VIRTIO_SCSI at all (not
+# even as a module), so a scsi-cd-on-virtio-scsi-pci device would be
+# undetectable at boot. virtio-blk needs no ATAPI/CD-ROM semantics to read an
+# ISO9660 filesystem -- mounting it directly (as init already does) works the
+# same as any other block device.
 ISO_ARGS=()
 if ! "${MODE_NO_ISO}"; then
     [[ -f "${ISO_PATH}" ]] || { echo "ERROR: ISO not found at ${ISO_PATH}"; exit 1; }
     ISO_ARGS=(
-        -drive "file=${ISO_PATH},if=none,id=cd0,media=cdrom,readonly=on"
-        -device virtio-scsi-pci,id=scsi0
-        -device scsi-cd,bus=scsi0.0,drive=cd0,bootindex=2
+        -drive "file=${ISO_PATH},if=none,id=cd0,readonly=on"
+        -device virtio-blk-pci,drive=cd0,bootindex=2
     )
     echo ">>> ISO: ${ISO_PATH}"
 fi
