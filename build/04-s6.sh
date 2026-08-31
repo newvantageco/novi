@@ -50,8 +50,7 @@ cd skalibs-${SKALIBS_VERSION}
     --target="${TARGET_TRIPLE}" \
     --prefix="/usr" \
     --enable-shared \
-    --disable-static \
-    --datadir="/usr/lib/skalibs"
+    --disable-static
 
 make -j${NPROC}
 make DESTDIR="${ROOTFS}" install
