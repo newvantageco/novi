@@ -103,6 +103,11 @@ cd "${SOURCES}"
 rm -rf build-gcc-stage1
 
 # ── Phase 6: musl libc (full build) ──────────────────────
+# Build both libc.so and libc.a: the shared lib is needed for gcc
+# stage 2 and any dynamically-linked package later, but the static
+# archive is required too -- 03-base.sh links BusyBox fully static
+# (README's stated stack: "Userland | BusyBox (static)"), and a
+# static link needs -lc to resolve to libc.a, not just libc.so.
 echo "==> [6/7] musl-${MUSL_VERSION} (full build)"
 mkdir -p build-musl && cd build-musl
 
@@ -111,7 +116,6 @@ CC="${TOOLS}/bin/${TARGET_TRIPLE}-gcc" \
 ../musl-${MUSL_VERSION}/configure \
     --prefix="${SYSROOT}/usr" \
     --target="${TARGET_TRIPLE}" \
-    --disable-static \
     --enable-optimize=speed
 
 make -j${NPROC}
