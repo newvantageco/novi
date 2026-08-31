@@ -1,0 +1,25 @@
+#!/bin/sh -e
+# ============================================================
+# rc.init -- s6-linux-init stage 2 entry point
+#
+# By the time this runs, s6-linux-init has already mounted the
+# early virtual filesystems, exec'd into s6-svscan on /run/service,
+# and that svscan has brought up the fixed run-image services
+# (catch-all logger, runleveld, shutdownd). This script's job is to
+# bring up everything else via s6-rc, then hand off to the runlevel
+# script s6-linux-init-maker generated alongside it.
+# ============================================================
+
+rl="$1"
+shift
+
+### 1. Early one-time preparation
+test -r /etc/hostname && hostname -F /etc/hostname
+
+### 2. Start the s6-rc-managed services into the already-running
+### scandir (/run/service, seeded by s6-linux-init from run-image).
+s6-rc-init -c /etc/s6-rc/compiled -l /run/s6-rc /run/service
+
+### 3. Bring the compiled "default" bundle up (or whatever runlevel
+### was requested on the kernel command line -- see scripts/runlevel).
+exec /etc/s6-linux-init/scripts/runlevel "$rl"

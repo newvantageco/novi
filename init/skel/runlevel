@@ -1,0 +1,9 @@
+#!/bin/sh -e
+# ============================================================
+# runlevel -- called once by rc.init at boot, and again by
+# s6-linux-init-runleveld whenever the runlevel changes (telinit).
+# ============================================================
+
+test "$#" -gt 0 || { echo 'runlevel: fatal: too few arguments' 1>&2; exit 100; }
+
+exec s6-rc -v2 -l /run/s6-rc -up change "$1"
