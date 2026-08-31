@@ -46,11 +46,20 @@ cd "${SOURCES}"
 tar -xf skalibs-${SKALIBS_VERSION}.tar.gz
 cd skalibs-${SKALIBS_VERSION}
 
+# /dev/urandom and posix_spawn()'s return-timing can't be autodetected
+# when cross-compiling (skalibs' configure refuses to execute target
+# binaries on the build host), so provide them explicitly: modern Linux
+# always has /dev/urandom, and musl's posix_spawn() is implemented via
+# vfork()-equivalent (CLONE_VM|CLONE_VFORK) semantics, which structurally
+# cannot return to the parent before the child has exec'd or exited --
+# i.e. it does not return early.
 ./configure \
     --target="${TARGET_TRIPLE}" \
     --prefix="/usr" \
     --enable-shared \
-    --disable-static
+    --disable-static \
+    --with-sysdep-devurandom=yes \
+    --with-sysdep-posixspawnearlyreturn=no
 
 make -j${NPROC}
 make DESTDIR="${ROOTFS}" install
