@@ -12,20 +12,24 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 source "${REPO_ROOT}/build/00-versions.sh"
 
 # ROOTFS_DIR/KERNEL_IMAGE default to where build/*.sh actually produce them
-# (${ROOTFS}, i.e. /build/rootfs -- BUILD_DIR in 00-versions.sh is hardcoded
-# absolute, unrelated to REPO_ROOT). BUILD_DIR below is this script's own,
-# unrelated concept: where mkiso.sh stages the ISO it's building.
+# (${ROOTFS}, i.e. /build/rootfs, from the sourced 00-versions.sh -- that
+# file's own BUILD_DIR is hardcoded to /build, unrelated to REPO_ROOT).
+# ISO_WORK_DIR is this script's own, unrelated concept: where mkiso.sh
+# stages the ISO it's building. Deliberately NOT named BUILD_DIR -- that
+# name is already taken by the sourced 00-versions.sh's export, and a
+# same-named local default here would silently pick up its value instead
+# of falling back to the repo-relative path intended below.
 ROOTFS_DIR="${ROOTFS_DIR:-${ROOTFS}}"
-BUILD_DIR="${BUILD_DIR:-${REPO_ROOT}/build}"
-ISO_DIR="${BUILD_DIR}/isoroot"
+ISO_WORK_DIR="${ISO_WORK_DIR:-${REPO_ROOT}/build}"
+ISO_DIR="${ISO_WORK_DIR}/isoroot"
 # Not "${1:-...}": this script takes --flag value pairs, not a bare
 # positional arg, so grabbing raw $1 here would take the *next flag
 # name* (e.g. "--rootfs") as the output path whenever --output isn't
 # the first argument passed.
-OUTPUT_ISO="${OUTPUT_ISO:-${BUILD_DIR}/novi.iso}"
+OUTPUT_ISO="${OUTPUT_ISO:-${ISO_WORK_DIR}/novi.iso}"
 SQUASHFS_COMP="${SQUASHFS_COMP:-zstd}"     # xz | zstd | lz4
 KERNEL_IMAGE="${KERNEL_IMAGE:-${ROOTFS}/boot/vmlinuz-${LINUX_VERSION}}"
-INITRAMFS_IMAGE="${INITRAMFS_IMAGE:-${BUILD_DIR}/initramfs.cpio.gz}"
+INITRAMFS_IMAGE="${INITRAMFS_IMAGE:-${ISO_WORK_DIR}/initramfs.cpio.gz}"
 GRUB_TIMEOUT="${GRUB_TIMEOUT:-5}"
 ISO_LABEL="NOVI"
 ISO_VERSION="0.1.0"
