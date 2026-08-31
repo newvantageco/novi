@@ -219,13 +219,17 @@ du -sx --block-size=1 "${ROOTFS_DIR}" 2>/dev/null \
 echo ">>> Building hybrid ISO with grub-mkrescue ..."
 mkdir -p "$(dirname "${OUTPUT_ISO}")"
 
+# Source directory as a plain trailing positional arg -- the standard
+# grub-mkrescue invocation. The previous "-- SRCDIR graft=point" form
+# isn't valid input for this xorriso version's -as mkisofs emulation
+# ("Not a known command: '...'") and the graft-point override was
+# redundant anyway: boot/grub/grub.cfg is already written inside
+# ISO_DIR at that exact path above.
 grub-mkrescue \
     --output="${OUTPUT_ISO}" \
     --verbose \
     -volid "${ISO_LABEL}" \
-    -- \
     "${ISO_DIR}" \
-    boot/grub/grub.cfg="${ISO_DIR}/boot/grub/grub.cfg" \
     2>&1
 
 # ─── Make hybrid (MBR + GPT + EFI) ──────────────────────────────────────────
