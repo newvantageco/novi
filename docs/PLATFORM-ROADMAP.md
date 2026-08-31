@@ -137,12 +137,15 @@ firmware packages are opt-in at install or bundled in the default ISO.
 **Open — no compositor chosen yet.** `CONTRIBUTING.md` already flags
 "introducing a desktop / GUI stack or Wayland compositor layer" as
 RFC-required, and `README.md`'s "Next" list has it unchecked. This is the
-single biggest undecided piece of the platform and should be the next RFC
-opened, since the sandboxed-app model (§2) and gaming strategy (§6) both
-depend on which compositor/session we pick (wlroots-based vs. a fuller
-shell). Recommendation when that RFC opens: default to a wlroots-based
-Wayland compositor (small, well-understood, musl-friendly) with a thin
-Novi shell on top, rather than importing GNOME/KDE's full stack.
+single biggest undecided piece of the platform, since the sandboxed-app
+model (§2) and gaming strategy (§6) both depend on which compositor/
+session we pick.
+
+Drafted: [`docs/rfcs/0001-desktop-wayland-compositor.md`](rfcs/0001-desktop-wayland-compositor.md)
+proposes a wlroots-based compositor + `seatd` (no systemd-logind) with a
+thin `novi-shell` on top, run as an s6-rc service like everything else.
+It's a draft, not yet opened for the 7-day discussion period required by
+`CONTRIBUTING.md`.
 
 ---
 
@@ -238,6 +241,7 @@ which tier an app came from.
 | 10 | Community/governance | ✅ Decided |
 | 11 | Differentiation | ✅ Articulated above |
 
-**Next concrete step:** open an RFC for §5 (desktop/compositor choice) —
+**Next concrete step:** open [RFC 0001](rfcs/0001-desktop-wayland-compositor.md)
+(desktop/compositor choice) for the 7-day community discussion period —
 every open item in §2, §6 depends on it, and it's the largest remaining
 unknown.
