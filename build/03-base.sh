@@ -3,10 +3,11 @@
 # 03-base.sh — Build base userland (BusyBox) into rootfs
 # ============================================================
 set -euo pipefail
-source "$(dirname "$0")/00-versions.sh"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+source "${SCRIPT_DIR}/00-versions.sh"
 
 NPROC=$(nproc)
-CC="${TOOLS}/bin/${TARGET_TRIPLE}-gcc"
 STRIP="${TOOLS}/bin/${TARGET_TRIPLE}-strip"
 
 # ── BusyBox ──────────────────────────────────────────────
@@ -15,10 +16,14 @@ cd "${SOURCES}"
 tar -xf busybox-${BUSYBOX_VERSION}.tar.bz2
 cd busybox-${BUSYBOX_VERSION}
 
-# Use our minimal config (no telnet, no ftpd, no legacy cruft)
-if [ -f "${BUILD_DIR}/../config/busybox.config" ]; then
-    cp "${BUILD_DIR}/../config/busybox.config" .config
+# Use our minimal config (no telnet, no ftpd, no legacy cruft) if the
+# repo ships one; otherwise fall back to defconfig (not curated -- see
+# docs/PLATFORM-ROADMAP.md tracked follow-up to commit a trimmed config).
+if [ -f "${REPO_ROOT}/config/busybox.config" ]; then
+    cp "${REPO_ROOT}/config/busybox.config" .config
+    make CROSS_COMPILE="${TARGET_TRIPLE}-" olddefconfig
 else
+    echo "   No config/busybox.config in repo yet, using defconfig"
     make defconfig
 fi
 
@@ -44,7 +49,7 @@ ln -sfn libc.musl-x86_64.so.1                    "${ROOTFS}/lib/ld-musl-x86_64.s
 
 # ── Strip everything ──────────────────────────────────────
 echo "==> Stripping binaries"
-find "${ROOTFS}" -type f | xargs -I{} sh -c \
+find "${ROOTFS}" -type f -print0 | xargs -0 -I{} sh -c \
     'file "{}" | grep -q "ELF" && '"${STRIP}"' --strip-all "{}" 2>/dev/null || true'
 
 echo ""
