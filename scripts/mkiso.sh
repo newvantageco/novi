@@ -125,6 +125,14 @@ set default=0
 set timeout=${GRUB_TIMEOUT}
 set timeout_style=menu
 
+# Serial console (in addition to the graphical/tty0 one) so the boot menu
+# and kernel messages are visible when run headless -- a real distro use
+# case (cloud VMs, QEMU -nographic), not just a debug convenience.
+insmod serial
+serial --unit=0 --speed=115200
+terminal_input console serial
+terminal_output console serial
+
 # Appearance
 if [ -f \$prefix/theme/theme.txt ]; then
     insmod gfxterm
@@ -156,6 +164,8 @@ menuentry "Novi Linux ${ISO_VERSION} — Live" --class linux {
            quiet splash \
            rw \
            loglevel=3 \
+           console=tty0 \
+           console=ttyS0,115200n8 \
            mitigations=auto \
            iommu=pt \
            vt.global_cursor_default=0
@@ -175,7 +185,9 @@ menuentry "Novi Linux ${ISO_VERSION} — Safe Mode" --class linux {
            nomodeset \
            nosplash \
            rw \
-           loglevel=7
+           loglevel=7 \
+           console=tty0 \
+           console=ttyS0,115200n8
     echo "Loading initramfs..."
     initrd /boot/initramfs.cpio.gz
 }
