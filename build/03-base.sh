@@ -21,7 +21,7 @@ cd busybox-${BUSYBOX_VERSION}
 # docs/PLATFORM-ROADMAP.md tracked follow-up to commit a trimmed config).
 if [ -f "${REPO_ROOT}/config/busybox.config" ]; then
     cp "${REPO_ROOT}/config/busybox.config" .config
-    make CROSS_COMPILE="${TARGET_TRIPLE}-" olddefconfig
+    make CROSS_COMPILE="${TARGET_TRIPLE}-" oldconfig </dev/null
 else
     echo "   No config/busybox.config in repo yet, using defconfig"
     make defconfig
@@ -40,7 +40,7 @@ sed -i 's/CONFIG_STATIC=n/CONFIG_STATIC=y/' .config
 # BusyBox's source or reintroduce dead kernel-header definitions.
 sed -i 's/^CONFIG_TC=y/# CONFIG_TC is not set/' .config
 sed -i 's/^CONFIG_FEATURE_TC_INGRESS=y/# CONFIG_FEATURE_TC_INGRESS is not set/' .config
-make CROSS_COMPILE="${TARGET_TRIPLE}-" olddefconfig
+make CROSS_COMPILE="${TARGET_TRIPLE}-" oldconfig </dev/null
 
 make CROSS_COMPILE="${TARGET_TRIPLE}-" -j${NPROC}
 make CROSS_COMPILE="${TARGET_TRIPLE}-" CONFIG_PREFIX="${ROOTFS}" install
