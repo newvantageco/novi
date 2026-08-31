@@ -9,8 +9,6 @@ set -euo pipefail
 source "$(dirname "$0")/00-versions.sh"
 
 NPROC=$(nproc)
-CC="${TOOLS}/bin/${TARGET_TRIPLE}-gcc"
-S6_INSTALL="${ROOTFS}/package/admin/s6"
 
 build_skarnet() {
     local name="$1"
@@ -22,12 +20,16 @@ build_skarnet() {
     tar -xf ${name}-${version}.tar.gz
     cd ${name}-${version}
 
+    # skalibs was installed with a plain --prefix=/usr (no
+    # --enable-slashpackage), so its sysdeps/include/lib land under
+    # ${ROOTFS}/usr/lib/skalibs and ${ROOTFS}/usr/include -- not the
+    # slashpackage-style /package/<category>/<name> layout.
     ./configure \
         --target="${TARGET_TRIPLE}" \
         --prefix="/usr" \
-        --with-sysdeps="${ROOTFS}/package/admin/skalibs/library/sysdeps" \
-        --with-include="${ROOTFS}/package/admin/skalibs/include" \
-        --with-lib="${ROOTFS}/package/admin/skalibs/library" \
+        --with-sysdeps="${ROOTFS}/usr/lib/skalibs/sysdeps" \
+        --with-include="${ROOTFS}/usr/include" \
+        --with-lib="${ROOTFS}/usr/lib/skalibs" \
         ${extra_flags}
 
     make -j${NPROC}
