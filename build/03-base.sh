@@ -31,6 +31,17 @@ fi
 sed -i 's/# CONFIG_STATIC is not set/CONFIG_STATIC=y/' .config
 sed -i 's/CONFIG_STATIC=n/CONFIG_STATIC=y/' .config
 
+# Disable the tc applet: its CBQ support (networking/tc.c) references
+# kernel pkt_sched.h structures (struct tc_cbq_lssopt, TCF_CBQ_LSS_*,
+# TC_CBQ_MAXPRIO) that no longer exist -- CBQ was removed from Linux's
+# UAPI headers years ago and BusyBox 1.36.1 hasn't caught up. tc is an
+# advanced traffic-shaping CLI, not required to boot; not gated behind
+# its own config knob, so disable the whole applet rather than patch
+# BusyBox's source or reintroduce dead kernel-header definitions.
+sed -i 's/^CONFIG_TC=y/# CONFIG_TC is not set/' .config
+sed -i 's/^CONFIG_FEATURE_TC_INGRESS=y/# CONFIG_FEATURE_TC_INGRESS is not set/' .config
+make CROSS_COMPILE="${TARGET_TRIPLE}-" olddefconfig
+
 make CROSS_COMPILE="${TARGET_TRIPLE}-" -j${NPROC}
 make CROSS_COMPILE="${TARGET_TRIPLE}-" CONFIG_PREFIX="${ROOTFS}" install
 
