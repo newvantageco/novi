@@ -1,0 +1,16 @@
+#!/bin/sh
+# ============================================================
+# getty service (serial console) — run script
+# s6 keeps this supervised. If it dies, s6 restarts it.
+#
+# The local VGA console (tty1, see ../getty-tty1) needs the
+# virtio-gpu KMS driver loaded to actually display anything --
+# it's built as a module and nothing loads it by default, so
+# nothing ever renders it visible in a headless QEMU run (or any
+# host with no framebuffer console backing tty1). ttyS0 is what the
+# kernel cmdline (console=ttyS0,115200n8) and scripts/mkiso.sh's
+# GRUB config already treat as the primary console for headless
+# boot verification (scripts/mkvm.sh --display none), so give it
+# its own getty rather than relying on a console nothing can see.
+# ============================================================
+exec s6-setuidgid root /sbin/getty 115200 ttyS0
