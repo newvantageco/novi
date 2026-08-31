@@ -234,7 +234,11 @@ Every pull request must pass the following verification checks:
    ```
 2. **Clean Build Check**:
    ```bash
-   rm -rf build/rootfs build/isoroot
+   # ROOTFS is /build/rootfs, not build/rootfs -- BUILD_DIR is hardcoded
+   # absolute in build/00-versions.sh, unrelated to the repo checkout path
+   # (see CLAUDE.md's "Architecture: cross-toolchain bootstrap order").
+   # build/isoroot is repo-relative (scripts/mkiso.sh's ISO_WORK_DIR).
+   rm -rf /build/rootfs build/isoroot
    bash build.sh
    ```
 3. **ISO & Boot Verification**:
