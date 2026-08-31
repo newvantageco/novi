@@ -84,6 +84,42 @@ Key decisions this locks in:
    what lets Novi target both an Arch-terminal-grade CLI experience
    (`docs/PLATFORM-ROADMAP.md` §5 "Terminal / CLI environment") and a
    real desktop without the two pulling in different directions.
+7. **Keyboard-driven UX borrows proven bindings, not novel ones.**
+   Decades of desktop environments and launchers have already settled
+   what a fast, intentional desktop feels like; `novi-shell` adopts
+   that muscle memory instead of asking users to relearn it. Default
+   bindings (all overridable — see below):
+   - **Alt+Space — global search/launcher overlay**: apps, files by
+     name, and a calculator/unit-conversion fallback for quick math.
+     This is the same overlay already sketched as the app launcher's
+     search box in the `novi-shell` mockup; Alt+Space matches the
+     binding Ulauncher, Albert, and several other Linux launchers
+     already default to, and is close enough to Spotlight/PowerToys
+     Run muscle memory that it needs no explanation.
+   - **Alt+Tab / Alt+Shift+Tab — window switching**, the one binding
+     that has been effectively universal across every desktop OS for
+     decades. Never remapped.
+   - **Super+[1–9] — switch workspace**, **Super+Shift+[1–9] — move
+     focused window to workspace** — the sway/i3 convention, a natural
+     fit given wlroots is the compositor foundation (decision 1 above).
+   - **Super+Return — open a terminal (`foot`)**, **Super+Q — close
+     focused window** — sway/i3 defaults, kept rather than reinvented.
+   - **PrintScreen — screenshot to clipboard + file**,
+     **Shift+PrintScreen — region select** — matches GNOME/KDE/Windows
+     closely enough to need no explanation either.
+   - **Super+L — lock session**, **Super+. — emoji/symbol picker** —
+     small, well-worn conveniences (Windows/GNOME) worth having day
+     one since they're cheap to implement against layer-shell.
+   - **Super+V — clipboard history** is useful but **proposed, not
+     day-one** — it needs a small persistent clipboard-manager daemon
+     `novi-shell` doesn't have yet, and isn't load-bearing for the
+     compositor decision this RFC is actually about.
+
+   All of this is *default configuration*, not hard-coded behavior —
+   `novi-shell`'s bindings live in a plaintext config file a user can
+   edit directly, the same config-first philosophy as everything else
+   in this repo (§1 of the roadmap), not a GUI-only settings dialog
+   with nothing backing it on disk.
 
 ## Impact on Footprint & Dependencies
 
