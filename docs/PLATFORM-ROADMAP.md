@@ -216,6 +216,41 @@ do" compatible with also having a GUI, instead of the two competing:
   the same CLI underneath, not a separate code path with separate
   capabilities.
 
+### Application toolkit (GTK4 / Libadwaita, at the user's discretion)
+
+RFC 0001 designs `novi-shell` — the compositor and session shell — but says
+nothing about what toolkit the *apps* running inside it are built with. The
+app-launcher mockup (files, editor, settings, pkg) currently has icons and
+no implementation. **Proposed:** GTK4 + Libadwaita as the recommended
+convention for first-party apps bundled with the desktop track, not a
+system dependency:
+
+- **Why Libadwaita specifically**: its adaptive-widget/breakpoint model,
+  calm-by-default views with progressive disclosure, and system light/dark
+  + accent-color following line up directly with the design framework
+  already applied to the `novi-shell` mockup (one accent used sparingly,
+  restrained type scale, native-feeling chrome over custom-drawn UI). It's
+  also what the GNOME HIG is built around, so first-party apps get a
+  tested, documented pattern language for free instead of us inventing one.
+- **At the user's discretion, not mandated**: this is a convention for
+  *this repo's own* apps, the same way BusyBox vs. full coreutils is a
+  track choice (§3) — nothing about the sandboxed-app model (§2) requires
+  GTK4/Libadwaita, and a user (or a third-party package) is free to ship a
+  Qt, raw-GTK, or toolkit-less app the same way. `pkg` doesn't gate on
+  toolkit choice; this only decides what *we* reach for first when we build
+  the first-party files/editor/settings apps the launcher mockup implies.
+- **Consistent with §4's hardware principle**: GTK4 apps render through
+  the same open Wayland/DRM/KMS stack `novi-shell` already targets (§4's
+  amdgpu/i915/class-driver approach), not through any vendor-specific
+  rendering path — so "which GTK apps run well" tracks "which GPU speaks
+  the standard," the same manufacturer-agnostic property §4 already
+  establishes for the kernel. Nothing here narrows what hardware the
+  desktop experience runs on.
+
+**Open:** whether to adopt Libadwaita's exact visual language verbatim or
+restyle it against `novi-shell`'s own token system (accent color, spacing
+unit) once one exists as committed CSS rather than a mockup.
+
 ---
 
 ## 6. Gaming Strategy
