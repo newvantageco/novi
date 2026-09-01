@@ -22,8 +22,10 @@ XDG_SHELL_XML ?= /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml
 # back to -I. -- confirmed by reading wlroots' own protocol/meson.build
 # and its installed .pc Cflags (just "-I${includedir}/wlroots-0.18",
 # nothing protocol-related). Every wlroots-based compositor (sway
-# included) vendors this same XML for the same reason.
-LAYER_SHELL_XML ?= protocol/wlr-layer-shell-unstable-v1.xml
+# included) vendors this same XML for the same reason. Lives under
+# ../protocol/ (repo root, not novi-shell/) since novi-launcher and any
+# future layer-shell client need this exact same file too.
+LAYER_SHELL_XML ?= ../protocol/wlr-layer-shell-unstable-v1.xml
 DESTDIR ?=
 PREFIX ?= /usr
 

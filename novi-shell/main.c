@@ -51,6 +51,11 @@
  * Super+Return. Overridable via NOVI_TERMINAL so this doesn't need a
  * recompile once alternatives are packaged. */
 #define NOVI_DEFAULT_TERMINAL "foot"
+/* RFC 0001 decision 7: Alt+Space global search/launcher overlay,
+ * spawned as a separate process (novi-launcher/) rather than built
+ * into the compositor -- same "novi-shell UI is a layer-shell client,
+ * not compositor code" split as any future panel. */
+#define NOVI_DEFAULT_LAUNCHER "novi-launcher"
 
 /* For brevity's sake, struct members are annotated where they are used. */
 enum novi_cursor_mode {
@@ -128,6 +133,7 @@ struct novi_layer_surface {
 	struct wlr_layer_surface_v1 *layer_surface;
 	struct wlr_scene_layer_surface_v1 *scene_layer_surface;
 	struct wl_listener map;
+	struct wl_listener unmap;
 	struct wl_listener destroy;
 	struct wl_listener commit;
 };
@@ -306,6 +312,17 @@ static bool handle_keybinding(struct novi_server *server, uint32_t modifiers,
 			/* Most keyboard layouts report Shift+Tab as this keysym,
 			 * not as Tab with the shift modifier bit set. */
 			cycle_toplevel(server, false);
+			return true;
+		case XKB_KEY_space:
+			/* RFC 0001 decision 7: global search/launcher overlay.
+			 * novi-launcher is a separate layer-shell client (overlay
+			 * layer, exclusive keyboard interactivity) spawned fresh
+			 * each time, not toggled -- it exits itself on Escape or
+			 * Enter, so double-spawning only happens if Alt+Space is
+			 * pressed again while one is already open, an edge case
+			 * not worth extra state for yet. */
+			spawn(getenv("NOVI_LAUNCHER") ?
+				getenv("NOVI_LAUNCHER") : NOVI_DEFAULT_LAUNCHER);
 			return true;
 		default:
 			break;
@@ -867,6 +884,42 @@ static void layer_surface_map(struct wl_listener *listener, void *data) {
 	wlr_log(WLR_INFO, "layer-shell surface mapped: namespace=\"%s\" layer=%d",
 		surface->layer_surface->namespace ? surface->layer_surface->namespace : "",
 		surface->layer_surface->current.layer);
+
+	/* "exclusive" keyboard-interactivity (the launcher overlay's case:
+	 * it needs to receive typed input the instant it appears) means
+	 * grab keyboard focus now. "on_demand" (click-to-focus layer
+	 * surfaces) isn't implemented -- nothing needs it yet. */
+	if (surface->layer_surface->current.keyboard_interactive ==
+			ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_EXCLUSIVE) {
+		struct wlr_seat *seat = surface->output->server->seat;
+		struct wlr_keyboard *keyboard = wlr_seat_get_keyboard(seat);
+		if (keyboard != NULL) {
+			wlr_seat_keyboard_notify_enter(seat, surface->layer_surface->surface,
+				keyboard->keycodes, keyboard->num_keycodes, &keyboard->modifiers);
+		}
+	}
+}
+
+static void layer_surface_unmap(struct wl_listener *listener, void *data) {
+	struct novi_layer_surface *surface = wl_container_of(listener, surface, unmap);
+	struct novi_server *server = surface->output->server;
+	struct wlr_seat *seat = server->seat;
+
+	/* Only act if this surface actually held keyboard focus (a
+	 * non-interactive layer surface unmapping shouldn't disturb
+	 * whatever toplevel currently has focus). Restore focus to the
+	 * most-recently-focused toplevel, matching what focus_toplevel()
+	 * would have left focused before this surface grabbed it. */
+	if (seat->keyboard_state.focused_surface != surface->layer_surface->surface) {
+		return;
+	}
+	if (!wl_list_empty(&server->toplevels)) {
+		struct novi_toplevel *top =
+			wl_container_of(server->toplevels.next, top, link);
+		focus_toplevel(top, top->xdg_toplevel->base->surface);
+	} else {
+		wlr_seat_keyboard_notify_clear_focus(seat);
+	}
 }
 
 static void layer_surface_commit(struct wl_listener *listener, void *data) {
@@ -885,6 +938,7 @@ static void layer_surface_destroy(struct wl_listener *listener, void *data) {
 
 	wl_list_remove(&surface->link);
 	wl_list_remove(&surface->map.link);
+	wl_list_remove(&surface->unmap.link);
 	wl_list_remove(&surface->destroy.link);
 	wl_list_remove(&surface->commit.link);
 	/* surface->scene_layer_surface frees itself: wlr_scene_layer_surface_v1_create()
@@ -956,6 +1010,8 @@ static void server_new_layer_surface(struct wl_listener *listener, void *data) {
 
 	surface->map.notify = layer_surface_map;
 	wl_signal_add(&layer_surface->surface->events.map, &surface->map);
+	surface->unmap.notify = layer_surface_unmap;
+	wl_signal_add(&layer_surface->surface->events.unmap, &surface->unmap);
 	surface->destroy.notify = layer_surface_destroy;
 	wl_signal_add(&layer_surface->events.destroy, &surface->destroy);
 	surface->commit.notify = layer_surface_commit;
@@ -963,7 +1019,18 @@ static void server_new_layer_surface(struct wl_listener *listener, void *data) {
 
 	wl_list_insert(&output->layer_surfaces, &surface->link);
 
-	arrange_layers(output);
+	/* Deliberately NOT calling arrange_layers() here: this fires while
+	 * handling the client's get_layer_surface request, before it has
+	 * sent set_size/set_anchor/etc. or its required initial commit
+	 * (wlr-layer-shell-unstable-v1.xml: "the client must perform an
+	 * initial commit without any buffer attached" before the
+	 * compositor may configure it). Confirmed live: arranging here
+	 * sent a real client a 0x0 configure and logged wlroots' own
+	 * "A configure is sent to an uninitialized wlr_layer_surface_v1"
+	 * error -- silently absorbed only because that particular client
+	 * happened to fall back to a default size on a zero configure, not
+	 * because it was correct. layer_surface_commit() already arranges
+	 * on every commit, including the first real one. */
 }
 
 static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
