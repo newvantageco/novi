@@ -398,6 +398,21 @@ Verified live in QEMU: a zoomed screendump crop shows a real
 anti-aliased curve at all four corners, with typed calculator text
 still rendering correctly against the new buffer format.
 
+Item 4 (drop shadows) is done too, following the same real, not
+placeholder, standard: the card's rounded-rect silhouette, offset down
+4px and feathered 16px outward per §4's elevation-1 spec, computed via
+the standard 2D rounded-box signed-distance-field formula rather than
+a precomputed sprite. Getting the layering right (the shadow correctly
+peeking through the card's own transparent rounded corners, not erased
+by them) needed alpha-*compositing* the card onto the shadow via
+`PIXMAN_OP_OVER` instead of the previous raw-overwrite `draw_rect()`
+calls. A real black-on-black shadow is mathematically invisible in a
+plain-black-desktop screendump no matter how correct it is, so this
+was verified with a temporary bright-color swap-in (reverted after): a
+pixel-exact column scan confirmed the feather's 16-step linear
+gradient and the bottom edge's exact 4px-sliver-then-16px-feather
+shape, both landing precisely on the spec'd values with zero clipping.
+
 **Still open**: app/file search itself (blocked on §2's package model
 existing enough to have something to search); Super+[1-9] workspaces
 (needs real per-output workspace state), PrintScreen screenshots,
@@ -616,7 +631,7 @@ compositor choice does.
 | 2 | Package/application model | 🟡 Native `pkg`/`mkpkg` now installed, wired into the build, and live-verified end-to-end (real dependency chain, install/remove/search/info) after fixing several real bugs found by first actually running it; sandbox tier still proposed (RFC needed) |
 | 3 | Update/rollback model | 🟡 Track split decided, on-device rollback open |
 | 4 | Hardware strategy | 🟡 x86_64 kernel exists, coverage + aarch64 open |
-| 5 | Desktop strategy | 🟡 Compositor + layer-shell + launcher + foot terminal + top-bar panel, real anti-aliased text rendering (fcft/pixman), a clickable apps button routing pointer input to a layer-shell surface, new windows placed below the panel's exclusive zone, real alpha compositing + rounded corners on the launcher, all live-verified in QEMU together; no app search yet; `docs/design/` now has a target visual-language spec |
+| 5 | Desktop strategy | 🟡 Compositor + layer-shell + launcher + foot terminal + top-bar panel, real anti-aliased text rendering (fcft/pixman), a clickable apps button routing pointer input to a layer-shell surface, new windows placed below the panel's exclusive zone, real alpha compositing + rounded corners + a drop shadow on the launcher, all live-verified in QEMU together; no app search yet; `docs/design/` now has a target visual-language spec |
 | 6 | Gaming strategy | 🔴 Open — blocked on #5 |
 | 7 | Developer strategy | 🟡 Native toolchain exists, container tier proposed |
 | 8 | Enterprise strategy | 🟡 LTS branches exist, signing enforcement + fleet mgmt open |
@@ -625,15 +640,19 @@ compositor choice does.
 | 11 | Differentiation | ✅ Articulated above |
 | 12 | Security tooling / pentest track | 🔴 Open — packaging work, blocked on §2/§8/§9 |
 
-**Next concrete step:** drop-shadow sprites for the launcher (design
-doc §8 item 4, next in sequence now that alpha compositing and rounded
-rects both exist — a shadow needs the same real-alpha buffer rounded
-corners just added), or wire `novi-launcher` up to real app/file
-search now that §2's native `pkg` actually works end-to-end — narrower
-than fully unblocked, though: `pkg` installs files, it doesn't yet
-register a "this is a launchable GUI app" concept anywhere (no
-desktop-entry equivalent exists in `pkg-format.md` yet), so a search
-integration still needs that piece designed first. Dogfoodable now via
-`foot`'s real interactive shell inside the graphical session instead
-of only
+**Next concrete step:** design doc §8's rendering sequence is now
+through item 4 of 6 (text, alpha compositing, rounded rects, drop
+shadows all real). Item 5 (icon rendering) needs a maintainer decision
+first — `ICON-PIPELINE.md` recommends Lucide primary/Tabler secondary,
+but flags their licenses as needing human verification it couldn't do
+itself, so this isn't unilaterally actionable yet. Item 6 (server-side
+window decorations) is real new compositor work, not just client-side
+rendering, and is sequenced last in the doc for exactly that reason.
+Alternatively: wire `novi-launcher` up to real app/file search now
+that §2's native `pkg` actually works end-to-end — narrower than fully
+unblocked, though: `pkg` installs files, it doesn't yet register a
+"this is a launchable GUI app" concept anywhere (no desktop-entry
+equivalent exists in `pkg-format.md` yet), so a search integration
+still needs that piece designed first. Dogfoodable now via `foot`'s
+real interactive shell inside the graphical session instead of only
 QEMU-injection-and-screendump from outside.
