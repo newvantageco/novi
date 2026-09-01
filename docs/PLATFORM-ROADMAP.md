@@ -12,6 +12,38 @@ we already have.
 Guiding line: *everything Linux can do, without making users choose which
 Linux they want.*
 
+**Who this is for, and why that's one audience, not four:** everyday
+users, programmers/developers, security practitioners, and gamers —
+tracked concretely below (§5 desktop for the everyday-user experience
+and its HIG-grade design language, §7 developer, §12 pentest, §6
+gaming). These aren't four separate editions or spins to choose between
+at install time (the guiding line above rules that out explicitly) —
+they're four use cases the same rootfs, the same `pkg` foundation, and
+the same compositor serve at once, the way §11 already frames Novi's
+differentiator (one foundation, not bundled-together forks of it). The
+thread connecting all four: **user control over their own machine** —
+a small, auditable TCB (§9), a package model that never hides what's
+installed or phones home without being asked (§2), an update model the
+user drives rather than one that drives them (§3), and a desktop (§5)
+whose visual design is held to a real HIG, not styled after the fact.
+
+**Long-term direction, not yet scoped — a phone/mobile target, so the
+same account, the same look, and eventually the same running apps
+follow a user from desktop to phone instead of stopping at it.** This is
+explicitly aspirational: no mobile kernel config, no touch-first shell
+mode, no phone hardware-enablement work exists yet, and none should
+start without its own RFC per `CONTRIBUTING.md` (a new hardware class is
+exactly the kind of architectural change that process exists for). It's
+recorded here because §5's Libadwaita discussion already leans on
+adaptive phone/tablet/desktop breakpoints as a reuse argument, and
+because it should shape judgment calls made *today* even before it's
+scoped: prefer designs and protocols that don't quietly assume a
+keyboard+mouse+one-fixed-output desktop is the only target (layer-shell,
+`novi-launcher`'s search-first interaction model, and adaptive-widget
+toolkit choices in §5 already happen to point this way), and don't
+spend real engineering effort inventing a phone story prematurely — the
+open work in §4 Hardware Strategy and §5 Desktop Strategy comes first.
+
 This doc turns that into a tracked technical roadmap. Each section states
 what's **already decided** (shipped in this repo today), what's **proposed**
 (needs an RFC per `CONTRIBUTING.md` before implementation), and what's
