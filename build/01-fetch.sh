@@ -126,5 +126,49 @@ fetch_git "libudev-zero" "${LIBUDEV_ZERO_VERSION}" \
 fetch_git "seatd" "${SEATD_VERSION}" \
     "https://git.sr.ht/~kennylevinsen/seatd" "${SEATD_VERSION}"
 
+# ── foot (default terminal, RFC 0001 decision 6) and its font-rendering
+# dependency chain -- see build/09-foot.sh. Both gitlab.freedesktop.org
+# archive endpoints work with a plain fetch here (no Anubis wall, unlike
+# mtdev's).
+fetch "https://gitlab.freedesktop.org/freetype/freetype/-/archive/VER-${FREETYPE_VERSION}/freetype-VER-${FREETYPE_VERSION}.tar.gz"
+fetch "https://gitlab.freedesktop.org/fontconfig/fontconfig/-/archive/${FONTCONFIG_VERSION}/fontconfig-${FONTCONFIG_VERSION}.tar.gz"
+
+# tllist/fcft/foot are hosted on codeberg.org (Forgejo, not GitLab) --
+# its archive tarballs extract to a bare "<project>/" directory with NO
+# version suffix at all (confirmed by hand: "tllist/", not
+# "tllist-1.1.0/"), unlike every GitHub/GitLab archive fetched above.
+# Fetched to an explicit "<name>-<version>.tar.gz" filename so the
+# generic build_meson() naming convention still applies to the
+# downloaded file even though the version has to be passed as a `-d`
+# directory override at build time.
+for pkg_ver in "tllist:${TLLIST_VERSION}" "fcft:${FCFT_VERSION}" "foot:${FOOT_VERSION}"; do
+    pkg="${pkg_ver%%:*}"
+    ver="${pkg_ver##*:}"
+    fname="${pkg}-${ver}.tar.gz"
+    if [ ! -f "${fname}" ]; then
+        echo "[fetch] ${fname}"
+        curl -fL --retry 3 -o "${fname}" "https://codeberg.org/dnkl/${pkg}/archive/${ver}.tar.gz"
+    else
+        echo "[skip]  ${fname} already exists"
+    fi
+done
+
+# JetBrains Mono: the default terminal font. OFL-1.1 (fully
+# redistributable). Fetched as a GitHub *release asset* (a prebuilt
+# .zip of .ttf files), not a source-archive endpoint -- this repo's
+# session environment blocks GitHub source-archive downloads but not
+# release-asset downloads (different backing infra), and building a
+# font from its real source (a FontForge/UFO project) would pull in
+# FontForge itself, wildly out of proportion to "install a terminal
+# font."
+JBMONO_ZIP="jetbrains-mono-${JETBRAINS_MONO_VERSION}.zip"
+if [ ! -f "${JBMONO_ZIP}" ]; then
+    echo "[fetch] ${JBMONO_ZIP}"
+    curl -fL --retry 3 -o "${JBMONO_ZIP}" \
+        "https://github.com/JetBrains/JetBrainsMono/releases/download/v${JETBRAINS_MONO_VERSION}/JetBrainsMono-${JETBRAINS_MONO_VERSION}.zip"
+else
+    echo "[skip]  ${JBMONO_ZIP} already exists"
+fi
+
 echo ""
 echo "All sources downloaded to ${SOURCES}"

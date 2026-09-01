@@ -65,6 +65,20 @@ endian = 'little'
 
 [properties]
 sys_root = '${ROOTFS}'
+
+[built-in options]
+# The static linker only consults -L when resolving a DIRECTLY named
+# -l<lib> -- never for a shared library's own transitive DT_NEEDED
+# entries (confirmed twice now: novi-launcher linking against
+# libwayland-client.so, which itself needs libffi; fontconfig's own
+# fc-cache linking against the libfontconfig.so this same build just
+# produced, which itself needs libfreetype/libexpat). -rpath-link is
+# the linker's actual purpose-built mechanism for this -- point it at
+# the rootfs's lib dir globally here so every future meson-cross build
+# gets this for free, rather than rediscovering and patching around it
+# package by package.
+c_link_args = ['-Wl,-rpath-link,${ROOTFS}/usr/lib']
+cpp_link_args = ['-Wl,-rpath-link,${ROOTFS}/usr/lib']
 CROSS
 
 meson_cross() {
@@ -105,6 +119,17 @@ build_autotools() {
 # name; codeberg.org (Forgejo) archives expand to a bare "<name>/"
 # with no version suffix at all -- both confirmed by actually listing
 # the tarball's contents) pass their own extracted dir via -d.
+#
+# -p 'shell command' (optional, evaluated in the extracted source dir
+# right after extraction, before configure) mirrors build_skarnet()'s
+# existing patch-eval argument in build/04-s6.sh -- for the same
+# reason: a pinned version pairing can turn up a real, narrow
+# incompatibility (confirmed live: foot 1.9.2's exhaustive switch over
+# enum xdg_toplevel_state predates XDG_TOPLEVEL_STATE_SUSPENDED, which
+# this repo's newer wayland-protocols now generates, and foot compiles
+# with -Werror) that's better fixed with a small source patch than by
+# bumping versions across an unrelated stack or disabling warnings
+# wholesale.
 build_meson() {
     local name="$1" version="$2"
     local dir="${name}-${version}"
@@ -113,11 +138,19 @@ build_meson() {
         dir="$2"
         shift 2
     fi
+    local patch=""
+    if [ "${1:-}" = "-p" ]; then
+        patch="$2"
+        shift 2
+    fi
     echo "==> Building ${name}-${version}"
     cd "${SOURCES}"
     rm -rf "${dir}"
     tar -xf "${name}-${version}.tar.gz"
     cd "${dir}"
+    if [ -n "${patch}" ]; then
+        eval "${patch}"
+    fi
     meson_cross build --prefix=/usr "$@"
     ninja -C build
     DESTDIR="${ROOTFS}" ninja -C build install

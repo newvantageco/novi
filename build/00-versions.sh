@@ -43,6 +43,23 @@ LIBDISPLAY_INFO_VERSION="0.2.0"
 WLROOTS_VERSION="0.18.0"
 XKEYBOARD_CONFIG_VERSION="2.48"
 
+# foot (default terminal, RFC 0001 decision 6) and its dependency
+# chain -- see build/09-foot.sh. freetype/fontconfig/fcft/tllist/
+# JetBrains Mono are all NEW here, nothing else in this repo needed
+# real font rendering before now.
+#
+# fcft is pinned to the 2.x line, NOT latest (3.3.3 at time of
+# writing) -- confirmed by reading foot-1.9.2's own meson.build:
+# `dependency('fcft', version: ['>=2.4.0', '<3.0.0'])`. Pinning
+# "latest fcft" here would have been the same class of mistake as an
+# unpinned skarnet version skew earlier in this repo's history.
+FREETYPE_VERSION="2-14-3"
+FONTCONFIG_VERSION="2.18.3"
+TLLIST_VERSION="1.1.0"
+FCFT_VERSION="2.5.1"
+FOOT_VERSION="1.9.2"
+JETBRAINS_MONO_VERSION="2.304"
+
 # Build target
 TARGET_ARCH="x86_64"
 TARGET_TRIPLE="${TARGET_ARCH}-linux-musl"
