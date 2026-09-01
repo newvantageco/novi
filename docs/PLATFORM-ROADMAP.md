@@ -275,16 +275,41 @@ first time libxkbcommon was built). Fixed by pinning
 `-Dxkb-config-root=` explicitly rather than leaving it to
 auto-detection.
 
+**`novi-panel`** (a top bar, third layer-shell client alongside the
+compositor and launcher) is built: a live clock, always visible,
+auto-spawned by novi-shell at startup. Finding it also turned up a real
+infinite-loop bug in the compositor's layer-shell arrangement logic
+(fixed: re-arranging was firing on every client commit instead of only
+ones that actually changed geometry, closing a compositor↔client
+configure/commit ping-pong — one boot logged 1,000+ cycles in 13
+seconds before the fix). It initially looked like a z-order bug (the
+panel appeared to vanish once a terminal opened) and took an actual
+diagnostic log, not guesswork, to find the real cause. Live-verified:
+the panel now stays visible and correctly on top of terminal windows.
+
 **Still open**: app/file search itself (blocked on §2's package model
 existing enough to have something to search); Super+[1-9] workspaces
 (needs real per-output workspace state), PrintScreen screenshots,
 Super+L lock, Super+. emoji picker — none of RFC 0001 decision 7's
-remaining bindings are wired up yet; the panel/taskbar (a second
-layer-shell client, not built yet); moving keybindings to RFC 0001's
-user-editable config file instead of compiled-in defaults;
+remaining bindings are wired up yet; click/pointer input isn't routed
+to layer-shell surfaces yet, so the panel isn't interactive and new
+windows don't avoid its reserved space; moving keybindings to RFC
+0001's user-editable config file instead of compiled-in defaults;
 hardware-accelerated rendering (GLES2/Vulkan via Mesa) is out of scope
 for this milestone and stays pixman-only until that's picked up
 separately.
+
+**Adjacent idea, not started**: decentralized, radio-agnostic mesh
+networking (Reticulum-style — cryptographic identity as the address,
+transport-agnostic routing over anything from LoRa to Wi-Fi to plain
+IP) is a strong philosophical fit for this project's "own the platform,
+no infrastructure you don't control" stance, and ties directly to §12's
+security/pentest track. Not scoped yet: the reference implementation
+is Python, a materially different kind of dependency than anything
+built so far (wlroots, foot, etc. are all plain C, no scripting
+runtime anywhere in this rootfs). Worth its own track when picked up,
+starting with Reticulum-over-IP (needs only a socket, no new radio
+drivers) before any LoRa/HaLow hardware work.
 
 ### Terminal / CLI environment
 
@@ -480,7 +505,7 @@ compositor choice does.
 | 2 | Package/application model | 🟡 Native done, sandbox tier proposed (RFC needed) |
 | 3 | Update/rollback model | 🟡 Track split decided, on-device rollback open |
 | 4 | Hardware strategy | 🟡 x86_64 kernel exists, coverage + aarch64 open |
-| 5 | Desktop strategy | 🟡 Compositor + layer-shell + launcher + foot terminal, all live-verified in QEMU (typed a real command, got real output); no panel/taskbar or app search yet |
+| 5 | Desktop strategy | 🟡 Compositor + layer-shell + launcher + foot terminal + top-bar panel, all live-verified in QEMU together; no app search, no click/pointer input on the panel yet |
 | 6 | Gaming strategy | 🔴 Open — blocked on #5 |
 | 7 | Developer strategy | 🟡 Native toolchain exists, container tier proposed |
 | 8 | Enterprise strategy | 🟡 LTS branches exist, signing enforcement + fleet mgmt open |
@@ -489,10 +514,9 @@ compositor choice does.
 | 11 | Differentiation | ✅ Articulated above |
 | 12 | Security tooling / pentest track | 🔴 Open — packaging work, blocked on §2/§8/§9 |
 
-**Next concrete step:** either wire `novi-launcher` up to something real
-to search once §2's package model can register installed apps (closing
-the loop on RFC 0001's "apps, files by name" part of Alt+Space), or
-build the panel/taskbar as the second layer-shell client — both are
-open, and now that `foot` exists there's a real interactive shell
-inside the graphical session to dogfood either one against, instead of
+**Next concrete step:** pointer/click routing to layer-shell surfaces
+(needed before the panel can do anything beyond display a clock), or
+wire `novi-launcher` up to real app/file search once §2's package
+model can register installed apps — both open, dogfoodable now via
+`foot`'s real interactive shell inside the graphical session instead of
 only QEMU-injection-and-screendump from outside.
