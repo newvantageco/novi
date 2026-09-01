@@ -34,6 +34,14 @@
  * buffer with actual alpha, not a placeholder square -- the wl_shm
  * surface is deliberately larger than the visible card to leave room
  * for the shadow to extend past its edges without clipping.
+ *
+ * A second mode, `novi-launcher --symbols` (spawned by novi-shell on
+ * Super+.), reuses this entire client -- same overlay, same card
+ * chrome, same font -- for RFC 0001 decision 7's other overlay binding:
+ * the symbol half of "emoji/symbol picker" (see the SYMBOLS[] table's
+ * own comment for why not emoji). Enter copies the matched symbol to
+ * the clipboard via the standard core-Wayland wl_data_device_manager
+ * instead of launching anything.
  */
 #include <dirent.h>
 #include <errno.h>
@@ -158,6 +166,7 @@ struct novi_launcher {
 	struct wl_seat *seat;
 	struct wl_keyboard *keyboard;
 	struct zwlr_layer_shell_v1 *layer_shell;
+	struct wl_data_device_manager *data_device_manager;
 
 	struct wl_surface *surface;
 	struct zwlr_layer_surface_v1 *layer_surface;
@@ -171,6 +180,15 @@ struct novi_launcher {
 	uint32_t width, height;
 	bool configured;
 	bool running;
+
+	/* --symbols mode (see main()): the visible overlay closes the
+	 * instant a symbol is copied, but the process itself has to keep
+	 * dispatching until the clipboard data source is superseded --
+	 * standard Wayland clipboard-source lifetime (the same reason
+	 * wl-copy stays resident), not specific to this client. */
+	bool symbol_mode;
+	bool clipboard_serving;
+	uint32_t last_key_serial;
 
 	char input[INPUT_MAX + 1];
 	size_t input_len;
@@ -480,6 +498,186 @@ static void launch_app(const struct app_entry *app) {
 	}
 }
 
+/* ── Symbol picker (Super+., novi-launcher --symbols) ──────────────
+ *
+ * RFC 0001 decision 7 calls this binding "emoji/symbol picker". Only
+ * the symbol half is implemented: this repo ships no color-emoji font
+ * (JetBrainsMono-Regular.ttf's own cmap was checked directly, not
+ * assumed -- it has zero glyphs anywhere in the U+1F300+ emoji block),
+ * and rendering real emoji would mean silently showing tofu/missing-
+ * glyph boxes instead. Every codepoint below was checked against that
+ * same cmap and does have a real JetBrains Mono glyph, so what's typed
+ * and copied is always exactly what was seen on screen -- no
+ * placeholder characters. Full emoji support is future work gated on
+ * adding an actual (color or monochrome) emoji font. */
+struct symbol_entry {
+	const char *name;
+	uint32_t codepoint;
+};
+
+static const struct symbol_entry SYMBOLS[] = {
+	{"arrow right", 0x2192}, {"arrow left", 0x2190},
+	{"arrow up", 0x2191}, {"arrow down", 0x2193},
+	{"arrow left right", 0x2194}, {"arrow up down", 0x2195},
+	{"double arrow right", 0x21D2}, {"double arrow left", 0x21D0},
+	{"check mark", 0x2713}, {"cross mark", 0x2717},
+	{"warning sign", 0x26A0}, {"lightning bolt", 0x26A1},
+	{"plus minus", 0xB1}, {"multiply", 0xD7}, {"divide", 0xF7},
+	{"approx equal", 0x2248}, {"not equal", 0x2260},
+	{"less equal", 0x2264}, {"greater equal", 0x2265},
+	{"infinity", 0x221E}, {"sum", 0x2211}, {"sqrt", 0x221A},
+	{"delta", 0x2206}, {"pi", 0x3C0}, {"lambda", 0x3BB}, {"micro", 0xB5},
+	{"euro", 0x20AC}, {"pound", 0xA3}, {"yen", 0xA5}, {"cent", 0xA2},
+	{"copyright", 0xA9}, {"registered", 0xAE}, {"trademark", 0x2122},
+	{"degree", 0xB0}, {"section", 0xA7}, {"paragraph", 0xB6},
+	{"en dash", 0x2013}, {"em dash", 0x2014}, {"ellipsis", 0x2026},
+	{"bullet", 0x2022}, {"middle dot", 0xB7}, {"not sign", 0xAC},
+	{"left double quote", 0x201C}, {"right double quote", 0x201D},
+	{"left single quote", 0x2018}, {"right single quote", 0x2019},
+	{"box top left", 0x250C}, {"box top right", 0x2510},
+	{"box bottom left", 0x2514}, {"box bottom right", 0x2518},
+	{"box horizontal", 0x2500}, {"box vertical", 0x2502},
+	{"square empty", 0x25A1}, {"square filled", 0x25A0},
+	{"circle empty", 0x25CB}, {"circle filled", 0x25CF},
+};
+
+/* Encodes one Unicode codepoint as UTF-8 into out (caller-owned, must be
+ * at least 5 bytes), NUL-terminated. Every SYMBOLS[] entry is in the
+ * Basic Multilingual Plane (<= 3 UTF-8 bytes), but this handles the
+ * full range correctly rather than assuming that stays true forever. */
+static void utf8_encode(uint32_t cp, char out[5]) {
+	if (cp < 0x80) {
+		out[0] = (char)cp;
+		out[1] = '\0';
+	} else if (cp < 0x800) {
+		out[0] = (char)(0xC0 | (cp >> 6));
+		out[1] = (char)(0x80 | (cp & 0x3F));
+		out[2] = '\0';
+	} else if (cp < 0x10000) {
+		out[0] = (char)(0xE0 | (cp >> 12));
+		out[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+		out[2] = (char)(0x80 | (cp & 0x3F));
+		out[3] = '\0';
+	} else {
+		out[0] = (char)(0xF0 | (cp >> 18));
+		out[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+		out[2] = (char)(0x80 | ((cp >> 6) & 0x3F));
+		out[3] = (char)(0x80 | (cp & 0x3F));
+		out[4] = '\0';
+	}
+}
+
+/* Same one-result convention as find_app_match(): the first name match,
+ * no ranked/multi-result list. */
+static const struct symbol_entry *find_symbol_match(
+		const struct novi_launcher *state) {
+	if (state->input_len == 0) {
+		return NULL;
+	}
+	for (size_t i = 0; i < sizeof(SYMBOLS) / sizeof(SYMBOLS[0]); i++) {
+		if (app_name_matches(SYMBOLS[i].name, state->input)) {
+			return &SYMBOLS[i];
+		}
+	}
+	return NULL;
+}
+
+static const struct wl_data_source_listener clipboard_source_listener;
+
+/* Bundles what the data-source callbacks need -- there's only ever one
+ * clipboard source alive per process (this client copies exactly once,
+ * on Enter), so static storage is simpler than heap-allocating a
+ * per-source context. */
+static struct {
+	struct novi_launcher *state;
+	char utf8[5];
+} clipboard_ctx;
+
+/* Sets a copy of `utf8` as the clipboard selection via the standard
+ * core-Wayland wl_data_device_manager (novi-shell already creates one --
+ * wlr_data_device_manager_create() in novi-shell/main.c -- for exactly
+ * this, not a new protocol). */
+static void copy_to_clipboard(struct novi_launcher *state, const char *utf8) {
+	if (state->data_device_manager == NULL || state->seat == NULL) {
+		fprintf(stderr, "novi-launcher: no clipboard support "
+			"(wl_data_device_manager or wl_seat missing)\n");
+		return;
+	}
+	clipboard_ctx.state = state;
+	snprintf(clipboard_ctx.utf8, sizeof(clipboard_ctx.utf8), "%s", utf8);
+
+	struct wl_data_source *source =
+		wl_data_device_manager_create_data_source(state->data_device_manager);
+	wl_data_source_offer(source, "text/plain;charset=utf-8");
+	wl_data_source_offer(source, "UTF8_STRING");
+	wl_data_source_offer(source, "text/plain");
+	wl_data_source_add_listener(source, &clipboard_source_listener, NULL);
+
+	struct wl_data_device *device =
+		wl_data_device_manager_get_data_device(state->data_device_manager,
+			state->seat);
+	/* set_selection needs the serial of the input event that justifies
+	 * claiming the selection -- the Enter keypress that triggered this
+	 * copy, captured in keyboard_key() below. */
+	wl_data_device_set_selection(device, source, state->last_key_serial);
+	state->clipboard_serving = true;
+}
+
+static void clipboard_source_target(void *data, struct wl_data_source *source,
+		const char *mime_type) {
+	(void)data; (void)source; (void)mime_type;
+}
+
+static void clipboard_source_send(void *data, struct wl_data_source *source,
+		const char *mime_type, int32_t fd) {
+	(void)data; (void)source; (void)mime_type;
+	const char *utf8 = clipboard_ctx.utf8;
+	size_t len = strlen(utf8);
+	size_t written = 0;
+	while (written < len) {
+		ssize_t n = write(fd, utf8 + written, len - written);
+		if (n <= 0) {
+			break;
+		}
+		written += (size_t)n;
+	}
+	close(fd);
+}
+
+static void clipboard_source_cancelled(void *data,
+		struct wl_data_source *source) {
+	(void)data;
+	/* Another client took the selection (or novi-launcher itself is
+	 * being torn down) -- this source's job is done, and nothing else
+	 * keeps this process alive once clipboard_serving drops. */
+	wl_data_source_destroy(source);
+	clipboard_ctx.state->clipboard_serving = false;
+}
+
+static void clipboard_source_dnd_drop_performed(void *data,
+		struct wl_data_source *source) {
+	(void)data; (void)source;
+}
+
+static void clipboard_source_dnd_finished(void *data,
+		struct wl_data_source *source) {
+	(void)data; (void)source;
+}
+
+static void clipboard_source_action(void *data, struct wl_data_source *source,
+		uint32_t dnd_action) {
+	(void)data; (void)source; (void)dnd_action;
+}
+
+static const struct wl_data_source_listener clipboard_source_listener = {
+	.target = clipboard_source_target,
+	.send = clipboard_source_send,
+	.cancelled = clipboard_source_cancelled,
+	.dnd_drop_performed = clipboard_source_dnd_drop_performed,
+	.dnd_finished = clipboard_source_dnd_finished,
+	.action = clipboard_source_action,
+};
+
 /* ── Rendering ───────────────────────────────────────────────────── */
 
 static void draw_rect(uint32_t *px, uint32_t stride_px, uint32_t buf_w,
@@ -712,6 +910,26 @@ static void render(struct novi_launcher *state, uint32_t *px,
 			line_height, CURSOR_COLOR);
 	}
 
+	if (state->symbol_mode) {
+		const struct symbol_entry *sym_match = find_symbol_match(state);
+		if (sym_match != NULL) {
+			/* Glyph first (exactly what Enter would copy), then its
+			 * name -- no "-> " prefix here, unlike app search: the
+			 * rendered glyph itself already IS the preview of what
+			 * gets copied, "-> " would just be visual noise in front
+			 * of it. */
+			char glyph_utf8[5];
+			utf8_encode(sym_match->codepoint, glyph_utf8);
+			int result_top = input_y + line_height + 16;
+			int end_x = novi_text_draw(dest, state->font, text_x,
+				result_top + state->font->ascent, glyph_utf8, result_color);
+			novi_text_draw(dest, state->font, end_x + RESULT_ICON_GAP,
+				result_top + state->font->ascent, sym_match->name, result_color);
+		}
+		pixman_image_unref(dest);
+		return;
+	}
+
 	/* App match takes priority over the calculator result when both
 	 * would otherwise show something -- typing a name like "foot"
 	 * never parses as an expression anyway (evaluate() would reject it
@@ -856,8 +1074,9 @@ static void keyboard_leave(void *data, struct wl_keyboard *kb, uint32_t serial,
 
 static void keyboard_key(void *data, struct wl_keyboard *kb, uint32_t serial,
 		uint32_t time, uint32_t key, uint32_t key_state) {
-	(void)kb; (void)serial; (void)time;
+	(void)kb; (void)time;
 	struct novi_launcher *state = data;
+	state->last_key_serial = serial;
 	if (key_state != WL_KEYBOARD_KEY_STATE_PRESSED || state->xkb_state == NULL) {
 		return;
 	}
@@ -868,6 +1087,28 @@ static void keyboard_key(void *data, struct wl_keyboard *kb, uint32_t serial,
 		return;
 	}
 	if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter) {
+		if (state->symbol_mode) {
+			const struct symbol_entry *sym_match = find_symbol_match(state);
+			if (sym_match != NULL) {
+				char utf8[5];
+				utf8_encode(sym_match->codepoint, utf8);
+				copy_to_clipboard(state, utf8);
+			}
+			/* Hide the overlay immediately -- copy_to_clipboard() (if
+			 * it ran) already armed clipboard_serving, which is what
+			 * actually keeps the process alive past this point, not
+			 * the surface staying mapped. */
+			if (state->layer_surface != NULL) {
+				zwlr_layer_surface_v1_destroy(state->layer_surface);
+				state->layer_surface = NULL;
+			}
+			if (state->surface != NULL) {
+				wl_surface_destroy(state->surface);
+				state->surface = NULL;
+			}
+			state->running = false;
+			return;
+		}
 		struct app_entry *app = find_app_match(state);
 		if (app != NULL) {
 			launch_app(app);
@@ -995,6 +1236,9 @@ static void registry_global(void *data, struct wl_registry *registry,
 	} else if (strcmp(interface, zwlr_layer_shell_v1_interface.name) == 0) {
 		state->layer_shell = wl_registry_bind(registry, name,
 			&zwlr_layer_shell_v1_interface, 4);
+	} else if (strcmp(interface, wl_data_device_manager_interface.name) == 0) {
+		state->data_device_manager = wl_registry_bind(registry, name,
+			&wl_data_device_manager_interface, 3);
 	}
 }
 
@@ -1008,11 +1252,18 @@ static const struct wl_registry_listener registry_listener = {
 	.global_remove = registry_global_remove,
 };
 
-int main(void) {
+int main(int argc, char *argv[]) {
 	struct novi_launcher state = {0};
 	state.running = true;
+	/* --symbols: the symbol-picker half of RFC 0001 decision 7's
+	 * Super+. binding (see the SYMBOLS[] table above for why not full
+	 * emoji), spawned by novi-shell's own Super+. handler. Plain
+	 * invocation (Alt+Space) stays app search + calculator, unchanged. */
+	state.symbol_mode = argc > 1 && strcmp(argv[1], "--symbols") == 0;
 
-	load_apps(&state);
+	if (!state.symbol_mode) {
+		load_apps(&state);
+	}
 
 	state.display = wl_display_connect(NULL);
 	if (state.display == NULL) {
@@ -1063,8 +1314,12 @@ int main(void) {
 	 * zwlr_layer_surface_v1 description). */
 	wl_surface_commit(state.surface);
 
-	while (state.running && wl_display_dispatch(state.display) != -1) {
-		/* All the real work happens in the listener callbacks above. */
+	while ((state.running || state.clipboard_serving) &&
+			wl_display_dispatch(state.display) != -1) {
+		/* All the real work happens in the listener callbacks above.
+		 * clipboard_serving keeps this alive after the overlay itself
+		 * is gone (see keyboard_key()'s Enter/--symbols handling) so a
+		 * copied symbol can still actually be pasted somewhere. */
 	}
 
 	if (state.layer_surface != NULL) {

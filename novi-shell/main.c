@@ -10,13 +10,14 @@
  * rather than reinvented.
  *
  * Default keybindings implement part of RFC 0001 decision 7: Alt+Tab /
- * Alt+Shift+Tab (window switching), Super+Return (spawn a terminal),
- * Super+Q (close focused window). Still not implemented: the panel and
- * app launcher themselves (this only provides the protocol they'd
- * anchor to, not the UI), Super+[1-9] workspaces, PrintScreen
- * screenshots, Super+L lock, Super+. emoji picker, and moving any of
- * this to the user-editable config file RFC 0001 calls for -- all
- * tracked follow-up work, not part of this milestone.
+ * Alt+Shift+Tab (window switching), Alt+Space (search/launcher overlay,
+ * novi-launcher/), Super+Return (spawn a terminal), Super+Q (close
+ * focused window), Super+. (symbol picker, novi-launcher --symbols --
+ * see that file for why "symbol" and not full emoji). Still not
+ * implemented: Super+[1-9] workspaces, PrintScreen screenshots, Super+L
+ * lock, and moving any of this to the user-editable config file RFC
+ * 0001 calls for -- all tracked follow-up work, not part of this
+ * milestone.
  */
 #include <assert.h>
 #include <getopt.h>
@@ -58,6 +59,10 @@
  * into the compositor -- same "novi-shell UI is a layer-shell client,
  * not compositor code" split as any future panel. */
 #define NOVI_DEFAULT_LAUNCHER "novi-launcher"
+/* RFC 0001 decision 7: Super+. symbol picker -- the same novi-launcher
+ * binary, re-invoked with --symbols (see novi-launcher/main.c's own
+ * header comment for why this is "symbol", not full emoji). */
+#define NOVI_DEFAULT_SYMBOL_PICKER "novi-launcher --symbols"
 /* The top bar (RFC 0001's "novi-shell" UI chrome) -- another
  * layer-shell client, auto-spawned once the compositor is up, rather
  * than left for the user to start manually or wired as a separate s6
@@ -395,9 +400,9 @@ static void close_focused_toplevel(struct novi_server *server) {
 }
 
 /* RFC 0001 decision 7's default keybindings. Alt+Tab/Shift+Tab (window
- * switching) and Super+Return/Super+Q (terminal/close) are implemented
- * here; Super+[1-9] workspaces, PrintScreen screenshots, Super+L lock,
- * and Super+. emoji picker are tracked follow-ups, not yet wired --
+ * switching), Super+Return/Super+Q (terminal/close), and Super+. (symbol
+ * picker) are implemented here; Super+[1-9] workspaces, PrintScreen
+ * screenshots, and Super+L lock are tracked follow-ups, not yet wired --
  * each needs state (workspaces) or a client-side helper (screenshot,
  * lock) this milestone doesn't build. All of this is compositor-
  * internal default behavior for now; RFC 0001 calls for these to move
@@ -445,6 +450,13 @@ static bool handle_keybinding(struct novi_server *server, uint32_t modifiers,
 		case XKB_KEY_q:
 		case XKB_KEY_Q:
 			close_focused_toplevel(server);
+			return true;
+		case XKB_KEY_period:
+			/* RFC 0001 decision 7: symbol picker. Same spawn-fresh-
+			 * overlay pattern as Alt+Space above, just a different
+			 * argv -- novi-launcher decides what that means. */
+			spawn(getenv("NOVI_SYMBOL_PICKER") ?
+				getenv("NOVI_SYMBOL_PICKER") : NOVI_DEFAULT_SYMBOL_PICKER);
 			return true;
 		default:
 			break;

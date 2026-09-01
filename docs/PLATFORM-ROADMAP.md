@@ -592,13 +592,39 @@ foot window with a live shell prompt. Also required relaxing
 calculator grammar's character set (digits/operators only) -- app
 names need letters, which that filter rejected outright before this.
 
+Super+. (RFC 0001 decision 7's "emoji/symbol picker") is now wired too
+-- the symbol half only: JetBrainsMono-Regular.ttf's own cmap was
+checked directly (via fontTools, not assumed) and has zero glyphs
+anywhere in the Unicode emoji blocks, so rendering real emoji would
+mean silently showing tofu boxes instead. `novi-launcher --symbols`
+(same binary, same card/shadow/font chrome as Alt+Space, a new mode
+rather than a duplicate client) searches ~50 real Unicode symbols this
+font does have glyphs for (arrows, math, currency, quotes, box-drawing,
+checkmarks), and Enter copies the match to the clipboard via the
+standard core-Wayland `wl_data_device_manager` novi-shell already
+creates (`wlr_data_device_manager_create()` predates this feature --
+zero new compositor-side protocol work). Live-verified in QEMU end to
+end, including the actual clipboard bytes: Super+., typed "arrow
+right", Enter, then opened a real `foot` window and pasted into `od -c`
+-- `0000000 342 206 222`, the exact correct 3-byte UTF-8 encoding of
+U+2192, not just "something got copied." Getting the glyph to render
+correctly at all surfaced a real, previously-invisible bug along the
+way: `common/text.c`'s `novi_text_draw()`/`novi_text_width()` treated
+every byte of the input string as its own codepoint (fine for the
+ASCII-only callers that existed before -- the panel clock, calculator
+operators -- silently wrong for anything requiring a multi-byte UTF-8
+sequence, like a real arrow glyph, which rendered as three-character
+mojibake). Fixed with a real UTF-8 decoder in `common/text.c`, shared
+by every caller (`novi-panel`, `novi-launcher`); re-verified live that
+the panel clock and app-search icon rendering were unaffected.
+
 **Still open**: file search (indexed filesystem lookup) still doesn't
 exist, and no package installs a `.app` descriptor yet since no real
 GUI apps are packaged -- app search only has one real entry (foot) to
 find until that changes; Super+[1-9] workspaces
-(needs real per-output workspace state), PrintScreen screenshots,
-Super+L lock, Super+. emoji picker — none of RFC 0001 decision 7's
-remaining bindings are wired up yet; moving keybindings to RFC 0001's
+(needs real per-output workspace state), PrintScreen screenshots, and
+Super+L lock — none of RFC 0001 decision 7's remaining bindings are
+wired up yet; moving keybindings to RFC 0001's
 user-editable config file instead of compiled-in defaults;
 hardware-accelerated rendering (GLES2/Vulkan via Mesa) is out of scope
 for this milestone and stays pixman-only until that's picked up
@@ -814,7 +840,7 @@ compositor choice does.
 | 2 | Package/application model | 🟡 Native `pkg`/`mkpkg` now installed, wired into the build, and live-verified end-to-end (real dependency chain, install/remove/search/info) after fixing several real bugs found by first actually running it; sandbox tier still proposed (RFC needed) |
 | 3 | Update/rollback model | 🟡 Track split decided, on-device rollback open |
 | 4 | Hardware strategy | 🟡 x86_64 kernel exists, coverage + aarch64 open |
-| 5 | Desktop strategy | 🟡 Compositor + layer-shell + launcher + foot terminal + top-bar panel, real anti-aliased text rendering (fcft/pixman), a clickable apps button routing pointer input to a layer-shell surface, new windows placed below the panel's exclusive zone, real alpha compositing + rounded corners + a drop shadow on the launcher, server-side window decorations with working close + maximize buttons, all live-verified in QEMU together; design docs' rendering sequence now started on icons too — Lucide's license verified from upstream, apps-button icon shipped and live-verified; the `tools/svg2icon/` offline pipeline is built and its icons are now wired into `novi-launcher`'s search results (`icon=` in `.app` descriptors) and QEMU-live-verified — a real generated terminal icon renders next to a matched result, pixel-confirmed via screendump; status-bar icons are generated but unwired, blocked on real wifi/battery data; real app search too — `pkg-format.md`'s GUI-app-registration convention, foot registered and launchable by typed name, fork+execvp on Enter, live-verified end-to-end; file search still doesn't exist; two unrelated bugs found and fixed live-testing this: a missing `/tmp` mount, and the documented `s6-rc -up change graphical` command itself (root-caused: `-p`/prune tries to stop the console's own getty; corrected to plain `-u`) |
+| 5 | Desktop strategy | 🟡 Compositor + layer-shell + launcher + foot terminal + top-bar panel, real anti-aliased text rendering (fcft/pixman), a clickable apps button routing pointer input to a layer-shell surface, new windows placed below the panel's exclusive zone, real alpha compositing + rounded corners + a drop shadow on the launcher, server-side window decorations with working close + maximize buttons, all live-verified in QEMU together; design docs' rendering sequence now started on icons too — Lucide's license verified from upstream, apps-button icon shipped and live-verified; the `tools/svg2icon/` offline pipeline is built and its icons are now wired into `novi-launcher`'s search results (`icon=` in `.app` descriptors) and QEMU-live-verified — a real generated terminal icon renders next to a matched result, pixel-confirmed via screendump; status-bar icons are generated but unwired, blocked on real wifi/battery data; real app search too — `pkg-format.md`'s GUI-app-registration convention, foot registered and launchable by typed name, fork+execvp on Enter, live-verified end-to-end; file search still doesn't exist; Super+. symbol picker (not full emoji — no emoji-capable font exists) now wired too, `novi-launcher --symbols` copying to the clipboard via novi-shell's existing `wl_data_device_manager`, QEMU-live-verified down to the exact pasted UTF-8 bytes; found and fixed a real, previously-invisible `common/text.c` bug along the way (byte-per-codepoint rendering silently mojibake'd any multi-byte UTF-8 glyph); two more unrelated bugs found and fixed live-testing all this: a missing `/tmp` mount, and the documented `s6-rc -up change graphical` command itself (root-caused: `-p`/prune tries to stop the console's own getty; corrected to plain `-u`) |
 | 6 | Gaming strategy | 🔴 Open — blocked on #5 |
 | 7 | Developer strategy | 🟡 Native toolchain exists, container tier proposed |
 | 8 | Enterprise strategy | 🟡 LTS branches exist, signing enforcement + fleet mgmt open |
@@ -850,3 +876,32 @@ the graphical session (with real, clickable close and maximize
 buttons, and now reachable by typing its name into Alt+Space, not only
 Super+Return) instead of only QEMU-injection-and-screendump from
 outside.
+
+RFC 0001 decision 7's Super+. binding is done too, as far as it can be:
+`novi-launcher --symbols` reuses the whole launcher client for a
+searchable list of ~50 real Unicode symbols (checked against
+JetBrainsMono-Regular.ttf's actual cmap, not assumed — this repo has no
+emoji-capable font, so full "emoji/symbol picker" stays symbol-only
+until one is added, a real font dependency and its own future work, not
+this milestone's). Enter copies the match to the clipboard through
+novi-shell's existing `wl_data_device_manager` (zero new compositor
+protocol work — it already existed for regular app copy/paste). Getting
+the glyph to even render correctly surfaced a real bug in the shared
+`common/text.[ch]` module both `novi-panel` and `novi-launcher` use:
+it silently treated every byte as its own codepoint, mojibake-ing any
+real multi-byte UTF-8 character — invisible until something actually
+needed one. Fixed with a real UTF-8 decoder, and re-verified live that
+the ASCII-only callers (the clock, calculator, app icons) were
+unaffected. The whole path was QEMU-live-verified down to the actual
+clipboard bytes: pasted into a real `foot` window and read back via
+`od -c` as the exact correct 3-byte UTF-8 sequence, not just "something
+non-empty got copied."
+
+Next candidates, in roughly increasing order of what they need: Super+L
+lock (needs a real auth-gated layer-shell overlay — the one remaining
+binding this project's own security bar makes non-trivial, not
+"cheap"), PrintScreen screenshots (needs a screencopy protocol plus
+writing a file), and Super+[1-9] workspaces (needs real per-output
+workspace state in the compositor, the largest of the three). None are
+blocked on a decision — all three are exactly "implementation effort"
+the way the icon pipeline and symbol picker were.
