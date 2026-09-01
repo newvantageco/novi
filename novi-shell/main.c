@@ -131,6 +131,14 @@ struct novi_output {
 	struct wl_listener destroy;
 	/* layer-shell clients (novi_layer_surface.link) mapped on this output */
 	struct wl_list layer_surfaces;
+	/* Output-local box left over after layer-shell exclusive zones (the
+	 * top bar's reserved 32px) are subtracted -- set by arrange_layers(),
+	 * read by server_new_xdg_toplevel() so a new window's initial
+	 * position doesn't land underneath the panel. Starts as the full
+	 * output box: arrange_layers() runs once at output creation (before
+	 * any layer-shell client can possibly exist yet to shrink it), so
+	 * this is never used uninitialized. */
+	struct wlr_box usable_area;
 };
 
 struct novi_layer_surface {
@@ -906,6 +914,8 @@ static void arrange_layers(struct novi_output *output) {
 				&full_area, &usable_area);
 		}
 	}
+
+	output->usable_area = usable_area;
 }
 
 static void layer_surface_map(struct wl_listener *listener, void *data) {
@@ -1242,6 +1252,28 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
 		toplevel->server->layer_tree_toplevels, xdg_toplevel->base);
 	toplevel->scene_tree->node.data = toplevel;
 	xdg_toplevel->base->data = toplevel->scene_tree;
+
+	/* Initial placement: land the window in the output's usable area
+	 * (below the panel's exclusive zone), not at the scene tree's
+	 * default (0,0) -- which is directly under the top bar, so every
+	 * new window used to open with its top ~32px hidden behind it.
+	 * Same "single output for now" simplification server_new_layer_
+	 * surface() already uses (and explains) for picking an output when
+	 * a client doesn't specify one; a real multi-output compositor
+	 * would place new windows on the focused/cursor output instead.
+	 * This only sets an initial position, once, at creation -- it's not
+	 * re-applied on every map, so a window the user has since moved
+	 * doesn't get snapped back if it's ever unmapped and remapped. */
+	if (!wl_list_empty(&server->outputs)) {
+		struct novi_output *output =
+			wl_container_of(server->outputs.next, output, link);
+		struct wlr_box layout_box = {0};
+		wlr_output_layout_get_box(server->output_layout,
+			output->wlr_output, &layout_box);
+		wlr_scene_node_set_position(&toplevel->scene_tree->node,
+			layout_box.x + output->usable_area.x,
+			layout_box.y + output->usable_area.y);
+	}
 
 	/* Listen to the various events it can emit */
 	toplevel->map.notify = xdg_toplevel_map;
