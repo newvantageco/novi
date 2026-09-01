@@ -256,6 +256,25 @@ sent before the client's required initial commit, logged by wlroots
 itself as an error) — masked at first because the client happened to
 have a defensive fallback for it.
 
+**foot** (RFC 0001 decision 6's default terminal) is now built and
+Super+Return actually does something: a real terminal window opens,
+running a live BusyBox shell, rendered in JetBrains Mono via
+freetype/fontconfig/fcft — the first real font-rendering stack this
+repo has needed. **Live-verified interactively in QEMU**, not just
+"the binary exists": typed `echo Hello` into the booted VM via
+keyboard injection and got `Hello` printed back, the full
+keyboard → novi-shell → foot → shell → render round trip. Along the
+way, found and fixed a real, independent bug this work exposed rather
+than caused: a re-run of `build/06-wayland.sh` picked up a
+build-host path (`/build/rootfs/...`) baked into libxkbcommon.so's
+compiled-in default XKB config root, because its build queries
+xkeyboard-config's pkg-config variable through this repo's
+sysroot-rewriting pkg-config wrapper — silently correct before only by
+step-ordering accident (xkeyboard-config didn't exist yet the very
+first time libxkbcommon was built). Fixed by pinning
+`-Dxkb-config-root=` explicitly rather than leaving it to
+auto-detection.
+
 **Still open**: app/file search itself (blocked on §2's package model
 existing enough to have something to search); Super+[1-9] workspaces
 (needs real per-output workspace state), PrintScreen screenshots,
@@ -461,7 +480,7 @@ compositor choice does.
 | 2 | Package/application model | 🟡 Native done, sandbox tier proposed (RFC needed) |
 | 3 | Update/rollback model | 🟡 Track split decided, on-device rollback open |
 | 4 | Hardware strategy | 🟡 x86_64 kernel exists, coverage + aarch64 open |
-| 5 | Desktop strategy | 🟡 Compositor + layer-shell + Alt+Space launcher (calculator) live-verified in QEMU; no panel/taskbar or app search yet |
+| 5 | Desktop strategy | 🟡 Compositor + layer-shell + launcher + foot terminal, all live-verified in QEMU (typed a real command, got real output); no panel/taskbar or app search yet |
 | 6 | Gaming strategy | 🔴 Open — blocked on #5 |
 | 7 | Developer strategy | 🟡 Native toolchain exists, container tier proposed |
 | 8 | Enterprise strategy | 🟡 LTS branches exist, signing enforcement + fleet mgmt open |
@@ -474,6 +493,6 @@ compositor choice does.
 to search once §2's package model can register installed apps (closing
 the loop on RFC 0001's "apps, files by name" part of Alt+Space), or
 build the panel/taskbar as the second layer-shell client — both are
-open; whichever lands next, `foot` (the default terminal Super+Return
-already spawns but that isn't packaged yet) is worth picking up
-alongside it since it blocks that binding from doing anything visible.
+open, and now that `foot` exists there's a real interactive shell
+inside the graphical session to dogfood either one against, instead of
+only QEMU-injection-and-screendump from outside.
