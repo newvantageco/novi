@@ -447,6 +447,23 @@ side decorations are all real, all live-verified. Only item 5 (icon
 rendering) remains, and it's blocked on a maintainer decision, not
 implementation effort (see below).
 
+The maximize dot the decorations landed with is now real too, not a
+dimmed placeholder -- `GUI-DESIGN-LANGUAGE.md` had already flagged it
+as "the more tractable of the two" remaining dots, and
+`maximize_toplevel()`/`unmaximize_toplevel()` deliver on exactly that:
+snap-to-usable-area plus a saved-geometry struct to restore on a
+second click, shared by both the dot's click handler and a client's
+own `xdg_toplevel_request_maximize()` (previously a stub). Minimize
+stays dimmed and non-interactive, per the doc's own reasoning (no
+taskbar/dock exists yet to restore to). Building this also surfaced
+and fixed a real, silent bug in the dimmed dot's own color: wlroots'
+`wlr_render_color` requires pre-multiplied RGB, and the first version
+didn't, rendering the "dimmed" dot brighter than the full-strength
+ones next to it -- confirmed via a pixel readback, not just eyeballed.
+Also corrected an internally-inconsistent line in the design doc's own
+dot spec ("8px gap between centers" for 8px-diameter dots, which would
+overlap them by a full diameter) to 8px of edge-to-edge clearance.
+
 **Still open**: app/file search itself (blocked on §2's package model
 existing enough to have something to search); Super+[1-9] workspaces
 (needs real per-output workspace state), PrintScreen screenshots,
@@ -665,7 +682,7 @@ compositor choice does.
 | 2 | Package/application model | 🟡 Native `pkg`/`mkpkg` now installed, wired into the build, and live-verified end-to-end (real dependency chain, install/remove/search/info) after fixing several real bugs found by first actually running it; sandbox tier still proposed (RFC needed) |
 | 3 | Update/rollback model | 🟡 Track split decided, on-device rollback open |
 | 4 | Hardware strategy | 🟡 x86_64 kernel exists, coverage + aarch64 open |
-| 5 | Desktop strategy | 🟡 Compositor + layer-shell + launcher + foot terminal + top-bar panel, real anti-aliased text rendering (fcft/pixman), a clickable apps button routing pointer input to a layer-shell surface, new windows placed below the panel's exclusive zone, real alpha compositing + rounded corners + a drop shadow on the launcher, server-side window decorations with a working close button, all live-verified in QEMU together; design docs' rendering sequence complete except icons (blocked on a license decision); no app search yet |
+| 5 | Desktop strategy | 🟡 Compositor + layer-shell + launcher + foot terminal + top-bar panel, real anti-aliased text rendering (fcft/pixman), a clickable apps button routing pointer input to a layer-shell surface, new windows placed below the panel's exclusive zone, real alpha compositing + rounded corners + a drop shadow on the launcher, server-side window decorations with working close + maximize buttons, all live-verified in QEMU together; design docs' rendering sequence complete except icons (blocked on a license decision); no app search yet |
 | 6 | Gaming strategy | 🔴 Open — blocked on #5 |
 | 7 | Developer strategy | 🟡 Native toolchain exists, container tier proposed |
 | 8 | Enterprise strategy | 🟡 LTS branches exist, signing enforcement + fleet mgmt open |
@@ -687,6 +704,6 @@ unblocked, though: `pkg` installs files, it doesn't yet register a
 "this is a launchable GUI app" concept anywhere (no desktop-entry
 equivalent exists in `pkg-format.md` yet), so a search integration
 still needs that piece designed first. Dogfoodable now via `foot`'s
-real interactive shell inside the graphical session (with a real,
-clickable close button) instead of only
+real interactive shell inside the graphical session (with real,
+clickable close and maximize buttons) instead of only
 QEMU-injection-and-screendump from outside.

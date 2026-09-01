@@ -382,15 +382,23 @@ work:
 | Dot | Meaning | Status |
 |---|---|---|
 | **Close** | Sends `wlr_xdg_toplevel_send_close()` on click | **Wire it up.** This is the one dot with a real, already-implemented compositor primitive behind it. Making it clickable is "add decoration hit-testing," not "add a new compositor capability." |
-| **Maximize** | Snap the window to the output's usable area | **Style as present, dimmed (~40% opacity `text-muted`), no hover state, non-interactive for now.** Flagged in §8 as the more tractable of the two to actually implement later: `process_cursor_resize()` already demonstrates the exact geometry math (`wlr_xdg_toplevel_set_size` + scene-node repositioning) a maximize toggle would reuse; what's missing is remembering pre-maximize geometry to restore on a second click, which is a small, contained addition. |
+| **Maximize** | Snap the window to the output's usable area | **Wired and real, same as close.** Was flagged here as "the more tractable of the two to actually implement later" — since implemented: `maximize_toplevel()`/`unmaximize_toplevel()` in `novi-shell/main.c` reuse `process_cursor_resize()`'s exact geometry approach, plus a saved-geometry struct to restore on a second click, exactly as anticipated. Full strength `text-muted`, not dimmed, since it's genuinely interactive now — dimming it would misleadingly signal "disabled." |
 | **Minimize** | Hide the window, keep it referenced somewhere to restore from | **Style as present, dimmed, non-interactive.** Do not implement a "fake" minimize (e.g. just unmapping the scene node) without also deciding where the window goes to be restored from — there's no taskbar/dock in this design yet for it to live in, so wiring the dot before that exists would be a dead end, not a shortcut. |
 
-Visual spec for the dots themselves: **8px diameter circles, 8px gap
-between centers, monochrome `text-muted` at rest → `text-secondary` on
-hover (close dot only, once wired) → `status-error`-tinted only at the
-instant of a close click if a "destructive confirm" flash is wanted
-(optional, not required)**. Never use red/yellow/green fills — that's
-the one explicit thing the mockup calls out as *not* wanted here.
+Visual spec for the dots themselves: **8px diameter circles, monochrome
+`text-muted` at rest → `text-secondary` on hover (close/maximize, once
+hover state is wired — currently unwired, see `novi-shell/main.c`'s own
+comments) → `status-error`-tinted only at the instant of a close click
+if a "destructive confirm" flash is wanted (optional, not required)**.
+Never use red/yellow/green fills — that's the one explicit thing the
+mockup calls out as *not* wanted here.
+
+Spacing correction: this section originally specified "8px gap between
+centers" for same-sized 8px dots, which is a contradiction — center
+spacing narrower than the dots' own diameter means they'd overlap by a
+full diameter, not sit apart. The implementation uses 8px of
+edge-to-edge clearance instead (16px center-to-center), the
+conventional reading of "an 8px gap" between equal-sized elements.
 
 ### Consequence for who draws the title bar
 
