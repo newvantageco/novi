@@ -78,10 +78,28 @@ build_meson wayland-protocols "${WAYLAND_PROTOCOLS_VERSION}" \
 # here, not a build failure, but is a real *runtime* dependency for
 # keyboard input to work at all -- not yet added anywhere in this
 # repo, tracked as a follow-up.
+# -Dxkb-config-root=/usr/share/X11/xkb: pinned explicitly rather than
+# left to xkbcommon's own auto-detection. Its meson.build (see
+# XKBCONFIGROOT logic) queries xkeyboard-config's "xkb_base" pkg-config
+# variable when that package is already installed, through our
+# sysroot-aware pkg-config wrapper (PKG_CONFIG_SYSROOT_DIR=${ROOTFS}) --
+# and pkg-config's sysroot rewriting applies to that value too, not
+# just Cflags/Libs, producing "${ROOTFS}/usr/share/X11/xkb" baked into
+# libxkbcommon.so as its compiled-in RUNTIME default (DFLT_XKB_CONFIG_ROOT),
+# a build-host path that doesn't exist inside the booted VM at all.
+# Confirmed live: this exact bug fired on a re-run of this script after
+# xkeyboard-config (step 15, below) already existed in the rootfs from
+# an earlier run -- the very first build predates xkeyboard-config
+# entirely, so it never hit xkeyboard_config_dep.found() and fell back
+# to a correct, unprefixed default, silently working by step-ordering
+# accident rather than by design. Passing this explicitly makes the
+# correct runtime value (no sysroot prefix -- /usr/... is exactly right
+# at boot time) independent of both build order and pkg-config's
+# variable-substitution behavior.
 build_meson libxkbcommon "${LIBXKBCOMMON_VERSION}" \
     -Denable-x11=false -Denable-tools=false -Denable-wayland=false \
     -Denable-docs=false -Denable-bash-completion=false \
-    -Denable-xkbregistry=false
+    -Denable-xkbregistry=false -Dxkb-config-root=/usr/share/X11/xkb
 
 # ── 6. pixman (wlroots' mandatory software renderer backend) ──────
 # name+version deliberately built as "pixman"+"pixman-X.Y.Z": the
