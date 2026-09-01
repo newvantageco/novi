@@ -180,18 +180,35 @@ firmware packages are opt-in at install or bundled in the default ISO.
 
 ## 5. Desktop Strategy
 
-**Open — no compositor chosen yet.** `CONTRIBUTING.md` already flags
-"introducing a desktop / GUI stack or Wayland compositor layer" as
-RFC-required, and `README.md`'s "Next" list has it unchecked. This is the
-single biggest undecided piece of the platform, since the sandboxed-app
-model (§2) and gaming strategy (§6) both depend on which compositor/
-session we pick.
-
-Drafted: [`docs/rfcs/0001-desktop-wayland-compositor.md`](rfcs/0001-desktop-wayland-compositor.md)
+**Decided and under construction.** [`docs/rfcs/0001-desktop-wayland-compositor.md`](rfcs/0001-desktop-wayland-compositor.md)
 proposes a wlroots-based compositor + `seatd` (no systemd-logind) with a
 thin `novi-shell` on top, run as an s6-rc service like everything else.
-It's a draft, not yet opened for the 7-day discussion period required by
-`CONTRIBUTING.md`.
+`CONTRIBUTING.md`'s 7-day discussion period is a gate for outside
+contributors once there's a community to consult — pre-launch, the
+founder's own approval is what moves this from draft to build, and that's
+been given: implementation is underway.
+
+Built so far, cross-compiled from source against this repo's own musl
+toolchain (`build/06-wayland.sh`, `build/07-novi-shell.sh`): the full
+dependency stack (wayland, wayland-protocols, libxkbcommon, pixman,
+libudev-zero, libevdev, mtdev, libinput, libdrm, libdisplay-info, seatd,
+wlroots itself — 14 libraries, all with real cross-compilation bugs found
+and fixed, not just downloaded), and a first working `novi-shell` binary
+(`novi-shell/`, a wlroots DRM+libinput+pixman compositor core adapted from
+wlroots' own tinywl.c reference). It compiles, links, and runs correctly
+up to the point of connecting to `seatd` over its socket. Wired into
+s6-rc as `seatd` and `novi-shell` services (dependency verified via
+`s6-rc-db`), deliberately kept out of the `default` boot bundle behind a
+new `graphical` bundle until it's actually proven on real output.
+
+**Still open**: pixel-verified rendering (blocked on this environment's
+QEMU virtio-gpu module not auto-loading yet, and on the root-login policy
+gap noted in §9 blocking an interactive shell to switch runlevels by
+hand); the panel, app launcher, and layer-shell protocol support that
+RFC 0001 actually means by "novi-shell" — what exists today is the
+compositor core they'll be built on, not that UI layer itself; the
+keyboard-shortcut conventions (Alt+Space search, etc.) RFC 0001 specs are
+not implemented in code yet either.
 
 ### Terminal / CLI environment
 
@@ -371,7 +388,7 @@ compositor choice does.
 | 2 | Package/application model | 🟡 Native done, sandbox tier proposed (RFC needed) |
 | 3 | Update/rollback model | 🟡 Track split decided, on-device rollback open |
 | 4 | Hardware strategy | 🟡 x86_64 kernel exists, coverage + aarch64 open |
-| 5 | Desktop strategy | 🔴 Open — next RFC to open |
+| 5 | Desktop strategy | 🟡 RFC approved, compositor core built + s6-wired, unverified on real output, no panel/launcher yet |
 | 6 | Gaming strategy | 🔴 Open — blocked on #5 |
 | 7 | Developer strategy | 🟡 Native toolchain exists, container tier proposed |
 | 8 | Enterprise strategy | 🟡 LTS branches exist, signing enforcement + fleet mgmt open |
@@ -380,7 +397,9 @@ compositor choice does.
 | 11 | Differentiation | ✅ Articulated above |
 | 12 | Security tooling / pentest track | 🔴 Open — packaging work, blocked on §2/§8/§9 |
 
-**Next concrete step:** open [RFC 0001](rfcs/0001-desktop-wayland-compositor.md)
-(desktop/compositor choice) for the 7-day community discussion period —
-every open item in §2, §6 depends on it, and it's the largest remaining
-unknown.
+**Next concrete step:** verify `novi-shell` actually renders on real output
+(load `virtio_gpu` in the test VM, resolve the root-login gap enough to
+drive a manual runlevel switch or start `graphical` by default for
+testing), then build the panel/launcher/layer-shell UI layer RFC 0001
+actually describes as "novi-shell" on top of the now-working compositor
+core.
