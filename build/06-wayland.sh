@@ -243,8 +243,21 @@ build_meson libinput "${LIBINPUT_VERSION}" \
 # requested archive filename doesn't exactly match its own canonical
 # "<project>-<ref>" naming, confirmed by listing the tarball's actual
 # contents rather than assuming. build_meson's own name/version-based
-# default can't express that, so resolve it from the tarball directly.
-LIBDRM_DIR="$(tar -tzf "${SOURCES}/drm-libdrm-${LIBDRM_VERSION}.tar.gz" | head -1 | cut -d/ -f1)"
+# default can't express that, so extract once here to discover the
+# real directory name via a glob, then let build_meson's own (harmless
+# to repeat) extraction take over from there.
+#
+# NOT `tar -tzf ... | head -1 | ...`: under `set -o pipefail`, head
+# closing its input after one line sends SIGPIPE back to tar before it
+# finishes writing the rest of the (much longer) listing, which
+# pipefail turns into a silent script-aborting failure -- confirmed by
+# this exact pipeline killing the script immediately after the
+# libinput step, twice, with no error output at all (the failure is in
+# the pipeline itself, before anything downstream ever runs).
+cd "${SOURCES}"
+rm -rf libdrm-libdrm-"${LIBDRM_VERSION}"-*
+tar -xf "drm-libdrm-${LIBDRM_VERSION}.tar.gz"
+LIBDRM_DIR="$(compgen -G "libdrm-libdrm-${LIBDRM_VERSION}-*")"
 build_meson drm-libdrm "${LIBDRM_VERSION}" -d "${LIBDRM_DIR}" \
     -Dcairo-tests=disabled -Dman-pages=disabled -Dvalgrind=disabled -Dtests=false
 
