@@ -369,6 +369,17 @@ mount --move /sys  /newroot/sys  2>/dev/null || \
 mount --move /run  /newroot/run  2>/dev/null || \
     mount -t tmpfs tmpfs /newroot/run
 
+# scripts/mkiso.sh's mksquashfs invocation excludes /tmp from the
+# squashed image entirely (`-e proc sys dev run tmp`, the same
+# exclusion list as the other runtime-mounted directories), but unlike
+# dev/proc/sys/run above, nothing ever mounted anything AT /tmp -- so a
+# live boot ended up with no /tmp directory at all (confirmed live: `ls
+# /tmp` failed with "No such file or directory", not guessed). 1777 to
+# match the mode build/03-base.sh already sets on the build-time
+# rootfs's own (squashed-out) /tmp.
+mkdir -p /newroot/tmp
+mount -t tmpfs -o mode=1777 tmpfs /newroot/tmp
+
 # ── Verify new root has an init ───────────────────────────────────────────────
 for candidate in "${INIT_PATH}" /sbin/init /usr/sbin/init /lib/systemd/systemd /bin/sh; do
     if [ -x "/newroot${candidate}" ]; then
