@@ -359,6 +359,20 @@ Live-verified with a pixel-exact column scan of a post-boot
 screendump: the panel's background/border ends at row 31 and `foot`'s
 own background/glyphs start cleanly at row 32, zero gap, zero overlap.
 
+The next two items on `GUI-DESIGN-LANGUAGE.md` §8's leverage-ordered
+list are also done, together: `novi-launcher` now composites real
+alpha (`WL_SHM_FORMAT_ARGB8888` + pixman `a8r8g8b8`, replacing the
+opaque `XRGB8888` buffer every client used before) and has real
+rounded corners, punched into each of the four corner regions as a
+per-pixel anti-aliased alpha mask rather than a placeholder cutoff.
+Scoped to the launcher specifically, not the panel: §3 already calls
+the top bar out as deliberately *not* rounded (edge-anchored chrome
+touching three screen edges), while the launcher is exactly the
+"floating card" the target mockup's rounded-corner language describes.
+Verified live in QEMU: a zoomed screendump crop shows a real
+anti-aliased curve at all four corners, with typed calculator text
+still rendering correctly against the new buffer format.
+
 **Still open**: app/file search itself (blocked on §2's package model
 existing enough to have something to search); Super+[1-9] workspaces
 (needs real per-output workspace state), PrintScreen screenshots,
@@ -367,9 +381,9 @@ remaining bindings are wired up yet; moving keybindings to RFC 0001's
 user-editable config file instead of compiled-in defaults;
 hardware-accelerated rendering (GLES2/Vulkan via Mesa) is out of scope
 for this milestone and stays pixman-only until that's picked up
-separately; the design docs' concrete next steps (real alpha
-compositing, rounded rects, drop shadows, an icon set, server-side
-window decorations) are documented but not yet implemented.
+separately; the rest of the design docs' sequenced list (drop-shadow
+sprites, an icon set, server-side window decorations) is documented
+but not yet implemented.
 
 **Adjacent idea, not started**: decentralized, radio-agnostic mesh
 networking (Reticulum-style — cryptographic identity as the address,
@@ -577,7 +591,7 @@ compositor choice does.
 | 2 | Package/application model | 🟡 Native done, sandbox tier proposed (RFC needed) |
 | 3 | Update/rollback model | 🟡 Track split decided, on-device rollback open |
 | 4 | Hardware strategy | 🟡 x86_64 kernel exists, coverage + aarch64 open |
-| 5 | Desktop strategy | 🟡 Compositor + layer-shell + launcher + foot terminal + top-bar panel, real anti-aliased text rendering (fcft/pixman), a clickable apps button routing pointer input to a layer-shell surface, new windows placed below the panel's exclusive zone, all live-verified in QEMU together; no app search yet; `docs/design/` now has a target visual-language spec |
+| 5 | Desktop strategy | 🟡 Compositor + layer-shell + launcher + foot terminal + top-bar panel, real anti-aliased text rendering (fcft/pixman), a clickable apps button routing pointer input to a layer-shell surface, new windows placed below the panel's exclusive zone, real alpha compositing + rounded corners on the launcher, all live-verified in QEMU together; no app search yet; `docs/design/` now has a target visual-language spec |
 | 6 | Gaming strategy | 🔴 Open — blocked on #5 |
 | 7 | Developer strategy | 🟡 Native toolchain exists, container tier proposed |
 | 8 | Enterprise strategy | 🟡 LTS branches exist, signing enforcement + fleet mgmt open |
@@ -586,9 +600,11 @@ compositor choice does.
 | 11 | Differentiation | ✅ Articulated above |
 | 12 | Security tooling / pentest track | 🔴 Open — packaging work, blocked on §2/§8/§9 |
 
-**Next concrete step:** wire `novi-launcher` up to real app/file search
-once §2's package model can register installed apps — the other half
-of the previous "next concrete step" (pointer/click routing to
-layer-shell surfaces) is now done, dogfoodable now via `foot`'s real
-interactive shell inside the graphical session instead of only
+**Next concrete step:** drop-shadow sprites for the launcher (design
+doc §8 item 4, next in sequence now that alpha compositing and rounded
+rects both exist — a shadow needs the same real-alpha buffer rounded
+corners just added), or wire `novi-launcher` up to real app/file search
+once §2's package model can register installed apps — the latter is
+still blocked, dogfoodable now via `foot`'s real interactive shell
+inside the graphical session instead of only
 QEMU-injection-and-screendump from outside.
