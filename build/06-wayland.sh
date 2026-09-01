@@ -145,6 +145,145 @@ meson_cross build \
 ninja -C build
 DESTDIR="${ROOTFS}" ninja -C build install
 
+
+# meson-built packages that just need a --prefix and a handful of
+# feature flags to disable -- one helper for the common shape,
+# packages needing a nonstandard extracted-directory name (libdrm's
+# GitLab archive expands to "libdrm-libdrm-<version>-<hash>/", not
+# "libdrm-<version>/", when the ref doesn't resolve to a plain tag
+# name -- confirmed by actually listing the tarball's contents) pass
+# their own extracted dir via -d.
+build_meson() {
+    local name="$1" version="$2"
+    local dir="${name}-${version}"
+    shift 2
+    if [ "$1" = "-d" ]; then
+        dir="$2"
+        shift 2
+    fi
+    echo "==> Building ${name}-${version}"
+    cd "${SOURCES}"
+    rm -rf "${dir}"
+    tar -xf "${name}-${version}.tar.gz"
+    cd "${dir}"
+    meson_cross build --prefix=/usr "$@"
+    ninja -C build
+    DESTDIR="${ROOTFS}" ninja -C build install
+    echo "   done: ${name}"
+}
+
+# ── 4. wayland-protocols (pure XML + pkg-config metadata) ─────────
+build_meson wayland-protocols "${WAYLAND_PROTOCOLS_VERSION}" \
+    -Dtests=false
+
+# ── 5. libxkbcommon ─────────────────────────────────────────────────
+#
+# enable-xkbregistry needs libxml2, a dependency chain not worth
+# pulling in for the "compositor renders something" milestone this
+# build stage exists to reach -- xkbregistry is for GUI layout
+# pickers, not core keymap handling; revisit when building that UI.
+# xkeyboard-config (the runtime layout database, a separate package
+# providing the actual rules/layout data files) is a soft warning
+# here, not a build failure, but is a real *runtime* dependency for
+# keyboard input to work at all -- not yet added anywhere in this
+# repo, tracked as a follow-up.
+build_meson libxkbcommon "${LIBXKBCOMMON_VERSION}" \
+    -Denable-x11=false -Denable-tools=false -Denable-wayland=false \
+    -Denable-docs=false -Denable-bash-completion=false \
+    -Denable-xkbregistry=false
+
+# ── 6. pixman (wlroots' mandatory software renderer backend) ──────
+# name+version deliberately built as "pixman"+"pixman-X.Y.Z": the
+# tarball and its extracted directory are both "pixman-pixman-X.Y.Z"
+# (GitLab archive naming includes the project name twice when the
+# ref itself is "pixman-X.Y.Z", not a bare "X.Y.Z" tag).
+build_meson pixman "pixman-${PIXMAN_VERSION}" \
+    -Dgtk=disabled -Dlibpng=disabled -Dtests=disabled -Ddemos=disabled \
+    -Dopenmp=disabled
+
+# ── 7. libudev-zero ────────────────────────────────────────────────
+#
+# Plain non-meson Makefile, not wlroots-specific -- a musl-friendly
+# drop-in libudev replacement that reads sysfs directly instead of
+# running a systemd-udevd-style daemon, exactly the "no systemd
+# anywhere" constraint RFC 0001 states. Satisfies every downstream
+# package's plain "libudev" pkg-config lookup (libinput, wlroots).
+echo "==> Building libudev-zero-${LIBUDEV_ZERO_VERSION}"
+cd "${SOURCES}"
+rm -rf "libudev-zero-${LIBUDEV_ZERO_VERSION}"
+tar -xf "libudev-zero-${LIBUDEV_ZERO_VERSION}.tar.gz"
+cd "libudev-zero-${LIBUDEV_ZERO_VERSION}"
+make CC="${TARGET_TRIPLE}-gcc" AR="${TARGET_TRIPLE}-ar" PREFIX=/usr LIBDIR=/usr/lib
+make DESTDIR="${ROOTFS}" CC="${TARGET_TRIPLE}-gcc" AR="${TARGET_TRIPLE}-ar" \
+    PREFIX=/usr LIBDIR=/usr/lib install
+echo "   done: libudev-zero"
+
+# ── 8. libevdev ─────────────────────────────────────────────────────
+# Same double-name-in-archive situation as pixman above.
+build_meson libevdev "libevdev-${LIBEVDEV_VERSION}" \
+    -Dtests=disabled -Dtools=disabled -Ddocumentation=disabled
+
+# ── 9. mtdev ─────────────────────────────────────────────────────────
+build_autotools mtdev "${MTDEV_VERSION}" \
+    --disable-static --enable-shared
+
+# ── 10. libinput ─────────────────────────────────────────────────────
+#
+# libwacom (tablet identification) and debug-gui (needs GTK/cairo) are
+# both real features, deliberately deferred -- neither is needed for
+# a compositor to come up and render.
+build_meson libinput "${LIBINPUT_VERSION}" \
+    -Dlibwacom=false -Ddebug-gui=false -Dtests=false -Ddocumentation=false
+
+# ── 11. libdrm ────────────────────────────────────────────────────────
+# The tarball is "drm-libdrm-X.Y.Z.tar.gz" (matches the URL path,
+# fetched as "drm/-/archive/libdrm-X.Y.Z/..."), but it actually
+# extracts to "libdrm-libdrm-X.Y.Z-<commit-hash>/" -- GitLab appends a
+# commit hash to the archive's internal directory name whenever the
+# requested archive filename doesn't exactly match its own canonical
+# "<project>-<ref>" naming, confirmed by listing the tarball's actual
+# contents rather than assuming. build_meson's own name/version-based
+# default can't express that, so resolve it from the tarball directly.
+LIBDRM_DIR="$(tar -tzf "${SOURCES}/drm-libdrm-${LIBDRM_VERSION}.tar.gz" | head -1 | cut -d/ -f1)"
+build_meson drm-libdrm "${LIBDRM_VERSION}" -d "${LIBDRM_DIR}" \
+    -Dcairo-tests=disabled -Dman-pages=disabled -Dvalgrind=disabled -Dtests=false
+
+# ── 12. libdisplay-info (EDID parsing for the DRM backend) ──────────
+build_meson libdisplay-info "${LIBDISPLAY_INFO_VERSION}"
+
+# ── 13. seatd (logind-free seat/session management) ─────────────────
+#
+# libseat-logind=disabled: no systemd-logind, no elogind, matching
+# RFC 0001's "no systemd anywhere" decision explicitly, not just by
+# omission.
+build_meson seatd "${SEATD_VERSION}" \
+    -Dlibseat-logind=disabled -Dlibseat-seatd=enabled -Dserver=enabled \
+    -Dman-pages=disabled
+
+# ── 14. wlroots ────────────────────────────────────────────────────
+#
+# First milestone is "a compositor can come up and render," not "full
+# hardware acceleration" -- so this deliberately stays Mesa-free:
+#   - renderers=[] : only the mandatory pixman (software) renderer
+#     builds; wlroots' optional gles2/vulkan renderers are skipped.
+#   - allocators=[]: only wlroots' always-built-in shm + DRM dumb-buffer
+#     allocators are used; the optional gbm allocator (needs libgbm,
+#     i.e. Mesa) is skipped. Confirmed by reading
+#     render/allocator/meson.build directly: allocator.c, shm.c and
+#     drm_dumb.c are unconditional sources, gbm.c is added only if the
+#     'gbm' feature is requested.
+#   - xwayland=disabled, xcb-errors=disabled: no X11 anywhere yet.
+#   - backends=drm,libinput: no x11 backend (nested-in-X11 testing
+#     backend, irrelevant here).
+# hwdata (native-only, a build-time PCI/USB ID data lookup) and
+# libdisplay-info (a real target dependency, built just above) were
+# both missing on the first configure attempt -- added after reading
+# the actual meson.build dependency() calls, not guessed.
+build_meson wlroots "${WLROOTS_VERSION}" \
+    -Drenderers=[] -Dbackends=drm,libinput -Dallocators=[] \
+    -Dxwayland=disabled -Dexamples=false -Dcolor-management=disabled \
+    -Dlibliftoff=disabled -Dxcb-errors=disabled
+
 echo ""
-echo "Wayland core installed. Libraries:"
-find "${ROOTFS}/usr/lib" -maxdepth 1 -iname "libwayland*"
+echo "Wayland/wlroots stack installed. Libraries:"
+find "${ROOTFS}/usr/lib" -maxdepth 1 -iname "libwlroots*" -o -iname "libseat*" -o -iname "libinput*"
