@@ -347,13 +347,23 @@ background/text color (bg-card-raised/text-secondary →
 accent-subtle-bg/accent, per `GUI-DESIGN-LANGUAGE.md` §7), and a
 press-then-release inside it reliably spawns the launcher.
 
+New windows also no longer spawn hidden under the panel: every
+`xdg_toplevel` used to map at the scene tree's default (0,0), directly
+under the top bar's exclusive zone, so a window's top edge rendered
+behind the opaque panel until the user moved it. `arrange_layers()`
+already computed the output's usable area (full output box minus
+layer-shell exclusive zones) on every layer-shell commit but discarded
+it once the function returned; it's now stored on `struct novi_output`
+and read back once, at toplevel creation, to set the initial position.
+Live-verified with a pixel-exact column scan of a post-boot
+screendump: the panel's background/border ends at row 31 and `foot`'s
+own background/glyphs start cleanly at row 32, zero gap, zero overlap.
+
 **Still open**: app/file search itself (blocked on §2's package model
 existing enough to have something to search); Super+[1-9] workspaces
 (needs real per-output workspace state), PrintScreen screenshots,
 Super+L lock, Super+. emoji picker — none of RFC 0001 decision 7's
-remaining bindings are wired up yet; new windows still don't avoid the
-panel's reserved space (exclusive-zone-aware placement, separate from
-the pointer-routing gap just closed); moving keybindings to RFC 0001's
+remaining bindings are wired up yet; moving keybindings to RFC 0001's
 user-editable config file instead of compiled-in defaults;
 hardware-accelerated rendering (GLES2/Vulkan via Mesa) is out of scope
 for this milestone and stays pixman-only until that's picked up
@@ -567,7 +577,7 @@ compositor choice does.
 | 2 | Package/application model | 🟡 Native done, sandbox tier proposed (RFC needed) |
 | 3 | Update/rollback model | 🟡 Track split decided, on-device rollback open |
 | 4 | Hardware strategy | 🟡 x86_64 kernel exists, coverage + aarch64 open |
-| 5 | Desktop strategy | 🟡 Compositor + layer-shell + launcher + foot terminal + top-bar panel, real anti-aliased text rendering (fcft/pixman), a clickable apps button routing pointer input to a layer-shell surface, all live-verified in QEMU together; no app search yet; `docs/design/` now has a target visual-language spec |
+| 5 | Desktop strategy | 🟡 Compositor + layer-shell + launcher + foot terminal + top-bar panel, real anti-aliased text rendering (fcft/pixman), a clickable apps button routing pointer input to a layer-shell surface, new windows placed below the panel's exclusive zone, all live-verified in QEMU together; no app search yet; `docs/design/` now has a target visual-language spec |
 | 6 | Gaming strategy | 🔴 Open — blocked on #5 |
 | 7 | Developer strategy | 🟡 Native toolchain exists, container tier proposed |
 | 8 | Enterprise strategy | 🟡 LTS branches exist, signing enforcement + fleet mgmt open |
