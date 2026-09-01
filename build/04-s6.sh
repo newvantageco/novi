@@ -151,9 +151,19 @@ rm -rf "${BUILD_DIR}/s6-linux-init-gen"
 # /usr/etc/s6-linux-init/skel), which is meaningless when running the
 # TARGET-built binary directly on the build host outside a chroot --
 # -f must point explicitly at this repo's skeleton instead.
+# -p: s6-linux-init-maker's own default initial PATH is "/usr/bin:/bin"
+# -- no /sbin, no /usr/sbin. That's every s6-rc service's PATH too,
+# inherited from PID 1. Confirmed missing the hard way: a novi-shell
+# service run script's bare `modprobe virtio_gpu` failed with
+# "modprobe: not found" on a live boot, even though
+# /sbin/modprobe -> ../bin/busybox exists -- just not on this PATH.
+# Root cause fixed here, not by hardcoding /sbin/modprobe in one
+# script, since any future service or interactive `s6-rc`-managed
+# tooling under /sbin or /usr/sbin would hit the identical wall.
 run_target "${ROOTFS}/usr/bin/s6-linux-init-maker" \
     -c /etc/s6-linux-init \
     -f "${REPO_ROOT}/init/skel" \
+    -p "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
     -N "${BUILD_DIR}/s6-linux-init-gen"
 
 echo "==> Installing s6-linux-init runtime tree and PID 1"
