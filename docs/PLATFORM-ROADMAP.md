@@ -478,8 +478,39 @@ Also corrected an internally-inconsistent line in the design doc's own
 dot spec ("8px gap between centers" for 8px-diameter dots, which would
 overlap them by a full diameter) to 8px of edge-to-edge clearance.
 
-**Still open**: app/file search itself (blocked on §2's package model
-existing enough to have something to search); Super+[1-9] workspaces
+`novi-launcher` now has real app search too, not just the calculator
+fallback -- unblocked by defining the missing piece
+`docs/PLATFORM-ROADMAP.md`'s own "Next concrete step" called out:
+`packages/pkg-format.md`'s new "GUI Application Registration" section
+gives `pkg` a "this is a launchable GUI app" concept without touching
+`pkg`/`mkpkg` at all (a launchable app just ships one more file,
+`usr/share/novi/apps/<name>.app`, extracted/removed automatically the
+same as any other file in its `files/` tree). `load_apps()` scans that
+directory at startup, `find_app_match()` matches typed input against
+either the descriptor's filename (`foot`) or its display name
+(`Terminal`) -- both need to work, since a user searching for an app
+they know by binary name shouldn't fail just because the display name
+reads nothing like it, confirmed live in QEMU: typing "foot" alone
+initially matched nothing (only "Terminal" did, name-only matching's
+real gap, not a hypothetical one) until id-matching was added, fixed,
+and re-verified. `launch_app()` does a real `fork()`/`execvp()` on
+Enter, no shell involved. No package ships a `.app` descriptor yet
+(no real GUI apps are `pkg`-installed), so `foot` -- baked into the
+base rootfs by `build/09-foot.sh`, not `pkg`-installed -- registers
+itself the same way a real package would, giving this an actual
+launchable app to search for and exercise rather than untestable
+plumbing. Live-verified end-to-end in QEMU: typed "foot" or "Term"
+both surface "-> Terminal" below the input (screendump-confirmed, not
+assumed), and Enter closes the overlay and opens a real interactive
+foot window with a live shell prompt. Also required relaxing
+`novi-launcher`'s typed-input filter, previously restricted to the
+calculator grammar's character set (digits/operators only) -- app
+names need letters, which that filter rejected outright before this.
+
+**Still open**: file search (indexed filesystem lookup) still doesn't
+exist, and no package installs a `.app` descriptor yet since no real
+GUI apps are packaged -- app search only has one real entry (foot) to
+find until that changes; Super+[1-9] workspaces
 (needs real per-output workspace state), PrintScreen screenshots,
 Super+L lock, Super+. emoji picker — none of RFC 0001 decision 7's
 remaining bindings are wired up yet; moving keybindings to RFC 0001's
@@ -699,7 +730,7 @@ compositor choice does.
 | 2 | Package/application model | 🟡 Native `pkg`/`mkpkg` now installed, wired into the build, and live-verified end-to-end (real dependency chain, install/remove/search/info) after fixing several real bugs found by first actually running it; sandbox tier still proposed (RFC needed) |
 | 3 | Update/rollback model | 🟡 Track split decided, on-device rollback open |
 | 4 | Hardware strategy | 🟡 x86_64 kernel exists, coverage + aarch64 open |
-| 5 | Desktop strategy | 🟡 Compositor + layer-shell + launcher + foot terminal + top-bar panel, real anti-aliased text rendering (fcft/pixman), a clickable apps button routing pointer input to a layer-shell surface, new windows placed below the panel's exclusive zone, real alpha compositing + rounded corners + a drop shadow on the launcher, server-side window decorations with working close + maximize buttons, all live-verified in QEMU together; design docs' rendering sequence now started on icons too — Lucide's license verified from upstream, apps-button icon shipped and live-verified; app-grid/status-bar icon sets still open (need the offline SVG pipeline); no app search yet |
+| 5 | Desktop strategy | 🟡 Compositor + layer-shell + launcher + foot terminal + top-bar panel, real anti-aliased text rendering (fcft/pixman), a clickable apps button routing pointer input to a layer-shell surface, new windows placed below the panel's exclusive zone, real alpha compositing + rounded corners + a drop shadow on the launcher, server-side window decorations with working close + maximize buttons, all live-verified in QEMU together; design docs' rendering sequence now started on icons too — Lucide's license verified from upstream, apps-button icon shipped and live-verified; app-grid/status-bar icon sets still open (need the offline SVG pipeline); real app search now too — `pkg-format.md`'s new GUI-app-registration convention, foot registered and launchable by typed name (id or display name), fork+execvp on Enter, live-verified end-to-end; file search still doesn't exist |
 | 6 | Gaming strategy | 🔴 Open — blocked on #5 |
 | 7 | Developer strategy | 🟡 Native toolchain exists, container tier proposed |
 | 8 | Enterprise strategy | 🟡 LTS branches exist, signing enforcement + fleet mgmt open |
@@ -715,13 +746,15 @@ rather than assumed). What's left of it is the app-grid and
 status-bar (wifi/battery/power) icon sets, which need real curves and
 so need the `tools/svg2icon/` offline SVG-to-bitmap pipeline
 `ICON-PIPELINE.md` proposes (Stage 1) actually built — that's now
-purely implementation effort, no decision blocking it. The other
-actionable option: wire `novi-launcher` up to real app/file search now
-that §2's native `pkg` actually works end-to-end — narrower than fully
-unblocked, though: `pkg` installs files, it doesn't yet register a
-"this is a launchable GUI app" concept anywhere (no desktop-entry
-equivalent exists in `pkg-format.md` yet), so a search integration
-still needs that piece designed first. Dogfoodable now via `foot`'s
-real interactive shell inside the graphical session (with real,
-clickable close and maximize buttons) instead of only
-QEMU-injection-and-screendump from outside.
+purely implementation effort, no decision blocking it. App search also
+went from fully blocked to actionable: `pkg-format.md`'s "GUI
+Application Registration" convention gives `pkg` the "this is a
+launchable GUI app" concept it was missing, `novi-launcher` scans and
+matches against it, and `foot` proves it end-to-end — but real
+packages still don't ship `.app` descriptors (no GUI apps are
+`pkg`-installed yet), so there's exactly one app to find until that
+changes. Dogfoodable now via `foot`'s real interactive shell inside
+the graphical session (with real, clickable close and maximize
+buttons, and now reachable by typing its name into Alt+Space, not only
+Super+Return) instead of only QEMU-injection-and-screendump from
+outside.

@@ -132,3 +132,22 @@ build_meson foot "${FOOT_VERSION}" -d foot \
 echo ""
 echo "foot installed:"
 ls -la "${ROOTFS}/usr/bin/foot"
+
+# ── 8. Register foot as a launchable GUI app ─────────────────────────
+#
+# packages/pkg-format.md's "GUI Application Registration" convention:
+# novi-launcher (Alt+Space) scans usr/share/novi/apps/*.app for
+# launchable apps. foot isn't pkg-installed (it's baked into the base
+# rootfs right here, not a .pkg.tar.gz), so its descriptor is written
+# directly instead of shipped in a package -- but the file format and
+# the directory novi-launcher scans are exactly what a real package
+# would use.
+echo "==> Registering foot as a launchable GUI app"
+APPS_DIR="${ROOTFS}/usr/share/novi/apps"
+mkdir -p "${APPS_DIR}"
+cat > "${APPS_DIR}/foot.app" <<'EOF'
+name=Terminal
+exec=/usr/bin/foot
+description=foot terminal emulator
+EOF
+echo "   done: ${APPS_DIR}/foot.app"

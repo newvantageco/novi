@@ -6,13 +6,21 @@
  * panel will follow too. novi-shell spawns a fresh instance on
  * Alt+Space; this process exits itself on Escape or Enter.
  *
- * v1 scope is deliberately narrow: RFC 0001 describes Alt+Space as
- * "apps, files by name, and a calculator/unit-conversion fallback."
- * There is no application registry or indexed filesystem to search yet
- * (this is a fresh install with no packages/desktop entries installed),
- * so this implements only the calculator fallback -- live arithmetic
- * evaluation as you type, shown live below the input line. App/file
- * search is a tracked follow-up once there's something real to search.
+ * v1 scope: RFC 0001 describes Alt+Space as "apps, files by name, and
+ * a calculator/unit-conversion fallback." App search now covers real
+ * GUI apps -- packages/pkg-format.md's "GUI Application Registration"
+ * convention has each launchable app ship a small usr/share/novi/
+ * apps/<name>.app descriptor (plain name=/exec= text), which
+ * load_apps() scans at startup and find_app_match() searches against
+ * typed input. `pkg` doesn't install anything through this path yet
+ * (no real GUI apps are packaged), but foot -- baked into the base
+ * rootfs directly by build/09-foot.sh, not pkg-installed -- registers
+ * itself the same way a real package would, so this is exercised by a
+ * real launchable app, not just plumbing with nothing to search.
+ * File search (indexed filesystem lookup) still doesn't exist and
+ * isn't attempted here. The calculator fallback is unchanged -- live
+ * arithmetic evaluation as you type, shown below the input line
+ * whenever no app matches.
  *
  * Rendering uses real, anti-aliased text via fcft+pixman (see
  * common/text.h) -- the same font-rendering pipeline foot itself uses
@@ -27,7 +35,10 @@
  * surface is deliberately larger than the visible card to leave room
  * for the shadow to extend past its edges without clipping.
  */
+#include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -83,6 +94,22 @@
 
 #define INPUT_MAX 127
 
+/* GUI app registry -- packages/pkg-format.md's "GUI Application
+ * Registration" convention. APP_MAX is a fixed small cap, not a real
+ * limit design: matches this doc's own reasoning for the icon set
+ * being "small, fixed, and known entirely at build time" -- there's
+ * no dynamic app installation happening at runtime here to size for. */
+#define APPS_DIR "/usr/share/novi/apps"
+#define APP_NAME_MAX 63
+#define APP_EXEC_MAX 255
+#define APP_MAX 64
+
+struct app_entry {
+	char id[APP_NAME_MAX + 1];   /* descriptor filename stem, e.g. "foot" */
+	char name[APP_NAME_MAX + 1]; /* display name, e.g. "Terminal" */
+	char exec[APP_EXEC_MAX + 1];
+};
+
 struct novi_launcher {
 	struct wl_display *display;
 	struct wl_registry *registry;
@@ -107,6 +134,9 @@ struct novi_launcher {
 
 	char input[INPUT_MAX + 1];
 	size_t input_len;
+
+	struct app_entry apps[APP_MAX];
+	size_t app_count;
 };
 
 /* ── Shared-memory buffer allocation ────────────────────────────── */
@@ -236,6 +266,175 @@ static bool evaluate(const char *input, double *out) {
 	}
 	*out = v;
 	return true;
+}
+
+/* ── GUI app registry (Alt+Space app search) ───────────────────────── */
+
+/* Parses one usr/share/novi/apps/<name>.app descriptor
+ * (packages/pkg-format.md's "GUI Application Registration" format:
+ * plain name=/exec= key=value lines, same style as MANIFEST) into
+ * *out. Returns false if the file is missing either required field --
+ * a package shipping a malformed descriptor shouldn't crash the
+ * launcher or silently become an unnamed/unlaunchable entry, so it's
+ * just skipped, matching evaluate()'s own "not parseable means not
+ * shown" discipline rather than inventing a partial-entry fallback. */
+static bool parse_app_file(const char *path, struct app_entry *out) {
+	FILE *f = fopen(path, "r");
+	if (f == NULL) {
+		return false;
+	}
+	out->name[0] = '\0';
+	out->exec[0] = '\0';
+	char line[512];
+	while (fgets(line, sizeof(line), f) != NULL) {
+		size_t len = strlen(line);
+		while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {
+			line[--len] = '\0';
+		}
+		if (strncmp(line, "name=", 5) == 0) {
+			snprintf(out->name, sizeof(out->name), "%s", line + 5);
+		} else if (strncmp(line, "exec=", 5) == 0) {
+			snprintf(out->exec, sizeof(out->exec), "%s", line + 5);
+		}
+	}
+	fclose(f);
+	return out->name[0] != '\0' && out->exec[0] != '\0';
+}
+
+/* Scans APPS_DIR for *.app descriptors at startup -- the set of
+ * installed GUI apps is fixed for the life of this short-lived overlay
+ * process (it exits on every Escape/Enter and novi-shell spawns a
+ * fresh one next time), so there's no need to re-scan or watch the
+ * directory for changes while running. Missing directory (no GUI apps
+ * registered at all yet) is not an error -- the launcher still works
+ * as a pure calculator, exactly like before this feature existed. */
+static void load_apps(struct novi_launcher *state) {
+	DIR *dir = opendir(APPS_DIR);
+	if (dir == NULL) {
+		return;
+	}
+	struct dirent *entry;
+	while (state->app_count < APP_MAX && (entry = readdir(dir)) != NULL) {
+		size_t name_len = strlen(entry->d_name);
+		if (name_len < 5 || strcmp(entry->d_name + name_len - 4, ".app") != 0) {
+			continue;
+		}
+		char path[PATH_MAX];
+		snprintf(path, sizeof(path), "%s/%s", APPS_DIR, entry->d_name);
+		struct app_entry *slot = &state->apps[state->app_count];
+		if (parse_app_file(path, slot)) {
+			/* id is the filename stem (up to the ".app" suffix
+			 * load_apps() already matched), not part of the file's
+			 * own key=value content -- it's how a real package name
+			 * ("foot") stays searchable even when the display name
+			 * ("Terminal") reads nothing like it. */
+			size_t id_len = name_len - 4;
+			if (id_len > APP_NAME_MAX) {
+				id_len = APP_NAME_MAX;
+			}
+			memcpy(slot->id, entry->d_name, id_len);
+			slot->id[id_len] = '\0';
+			state->app_count++;
+		}
+	}
+	closedir(dir);
+}
+
+/* Case-insensitive substring search, hand-rolled rather than
+ * strcasestr(): this repo's musl cross-toolchain only declares
+ * strcasestr() under _GNU_SOURCE (confirmed by reading
+ * sysroot/usr/include/string.h and features.h -- plain -std=gnu11
+ * doesn't imply it under musl the way it effectively does under
+ * glibc), and this is little enough logic that hand-rolling it avoids
+ * the feature-test-macro question entirely. */
+static bool app_name_matches(const char *name, const char *query) {
+	size_t name_len = strlen(name);
+	size_t query_len = strlen(query);
+	if (query_len == 0 || query_len > name_len) {
+		return false;
+	}
+	for (size_t i = 0; i + query_len <= name_len; i++) {
+		size_t j = 0;
+		for (; j < query_len; j++) {
+			char a = name[i + j];
+			char b = query[j];
+			if (a >= 'A' && a <= 'Z') {
+				a = (char)(a + 32);
+			}
+			if (b >= 'A' && b <= 'Z') {
+				b = (char)(b + 32);
+			}
+			if (a != b) {
+				break;
+			}
+		}
+		if (j == query_len) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/* First registered app whose id (the descriptor's filename stem, e.g.
+ * "foot") or display name (e.g. "Terminal") contains the typed input,
+ * or NULL if input is empty or nothing matches. Checking id as well as
+ * name matters whenever the two don't read alike -- a user typing the
+ * binary/package name they already know ("foot") should find it even
+ * though its display name doesn't contain that substring at all. Only
+ * the first match is used (v1: no result list, no up/down selection)
+ * -- matches this launcher's existing one-result-at-a-time calculator
+ * display instead of adding new UI plumbing for a feature with, right
+ * now, exactly one real app (foot) to ever produce more than one match
+ * against. */
+static struct app_entry *find_app_match(struct novi_launcher *state) {
+	if (state->input_len == 0) {
+		return NULL;
+	}
+	for (size_t i = 0; i < state->app_count; i++) {
+		if (app_name_matches(state->apps[i].id, state->input) ||
+				app_name_matches(state->apps[i].name, state->input)) {
+			return &state->apps[i];
+		}
+	}
+	return NULL;
+}
+
+/* Splits app->exec on spaces into an execvp() argv (no shell -- see
+ * pkg-format.md's field table: no quoting/globbing/$VAR support in
+ * v1, a path containing a space isn't representable), forks, and
+ * execs in the child. The parent doesn't wait(): this overlay sets
+ * state->running = false right after calling this and exits within
+ * the same event-loop iteration, so the launched process is reparented
+ * to PID 1 (s6) immediately after, the same as any other orphaned
+ * process on this system -- there is no long-running parent here to
+ * reap it instead. */
+static void launch_app(const struct app_entry *app) {
+	char exec_copy[APP_EXEC_MAX + 1];
+	snprintf(exec_copy, sizeof(exec_copy), "%s", app->exec);
+
+	char *argv[16];
+	int argc = 0;
+	char *tok = strtok(exec_copy, " ");
+	while (tok != NULL && argc < 15) {
+		argv[argc++] = tok;
+		tok = strtok(NULL, " ");
+	}
+	argv[argc] = NULL;
+	if (argc == 0) {
+		return;
+	}
+
+	pid_t pid = fork();
+	if (pid < 0) {
+		fprintf(stderr, "novi-launcher: fork failed: %s\n", strerror(errno));
+		return;
+	}
+	if (pid == 0) {
+		execvp(argv[0], argv);
+		fprintf(stderr, "novi-launcher: exec %s failed: %s\n", argv[0],
+			strerror(errno));
+		_exit(127);
+	}
 }
 
 /* ── Rendering ───────────────────────────────────────────────────── */
@@ -402,16 +601,6 @@ static void draw_drop_shadow(uint32_t *px, uint32_t stride_px,
 	}
 }
 
-/* Restricts typed input to characters the calculator grammar actually
- * understands. fcft can render any printable ASCII glyph now (unlike
- * the old bitmap font, which only had digits/operators at all), but
- * accepting a character evaluate() can't parse would just display
- * text that can never produce a result -- not a rendering limit
- * anymore, a grammar one, so this check stays. */
-static bool is_input_char(char ch) {
-	return (ch >= '0' && ch <= '9') || strchr("+-*/. ()=", ch) != NULL;
-}
-
 static void render(struct novi_launcher *state, uint32_t *px,
 		uint32_t stride_px) {
 	uint32_t w = state->width, h = state->height;
@@ -480,12 +669,27 @@ static void render(struct novi_launcher *state, uint32_t *px,
 			line_height, CURSOR_COLOR);
 	}
 
-	double result;
-	if (evaluate(state->input, &result)) {
-		char buf[64];
-		snprintf(buf, sizeof(buf), "= %.6g", result);
+	/* App match takes priority over the calculator result when both
+	 * would otherwise show something -- typing a name like "foot"
+	 * never parses as an expression anyway (evaluate() would reject it
+	 * at the first non-digit/operator character), so in practice these
+	 * two never actually compete for the same input, but checking the
+	 * app match first keeps that priority explicit rather than
+	 * incidental. */
+	struct app_entry *app = find_app_match(state);
+	if (app != NULL) {
+		char buf[APP_NAME_MAX + 16];
+		snprintf(buf, sizeof(buf), "-> %s", app->name);
 		novi_text_draw(dest, state->font, text_x,
 			input_y + line_height + 16 + state->font->ascent, buf, result_color);
+	} else {
+		double result;
+		if (evaluate(state->input, &result)) {
+			char buf[64];
+			snprintf(buf, sizeof(buf), "= %.6g", result);
+			novi_text_draw(dest, state->font, text_x,
+				input_y + line_height + 16 + state->font->ascent, buf, result_color);
+		}
 	}
 
 	pixman_image_unref(dest);
@@ -608,9 +812,13 @@ static void keyboard_key(void *data, struct wl_keyboard *kb, uint32_t serial,
 		return;
 	}
 	if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter) {
-		/* No app/file search yet (see file header) -- there's nothing
-		 * further to "launch," so Enter just dismisses the overlay
-		 * the same as Escape. */
+		struct app_entry *app = find_app_match(state);
+		if (app != NULL) {
+			launch_app(app);
+		}
+		/* No result to "launch" for a bare calculator expression (see
+		 * evaluate()) or file search (doesn't exist yet) -- Enter just
+		 * dismisses the overlay in those cases, same as Escape. */
 		state->running = false;
 		return;
 	}
@@ -622,10 +830,13 @@ static void keyboard_key(void *data, struct wl_keyboard *kb, uint32_t serial,
 		return;
 	}
 
-	/* Only accept characters the calculator grammar understands
-	 * (digits, operators, space) -- anything else is silently ignored
-	 * rather than accepted and shown as text that can never evaluate. */
-	if (sym >= 32 && sym < 127 && is_input_char((char)sym)) {
+	/* Any printable ASCII is now valid input -- app names need letters
+	 * that the calculator grammar alone never did (see file header:
+	 * input is either a calculator expression or an app-name search
+	 * query, and there's no calculator character class to filter
+	 * against that wouldn't also reject e.g. "foot"). fcft renders any
+	 * printable glyph fine (unlike the old bitmap font this replaced). */
+	if (sym >= 32 && sym < 127) {
 		if (state->input_len < INPUT_MAX) {
 			state->input[state->input_len++] = (char)sym;
 			state->input[state->input_len] = '\0';
@@ -744,6 +955,8 @@ static const struct wl_registry_listener registry_listener = {
 int main(void) {
 	struct novi_launcher state = {0};
 	state.running = true;
+
+	load_apps(&state);
 
 	state.display = wl_display_connect(NULL);
 	if (state.display == NULL) {
