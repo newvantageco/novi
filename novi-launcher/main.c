@@ -22,6 +22,7 @@
  * nothing else in this repo needed real font rendering before foot.
  */
 #include <fcntl.h>
+#include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -38,11 +39,20 @@
 
 #define WIN_WIDTH 560
 #define WIN_HEIGHT 120
-#define BG_COLOR 0xff202030u /* opaque dark blue-gray, XRGB8888 */
+/* These are still plain 0xAARRGGBB literals with A=0xff -- a fully
+ * opaque premultiplied-alpha pixel is numerically identical to a
+ * straight-alpha one (premultiplying by 255/255 is a no-op), so
+ * switching the buffer format to real ARGB8888 (see surface_draw_
+ * frame()) needed no change here. Only the corner pixels
+ * apply_rounded_corners() touches actually carry alpha < 0xff. */
+#define BG_COLOR 0xff202030u
 #define BORDER_COLOR 0xff4a4a6au
 #define INPUT_COLOR 0xffe0e0f0u
 #define RESULT_COLOR 0xff8ab4f8u
 #define CURSOR_COLOR 0xffe0e0f0u
+/* GUI-DESIGN-LANGUAGE.md §3's radius-lg token: "Floating cards, the
+ * launcher panel, notification toasts, window corners." */
+#define CORNER_RADIUS 12
 
 #define INPUT_MAX 127
 
@@ -218,6 +228,72 @@ static void draw_rect(uint32_t *px, uint32_t stride_px, uint32_t buf_w,
 	}
 }
 
+/* Punches real transparency into each of the buffer's four corners so
+ * this layer-shell surface reads as a rounded card against whatever's
+ * behind it, instead of a rounded shape drawn ON an opaque square
+ * (which would still show hard square corners in BG_COLOR). Per
+ * GUI-DESIGN-LANGUAGE.md §4's "precomputed rounded-corner alpha mask"
+ * approach, but computed directly here via each pixel's distance to
+ * the corner's circle center rather than pixman's trapezoid
+ * rasterizer -- geometrically the same result (a real, anti-aliased
+ * A8 coverage boundary, not a hard cutoff), simpler to read, and cheap
+ * enough (4 * radius^2 pixels) to redo on every redraw rather than
+ * cache: this client only redraws on keystrokes, not every frame, so
+ * there's no per-frame cost to amortize the way a compositor-lifetime
+ * daemon would need to.
+ *
+ * Must run AFTER all other drawing (background, border, text) in
+ * render() -- it overwrites whatever those left in the corner
+ * squares, which is exactly the point: carve the rounding out last. */
+static void apply_rounded_corners(uint32_t *px, uint32_t stride_px,
+		uint32_t w, uint32_t h, int radius) {
+	for (int cy = 0; cy < radius; cy++) {
+		for (int cx = 0; cx < radius; cx++) {
+			double dx = radius - cx - 0.5;
+			double dy = radius - cy - 0.5;
+			double dist = sqrt(dx * dx + dy * dy);
+			/* 1.0 = fully inside the rounded boundary (opaque,
+			 * untouched in effect), 0.0 = fully outside (fully
+			 * transparent), the ~1px band between is the
+			 * anti-aliased edge. */
+			double coverage = radius - dist;
+			if (coverage > 1.0) {
+				coverage = 1.0;
+			} else if (coverage < 0.0) {
+				coverage = 0.0;
+			}
+			uint8_t alpha = (uint8_t)(coverage * 255.0 + 0.5);
+
+			int positions[4][2] = {
+				{cx, cy},                             /* top-left */
+				{(int)w - 1 - cx, cy},                 /* top-right */
+				{cx, (int)h - 1 - cy},                 /* bottom-left */
+				{(int)w - 1 - cx, (int)h - 1 - cy},     /* bottom-right */
+			};
+			for (int i = 0; i < 4; i++) {
+				int x = positions[i][0], y = positions[i][1];
+				if (x < 0 || x >= (int)w || y < 0 || y >= (int)h) {
+					continue;
+				}
+				uint32_t *p = &px[y * (int)stride_px + x];
+				uint32_t orig = *p;
+				uint8_t r = (orig >> 16) & 0xff;
+				uint8_t g = (orig >> 8) & 0xff;
+				uint8_t b = orig & 0xff;
+				/* wl_shm ARGB8888 is premultiplied alpha -- scale
+				 * the color channels down to match the new alpha
+				 * rather than just zeroing the alpha byte and
+				 * leaving stale full-brightness RGB behind it. */
+				r = (uint8_t)(r * alpha / 255);
+				g = (uint8_t)(g * alpha / 255);
+				b = (uint8_t)(b * alpha / 255);
+				*p = ((uint32_t)alpha << 24) | ((uint32_t)r << 16) |
+					((uint32_t)g << 8) | b;
+			}
+		}
+	}
+}
+
 /* Restricts typed input to characters the calculator grammar actually
  * understands. fcft can render any printable ASCII glyph now (unlike
  * the old bitmap font, which only had digits/operators at all), but
@@ -236,9 +312,14 @@ static void render(struct novi_launcher *state, uint32_t *px,
 	draw_rect(px, stride_px, w, h, 3, 3, (int)w - 6, (int)h - 6, BG_COLOR);
 
 	/* Wraps the same buffer draw_rect() already filled above -- both
-	 * write into the identical memory in place, no double buffering. */
+	 * write into the identical memory in place, no double buffering.
+	 * a8r8g8b8, not x8r8g8b8: the buffer now carries a real alpha
+	 * channel (see surface_draw_frame()'s WL_SHM_FORMAT_ARGB8888), so
+	 * glyph compositing needs the format that actually reads/writes it,
+	 * even though every glyph draws well inside the fully-opaque
+	 * interior today and never touches the corner pixels. */
 	pixman_image_t *dest = pixman_image_create_bits_no_clear(
-		PIXMAN_x8r8g8b8, (int)w, (int)h, px, (int)stride_px * 4);
+		PIXMAN_a8r8g8b8, (int)w, (int)h, px, (int)stride_px * 4);
 
 	static const pixman_color_t input_color = {
 		.red = 0xe000, .green = 0xe000, .blue = 0xf000, .alpha = 0xffff,
@@ -274,6 +355,8 @@ static void render(struct novi_launcher *state, uint32_t *px,
 	}
 
 	pixman_image_unref(dest);
+
+	apply_rounded_corners(px, stride_px, w, h, CORNER_RADIUS);
 }
 
 static void surface_draw_frame(struct novi_launcher *state) {
@@ -296,9 +379,16 @@ static void surface_draw_frame(struct novi_launcher *state) {
 	}
 
 	struct wl_shm_pool *pool = wl_shm_create_pool(state->shm, fd, (int32_t)size);
+	/* ARGB8888, not XRGB8888: apply_rounded_corners() needs a real
+	 * alpha channel to punch actual transparency into the four corners
+	 * -- an opaque XRGB buffer has nowhere to put that, so the corners
+	 * would just stay whatever solid color was drawn under them. Every
+	 * wl_shm-capable compositor is required to support both formats
+	 * (core Wayland protocol, wl_shm's two mandatory formats), so this
+	 * needs no capability check. */
 	struct wl_buffer *buffer = wl_shm_pool_create_buffer(pool, 0,
 		(int32_t)state->width, (int32_t)state->height, (int32_t)stride,
-		WL_SHM_FORMAT_XRGB8888);
+		WL_SHM_FORMAT_ARGB8888);
 	wl_shm_pool_destroy(pool);
 	/* Flush before closing: wl_shm_create_pool's fd is only actually
 	 * written to the socket (as SCM_RIGHTS ancillary data) at the next
