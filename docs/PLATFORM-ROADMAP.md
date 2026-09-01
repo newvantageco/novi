@@ -461,6 +461,26 @@ exactly by hand). The larger icon sets design-doc §8 still needs
 don't qualify for the same shortcut and remain blocked on standing up
 the `tools/svg2icon/` offline pipeline `ICON-PIPELINE.md` proposes.
 
+That pipeline is now built: `shared/icons/tools/svg2icon/` (host-only,
+never cross-compiled, per `ICON-PIPELINE.md`'s Stage 1 recommendation)
+vendors `nanosvg`+`nanosvgrast` (license read from upstream before
+vendoring) and real Lucide SVG sources (provenance recorded, not
+transcribed) to generate `shared/icons/icons_generated.c`: `terminal`,
+`folder`, `globe`, `pencil`, `package`, `settings`, `shield` (app-grid)
+and `wifi`, `battery`, `power`, `chevron-right`, `chevron-down`
+(status/disclosure) — every icon this doc's design references named,
+visually verified via the tool's own ASCII-art preview since there's no
+compositor to boot for a host-only tool. `shared/icons/icon_blit.c`'s
+`draw_icon()` (Stage 2) is built alongside it — real premultiplied
+"over" compositing, matching `novi-launcher`'s existing drop-shadow
+convention, verified against the real generated icon data with a native
+test harness (exact pixel match on a fully-opaque draw including
+clipped edges, correct strictly-in-between blending on a real
+antialiased edge pixel). **Not yet wired into any client**: no
+`Makefile` compiles these files yet and nothing calls `draw_icon()` —
+see `shared/icons/README.md`. That wiring, plus an actual cross-compile
+and QEMU boot to live-verify it, is the next slice.
+
 The maximize dot the decorations landed with is now real too, not a
 dimmed placeholder -- `GUI-DESIGN-LANGUAGE.md` had already flagged it
 as "the more tractable of the two" remaining dots, and
@@ -730,7 +750,7 @@ compositor choice does.
 | 2 | Package/application model | 🟡 Native `pkg`/`mkpkg` now installed, wired into the build, and live-verified end-to-end (real dependency chain, install/remove/search/info) after fixing several real bugs found by first actually running it; sandbox tier still proposed (RFC needed) |
 | 3 | Update/rollback model | 🟡 Track split decided, on-device rollback open |
 | 4 | Hardware strategy | 🟡 x86_64 kernel exists, coverage + aarch64 open |
-| 5 | Desktop strategy | 🟡 Compositor + layer-shell + launcher + foot terminal + top-bar panel, real anti-aliased text rendering (fcft/pixman), a clickable apps button routing pointer input to a layer-shell surface, new windows placed below the panel's exclusive zone, real alpha compositing + rounded corners + a drop shadow on the launcher, server-side window decorations with working close + maximize buttons, all live-verified in QEMU together; design docs' rendering sequence now started on icons too — Lucide's license verified from upstream, apps-button icon shipped and live-verified; app-grid/status-bar icon sets still open (need the offline SVG pipeline); real app search now too — `pkg-format.md`'s new GUI-app-registration convention, foot registered and launchable by typed name (id or display name), fork+execvp on Enter, live-verified end-to-end; file search still doesn't exist |
+| 5 | Desktop strategy | 🟡 Compositor + layer-shell + launcher + foot terminal + top-bar panel, real anti-aliased text rendering (fcft/pixman), a clickable apps button routing pointer input to a layer-shell surface, new windows placed below the panel's exclusive zone, real alpha compositing + rounded corners + a drop shadow on the launcher, server-side window decorations with working close + maximize buttons, all live-verified in QEMU together; design docs' rendering sequence now started on icons too — Lucide's license verified from upstream, apps-button icon shipped and live-verified; the `tools/svg2icon/` offline pipeline is now built (host-verified, not yet QEMU-live-verified) and has generated the full app-grid + status-bar icon set plus a working `draw_icon()` blit primitive, not yet wired into any client; real app search now too — `pkg-format.md`'s new GUI-app-registration convention, foot registered and launchable by typed name (id or display name), fork+execvp on Enter, live-verified end-to-end; file search still doesn't exist |
 | 6 | Gaming strategy | 🔴 Open — blocked on #5 |
 | 7 | Developer strategy | 🟡 Native toolchain exists, container tier proposed |
 | 8 | Enterprise strategy | 🟡 LTS branches exist, signing enforcement + fleet mgmt open |
@@ -739,15 +759,21 @@ compositor choice does.
 | 11 | Differentiation | ✅ Articulated above |
 | 12 | Security tooling / pentest track | 🔴 Open — packaging work, blocked on §2/§8/§9 |
 
-**Next concrete step:** design doc §8's rendering sequence item 5 (icon
-rendering) is unblocked and has its first real icon shipped (Lucide's
-`layout-grid` on the apps button, license-verified from upstream
-rather than assumed). What's left of it is the app-grid and
-status-bar (wifi/battery/power) icon sets, which need real curves and
-so need the `tools/svg2icon/` offline SVG-to-bitmap pipeline
-`ICON-PIPELINE.md` proposes (Stage 1) actually built — that's now
-purely implementation effort, no decision blocking it. App search also
-went from fully blocked to actionable: `pkg-format.md`'s "GUI
+**Next concrete step:** the `tools/svg2icon/` offline SVG-to-bitmap
+pipeline (`ICON-PIPELINE.md` Stage 1) is now built and has generated the
+real app-grid + status-bar icon set (`shared/icons/icons_generated.c`),
+alongside a working `draw_icon()` runtime blit primitive
+(`shared/icons/icon_blit.c`, Stage 2) — both verified on the build host
+(ASCII-preview pixel review for the generated bitmaps, a native test
+harness for the blit math), since neither needs a cross-compile or a
+boot to check. What's left is wiring: no client's `Makefile` compiles
+`shared/icons/`'s two files yet, and none of `novi-shell`, `novi-panel`,
+or `novi-launcher` calls `draw_icon()` — that needs an actual
+cross-compile against the musl toolchain and a QEMU boot to
+live-verify, the one part of this slice that couldn't be done from a
+host-only tool alone.
+
+App search also went from fully blocked to actionable: `pkg-format.md`'s "GUI
 Application Registration" convention gives `pkg` the "this is a
 launchable GUI app" concept it was missing, `novi-launcher` scans and
 matches against it, and `foot` proves it end-to-end — but real

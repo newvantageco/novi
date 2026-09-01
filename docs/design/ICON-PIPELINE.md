@@ -275,6 +275,57 @@ larger icon sets still needed (app-grid icons, status-bar wifi/battery/
 power) — those have real curves and multiple strokes that don't qualify
 for hand-coding, and remain blocked on standing up `tools/svg2icon/`.
 
+### Stage 1 built: `tools/svg2icon/`
+
+The offline pipeline this doc recommends is no longer just a proposal —
+`shared/icons/tools/svg2icon/` exists and works. It vendors
+[nanosvg](https://github.com/memononen/nanosvg) + `nanosvgrast`
+(single-header, zlib-licensed — the license file was fetched and read
+directly from upstream before vendoring, the same discipline Lucide's
+license got) as a host-only native build (never cross-compiled, never
+packaged — see `tools/svg2icon/third_party/nanosvg/NOTICE.md`), reads
+real vendored Lucide SVG sources under `tools/svg2icon/svg/` (provenance
+in that directory's `MANIFEST.md`, each file fetched directly from
+Lucide's upstream repo, not transcribed), and rasterizes them to 8-bit
+alpha-coverage bitmaps at the fixed sizes this doc calls for (24×24 for
+app-grid icons, 16×16 for status-bar/disclosure glyphs).
+
+The first real icon set is generated and committed as
+`shared/icons/icons_generated.c`: `terminal`, `folder`, `globe`,
+`pencil`, `package`, `settings`, `shield` (app-grid, 24×24) and `wifi`,
+`battery`, `power`, `chevron-right`, `chevron-down` (status/disclosure,
+16×16) — every named glyph this doc's "Icon set decision" section listed
+except `layout-grid`, which correctly stays out of this pipeline (see
+"First icon shipped" above). Each was visually verified via the tool's
+own ASCII-art preview output (its substitute, for a host-only tool with
+no compositor to boot, for the QEMU screendump pixel-checks the rest of
+this repo's UI work uses) — recognizable terminal prompt, folder,
+meridian-lined globe, pencil, package box, gear, wifi arcs, battery
+outline, power glyph, and both chevrons, not just "the tool ran without
+crashing."
+
+`shared/icons/icon_blit.c`/`icon_blit.h` (Stage 2's `draw_icon()`) is
+also built: a real premultiplied "over" compositing loop, the same
+convention `novi-launcher`'s drop-shadow/rounded-corner code already
+established for this buffer format, not a raw overwrite. Verified with a
+native host-side test harness against the real generated icon data
+(not synthetic/placeholder bitmaps): a fully-opaque draw matches a
+reference buffer pixel-for-pixel at every coordinate including clipped
+edges (an off-buffer draw is a true no-op; a partially-off-buffer draw
+produces exactly the shifted-window result, verified column-by-column
+and row-by-row, not just "didn't crash"), and a real antialiased edge
+pixel from `chevron-right`'s own coverage data blends strictly between
+source and destination color rather than snapping to either — genuine
+"over" blending, not coverage-gated overwrite.
+
+**Not yet done**: no client's `Makefile` compiles
+`icons_generated.c`/`icon_blit.c`, and none of `novi-shell`,
+`novi-panel`, or `novi-launcher` calls `draw_icon()` yet — this is a
+complete, host-verified primitive sitting next to those three clients,
+not wired into any of them. That wiring needs an actual cross-compile
+and QEMU boot to live-verify, which is the next slice on top of this one
+(see `shared/icons/README.md`'s Status section).
+
 ## Summary
 
 | | Runtime cost | Authoring cost | Dependency footprint |
