@@ -233,15 +233,39 @@ itself is verified by implementation review against wlroots' own
 geometry helper rather than a live client, since no panel/launcher
 client exists yet to exercise it end-to-end.
 
-**Still open**: the panel and app launcher themselves (this only
-provides the protocol surface they'd anchor to, not the UI); Alt+Space
-search/launcher, Super+[1-9] workspaces (needs real per-output workspace
-state), PrintScreen screenshots, Super+L lock, Super+. emoji picker —
-none of RFC 0001 decision 7's remaining bindings are wired up yet;
-moving keybindings to RFC 0001's user-editable config file instead of
-compiled-in defaults; hardware-accelerated rendering (GLES2/Vulkan via
-Mesa) is out of scope for this milestone and stays pixman-only until
-that's picked up separately.
+First real UI piece landed on top of that: **`novi-launcher`**
+(`novi-launcher/`), the Alt+Space search/launcher overlay, as its own
+wlr-layer-shell-v1 client process rather than compositor code — the
+split every future panel piece follows. novi-shell now grants keyboard
+focus to a layer-shell surface on map when it requests "exclusive"
+interactivity (and restores it on unmap), which the launcher needs to
+receive typed input at all. v1 scope is the calculator/unit-conversion
+fallback RFC 0001 describes, not app/file search — there's no
+application registry or indexed filesystem to search yet in a fresh
+install with no packages, so there's nothing real to search against.
+Rendering uses a small hand-authored bitmap font (digits + calculator
+operators only, not a full alphabet — no font-rendering stack exists in
+this repo yet, and a font table copied from memory without a way to
+verify it byte-for-byte isn't something to ship silently wrong).
+**Verified live in QEMU** via scripted keyboard injection and
+screendump capture, not just "compiles and doesn't crash": Alt+Space
+opens the overlay, typing "2+2" live-renders the input and "= 4" on
+screen, Escape closes it cleanly. That same live-verification pass also
+caught and fixed a real protocol-ordering bug (a premature configure
+sent before the client's required initial commit, logged by wlroots
+itself as an error) — masked at first because the client happened to
+have a defensive fallback for it.
+
+**Still open**: app/file search itself (blocked on §2's package model
+existing enough to have something to search); Super+[1-9] workspaces
+(needs real per-output workspace state), PrintScreen screenshots,
+Super+L lock, Super+. emoji picker — none of RFC 0001 decision 7's
+remaining bindings are wired up yet; the panel/taskbar (a second
+layer-shell client, not built yet); moving keybindings to RFC 0001's
+user-editable config file instead of compiled-in defaults;
+hardware-accelerated rendering (GLES2/Vulkan via Mesa) is out of scope
+for this milestone and stays pixman-only until that's picked up
+separately.
 
 ### Terminal / CLI environment
 
@@ -437,7 +461,7 @@ compositor choice does.
 | 2 | Package/application model | 🟡 Native done, sandbox tier proposed (RFC needed) |
 | 3 | Update/rollback model | 🟡 Track split decided, on-device rollback open |
 | 4 | Hardware strategy | 🟡 x86_64 kernel exists, coverage + aarch64 open |
-| 5 | Desktop strategy | 🟡 Compositor core + layer-shell protocol + partial keybindings built and boot-verified; no panel/launcher UI yet |
+| 5 | Desktop strategy | 🟡 Compositor + layer-shell + Alt+Space launcher (calculator) live-verified in QEMU; no panel/taskbar or app search yet |
 | 6 | Gaming strategy | 🔴 Open — blocked on #5 |
 | 7 | Developer strategy | 🟡 Native toolchain exists, container tier proposed |
 | 8 | Enterprise strategy | 🟡 LTS branches exist, signing enforcement + fleet mgmt open |
@@ -446,8 +470,10 @@ compositor choice does.
 | 11 | Differentiation | ✅ Articulated above |
 | 12 | Security tooling / pentest track | 🔴 Open — packaging work, blocked on §2/§8/§9 |
 
-**Next concrete step:** build the actual panel/launcher UI RFC 0001
-describes as "novi-shell" — the compositor core, layer-shell protocol
-support, and a first slice of default keybindings it needs are now built
-and boot-verified — starting with the Alt+Space search/launcher overlay,
-since that's the binding already sketched in the `novi-shell` mockup.
+**Next concrete step:** either wire `novi-launcher` up to something real
+to search once §2's package model can register installed apps (closing
+the loop on RFC 0001's "apps, files by name" part of Alt+Space), or
+build the panel/taskbar as the second layer-shell client — both are
+open; whichever lands next, `foot` (the default terminal Super+Return
+already spawns but that isn't packaged yet) is worth picking up
+alongside it since it blocks that binding from doing anything visible.
