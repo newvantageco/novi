@@ -1,0 +1,7 @@
+#!/bin/sh
+# ============================================================
+# novi-shell service — run script
+# The compositor (RFC 0001). Not part of the "default" bundle --
+# switch to it explicitly with: s6-rc -up change graphical
+# ============================================================
+exec novi-shell

@@ -1,0 +1,8 @@
+#!/bin/sh
+# ============================================================
+# seatd service — run script
+# Session/seat management for novi-shell (RFC 0001), replacing
+# systemd-logind/elogind. Runs as root; novi-shell talks to it
+# over /run/seatd.sock via libseat.
+# ============================================================
+exec seatd -l info
