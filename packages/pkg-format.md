@@ -118,6 +118,7 @@ line, same style as `MANIFEST`:
 |---|---|---|---|
 | `name` | yes | Display name shown in launcher results | `Terminal` |
 | `exec` | yes | Command to run, whitespace-split argv (no shell — no quoting, globbing, or `$VAR` expansion; a path with spaces isn't representable in v1) | `/usr/bin/foot` |
+| `icon` | no | One of `shared/icons/icons.h`'s app-grid icon names (`terminal`, `folder`, `globe`, `pencil`, `package`, `settings`, `shield`) — a closed, fixed set, not an arbitrary path, matching `docs/design/ICON-PIPELINE.md`'s "the icon set is small, fixed, and known entirely at build time" reasoning. Unrecognized or absent means no icon is shown next to this result, not a broken/missing-icon placeholder. | `terminal` |
 | `description` | no | Not yet shown anywhere; reserved for a future results view | `foot terminal emulator` |
 
 ### Example: `usr/share/novi/apps/foot.app`
@@ -125,6 +126,7 @@ line, same style as `MANIFEST`:
 ```
 name=Terminal
 exec=/usr/bin/foot
+icon=terminal
 description=foot terminal emulator
 ```
 

@@ -53,6 +53,8 @@
 
 #include "wlr-layer-shell-unstable-v1-protocol.h"
 #include "../common/text.h"
+#include "../shared/icons/icon_blit.h"
+#include "../shared/icons/icons.h"
 
 /* The visible card's own size -- unchanged from before the shadow was
  * added. The wl_shm buffer/layer-shell surface are now larger than
@@ -73,6 +75,16 @@
 #define INPUT_COLOR 0xffe0e0f0u
 #define RESULT_COLOR 0xff8ab4f8u
 #define CURSOR_COLOR 0xffe0e0f0u
+/* Real app-grid icon (shared/icons/, ICON-PIPELINE.md Stage 1/2), drawn
+ * next to a matched app's result text when its .app descriptor names one
+ * (pkg-format.md's icon= field). 24px is the app-grid size the generated
+ * bitmaps were rasterized at (shared/icons/tools/svg2icon's JOBS[]) --
+ * not a resize, an exact match. Same visual color as the result text
+ * itself (RESULT_COLOR), just opaque: an icon glyph reads better solid
+ * than at the text's own slightly-muted tone. */
+#define RESULT_ICON_SIZE 24
+#define RESULT_ICON_GAP 8
+#define RESULT_ICON_COLOR 0xff8ab4f8u
 /* GUI-DESIGN-LANGUAGE.md §3's radius-lg token: "Floating cards, the
  * launcher panel, notification toasts, window corners." */
 #define CORNER_RADIUS 12
@@ -108,7 +120,35 @@ struct app_entry {
 	char id[APP_NAME_MAX + 1];   /* descriptor filename stem, e.g. "foot" */
 	char name[APP_NAME_MAX + 1]; /* display name, e.g. "Terminal" */
 	char exec[APP_EXEC_MAX + 1];
+	int icon_id; /* enum novi_icon_id, or -1 if unset/unrecognized (see
+	              * resolve_icon_name()) -- pkg-format.md's icon= field
+	              * is optional, and "no icon" just means the result row
+	              * shows text only, not a broken-icon placeholder. */
 };
+
+/* icon= in a .app descriptor names one of shared/icons/icons.h's
+ * app-grid icons by its plain SVG-source name (pkg-format.md's own
+ * table) -- a closed, fixed set matching ICON-PIPELINE.md's own
+ * reasoning, not an arbitrary path novi-launcher would have to load at
+ * runtime (there's still zero image-loading capability anywhere in
+ * this repo; see that doc). */
+static int resolve_icon_name(const char *name) {
+	static const struct { const char *name; enum novi_icon_id id; } NAMES[] = {
+		{"terminal", ICON_TERMINAL},
+		{"folder", ICON_FOLDER},
+		{"globe", ICON_GLOBE},
+		{"pencil", ICON_PENCIL},
+		{"package", ICON_PACKAGE},
+		{"settings", ICON_SETTINGS},
+		{"shield", ICON_SHIELD},
+	};
+	for (size_t i = 0; i < sizeof(NAMES) / sizeof(NAMES[0]); i++) {
+		if (strcmp(NAMES[i].name, name) == 0) {
+			return (int)NAMES[i].id;
+		}
+	}
+	return -1;
+}
 
 struct novi_launcher {
 	struct wl_display *display;
@@ -285,6 +325,7 @@ static bool parse_app_file(const char *path, struct app_entry *out) {
 	}
 	out->name[0] = '\0';
 	out->exec[0] = '\0';
+	out->icon_id = -1;
 	char line[512];
 	while (fgets(line, sizeof(line), f) != NULL) {
 		size_t len = strlen(line);
@@ -295,6 +336,8 @@ static bool parse_app_file(const char *path, struct app_entry *out) {
 			snprintf(out->name, sizeof(out->name), "%s", line + 5);
 		} else if (strncmp(line, "exec=", 5) == 0) {
 			snprintf(out->exec, sizeof(out->exec), "%s", line + 5);
+		} else if (strncmp(line, "icon=", 5) == 0) {
+			out->icon_id = resolve_icon_name(line + 5);
 		}
 	}
 	fclose(f);
@@ -678,10 +721,23 @@ static void render(struct novi_launcher *state, uint32_t *px,
 	 * incidental. */
 	struct app_entry *app = find_app_match(state);
 	if (app != NULL) {
+		int result_top = input_y + line_height + 16;
+		int result_text_x = text_x;
+		/* Real ICON-PIPELINE.md Stage 2 icon, not a placeholder: only
+		 * drawn when the descriptor named a recognized icon= (see
+		 * resolve_icon_name()) -- an app with no icon set, or an
+		 * unrecognized name, still shows its text-only result exactly
+		 * as before this feature existed. */
+		if (app->icon_id >= 0) {
+			int icon_y = result_top + (line_height - RESULT_ICON_SIZE) / 2;
+			draw_icon(px, stride_px, w, h, text_x, icon_y,
+				(enum novi_icon_id)app->icon_id, RESULT_ICON_COLOR);
+			result_text_x = text_x + RESULT_ICON_SIZE + RESULT_ICON_GAP;
+		}
 		char buf[APP_NAME_MAX + 16];
 		snprintf(buf, sizeof(buf), "-> %s", app->name);
-		novi_text_draw(dest, state->font, text_x,
-			input_y + line_height + 16 + state->font->ascent, buf, result_color);
+		novi_text_draw(dest, state->font, result_text_x,
+			result_top + state->font->ascent, buf, result_color);
 	} else {
 		double result;
 		if (evaluate(state->input, &result)) {
