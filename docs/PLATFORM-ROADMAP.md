@@ -332,14 +332,29 @@ instead of D-Bus/XDG-notifications, which would contradict the
 no-systemd/no-D-Bus stance). The widget/notification review is also
 what surfaced the `desktop_toplevel_at()` bug above.
 
+Pointer/click input now reaches layer-shell surfaces: `novi-panel` has
+a left-aligned "Apps" button (text label, no icon set chosen yet) that
+opens `novi-launcher` on click, the mouse-driven equivalent of
+Alt+Space. The compositor-side routing turned out to already be
+correct — `desktop_toplevel_at()` was always resolving the right
+`wl_surface` for a layer-shell surface, even before the previous
+commit's toplevel/layer-shell discriminator fix, since it sets that
+out-param before the type check. The actual gap was purely
+client-side: `novi-panel` never bound `wl_seat` or created a
+`wl_pointer`, so nothing reached it regardless of what the compositor
+sent. Live-verified in QEMU: hovering the button switches its
+background/text color (bg-card-raised/text-secondary →
+accent-subtle-bg/accent, per `GUI-DESIGN-LANGUAGE.md` §7), and a
+press-then-release inside it reliably spawns the launcher.
+
 **Still open**: app/file search itself (blocked on §2's package model
 existing enough to have something to search); Super+[1-9] workspaces
 (needs real per-output workspace state), PrintScreen screenshots,
 Super+L lock, Super+. emoji picker — none of RFC 0001 decision 7's
-remaining bindings are wired up yet; click/pointer input isn't routed
-to layer-shell surfaces yet, so the panel isn't interactive and new
-windows don't avoid its reserved space; moving keybindings to RFC
-0001's user-editable config file instead of compiled-in defaults;
+remaining bindings are wired up yet; new windows still don't avoid the
+panel's reserved space (exclusive-zone-aware placement, separate from
+the pointer-routing gap just closed); moving keybindings to RFC 0001's
+user-editable config file instead of compiled-in defaults;
 hardware-accelerated rendering (GLES2/Vulkan via Mesa) is out of scope
 for this milestone and stays pixman-only until that's picked up
 separately; the design docs' concrete next steps (real alpha
@@ -552,7 +567,7 @@ compositor choice does.
 | 2 | Package/application model | 🟡 Native done, sandbox tier proposed (RFC needed) |
 | 3 | Update/rollback model | 🟡 Track split decided, on-device rollback open |
 | 4 | Hardware strategy | 🟡 x86_64 kernel exists, coverage + aarch64 open |
-| 5 | Desktop strategy | 🟡 Compositor + layer-shell + launcher + foot terminal + top-bar panel, real anti-aliased text rendering (fcft/pixman) across the two clients, all live-verified in QEMU together; no app search, no click/pointer input on the panel yet; `docs/design/` now has a target visual-language spec |
+| 5 | Desktop strategy | 🟡 Compositor + layer-shell + launcher + foot terminal + top-bar panel, real anti-aliased text rendering (fcft/pixman), a clickable apps button routing pointer input to a layer-shell surface, all live-verified in QEMU together; no app search yet; `docs/design/` now has a target visual-language spec |
 | 6 | Gaming strategy | 🔴 Open — blocked on #5 |
 | 7 | Developer strategy | 🟡 Native toolchain exists, container tier proposed |
 | 8 | Enterprise strategy | 🟡 LTS branches exist, signing enforcement + fleet mgmt open |
@@ -561,9 +576,9 @@ compositor choice does.
 | 11 | Differentiation | ✅ Articulated above |
 | 12 | Security tooling / pentest track | 🔴 Open — packaging work, blocked on §2/§8/§9 |
 
-**Next concrete step:** pointer/click routing to layer-shell surfaces
-(needed before the panel can do anything beyond display a clock), or
-wire `novi-launcher` up to real app/file search once §2's package
-model can register installed apps — both open, dogfoodable now via
-`foot`'s real interactive shell inside the graphical session instead of
-only QEMU-injection-and-screendump from outside.
+**Next concrete step:** wire `novi-launcher` up to real app/file search
+once §2's package model can register installed apps — the other half
+of the previous "next concrete step" (pointer/click routing to
+layer-shell surfaces) is now done, dogfoodable now via `foot`'s real
+interactive shell inside the graphical session instead of only
+QEMU-injection-and-screendump from outside.
