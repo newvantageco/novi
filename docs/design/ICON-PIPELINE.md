@@ -318,13 +318,47 @@ pixel from `chevron-right`'s own coverage data blends strictly between
 source and destination color rather than snapping to either — genuine
 "over" blending, not coverage-gated overwrite.
 
-**Not yet done**: no client's `Makefile` compiles
-`icons_generated.c`/`icon_blit.c`, and none of `novi-shell`,
-`novi-panel`, or `novi-launcher` calls `draw_icon()` yet — this is a
-complete, host-verified primitive sitting next to those three clients,
-not wired into any of them. That wiring needs an actual cross-compile
-and QEMU boot to live-verify, which is the next slice on top of this one
-(see `shared/icons/README.md`'s Status section).
+### Wired in and QEMU-live-verified: `novi-launcher` search results
+
+The first real consumer now exists: `packages/pkg-format.md`'s `.app`
+descriptor format gained an optional `icon=` field (one of the app-grid
+names above), `novi-launcher/main.c` resolves it to a `novi_icon_id` and
+calls `draw_icon()` next to a matched search result's `-> Name` text
+(`RESULT_ICON_SIZE`/`RESULT_ICON_GAP` in `novi-launcher/main.c`), and
+`novi-launcher/Makefile` compiles `shared/icons/icon_blit.c` and
+`icons_generated.c` straight into the binary — source-level inclusion,
+same as `../common/text.c`, no new library. `build/09-foot.sh`'s
+self-registered descriptor sets `icon=terminal`, so `foot` — the one
+real launchable app in this rootfs — exercises it.
+
+This cross-compiled cleanly (`build/08-novi-launcher.sh`, no changes
+needed to the fix already described in Stage 1/2 above) and was
+**live-verified in QEMU**, not just "compiles": booted the ISO, switched
+to the `graphical` bundle, Alt+Space, typed "foot", and a real
+screendump (pixel-cropped and zoomed, not eyeballed at full scale) shows
+the exact `ICON_TERMINAL` chevron-and-underscore shape rendered
+immediately left of "-> Terminal" in the same accent-blue as the result
+text — the actual generated bitmap, actually composited by `draw_icon()`
+onto the actual launcher card buffer, actually inside the actual
+compositor. Enter afterward still opened a real interactive `foot`
+window with server-side decorations, confirming the icon addition
+caused no regression to the existing search/launch path.
+
+Two independent, unrelated bugs were found and fixed while getting this
+boot to work at all (not icon-specific, but discovered by this
+verification pass): `scripts/mkinitramfs.sh` never mounted anything at
+`/tmp` even though `scripts/mkiso.sh` excludes it from the squashed
+image the same way it excludes `/dev`/`/run` (which *are* mounted) —
+fixed the same way, a 1777 tmpfs alongside the existing `/dev`/`/run`
+mounts. And `s6-rc -up change graphical` itself hangs indefinitely
+(confirmed: `s6-svc -u /run/service/seatd` and
+`/run/service/novi-shell` bring each service up individually within
+seconds when driven directly, so the supervision primitives are fine —
+the hang is in `s6-rc -up`'s own orchestration) — **not fixed**, worked
+around by driving `s6-svc -u` on `seatd` then `novi-shell` directly for
+this verification pass. This is a real, reproducible, currently-open bug
+in the boot path, independent of the icon work, and needs its own
+investigation.
 
 ## Summary
 

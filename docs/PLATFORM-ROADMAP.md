@@ -476,10 +476,27 @@ compositor to boot for a host-only tool. `shared/icons/icon_blit.c`'s
 convention, verified against the real generated icon data with a native
 test harness (exact pixel match on a fully-opaque draw including
 clipped edges, correct strictly-in-between blending on a real
-antialiased edge pixel). **Not yet wired into any client**: no
-`Makefile` compiles these files yet and nothing calls `draw_icon()` —
-see `shared/icons/README.md`. That wiring, plus an actual cross-compile
-and QEMU boot to live-verify it, is the next slice.
+antialiased edge pixel).
+
+That wiring is now done too, and QEMU-live-verified: `pkg-format.md`'s
+`.app` descriptor gained an optional `icon=` field, `novi-launcher`
+resolves it and calls `draw_icon()` next to a matched search result,
+`foot`'s self-registered descriptor sets `icon=terminal`, and
+`novi-launcher/Makefile` compiles `icon_blit.c`/`icons_generated.c`
+straight in. Booted the ISO, switched to the `graphical` bundle,
+Alt+Space, typed "foot" — a real, pixel-zoomed screendump shows the
+actual generated terminal-icon bitmap rendered next to "-> Terminal" in
+the result's own accent color, and Enter still opened a real `foot`
+window afterward (no regression to the existing search/launch path).
+Getting that boot to work at all surfaced two unrelated real bugs:
+`scripts/mkinitramfs.sh` never mounted anything at `/tmp` despite
+`mkiso.sh` excluding it from the squashed image the same way it excludes
+`/dev`/`/run` (which *are* mounted) — fixed, same tmpfs-alongside-the-
+others pattern. And `s6-rc -up change graphical` itself hangs
+indefinitely even though driving `s6-svc -u` directly on `seatd` and
+`novi-shell` brings each up in seconds — **not fixed**, worked around
+for this verification pass, and still open (see `ICON-PIPELINE.md`'s
+own write-up of both).
 
 The maximize dot the decorations landed with is now real too, not a
 dimmed placeholder -- `GUI-DESIGN-LANGUAGE.md` had already flagged it
@@ -537,12 +554,14 @@ remaining bindings are wired up yet; moving keybindings to RFC 0001's
 user-editable config file instead of compiled-in defaults;
 hardware-accelerated rendering (GLES2/Vulkan via Mesa) is out of scope
 for this milestone and stays pixman-only until that's picked up
-separately; the app-grid and status-bar (wifi/battery/power) icon sets
-design-doc §8 calls for are still unimplemented, blocked on standing up
-the `tools/svg2icon/` offline SVG-to-bitmap pipeline (real curves,
-don't qualify for the hand-coded parametric shortcut the apps-button
-icon used); status icons are additionally blocked on real wifi/battery
-data sources that don't exist yet either.
+separately; the app-grid icon set is generated and wired (see above) but
+only exercised for `terminal` so far (the one real `.app` descriptor);
+status-bar icons (wifi/battery/power) have generated bitmaps too but
+stay unwired, blocked on real wifi/battery data sources that don't exist
+yet, independent of the icons themselves. `s6-rc -up change graphical`
+hangs indefinitely (confirmed live; `s6-svc -u` on the individual
+services works fine, so the bug is in `s6-rc -up`'s own orchestration,
+not the services) — real, reproducible, not yet root-caused.
 
 **Adjacent idea, not started**: decentralized, radio-agnostic mesh
 networking (Reticulum-style — cryptographic identity as the address,
@@ -750,7 +769,7 @@ compositor choice does.
 | 2 | Package/application model | 🟡 Native `pkg`/`mkpkg` now installed, wired into the build, and live-verified end-to-end (real dependency chain, install/remove/search/info) after fixing several real bugs found by first actually running it; sandbox tier still proposed (RFC needed) |
 | 3 | Update/rollback model | 🟡 Track split decided, on-device rollback open |
 | 4 | Hardware strategy | 🟡 x86_64 kernel exists, coverage + aarch64 open |
-| 5 | Desktop strategy | 🟡 Compositor + layer-shell + launcher + foot terminal + top-bar panel, real anti-aliased text rendering (fcft/pixman), a clickable apps button routing pointer input to a layer-shell surface, new windows placed below the panel's exclusive zone, real alpha compositing + rounded corners + a drop shadow on the launcher, server-side window decorations with working close + maximize buttons, all live-verified in QEMU together; design docs' rendering sequence now started on icons too — Lucide's license verified from upstream, apps-button icon shipped and live-verified; the `tools/svg2icon/` offline pipeline is now built (host-verified, not yet QEMU-live-verified) and has generated the full app-grid + status-bar icon set plus a working `draw_icon()` blit primitive, not yet wired into any client; real app search now too — `pkg-format.md`'s new GUI-app-registration convention, foot registered and launchable by typed name (id or display name), fork+execvp on Enter, live-verified end-to-end; file search still doesn't exist |
+| 5 | Desktop strategy | 🟡 Compositor + layer-shell + launcher + foot terminal + top-bar panel, real anti-aliased text rendering (fcft/pixman), a clickable apps button routing pointer input to a layer-shell surface, new windows placed below the panel's exclusive zone, real alpha compositing + rounded corners + a drop shadow on the launcher, server-side window decorations with working close + maximize buttons, all live-verified in QEMU together; design docs' rendering sequence now started on icons too — Lucide's license verified from upstream, apps-button icon shipped and live-verified; the `tools/svg2icon/` offline pipeline is built and its icons are now wired into `novi-launcher`'s search results (`icon=` in `.app` descriptors) and QEMU-live-verified — a real generated terminal icon renders next to a matched result, pixel-confirmed via screendump; status-bar icons are generated but unwired, blocked on real wifi/battery data; real app search too — `pkg-format.md`'s GUI-app-registration convention, foot registered and launchable by typed name, fork+execvp on Enter, live-verified end-to-end; file search still doesn't exist; two unrelated bugs found live-testing this (missing `/tmp` mount, fixed; `s6-rc -up change graphical` hangs, not yet fixed) |
 | 6 | Gaming strategy | 🔴 Open — blocked on #5 |
 | 7 | Developer strategy | 🟡 Native toolchain exists, container tier proposed |
 | 8 | Enterprise strategy | 🟡 LTS branches exist, signing enforcement + fleet mgmt open |
@@ -760,18 +779,20 @@ compositor choice does.
 | 12 | Security tooling / pentest track | 🔴 Open — packaging work, blocked on §2/§8/§9 |
 
 **Next concrete step:** the `tools/svg2icon/` offline SVG-to-bitmap
-pipeline (`ICON-PIPELINE.md` Stage 1) is now built and has generated the
-real app-grid + status-bar icon set (`shared/icons/icons_generated.c`),
-alongside a working `draw_icon()` runtime blit primitive
-(`shared/icons/icon_blit.c`, Stage 2) — both verified on the build host
-(ASCII-preview pixel review for the generated bitmaps, a native test
-harness for the blit math), since neither needs a cross-compile or a
-boot to check. What's left is wiring: no client's `Makefile` compiles
-`shared/icons/`'s two files yet, and none of `novi-shell`, `novi-panel`,
-or `novi-launcher` calls `draw_icon()` — that needs an actual
-cross-compile against the musl toolchain and a QEMU boot to
-live-verify, the one part of this slice that couldn't be done from a
-host-only tool alone.
+pipeline (`ICON-PIPELINE.md` Stage 1+2) is built, wired into
+`novi-launcher`'s search results, and QEMU-live-verified end to end —
+booted the ISO, opened Alt+Space, typed "foot", and a real screendump
+shows the generated terminal icon rendered next to the matched result.
+What's left of the icon set: `novi-panel`/`novi-shell` don't call
+`draw_icon()` yet (no app-grid view or status bar content exists to put
+icons in yet, independent of the icons themselves being ready), and the
+status-bar icons stay unwired until real wifi/battery data sources
+exist. Two unrelated bugs surfaced by actually booting this: a missing
+`/tmp` mount in `scripts/mkinitramfs.sh` (fixed) and `s6-rc -up change
+graphical` hanging indefinitely even though the underlying `s6-svc -u`
+primitives work fine when driven directly (not fixed — real, confirmed,
+needs its own investigation into s6-rc's orchestration, not the
+services themselves).
 
 App search also went from fully blocked to actionable: `pkg-format.md`'s "GUI
 Application Registration" convention gives `pkg` the "this is a
