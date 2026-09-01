@@ -52,6 +52,31 @@ an installable `pkg` layer for any real interactive system).
 topological dependency resolution, lifecycle scripts, install DB under
 `/var/lib/pkg/`.
 
+**Now actually real, not just designed on paper.** `packages/pkg` (the
+installer) and `packages/mkpkg` (the builder) were logically complete
+but had never been installed anywhere or run end-to-end — no
+`build/*.sh` stage referenced `pkg` at all, so nothing in this repo had
+ever actually executed `pkg install` against a real dependency chain.
+`build/11-pkg.sh` now installs it into the rootfs (`mkpkg` stays a
+build-host tool, not shipped — see its own header comment). Actually
+running it for the first time, in a chroot of `build/rootfs` under the
+real built BusyBox `ash` binary (not assumed, not a different host
+shell), surfaced several real bugs that static reading hadn't caught:
+a UTF-8 BOM breaking the shebang; `manifest_field()` silently killing
+the whole script under `set -e` whenever an optional MANIFEST field
+was absent (the normal case for most fields); dependency resolution
+doing nothing at all, silently, because its collection loop piped into
+`while read` — the last stage of a pipeline, which `ash` runs in a
+subshell, discarding every `DEP_QUEUE` mutation inside it; the same bug
+in `pkg search`; duplicate search results for installed packages still
+present in the local repo; and `mkpkg` corrupting its own input
+MANIFEST on a second run of the same staging directory. All fixed and
+verified live: a toy two-package dependency chain (`hello` depending on
+`libfoo`) installs in the correct order, files land correctly, lifecycle
+scripts run, `pkg list`/`info`/`search`/`remove` (including the
+reverse-dependency warning) all behave correctly, and `mkpkg` is now
+idempotent. Both scripts are shellcheck-clean.
+
 **Proposed — three-tier model**, so users never have to think about it:
 
 ```
@@ -588,7 +613,7 @@ compositor choice does.
 | # | Area | State |
 |---|---|---|
 | 1 | Base architecture | ✅ Decided |
-| 2 | Package/application model | 🟡 Native done, sandbox tier proposed (RFC needed) |
+| 2 | Package/application model | 🟡 Native `pkg`/`mkpkg` now installed, wired into the build, and live-verified end-to-end (real dependency chain, install/remove/search/info) after fixing several real bugs found by first actually running it; sandbox tier still proposed (RFC needed) |
 | 3 | Update/rollback model | 🟡 Track split decided, on-device rollback open |
 | 4 | Hardware strategy | 🟡 x86_64 kernel exists, coverage + aarch64 open |
 | 5 | Desktop strategy | 🟡 Compositor + layer-shell + launcher + foot terminal + top-bar panel, real anti-aliased text rendering (fcft/pixman), a clickable apps button routing pointer input to a layer-shell surface, new windows placed below the panel's exclusive zone, real alpha compositing + rounded corners on the launcher, all live-verified in QEMU together; no app search yet; `docs/design/` now has a target visual-language spec |
@@ -603,8 +628,12 @@ compositor choice does.
 **Next concrete step:** drop-shadow sprites for the launcher (design
 doc §8 item 4, next in sequence now that alpha compositing and rounded
 rects both exist — a shadow needs the same real-alpha buffer rounded
-corners just added), or wire `novi-launcher` up to real app/file search
-once §2's package model can register installed apps — the latter is
-still blocked, dogfoodable now via `foot`'s real interactive shell
-inside the graphical session instead of only
+corners just added), or wire `novi-launcher` up to real app/file
+search now that §2's native `pkg` actually works end-to-end — narrower
+than fully unblocked, though: `pkg` installs files, it doesn't yet
+register a "this is a launchable GUI app" concept anywhere (no
+desktop-entry equivalent exists in `pkg-format.md` yet), so a search
+integration still needs that piece designed first. Dogfoodable now via
+`foot`'s real interactive shell inside the graphical session instead
+of only
 QEMU-injection-and-screendump from outside.
