@@ -287,6 +287,51 @@ panel appeared to vanish once a terminal opened) and took an actual
 diagnostic log, not guesswork, to find the real cause. Live-verified:
 the panel now stays visible and correctly on top of terminal windows.
 
+`novi-panel` and `novi-launcher` have since dropped their hand-authored
+3×5 bitmap fonts entirely: both now render through a new shared
+`common/text.[ch]` module built on `fcft` (the same library `foot`
+already depends on, written by `foot`'s own author to hand back
+`pixman`-compatible rasterized glyphs) plus `pixman` compositing,
+following the exact glyph-blit pattern read directly out of `foot`'s
+own `render.c` rather than guessed. Zero new OS dependencies — fcft,
+freetype, fontconfig, and pixman were all already cross-compiled and
+installed in the rootfs for `foot` (`build/09-foot.sh`), just not
+linked into these two clients yet. Live-verified in QEMU: the panel
+clock and the launcher's calculator input/result both render as clean
+anti-aliased text instead of blocky bitmap glyphs.
+
+A real memory-safety bug was also found and fixed in
+`novi-shell/main.c`'s `desktop_toplevel_at()`: it walked the scene
+tree for the first non-NULL `node.data` and returned it unconditionally
+cast as a `novi_toplevel*`, but layer-shell surfaces (the panel,
+launcher) also set non-NULL `.data` on their own scene tree root,
+pointing at a `novi_layer_surface` instead — clicking one would have
+type-confused it as a toplevel. Fixed by checking the found tree's
+immediate parent against `server->layer_tree_toplevels` before
+trusting it. Not yet observable through normal use (see "click/pointer
+input isn't routed to layer-shell surfaces yet" below — nothing has
+clicked a layer-shell surface in testing so far), but real UB waiting
+for that gap to close.
+
+A new `docs/design/` directory now holds three grounding documents —
+`GUI-DESIGN-LANGUAGE.md`, `ICON-PIPELINE.md`, and
+`WIDGET-NOTIFICATION-ARCHITECTURE.md` — written against a target visual
+direction the project maintainer supplied (dark theme, teal accent,
+rounded card/glass panels, icon-grid launcher, right-aligned monochrome
+window-chrome dots) and checked against this codebase as it actually
+stands rather than assumed. Between them they cover: a full color/type/
+spacing/radius token spec and a pixman-realistic elevation approach
+(precomputed shadow sprites and rounded-corner masks — true backdrop
+blur is explicitly ruled out as infeasible without GPU/Mesa); an
+offline-only icon pipeline proposal (SVG-to-bitmap generation stays a
+host-side build step, never cross-compiled or shipped, same category as
+`depmod`); and a widget/notification architecture proposal (layer-shell
+is sufficient for both, no new Wayland protocol needed; a single
+persistent toast-queue daemon over a minimal Unix-socket protocol
+instead of D-Bus/XDG-notifications, which would contradict the
+no-systemd/no-D-Bus stance). The widget/notification review is also
+what surfaced the `desktop_toplevel_at()` bug above.
+
 **Still open**: app/file search itself (blocked on §2's package model
 existing enough to have something to search); Super+[1-9] workspaces
 (needs real per-output workspace state), PrintScreen screenshots,
@@ -297,7 +342,9 @@ windows don't avoid its reserved space; moving keybindings to RFC
 0001's user-editable config file instead of compiled-in defaults;
 hardware-accelerated rendering (GLES2/Vulkan via Mesa) is out of scope
 for this milestone and stays pixman-only until that's picked up
-separately.
+separately; the design docs' concrete next steps (real alpha
+compositing, rounded rects, drop shadows, an icon set, server-side
+window decorations) are documented but not yet implemented.
 
 **Adjacent idea, not started**: decentralized, radio-agnostic mesh
 networking (Reticulum-style — cryptographic identity as the address,
@@ -505,7 +552,7 @@ compositor choice does.
 | 2 | Package/application model | 🟡 Native done, sandbox tier proposed (RFC needed) |
 | 3 | Update/rollback model | 🟡 Track split decided, on-device rollback open |
 | 4 | Hardware strategy | 🟡 x86_64 kernel exists, coverage + aarch64 open |
-| 5 | Desktop strategy | 🟡 Compositor + layer-shell + launcher + foot terminal + top-bar panel, all live-verified in QEMU together; no app search, no click/pointer input on the panel yet |
+| 5 | Desktop strategy | 🟡 Compositor + layer-shell + launcher + foot terminal + top-bar panel, real anti-aliased text rendering (fcft/pixman) across the two clients, all live-verified in QEMU together; no app search, no click/pointer input on the panel yet; `docs/design/` now has a target visual-language spec |
 | 6 | Gaming strategy | 🔴 Open — blocked on #5 |
 | 7 | Developer strategy | 🟡 Native toolchain exists, container tier proposed |
 | 8 | Enterprise strategy | 🟡 LTS branches exist, signing enforcement + fleet mgmt open |
