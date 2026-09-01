@@ -28,4 +28,13 @@ modprobe virtio_gpu 2>/dev/null || true
 # explicitly rather than relying on a heuristic tuned for GPU-
 # accelerated builds this one isn't.
 export WLR_RENDERER=pixman
+# libwayland-server refuses to create its socket without a valid
+# XDG_RUNTIME_DIR (must exist, be owned by the caller, mode 0700) --
+# confirmed live: with the pixman fix above the DRM backend, renderer
+# and DRM-dumb allocator all now initialize cleanly, and the next (and
+# only) failure is "[wayland] error: XDG_RUNTIME_DIR is invalid or not
+# set in the environment". Nothing in this init ever created a runtime
+# dir for root, so create and own the standard path ourselves.
+mkdir -p -m 0700 /run/user/0
+export XDG_RUNTIME_DIR=/run/user/0
 exec novi-shell
