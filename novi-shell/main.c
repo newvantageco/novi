@@ -34,6 +34,7 @@
 #include <wlr/types/wlr_cursor.h>
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_data_device.h>
+#include <wlr/types/wlr_foreign_toplevel_management_v1.h>
 #include <wlr/types/wlr_input_device.h>
 #include <wlr/types/wlr_keyboard.h>
 #include <wlr/types/wlr_layer_shell_v1.h>
@@ -98,30 +99,24 @@
  * clearance instead (16px center-to-center), the conventional reading
  * of "an 8px gap" between same-sized elements. */
 #define DECO_DOT_GAP 16
-/* bg-card (GUI-DESIGN-LANGUAGE.md's window-content-chrome token),
- * text-muted at full strength (close/maximize -- both real and
- * functional, so neither gets the doc's "dimmed" treatment, which
- * would misleadingly signal non-interactive), and text-muted at ~40%
- * opacity (minimize -- genuinely still just a placeholder, per the
- * doc's own spec for it), as wlr_scene_rect's normalized-float RGBA
- * rather than this codebase's usual packed 0xRRGGBB hex, since that's
- * the format the scene-graph rect API actually takes.
+/* bg-card (GUI-DESIGN-LANGUAGE.md's window-content-chrome token) and
+ * text-muted at full strength -- all three dots (close/maximize/
+ * minimize) are real and functional now, so none gets a "dimmed"
+ * treatment, which would misleadingly signal non-interactive. As
+ * wlr_scene_rect's normalized-float RGBA rather than this codebase's
+ * usual packed 0xRRGGBB hex, since that's the format the scene-graph
+ * rect API actually takes.
  *
- * The dimmed color's R/G/B are pre-multiplied by its 0.4 alpha, not
- * the plain text-muted values scaled down some other way -- struct
- * wlr_render_color (wlr/render/pass.h, what a wlr_scene_rect's color
- * eventually becomes) documents this explicitly: "the R, G, B channels
- * need to be pre-multiplied by A." Getting this wrong is silent, not a
- * crash: confirmed live, passing straight (non-premultiplied)
- * text-muted with alpha=0.4 rendered the dot BRIGHTER than the full-
- * strength dots next to it, the opposite of "dimmed" -- a pixel
- * sample read back (123,128,151) against the real dots' (107,111,128),
- * not the ~(59,61,74) blending toward the dark title bar would
- * actually produce. */
+ * Note for whoever adds the next translucent decoration element: a
+ * wlr_scene_rect's R/G/B must be pre-multiplied by its own alpha --
+ * struct wlr_render_color (wlr/render/pass.h) documents this
+ * explicitly. Getting it wrong is silent, not a crash: this file used
+ * to have a dimmed (40%-alpha) minimize dot, and passing straight
+ * (non-premultiplied) color with alpha=0.4 rendered it BRIGHTER than
+ * the full-strength dots next to it, confirmed via a pixel readback --
+ * the opposite of "dimmed". */
 static const float DECO_BG_COLOR[4] = {0x1B / 255.0f, 0x1C / 255.0f, 0x26 / 255.0f, 1.0f};
 static const float DECO_DOT_COLOR[4] = {0x6B / 255.0f, 0x6F / 255.0f, 0x80 / 255.0f, 1.0f};
-static const float DECO_DOT_COLOR_DIMMED[4] = {
-	(0x6B / 255.0f) * 0.4f, (0x6F / 255.0f) * 0.4f, (0x80 / 255.0f) * 0.4f, 0.4f};
 
 /* For brevity's sake, struct members are annotated where they are used. */
 enum novi_cursor_mode {
@@ -193,6 +188,16 @@ struct novi_server {
 	struct wlr_scene_tree *layer_tree_toplevels;
 	struct wlr_scene_tree *layer_tree_top;
 	struct wlr_scene_tree *layer_tree_overlay;
+
+	/* wlr-foreign-toplevel-management-unstable-v1: lets a separate
+	 * layer-shell client (novi-panel's taskbar) list open windows and
+	 * request activate/minimize/maximize/close on them, the standard
+	 * protocol real taskbars (waybar included) use for exactly this --
+	 * not a new bespoke IPC channel between novi-shell and novi-panel.
+	 * wlroots implements the protocol server internally (same shape as
+	 * wlr_data_device_manager_v1/wlr_layer_shell_v1 above); this is the
+	 * one manager object, created once. */
+	struct wlr_foreign_toplevel_manager_v1 *foreign_toplevel_manager;
 };
 
 struct novi_output {
@@ -235,10 +240,9 @@ struct novi_toplevel {
 	 * toplevel()'s initial-placement comment for why the content itself
 	 * is now placed DECO_HEIGHT lower than before, to leave room). Kept
 	 * as direct pointers, not walked from the scene tree, so xdg_
-	 * toplevel_commit() can resize the bar and {close,maximize}_dot_
-	 * toplevel_at() can identify a hit without re-deriving them.
-	 * minimize_dot has no _toplevel_at() helper -- it stays a dimmed,
-	 * non-interactive placeholder (see its creation comment). */
+	 * toplevel_commit() can resize the bar and all three dots'
+	 * decoration_rect_toplevel_at() hit-test can identify a click
+	 * without re-deriving them. */
 	struct wlr_scene_rect *titlebar;
 	struct wlr_scene_rect *close_dot;
 	struct wlr_scene_rect *maximize_dot;
@@ -248,6 +252,12 @@ struct novi_toplevel {
 	 * (xdg_toplevel_request_maximize()) go through the same two
 	 * functions, so there's exactly one place that ever changes this. */
 	bool maximized;
+	/* Minimize state, toggled by minimize_toplevel()/unminimize_
+	 * toplevel() -- the (now-live, no longer dimmed) minimize dot, a
+	 * taskbar's request_minimize, and focus_toplevel() restoring a
+	 * minimized window (Alt+Tab or a taskbar's request_activate) all go
+	 * through this same pair. */
+	bool minimized;
 	struct wlr_box saved_geometry;
 	struct wl_listener map;
 	struct wl_listener unmap;
@@ -257,6 +267,18 @@ struct novi_toplevel {
 	struct wl_listener request_resize;
 	struct wl_listener request_maximize;
 	struct wl_listener request_fullscreen;
+	struct wl_listener set_title;
+	struct wl_listener set_app_id;
+
+	/* This toplevel's handle on the foreign-toplevel-management
+	 * protocol (see novi_server.foreign_toplevel_manager) -- created on
+	 * map, destroyed on unmap, so a taskbar only ever lists windows
+	 * that are actually currently mapped. */
+	struct wlr_foreign_toplevel_handle_v1 *foreign_handle;
+	struct wl_listener foreign_request_maximize;
+	struct wl_listener foreign_request_minimize;
+	struct wl_listener foreign_request_activate;
+	struct wl_listener foreign_request_close;
 };
 
 struct novi_popup {
@@ -281,11 +303,24 @@ struct novi_keyboard {
  * needs them earlier in the file than that. */
 static void maximize_toplevel(struct novi_toplevel *toplevel);
 static void unmaximize_toplevel(struct novi_toplevel *toplevel);
+/* Same reason: unminimize_toplevel() needs calling from focus_toplevel()
+ * itself (Alt+Tab or a taskbar "activate" request restoring a minimized
+ * window), defined near minimize_toplevel() below for the same "keep
+ * the state-owning pair together" reason as maximize/unmaximize. */
+static void minimize_toplevel(struct novi_toplevel *toplevel);
+static void unminimize_toplevel(struct novi_toplevel *toplevel);
 
 static void focus_toplevel(struct novi_toplevel *toplevel, struct wlr_surface *surface) {
 	/* Note: this function only deals with keyboard focus. */
 	if (toplevel == NULL) {
 		return;
+	}
+	if (toplevel->minimized) {
+		/* Alt+Tab and a taskbar's "activate" request both just call this
+		 * function -- restoring a minimized window on either path,
+		 * rather than requiring callers to remember to unminimize first,
+		 * matches how every real desktop's taskbar/Alt+Tab behaves. */
+		unminimize_toplevel(toplevel);
 	}
 	struct novi_server *server = toplevel->server;
 	struct wlr_seat *seat = server->seat;
@@ -313,6 +348,19 @@ static void focus_toplevel(struct novi_toplevel *toplevel, struct wlr_surface *s
 	wl_list_insert(&server->toplevels, &toplevel->link);
 	/* Activate the new surface */
 	wlr_xdg_toplevel_set_activated(toplevel->xdg_toplevel, true);
+	/* Keep every toplevel's foreign-toplevel-management "activated" bit
+	 * (what a taskbar highlights as the current window) in sync -- a
+	 * plain iteration rather than tracking just the two that changed,
+	 * since the window count here is always small (an "everyday
+	 * desktop" workload, not hundreds of toplevels) and this only runs
+	 * on an actual focus change, not per-frame. */
+	struct novi_toplevel *activated_iter;
+	wl_list_for_each(activated_iter, &server->toplevels, link) {
+		if (activated_iter->foreign_handle != NULL) {
+			wlr_foreign_toplevel_handle_v1_set_activated(
+				activated_iter->foreign_handle, activated_iter == toplevel);
+		}
+	}
 	/*
 	 * Tell the seat to have the keyboard enter this surface. wlroots will keep
 	 * track of this and automatically send key events to the appropriate
@@ -875,6 +923,8 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
 			} else {
 				maximize_toplevel(hit);
 			}
+		} else if (hit != NULL && hit_rect == hit->minimize_dot) {
+			minimize_toplevel(hit);
 		}
 	}
 
@@ -1288,11 +1338,84 @@ static void server_new_layer_surface(struct wl_listener *listener, void *data) {
 	 * on every commit, including the first real one. */
 }
 
+/* wlr-foreign-toplevel-management-unstable-v1: a taskbar client
+ * (novi-panel) requesting a state change on one of our toplevels via
+ * its handle. Each just calls the exact same function the
+ * compositor-native path (a decoration dot, a client's own xdg_
+ * toplevel request) already uses -- one place that ever changes each
+ * piece of state, regardless of which UI asked. */
+static void foreign_toplevel_handle_request_maximize(
+		struct wl_listener *listener, void *data) {
+	struct novi_toplevel *toplevel =
+		wl_container_of(listener, toplevel, foreign_request_maximize);
+	struct wlr_foreign_toplevel_handle_v1_maximized_event *event = data;
+	if (event->maximized) {
+		maximize_toplevel(toplevel);
+	} else {
+		unmaximize_toplevel(toplevel);
+	}
+}
+
+static void foreign_toplevel_handle_request_minimize(
+		struct wl_listener *listener, void *data) {
+	struct novi_toplevel *toplevel =
+		wl_container_of(listener, toplevel, foreign_request_minimize);
+	struct wlr_foreign_toplevel_handle_v1_minimized_event *event = data;
+	if (event->minimized) {
+		minimize_toplevel(toplevel);
+	} else {
+		unminimize_toplevel(toplevel);
+	}
+}
+
+static void foreign_toplevel_handle_request_activate(
+		struct wl_listener *listener, void *data) {
+	(void)data;
+	struct novi_toplevel *toplevel =
+		wl_container_of(listener, toplevel, foreign_request_activate);
+	/* focus_toplevel() itself unminimizes first if needed -- a taskbar
+	 * click on a minimized entry both restores and focuses it, same as
+	 * every real desktop. */
+	focus_toplevel(toplevel, toplevel->xdg_toplevel->base->surface);
+}
+
+static void foreign_toplevel_handle_request_close(
+		struct wl_listener *listener, void *data) {
+	(void)data;
+	struct novi_toplevel *toplevel =
+		wl_container_of(listener, toplevel, foreign_request_close);
+	wlr_xdg_toplevel_send_close(toplevel->xdg_toplevel);
+}
+
 static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 	/* Called when the surface is mapped, or ready to display on-screen. */
 	struct novi_toplevel *toplevel = wl_container_of(listener, toplevel, map);
 
 	wl_list_insert(&toplevel->server->toplevels, &toplevel->link);
+
+	/* Foreign-toplevel-management handle: created here (not in
+	 * server_new_xdg_toplevel(), where the surface isn't shown yet) and
+	 * destroyed in xdg_toplevel_unmap() below, so a taskbar only ever
+	 * lists windows that are actually currently mapped -- same map/
+	 * unmap-scoped lifetime as the surface's own on-screen presence. */
+	toplevel->foreign_handle = wlr_foreign_toplevel_handle_v1_create(
+		toplevel->server->foreign_toplevel_manager);
+	wlr_foreign_toplevel_handle_v1_set_title(toplevel->foreign_handle,
+		toplevel->xdg_toplevel->title ? toplevel->xdg_toplevel->title : "");
+	wlr_foreign_toplevel_handle_v1_set_app_id(toplevel->foreign_handle,
+		toplevel->xdg_toplevel->app_id ? toplevel->xdg_toplevel->app_id : "");
+	toplevel->foreign_request_maximize.notify = foreign_toplevel_handle_request_maximize;
+	wl_signal_add(&toplevel->foreign_handle->events.request_maximize,
+		&toplevel->foreign_request_maximize);
+	toplevel->foreign_request_minimize.notify = foreign_toplevel_handle_request_minimize;
+	wl_signal_add(&toplevel->foreign_handle->events.request_minimize,
+		&toplevel->foreign_request_minimize);
+	toplevel->foreign_request_activate.notify = foreign_toplevel_handle_request_activate;
+	wl_signal_add(&toplevel->foreign_handle->events.request_activate,
+		&toplevel->foreign_request_activate);
+	toplevel->foreign_request_close.notify = foreign_toplevel_handle_request_close;
+	wl_signal_add(&toplevel->foreign_handle->events.request_close,
+		&toplevel->foreign_request_close);
 
 	focus_toplevel(toplevel, toplevel->xdg_toplevel->base->surface);
 }
@@ -1307,6 +1430,15 @@ static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
 	}
 
 	wl_list_remove(&toplevel->link);
+
+	if (toplevel->foreign_handle != NULL) {
+		wl_list_remove(&toplevel->foreign_request_maximize.link);
+		wl_list_remove(&toplevel->foreign_request_minimize.link);
+		wl_list_remove(&toplevel->foreign_request_activate.link);
+		wl_list_remove(&toplevel->foreign_request_close.link);
+		wlr_foreign_toplevel_handle_v1_destroy(toplevel->foreign_handle);
+		toplevel->foreign_handle = NULL;
+	}
 }
 
 static void xdg_toplevel_commit(struct wl_listener *listener, void *data) {
@@ -1361,8 +1493,36 @@ static void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
 	wl_list_remove(&toplevel->request_resize.link);
 	wl_list_remove(&toplevel->request_maximize.link);
 	wl_list_remove(&toplevel->request_fullscreen.link);
+	wl_list_remove(&toplevel->set_title.link);
+	wl_list_remove(&toplevel->set_app_id.link);
 
 	free(toplevel);
+}
+
+/* Keeps a mapped toplevel's foreign-toplevel-management handle (its
+ * taskbar entry) showing the client's current title/app_id -- these
+ * can change any time after the initial commit (a browser tab switch,
+ * a terminal's shell prompt updating its title), not just once at
+ * creation. Guarded on foreign_handle != NULL since these listeners
+ * are wired for the toplevel's whole lifetime (server_new_xdg_
+ * toplevel()) but the handle itself only exists between map and
+ * unmap. */
+static void xdg_toplevel_set_title(struct wl_listener *listener, void *data) {
+	(void)data;
+	struct novi_toplevel *toplevel = wl_container_of(listener, toplevel, set_title);
+	if (toplevel->foreign_handle != NULL) {
+		wlr_foreign_toplevel_handle_v1_set_title(toplevel->foreign_handle,
+			toplevel->xdg_toplevel->title ? toplevel->xdg_toplevel->title : "");
+	}
+}
+
+static void xdg_toplevel_set_app_id(struct wl_listener *listener, void *data) {
+	(void)data;
+	struct novi_toplevel *toplevel = wl_container_of(listener, toplevel, set_app_id);
+	if (toplevel->foreign_handle != NULL) {
+		wlr_foreign_toplevel_handle_v1_set_app_id(toplevel->foreign_handle,
+			toplevel->xdg_toplevel->app_id ? toplevel->xdg_toplevel->app_id : "");
+	}
 }
 
 static void begin_interactive(struct novi_toplevel *toplevel,
@@ -1485,6 +1645,59 @@ static void unmaximize_toplevel(struct novi_toplevel *toplevel) {
 	toplevel->maximized = false;
 }
 
+/* Hides the toplevel by disabling its scene node -- the client's own
+ * wl_surface stays mapped throughout (no unmap/re-map round trip, no
+ * lost frame callbacks), only its on-screen visibility changes, the
+ * same technique sway and other wlroots compositors use for
+ * minimize/scratchpad-hide. Was previously a dimmed, non-interactive
+ * placeholder (see the minimize_dot creation comment) because there
+ * was no taskbar to ever bring a hidden window back from; now that
+ * novi-panel has one via wlr-foreign-toplevel-management, hiding is
+ * no longer a dead end. */
+static void minimize_toplevel(struct novi_toplevel *toplevel) {
+	if (toplevel->minimized) {
+		return;
+	}
+	toplevel->minimized = true;
+	wlr_scene_node_set_enabled(&toplevel->scene_tree->node, false);
+	if (toplevel->foreign_handle != NULL) {
+		wlr_foreign_toplevel_handle_v1_set_minimized(toplevel->foreign_handle, true);
+	}
+	struct novi_server *server = toplevel->server;
+	if (server->seat->keyboard_state.focused_surface ==
+			toplevel->xdg_toplevel->base->surface) {
+		/* Nothing useful stays focused on a surface that's no longer
+		 * visible -- hand focus to the next non-minimized window in MRU
+		 * order (the same list cycle_toplevel() walks for Alt+Tab), or
+		 * clear focus entirely if this was the only one open. */
+		wlr_xdg_toplevel_set_activated(toplevel->xdg_toplevel, false);
+		struct novi_toplevel *next = NULL;
+		struct novi_toplevel *t;
+		wl_list_for_each(t, &server->toplevels, link) {
+			if (t != toplevel && !t->minimized) {
+				next = t;
+				break;
+			}
+		}
+		if (next != NULL) {
+			focus_toplevel(next, next->xdg_toplevel->base->surface);
+		} else {
+			wlr_seat_keyboard_notify_clear_focus(server->seat);
+		}
+	}
+}
+
+static void unminimize_toplevel(struct novi_toplevel *toplevel) {
+	if (!toplevel->minimized) {
+		return;
+	}
+	toplevel->minimized = false;
+	wlr_scene_node_set_enabled(&toplevel->scene_tree->node, true);
+	if (toplevel->foreign_handle != NULL) {
+		wlr_foreign_toplevel_handle_v1_set_minimized(toplevel->foreign_handle, false);
+	}
+}
+
 static void xdg_toplevel_request_maximize(
 		struct wl_listener *listener, void *data) {
 	/* This event is raised when a client would like to maximize (or
@@ -1560,12 +1773,11 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
 		toplevel->scene_tree, DECO_DOT_SIZE, DECO_DOT_SIZE, DECO_DOT_COLOR);
 	toplevel->maximize_dot = wlr_scene_rect_create(
 		toplevel->scene_tree, DECO_DOT_SIZE, DECO_DOT_SIZE, DECO_DOT_COLOR);
-	/* Minimize has no taskbar/dock to restore from yet -- per GUI-
-	 * DESIGN-LANGUAGE.md, styled present-but-dimmed rather than either
-	 * wired to a dead end or omitted outright (omitting it would make
-	 * the remaining two look like the whole set, not two-thirds of one). */
+	/* Real now, not dimmed -- novi-panel's taskbar (wlr-foreign-toplevel-
+	 * management) is the restore path GUI-DESIGN-LANGUAGE.md's original
+	 * dimmed-placeholder reasoning was waiting on. */
 	toplevel->minimize_dot = wlr_scene_rect_create(
-		toplevel->scene_tree, DECO_DOT_SIZE, DECO_DOT_SIZE, DECO_DOT_COLOR_DIMMED);
+		toplevel->scene_tree, DECO_DOT_SIZE, DECO_DOT_SIZE, DECO_DOT_COLOR);
 	int dot_y = -DECO_HEIGHT + (DECO_HEIGHT - DECO_DOT_SIZE) / 2;
 	wlr_scene_node_set_position(&toplevel->close_dot->node, 0, dot_y);
 	wlr_scene_node_set_position(&toplevel->maximize_dot->node, 0, dot_y);
@@ -1621,6 +1833,10 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
 	wl_signal_add(&xdg_toplevel->events.request_maximize, &toplevel->request_maximize);
 	toplevel->request_fullscreen.notify = xdg_toplevel_request_fullscreen;
 	wl_signal_add(&xdg_toplevel->events.request_fullscreen, &toplevel->request_fullscreen);
+	toplevel->set_title.notify = xdg_toplevel_set_title;
+	wl_signal_add(&xdg_toplevel->events.set_title, &toplevel->set_title);
+	toplevel->set_app_id.notify = xdg_toplevel_set_app_id;
+	wl_signal_add(&xdg_toplevel->events.set_app_id, &toplevel->set_app_id);
 }
 
 static void server_new_xdg_decoration(struct wl_listener *listener, void *data) {
@@ -1754,6 +1970,12 @@ int main(int argc, char *argv[]) {
 	wlr_compositor_create(server.wl_display, 5, server.renderer);
 	wlr_subcompositor_create(server.wl_display);
 	wlr_data_device_manager_create(server.wl_display);
+	/* wlr-foreign-toplevel-management-unstable-v1: lets novi-panel's
+	 * taskbar (a separate layer-shell client, not compositor code, same
+	 * split as everything else in this UI) list open windows and
+	 * request activate/minimize/maximize/close on them. */
+	server.foreign_toplevel_manager =
+		wlr_foreign_toplevel_manager_v1_create(server.wl_display);
 
 	/* Creates an output layout, which a wlroots utility for working with an
 	 * arrangement of screens in a physical layout. */

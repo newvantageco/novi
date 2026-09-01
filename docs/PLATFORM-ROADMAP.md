@@ -840,7 +840,7 @@ compositor choice does.
 | 2 | Package/application model | 🟡 Native `pkg`/`mkpkg` now installed, wired into the build, and live-verified end-to-end (real dependency chain, install/remove/search/info) after fixing several real bugs found by first actually running it; sandbox tier still proposed (RFC needed) |
 | 3 | Update/rollback model | 🟡 Track split decided, on-device rollback open |
 | 4 | Hardware strategy | 🟡 x86_64 kernel exists, coverage + aarch64 open |
-| 5 | Desktop strategy | 🟡 Compositor + layer-shell + launcher + foot terminal + top-bar panel, real anti-aliased text rendering (fcft/pixman), a clickable apps button routing pointer input to a layer-shell surface, new windows placed below the panel's exclusive zone, real alpha compositing + rounded corners + a drop shadow on the launcher, server-side window decorations with working close + maximize buttons, all live-verified in QEMU together; design docs' rendering sequence now started on icons too — Lucide's license verified from upstream, apps-button icon shipped and live-verified; the `tools/svg2icon/` offline pipeline is built and its icons are now wired into `novi-launcher`'s search results (`icon=` in `.app` descriptors) and QEMU-live-verified — a real generated terminal icon renders next to a matched result, pixel-confirmed via screendump; status-bar icons are generated but unwired, blocked on real wifi/battery data; real app search too — `pkg-format.md`'s GUI-app-registration convention, foot registered and launchable by typed name, fork+execvp on Enter, live-verified end-to-end; file search still doesn't exist; Super+. symbol picker (not full emoji — no emoji-capable font exists) now wired too, `novi-launcher --symbols` copying to the clipboard via novi-shell's existing `wl_data_device_manager`, QEMU-live-verified down to the exact pasted UTF-8 bytes; found and fixed a real, previously-invisible `common/text.c` bug along the way (byte-per-codepoint rendering silently mojibake'd any multi-byte UTF-8 glyph); two more unrelated bugs found and fixed live-testing all this: a missing `/tmp` mount, and the documented `s6-rc -up change graphical` command itself (root-caused: `-p`/prune tries to stop the console's own getty; corrected to plain `-u`) |
+| 5 | Desktop strategy | 🟡 Compositor + layer-shell + launcher + foot terminal + top-bar panel, real anti-aliased text rendering (fcft/pixman), a clickable apps button routing pointer input to a layer-shell surface, new windows placed below the panel's exclusive zone, real alpha compositing + rounded corners + a drop shadow on the launcher, server-side window decorations with working close + maximize buttons, all live-verified in QEMU together; design docs' rendering sequence now started on icons too — Lucide's license verified from upstream, apps-button icon shipped and live-verified; the `tools/svg2icon/` offline pipeline is built and its icons are now wired into `novi-launcher`'s search results (`icon=` in `.app` descriptors) and QEMU-live-verified — a real generated terminal icon renders next to a matched result, pixel-confirmed via screendump; status-bar icons are generated but unwired, blocked on real wifi/battery data; real app search too — `pkg-format.md`'s GUI-app-registration convention, foot registered and launchable by typed name, fork+execvp on Enter, live-verified end-to-end; file search still doesn't exist; Super+. symbol picker (not full emoji — no emoji-capable font exists) now wired too, `novi-launcher --symbols` copying to the clipboard via novi-shell's existing `wl_data_device_manager`, QEMU-live-verified down to the exact pasted UTF-8 bytes; found and fixed a real, previously-invisible `common/text.c` bug along the way (byte-per-codepoint rendering silently mojibake'd any multi-byte UTF-8 glyph); two more unrelated bugs found and fixed live-testing all this: a missing `/tmp` mount, and the documented `s6-rc -up change graphical` command itself (root-caused: `-p`/prune tries to stop the console's own getty; corrected to plain `-u`); a real taskbar now too — `novi-panel` is a `wlr-foreign-toplevel-management-unstable-v1` client (the standard taskbar protocol, XML vendored under `protocol/`), minimize is a real function instead of a dimmed placeholder, QEMU-live-verified end to end (minimize, restore via taskbar click, close removing the entry, all pixel-confirmed) |
 | 6 | Gaming strategy | 🔴 Open — blocked on #5 |
 | 7 | Developer strategy | 🟡 Native toolchain exists, container tier proposed |
 | 8 | Enterprise strategy | 🟡 LTS branches exist, signing enforcement + fleet mgmt open |
@@ -897,6 +897,49 @@ clipboard bytes: pasted into a real `foot` window and read back via
 `od -c` as the exact correct 3-byte UTF-8 sequence, not just "something
 non-empty got copied."
 
+Minimize went from a dimmed placeholder to a real, working taskbar next:
+`novi-panel` is now also a `wlr-foreign-toplevel-management-unstable-v1`
+client (the standard protocol real taskbars use — waybar included —
+not a bespoke novi-shell↔novi-panel IPC channel; the XML is vendored
+under `protocol/` for the same reason `wlr-layer-shell-unstable-v1.xml`
+already is, since wlroots implements the server side internally but
+never installs this XML anywhere for a client to consume). `novi-shell`
+creates one `wlr_foreign_toplevel_manager_v1` and gives each mapped
+toplevel a handle (title/app_id kept live via `xdg_toplevel`'s own
+`set_title`/`set_app_id` signals), wired to real
+`request_activate`/`request_minimize`/`request_maximize`/`request_close`
+handlers that all funnel through the exact same
+`focus_toplevel()`/`minimize_toplevel()`/`maximize_toplevel()`/
+`wlr_xdg_toplevel_send_close()` functions the compositor-native paths
+(decoration dots, Super+Q) already used — one place per state change,
+regardless of which UI asked. Minimize itself
+(`minimize_toplevel()`/`unminimize_toplevel()`) hides a window by
+disabling its scene node rather than unmapping the real Wayland
+surface (the client's own state/frame callbacks are undisturbed), and
+`focus_toplevel()` now unminimizes automatically, so Alt+Tab and a
+taskbar click both restore a minimized window the same way every real
+desktop does. The minimize dot itself is real now too, no longer the
+dimmed, non-interactive placeholder GUI-DESIGN-LANGUAGE.md's original
+reasoning left it as — this taskbar is exactly the restore path that
+reasoning was waiting on.
+
+`novi-panel`'s taskbar renders one pill per open window after the Apps
+button (ellipsis-truncated past a max width, real UTF-8-safe
+truncation that never cuts a multi-byte title character in half),
+teal/accent when active, blended into the bar background when
+minimized (pixel-confirmed distinct from "open but unfocused"), click
+to activate/restore or (if already active) minimize — the same toggle
+convention real taskbars use. QEMU-live-verified end to end with two
+real `foot` windows: opened both (two real taskbar entries appeared),
+minimized the active one via its dot (pixel-sampled its taskbar entry's
+background as exactly the plain panel background color, confirming
+the "blended" minimized style actually rendered, and focus correctly
+moved to the other window), clicked the minimized entry to restore it
+(pixel-confirmed it took over the active/teal color and the window
+reappeared), then closed a window via its close dot and confirmed its
+taskbar entry actually disappeared (the `closed` event path, not just
+the open path).
+
 Next candidates, in roughly increasing order of what they need: Super+L
 lock (needs a real auth-gated layer-shell overlay — the one remaining
 binding this project's own security bar makes non-trivial, not
@@ -904,4 +947,4 @@ binding this project's own security bar makes non-trivial, not
 writing a file), and Super+[1-9] workspaces (needs real per-output
 workspace state in the compositor, the largest of the three). None are
 blocked on a decision — all three are exactly "implementation effort"
-the way the icon pipeline and symbol picker were.
+the way the icon pipeline, symbol picker, and taskbar were.
