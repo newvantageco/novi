@@ -526,6 +526,29 @@ static struct novi_toplevel *desktop_toplevel_at(
 	while (tree != NULL && tree->node.data == NULL) {
 		tree = tree->node.parent;
 	}
+	if (tree == NULL) {
+		return NULL;
+	}
+	/* A layer-shell surface's own root scene tree ALSO has non-NULL
+	 * .data (set in server_new_layer_surface(), pointing at its
+	 * novi_layer_surface, not a novi_toplevel) -- and the scan above
+	 * walks the ENTIRE scene, not just server->layer_tree_toplevels,
+	 * so clicking on the panel or launcher would find that tree here
+	 * too. Returning it as-is would type-confuse a novi_layer_surface*
+	 * as a novi_toplevel* in every caller (server_cursor_button ->
+	 * focus_toplevel() dereferences ->server/->link/->scene_tree/
+	 * ->xdg_toplevel at the wrong offsets) -- undefined behavior with
+	 * real crash/corruption potential, not yet hit only because
+	 * nothing has clicked a layer-shell surface in testing so far.
+	 * Toplevel scene trees are always DIRECT children of
+	 * layer_tree_toplevels (server_new_xdg_toplevel's
+	 * wlr_scene_xdg_surface_create() call), so this is a correct,
+	 * cheap discriminator -- and matches the documented reality that
+	 * novi-shell doesn't route pointer input to layer-shell surfaces
+	 * at all yet (novi-panel/novi-launcher's own header comments). */
+	if (tree->node.parent != server->layer_tree_toplevels) {
+		return NULL;
+	}
 	return tree->node.data;
 }
 
