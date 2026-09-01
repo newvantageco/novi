@@ -218,13 +218,30 @@ compiled; and POSIX shared memory (`shm_open`, used for keymap handoff to
 Wayland clients) needed a `tmpfs` at `/dev/shm`, which devtmpfs at `/dev`
 does not provide on its own.
 
-**Still open**: the panel, app launcher, and layer-shell protocol support
-that RFC 0001 actually means by "novi-shell" — what exists today is the
-compositor core they'll be built on, not that UI layer itself; the
-keyboard-shortcut conventions (Alt+Space search, etc.) RFC 0001 specs are
-not implemented in code yet either; hardware-accelerated rendering
-(GLES2/Vulkan via Mesa) is out of scope for this milestone and stays
-pixman-only until that's picked up separately.
+Next slice, built on top of the now-verified core: **wlr-layer-shell-v1
+protocol support** (five persistent scene-tree layers — background,
+bottom, windows, top, overlay — so a panel or launcher client can anchor
+to screen edges with correct z-order and exclusive-zone handling; the
+protocol XML had to be vendored into `novi-shell/protocol/`, since
+wlroots itself never installs it or its generated header anywhere) and
+part of RFC 0001 decision 7's **default keybindings**: Alt+Tab /
+Alt+Shift+Tab (window switching), Super+Return (spawn a terminal — `foot`
+by default, not packaged yet, so this fails visibly until it is),
+Super+Q (close focused window). Boot-verified with no regression to the
+existing "reaches running" milestone; the layer-shell arrangement logic
+itself is verified by implementation review against wlroots' own
+geometry helper rather than a live client, since no panel/launcher
+client exists yet to exercise it end-to-end.
+
+**Still open**: the panel and app launcher themselves (this only
+provides the protocol surface they'd anchor to, not the UI); Alt+Space
+search/launcher, Super+[1-9] workspaces (needs real per-output workspace
+state), PrintScreen screenshots, Super+L lock, Super+. emoji picker —
+none of RFC 0001 decision 7's remaining bindings are wired up yet;
+moving keybindings to RFC 0001's user-editable config file instead of
+compiled-in defaults; hardware-accelerated rendering (GLES2/Vulkan via
+Mesa) is out of scope for this milestone and stays pixman-only until
+that's picked up separately.
 
 ### Terminal / CLI environment
 
@@ -420,7 +437,7 @@ compositor choice does.
 | 2 | Package/application model | 🟡 Native done, sandbox tier proposed (RFC needed) |
 | 3 | Update/rollback model | 🟡 Track split decided, on-device rollback open |
 | 4 | Hardware strategy | 🟡 x86_64 kernel exists, coverage + aarch64 open |
-| 5 | Desktop strategy | 🟡 Compositor core built, s6-wired, and boot-verified running (pixman); no panel/launcher/keyboard-shortcut layer yet |
+| 5 | Desktop strategy | 🟡 Compositor core + layer-shell protocol + partial keybindings built and boot-verified; no panel/launcher UI yet |
 | 6 | Gaming strategy | 🔴 Open — blocked on #5 |
 | 7 | Developer strategy | 🟡 Native toolchain exists, container tier proposed |
 | 8 | Enterprise strategy | 🟡 LTS branches exist, signing enforcement + fleet mgmt open |
@@ -429,7 +446,8 @@ compositor choice does.
 | 11 | Differentiation | ✅ Articulated above |
 | 12 | Security tooling / pentest track | 🔴 Open — packaging work, blocked on §2/§8/§9 |
 
-**Next concrete step:** build the panel/launcher/layer-shell UI layer RFC
-0001 actually describes as "novi-shell" — the compositor core it runs on
-top of is now built, s6-wired, and boot-verified — plus the keyboard-driven
-UX conventions (Alt+Space search, etc.) RFC 0001 specs.
+**Next concrete step:** build the actual panel/launcher UI RFC 0001
+describes as "novi-shell" — the compositor core, layer-shell protocol
+support, and a first slice of default keybindings it needs are now built
+and boot-verified — starting with the Alt+Space search/launcher overlay,
+since that's the binding already sketched in the `novi-shell` mockup.
