@@ -40,8 +40,21 @@ sudo apt install -y \
     bc libssl-dev python3 \
     libmpc-dev libmpfr-dev libgmp-dev \
     rsync cpio file mksquashfs xorriso grub-common grub-pc-bin grub-efi-amd64-bin mtools kmod \
-    shellcheck qemu-system-x86
+    shellcheck qemu-system-x86 \
+    meson ninja-build pkg-config libwayland-bin hwdata
 ```
+
+`meson`/`ninja-build`/`pkg-config` are for `build/06-wayland.sh` onward (the
+wlroots stack, `foot`, and the three `novi-*` clients are all meson-built).
+`libwayland-bin` provides the *host's own* `wayland-scanner`, which
+`build/07-novi-shell.sh`/`08-novi-launcher.sh`/`10-novi-panel.sh` each
+require on the build host directly (their Makefiles generate protocol
+code with it) -- separate from the cross-compiled `wayland` package meson
+builds into the target rootfs. `hwdata` is needed because
+`libdisplay-info`'s own `meson.build` hard-requires
+`/usr/share/hwdata/pnp.ids` (a build-time PCI/USB ID data file) to exist
+on the host; confirmed by hitting `ERROR: File
+/usr/share/hwdata/pnp.ids does not exist.` with it missing, not guessed.
 
 ### 2. Prerequisites (Arch Linux)
 
@@ -50,7 +63,8 @@ sudo pacman -Syu --needed \
     base-devel gcc make curl tar xz bzip2 \
     bison flex texinfo libelf bc openssl python \
     libmpc mpfr gmp rsync cpio file \
-    squashfs-tools libisoburn grub mtools kmod shellcheck qemu-system-x86
+    squashfs-tools libisoburn grub mtools kmod shellcheck qemu-system-x86 \
+    meson ninja pkgconf wayland hwdata
 ```
 
 ### 3. Cloning the Repository
