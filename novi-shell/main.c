@@ -66,11 +66,18 @@
 #define NOVI_DEFAULT_PANEL "novi-panel"
 
 /* Server-side window decorations (GUI-DESIGN-LANGUAGE.md §6): a title
- * bar strip above every toplevel's content, with a close affordance --
- * the one dot the design doc calls out as backed by a real, already-
- * implemented compositor primitive (wlr_xdg_toplevel_send_close(),
- * the same request Super+Q already sends). Sized/positioned in the
- * scene graph via wlr_scene_rect, which only draws axis-aligned
+ * bar strip above every toplevel's content, with close and maximize
+ * affordances -- the two dots the design doc treats as tractable now
+ * (close: backed by wlr_xdg_toplevel_send_close(), the same request
+ * Super+Q already sends; maximize: "process_cursor_resize() already
+ * demonstrates the exact geometry math... what's missing is
+ * remembering pre-maximize geometry to restore on a second click,
+ * which is a small, contained addition" -- so this implements that,
+ * not just a dimmed placeholder). Minimize stays dimmed and non-
+ * interactive per the doc's own explicit instruction: wiring a "fake"
+ * minimize without deciding where the window goes (no taskbar/dock
+ * exists yet) would be a dead end, not a shortcut. Sized/positioned in
+ * the scene graph via wlr_scene_rect, which only draws axis-aligned
  * rectangles -- the design spec's "8px diameter circle" becomes a
  * small square here rather than a real anti-aliased circle, since
  * drawing an actual circle would mean the compositor rendering its own
@@ -79,14 +86,37 @@
 #define DECO_HEIGHT 32
 #define DECO_DOT_SIZE 8
 #define DECO_DOT_PADDING 12
-/* bg-card (GUI-DESIGN-LANGUAGE.md's window-content-chrome token) and
- * text-muted (the dot's at-rest color, since hover-state color
- * changes aren't wired up here -- see the close_dot_toplevel_at()
- * comment), as wlr_scene_rect's normalized-float RGBA rather than this
- * codebase's usual packed 0xRRGGBB hex, since that's the format the
- * scene-graph rect API actually takes. */
+/* The design doc's literal "8px gap between centers" would put two
+ * 8px-diameter dots overlapping by a full diameter (center spacing
+ * less than the diameter itself) -- clearly a spec error, not
+ * something to implement literally. Using 8px of edge-to-edge
+ * clearance instead (16px center-to-center), the conventional reading
+ * of "an 8px gap" between same-sized elements. */
+#define DECO_DOT_GAP 16
+/* bg-card (GUI-DESIGN-LANGUAGE.md's window-content-chrome token),
+ * text-muted at full strength (close/maximize -- both real and
+ * functional, so neither gets the doc's "dimmed" treatment, which
+ * would misleadingly signal non-interactive), and text-muted at ~40%
+ * opacity (minimize -- genuinely still just a placeholder, per the
+ * doc's own spec for it), as wlr_scene_rect's normalized-float RGBA
+ * rather than this codebase's usual packed 0xRRGGBB hex, since that's
+ * the format the scene-graph rect API actually takes.
+ *
+ * The dimmed color's R/G/B are pre-multiplied by its 0.4 alpha, not
+ * the plain text-muted values scaled down some other way -- struct
+ * wlr_render_color (wlr/render/pass.h, what a wlr_scene_rect's color
+ * eventually becomes) documents this explicitly: "the R, G, B channels
+ * need to be pre-multiplied by A." Getting this wrong is silent, not a
+ * crash: confirmed live, passing straight (non-premultiplied)
+ * text-muted with alpha=0.4 rendered the dot BRIGHTER than the full-
+ * strength dots next to it, the opposite of "dimmed" -- a pixel
+ * sample read back (123,128,151) against the real dots' (107,111,128),
+ * not the ~(59,61,74) blending toward the dark title bar would
+ * actually produce. */
 static const float DECO_BG_COLOR[4] = {0x1B / 255.0f, 0x1C / 255.0f, 0x26 / 255.0f, 1.0f};
 static const float DECO_DOT_COLOR[4] = {0x6B / 255.0f, 0x6F / 255.0f, 0x80 / 255.0f, 1.0f};
+static const float DECO_DOT_COLOR_DIMMED[4] = {
+	(0x6B / 255.0f) * 0.4f, (0x6F / 255.0f) * 0.4f, (0x80 / 255.0f) * 0.4f, 0.4f};
 
 /* For brevity's sake, struct members are annotated where they are used. */
 enum novi_cursor_mode {
@@ -195,15 +225,25 @@ struct novi_toplevel {
 	struct novi_server *server;
 	struct wlr_xdg_toplevel *xdg_toplevel;
 	struct wlr_scene_tree *scene_tree;
-	/* Server-side decoration -- both children of scene_tree, positioned
+	/* Server-side decoration -- all children of scene_tree, positioned
 	 * in the negative-y space above the content (see server_new_xdg_
 	 * toplevel()'s initial-placement comment for why the content itself
 	 * is now placed DECO_HEIGHT lower than before, to leave room). Kept
 	 * as direct pointers, not walked from the scene tree, so xdg_
-	 * toplevel_commit() can resize the bar and close_dot_toplevel_at()
-	 * can identify a hit without re-deriving them. */
+	 * toplevel_commit() can resize the bar and {close,maximize}_dot_
+	 * toplevel_at() can identify a hit without re-deriving them.
+	 * minimize_dot has no _toplevel_at() helper -- it stays a dimmed,
+	 * non-interactive placeholder (see its creation comment). */
 	struct wlr_scene_rect *titlebar;
 	struct wlr_scene_rect *close_dot;
+	struct wlr_scene_rect *maximize_dot;
+	struct wlr_scene_rect *minimize_dot;
+	/* Maximize state, toggled by maximize_toplevel()/unmaximize_
+	 * toplevel() -- both the maximize dot and a client's own request
+	 * (xdg_toplevel_request_maximize()) go through the same two
+	 * functions, so there's exactly one place that ever changes this. */
+	bool maximized;
+	struct wlr_box saved_geometry;
 	struct wl_listener map;
 	struct wl_listener unmap;
 	struct wl_listener commit;
@@ -229,6 +269,13 @@ struct novi_keyboard {
 	struct wl_listener key;
 	struct wl_listener destroy;
 };
+
+/* Defined near xdg_toplevel_request_maximize() below, alongside the
+ * geometry-save/restore logic they share with it; forward-declared
+ * here since server_cursor_button() (the maximize dot's click path)
+ * needs them earlier in the file than that. */
+static void maximize_toplevel(struct novi_toplevel *toplevel);
+static void unmaximize_toplevel(struct novi_toplevel *toplevel);
 
 static void focus_toplevel(struct novi_toplevel *toplevel, struct wlr_surface *surface) {
 	/* Note: this function only deals with keyboard focus. */
@@ -615,12 +662,18 @@ static struct novi_toplevel *desktop_toplevel_at(
 
 /* Separate from desktop_toplevel_at() above: that function only ever
  * resolves WLR_SCENE_NODE_BUFFER nodes (real client surface content),
- * so it correctly returns NULL for the title bar or close dot --
- * both plain WLR_SCENE_NODE_RECT nodes with no wlr_surface behind
- * them. Clicking the close dot still needs its owning toplevel
- * resolved, so this walks the scene separately for that one case. */
-static struct novi_toplevel *close_dot_toplevel_at(
-		struct novi_server *server, double lx, double ly) {
+ * so it correctly returns NULL for the title bar or any of its dots --
+ * all plain WLR_SCENE_NODE_RECT nodes with no wlr_surface behind them.
+ * Clicking a dot still needs its owning toplevel resolved, so this
+ * walks the scene separately for that case, handing back which exact
+ * rect was hit (the title bar backdrop itself is a legal, common
+ * answer -- not clickable in this pass, see DECO_HEIGHT's comment on
+ * no drag-to-move yet -- so callers must compare *rect_out themselves
+ * against the specific dot(s) they care about, same as this function
+ * doesn't privilege any one dot over another). */
+static struct novi_toplevel *decoration_rect_toplevel_at(
+		struct novi_server *server, double lx, double ly,
+		struct wlr_scene_rect **rect_out) {
 	double sx, sy;
 	struct wlr_scene_node *node = wlr_scene_node_at(
 		&server->scene->tree.node, lx, ly, &sx, &sy);
@@ -637,15 +690,8 @@ static struct novi_toplevel *close_dot_toplevel_at(
 	if (node->parent->node.parent != server->layer_tree_toplevels) {
 		return NULL;
 	}
-	struct novi_toplevel *toplevel = node->parent->node.data;
-	if (wlr_scene_rect_from_node(node) != toplevel->close_dot) {
-		/* It's a rect belonging to this toplevel, but not the close
-		 * dot specifically -- the title bar backdrop itself, most
-		 * likely, which isn't clickable in this pass (see DECO_HEIGHT's
-		 * comment: no drag-to-move via the title bar implemented yet). */
-		return NULL;
-	}
-	return toplevel;
+	*rect_out = wlr_scene_rect_from_node(node);
+	return node->parent->node.data;
 }
 
 static void reset_cursor_mode(struct novi_server *server) {
@@ -798,18 +844,25 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
 	/* Notify the client with pointer focus that a button press has occurred */
 	wlr_seat_pointer_notify_button(server->seat,
 			event->time_msec, event->button, event->state);
-	/* Close-dot click, on press -- matching the rest of this function's
-	 * own convention of acting on press, not press-then-release (unlike
-	 * novi-panel's client-side apps button, which does track press-then-
-	 * release since it's a separate client with its own hit-testing
-	 * conventions; this compositor's existing click-to-focus below has
-	 * always acted on press alone). */
+	/* Decoration-dot clicks, on press -- matching the rest of this
+	 * function's own convention of acting on press, not press-then-
+	 * release (unlike novi-panel's client-side apps button, which does
+	 * track press-then-release since it's a separate client with its
+	 * own hit-testing conventions; this compositor's existing click-to-
+	 * focus below has always acted on press alone). */
 	if (event->button == BTN_LEFT &&
 			event->state == WL_POINTER_BUTTON_STATE_PRESSED) {
-		struct novi_toplevel *closed = close_dot_toplevel_at(
-			server, server->cursor->x, server->cursor->y);
-		if (closed != NULL) {
-			wlr_xdg_toplevel_send_close(closed->xdg_toplevel);
+		struct wlr_scene_rect *hit_rect = NULL;
+		struct novi_toplevel *hit = decoration_rect_toplevel_at(
+			server, server->cursor->x, server->cursor->y, &hit_rect);
+		if (hit != NULL && hit_rect == hit->close_dot) {
+			wlr_xdg_toplevel_send_close(hit->xdg_toplevel);
+		} else if (hit != NULL && hit_rect == hit->maximize_dot) {
+			if (hit->maximized) {
+				unmaximize_toplevel(hit);
+			} else {
+				maximize_toplevel(hit);
+			}
 		}
 	}
 
@@ -1256,23 +1309,31 @@ static void xdg_toplevel_commit(struct wl_listener *listener, void *data) {
 		wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, 0, 0);
 	}
 
-	/* Keep the title bar/close dot in sync with the content's current
-	 * width on every commit -- necessary because both interactive
-	 * resize (process_cursor_resize()) and the client's own size
-	 * choice can change this at any time, and a title bar has to span
-	 * the actual window width to read as real chrome rather than a
-	 * mismatched strip. Geometry is 0x0 until the client's first real
-	 * commit (the initial_commit branch above only sends a configure,
-	 * it doesn't itself establish geometry) -- the guard below just
-	 * leaves the placeholder size from server_new_xdg_toplevel() alone
+	/* Keep the title bar/dots in sync with the content's current width
+	 * on every commit -- necessary because both interactive resize
+	 * (process_cursor_resize()) and the client's own size choice can
+	 * change this at any time, and a title bar has to span the actual
+	 * window width to read as real chrome rather than a mismatched
+	 * strip. Geometry is 0x0 until the client's first real commit (the
+	 * initial_commit branch above only sends a configure, it doesn't
+	 * itself establish geometry) -- the guard below just leaves the
+	 * placeholder size/position from server_new_xdg_toplevel() alone
 	 * until then, which is harmless since nothing is mapped yet either. */
 	struct wlr_box geo_box;
 	wlr_xdg_surface_get_geometry(toplevel->xdg_toplevel->base, &geo_box);
 	if (geo_box.width > 0) {
 		wlr_scene_rect_set_size(toplevel->titlebar, geo_box.width, DECO_HEIGHT);
-		wlr_scene_node_set_position(&toplevel->close_dot->node,
-			geo_box.width - DECO_DOT_PADDING - DECO_DOT_SIZE,
-			-DECO_HEIGHT + (DECO_HEIGHT - DECO_DOT_SIZE) / 2);
+		/* Right-to-left: close (rightmost), then maximize, then
+		 * minimize, each DECO_DOT_GAP further left than the last. */
+		int close_x = geo_box.width - DECO_DOT_PADDING - DECO_DOT_SIZE;
+		int maximize_x = close_x - DECO_DOT_GAP;
+		int minimize_x = maximize_x - DECO_DOT_GAP;
+		wlr_scene_node_set_position(&toplevel->close_dot->node, close_x,
+			toplevel->close_dot->node.y);
+		wlr_scene_node_set_position(&toplevel->maximize_dot->node, maximize_x,
+			toplevel->maximize_dot->node.y);
+		wlr_scene_node_set_position(&toplevel->minimize_dot->node, minimize_x,
+			toplevel->minimize_dot->node.y);
 	}
 }
 
@@ -1353,19 +1414,86 @@ static void xdg_toplevel_request_resize(
 	begin_interactive(toplevel, NOVI_CURSOR_RESIZE, event->edges);
 }
 
+/* Snaps a toplevel to the output's usable area (below the panel, same
+ * as initial placement), remembering its current position/size first
+ * so unmaximize_toplevel() can put it back. GUI-DESIGN-LANGUAGE.md
+ * flagged this as the tractable one of the two remaining dots: the
+ * geometry math is exactly what process_cursor_resize() already does
+ * for interactive resize, just driven by a click instead of a drag,
+ * and the only genuinely new piece is saving/restoring the pre-
+ * maximize geometry, which is what saved_geometry is for. */
+static void maximize_toplevel(struct novi_toplevel *toplevel) {
+	if (toplevel->maximized) {
+		return;
+	}
+	struct novi_server *server = toplevel->server;
+	if (wl_list_empty(&server->outputs)) {
+		return;
+	}
+	struct novi_output *output =
+		wl_container_of(server->outputs.next, output, link);
+	struct wlr_box layout_box = {0};
+	wlr_output_layout_get_box(server->output_layout,
+		output->wlr_output, &layout_box);
+
+	struct wlr_box geo_box;
+	wlr_xdg_surface_get_geometry(toplevel->xdg_toplevel->base, &geo_box);
+	toplevel->saved_geometry.x = (int)toplevel->scene_tree->node.x;
+	toplevel->saved_geometry.y = (int)toplevel->scene_tree->node.y;
+	toplevel->saved_geometry.width = geo_box.width;
+	toplevel->saved_geometry.height = geo_box.height;
+
+	int max_height = output->usable_area.height - DECO_HEIGHT;
+	if (max_height < 0) {
+		max_height = 0;
+	}
+	wlr_scene_node_set_position(&toplevel->scene_tree->node,
+		layout_box.x + output->usable_area.x,
+		layout_box.y + output->usable_area.y + DECO_HEIGHT);
+	wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel,
+		output->usable_area.width, max_height);
+	wlr_xdg_toplevel_set_maximized(toplevel->xdg_toplevel, true);
+	toplevel->maximized = true;
+}
+
+/* Restores the geometry maximize_toplevel() saved. A no-op if the
+ * toplevel was somehow never actually maximized (defensive, not
+ * expected -- both call sites (the maximize dot's click handler,
+ * xdg_toplevel_request_maximize() below) only ever call this when
+ * toplevel->maximized is already true). */
+static void unmaximize_toplevel(struct novi_toplevel *toplevel) {
+	if (!toplevel->maximized) {
+		return;
+	}
+	wlr_scene_node_set_position(&toplevel->scene_tree->node,
+		toplevel->saved_geometry.x, toplevel->saved_geometry.y);
+	wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel,
+		toplevel->saved_geometry.width, toplevel->saved_geometry.height);
+	wlr_xdg_toplevel_set_maximized(toplevel->xdg_toplevel, false);
+	toplevel->maximized = false;
+}
+
 static void xdg_toplevel_request_maximize(
 		struct wl_listener *listener, void *data) {
-	/* This event is raised when a client would like to maximize itself,
-	 * typically because the user clicked on the maximize button on client-side
-	 * decorations. novi-shell doesn't support maximization, but to conform to
-	 * xdg-shell protocol we still must send a configure.
-	 * wlr_xdg_surface_schedule_configure() is used to send an empty reply.
-	 * However, if the request was sent before an initial commit, we don't do
-	 * anything and let the client finish the initial surface setup. */
+	/* This event is raised when a client would like to maximize (or
+	 * unmaximize -- toplevel->requested.maximized carries which)
+	 * itself, typically because the user clicked a client-side
+	 * maximize control or used a toolkit keybinding. Both directions
+	 * go through the same maximize_toplevel()/unmaximize_toplevel()
+	 * pair the decoration's own maximize dot uses, so there's exactly
+	 * one place that ever changes a toplevel's maximized state. If the
+	 * request arrived before an initial commit, there's no geometry to
+	 * save/restore yet -- let the client finish its initial setup
+	 * instead (matching the previous behavior for that edge case). */
 	struct novi_toplevel *toplevel =
 		wl_container_of(listener, toplevel, request_maximize);
-	if (toplevel->xdg_toplevel->base->initialized) {
-		wlr_xdg_surface_schedule_configure(toplevel->xdg_toplevel->base);
+	if (!toplevel->xdg_toplevel->base->initialized) {
+		return;
+	}
+	if (toplevel->xdg_toplevel->requested.maximized) {
+		maximize_toplevel(toplevel);
+	} else {
+		unmaximize_toplevel(toplevel);
 	}
 }
 
@@ -1398,24 +1526,38 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
 	toplevel->scene_tree->node.data = toplevel;
 	xdg_toplevel->base->data = toplevel->scene_tree;
 
-	/* Server-side decoration: a title bar strip and close dot, both
+	/* Server-side decoration: a title bar strip and three dots, all
 	 * children of scene_tree, positioned in the negative-y space above
 	 * the content (local (0,-DECO_HEIGHT) and up) -- content itself
 	 * stays at local (0,0) exactly as before, so move/resize logic
 	 * elsewhere (process_cursor_move/resize(), both operate on scene_
 	 * tree's own node position) needs no changes; the decoration just
-	 * rides along as sibling children whenever the tree moves. Sized
-	 * with a 0-width placeholder here since the content's real width
-	 * isn't known until its first commit (see xdg_toplevel_commit(),
-	 * which the client's own initial_commit -> ack_configure ->
-	 * real commit sequence guarantees fires before this is visible). */
+	 * rides along as sibling children whenever the tree moves. All
+	 * placeholder-positioned at x=0 here since the content's real width
+	 * (needed to right-align them) isn't known until its first commit
+	 * (see xdg_toplevel_commit(), which the client's own initial_commit
+	 * -> ack_configure -> real commit sequence guarantees fires before
+	 * this is visible). Creation order right-to-left (close, maximize,
+	 * minimize) matches their intended screen order, though it isn't
+	 * load-bearing -- xdg_toplevel_commit() repositions all three by
+	 * direct pointer, not by sibling order. */
 	toplevel->titlebar = wlr_scene_rect_create(
 		toplevel->scene_tree, 0, DECO_HEIGHT, DECO_BG_COLOR);
 	wlr_scene_node_set_position(&toplevel->titlebar->node, 0, -DECO_HEIGHT);
 	toplevel->close_dot = wlr_scene_rect_create(
 		toplevel->scene_tree, DECO_DOT_SIZE, DECO_DOT_SIZE, DECO_DOT_COLOR);
-	wlr_scene_node_set_position(&toplevel->close_dot->node,
-		0, -DECO_HEIGHT + (DECO_HEIGHT - DECO_DOT_SIZE) / 2);
+	toplevel->maximize_dot = wlr_scene_rect_create(
+		toplevel->scene_tree, DECO_DOT_SIZE, DECO_DOT_SIZE, DECO_DOT_COLOR);
+	/* Minimize has no taskbar/dock to restore from yet -- per GUI-
+	 * DESIGN-LANGUAGE.md, styled present-but-dimmed rather than either
+	 * wired to a dead end or omitted outright (omitting it would make
+	 * the remaining two look like the whole set, not two-thirds of one). */
+	toplevel->minimize_dot = wlr_scene_rect_create(
+		toplevel->scene_tree, DECO_DOT_SIZE, DECO_DOT_SIZE, DECO_DOT_COLOR_DIMMED);
+	int dot_y = -DECO_HEIGHT + (DECO_HEIGHT - DECO_DOT_SIZE) / 2;
+	wlr_scene_node_set_position(&toplevel->close_dot->node, 0, dot_y);
+	wlr_scene_node_set_position(&toplevel->maximize_dot->node, 0, dot_y);
+	wlr_scene_node_set_position(&toplevel->minimize_dot->node, 0, dot_y);
 
 	/* Initial placement: land the window in the output's usable area
 	 * (below the panel's exclusive zone), not at the scene tree's
