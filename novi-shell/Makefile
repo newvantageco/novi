@@ -11,6 +11,19 @@ CC ?= cc
 PKG_CONFIG ?= pkg-config
 WAYLAND_SCANNER ?= wayland-scanner
 XDG_SHELL_XML ?= /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml
+# wlr-layer-shell-unstable-v1.xml is vendored in protocol/ (MIT-style
+# license, header intact) rather than read from an installed system
+# path: wlroots does not install this XML or its generated protocol
+# header anywhere -- it's wlroots' own bundled "wlr-protocols" source,
+# compiled directly into libwlroots.so, with no public install path.
+# wlr_layer_shell_v1.h (which IS installed) still needs the generated
+# wlr-layer-shell-unstable-v1-protocol.h at compile time for its enums
+# (ZWLR_LAYER_SHELL_V1_LAYER_* etc.) via a quoted #include that falls
+# back to -I. -- confirmed by reading wlroots' own protocol/meson.build
+# and its installed .pc Cflags (just "-I${includedir}/wlroots-0.18",
+# nothing protocol-related). Every wlroots-based compositor (sway
+# included) vendors this same XML for the same reason.
+LAYER_SHELL_XML ?= protocol/wlr-layer-shell-unstable-v1.xml
 DESTDIR ?=
 PREFIX ?= /usr
 
@@ -41,13 +54,20 @@ xdg-shell-protocol.h: $(XDG_SHELL_XML)
 xdg-shell-protocol.c: $(XDG_SHELL_XML)
 	$(WAYLAND_SCANNER) private-code $< $@
 
-novi-shell: main.c xdg-shell-protocol.c xdg-shell-protocol.h
+# Server-header only: the layer-shell protocol implementation itself
+# (opcode marshalling) is already compiled into libwlroots.so -- we
+# only need the enum/struct declarations wlr_layer_shell_v1.h's quoted
+# #include expects to find on the compiler's -I path.
+wlr-layer-shell-unstable-v1-protocol.h: $(LAYER_SHELL_XML)
+	$(WAYLAND_SCANNER) server-header $< $@
+
+novi-shell: main.c xdg-shell-protocol.c xdg-shell-protocol.h wlr-layer-shell-unstable-v1-protocol.h
 	$(CC) $(CFLAGS) -o $@ main.c xdg-shell-protocol.c $(LDLIBS)
 
 install: novi-shell
 	install -D -m 755 novi-shell "$(DESTDIR)$(PREFIX)/bin/novi-shell"
 
 clean:
-	rm -f novi-shell xdg-shell-protocol.h xdg-shell-protocol.c
+	rm -f novi-shell xdg-shell-protocol.h xdg-shell-protocol.c wlr-layer-shell-unstable-v1-protocol.h
 
 .PHONY: all install clean

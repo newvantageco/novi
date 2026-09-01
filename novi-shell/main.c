@@ -1,16 +1,22 @@
 /* novi-shell — Novi Linux's compositor and session shell (RFC 0001).
  *
- * This is the compositor core only: a DRM+libinput wlroots backend,
- * the pixman software renderer, xdg-shell window management, and
- * seatd-based session handling (no logind, matching this repo's
- * "no systemd anywhere" decision). Adapted from wlroots' tinywl.c
+ * The compositor core: a DRM+libinput wlroots backend, the pixman
+ * software renderer, xdg-shell window management, wlr-layer-shell-v1
+ * (so separate client processes can anchor to screen edges), and
+ * seatd-based session handling (no logind, matching this repo's "no
+ * systemd anywhere" decision). Adapted from wlroots' tinywl.c
  * reference compositor (CC0 / public domain), which already
- * implements exactly this core correctly and is meant to be built on
- * rather than reinvented. The panel, app launcher, and layer-shell
- * protocol support RFC 0001 actually describes as "novi-shell" are
- * not implemented yet -- those are a UI layer on top of this core,
- * tracked as follow-up work, not part of this first milestone (prove
- * the compositor builds, links, and runs under s6/seatd supervision).
+ * implements the xdg-shell core correctly and is meant to be built on
+ * rather than reinvented.
+ *
+ * Default keybindings implement part of RFC 0001 decision 7: Alt+Tab /
+ * Alt+Shift+Tab (window switching), Super+Return (spawn a terminal),
+ * Super+Q (close focused window). Still not implemented: the panel and
+ * app launcher themselves (this only provides the protocol they'd
+ * anchor to, not the UI), Super+[1-9] workspaces, PrintScreen
+ * screenshots, Super+L lock, Super+. emoji picker, and moving any of
+ * this to the user-editable config file RFC 0001 calls for -- all
+ * tracked follow-up work, not part of this milestone.
  */
 #include <assert.h>
 #include <getopt.h>
@@ -28,6 +34,7 @@
 #include <wlr/types/wlr_data_device.h>
 #include <wlr/types/wlr_input_device.h>
 #include <wlr/types/wlr_keyboard.h>
+#include <wlr/types/wlr_layer_shell_v1.h>
 #include <wlr/types/wlr_output.h>
 #include <wlr/types/wlr_output_layout.h>
 #include <wlr/types/wlr_pointer.h>
@@ -38,6 +45,12 @@
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/util/log.h>
 #include <xkbcommon/xkbcommon.h>
+
+/* RFC 0001 decision 6: novi-shell defaults to a small wlroots-native
+ * terminal (foot) with no GTK/Qt dependency chain, spawned on
+ * Super+Return. Overridable via NOVI_TERMINAL so this doesn't need a
+ * recompile once alternatives are packaged. */
+#define NOVI_DEFAULT_TERMINAL "foot"
 
 /* For brevity's sake, struct members are annotated where they are used. */
 enum novi_cursor_mode {
@@ -81,6 +94,21 @@ struct novi_server {
 	struct wlr_output_layout *output_layout;
 	struct wl_list outputs;
 	struct wl_listener new_output;
+
+	/* Layer-shell (RFC 0001 decision 5: the panel/launcher UI layer is
+	 * built as a client of this protocol, not baked into the
+	 * compositor). Scene trees are created once, in this fixed order,
+	 * so z-order across layers is guaranteed by scene_tree child
+	 * ordering alone: background is always bottom-most, overlay always
+	 * top-most, and toplevels (regular windows) always sandwiched
+	 * between "bottom" and "top" regardless of what's mapped later. */
+	struct wlr_layer_shell_v1 *layer_shell;
+	struct wl_listener new_layer_surface;
+	struct wlr_scene_tree *layer_tree_background;
+	struct wlr_scene_tree *layer_tree_bottom;
+	struct wlr_scene_tree *layer_tree_toplevels;
+	struct wlr_scene_tree *layer_tree_top;
+	struct wlr_scene_tree *layer_tree_overlay;
 };
 
 struct novi_output {
@@ -90,6 +118,18 @@ struct novi_output {
 	struct wl_listener frame;
 	struct wl_listener request_state;
 	struct wl_listener destroy;
+	/* layer-shell clients (novi_layer_surface.link) mapped on this output */
+	struct wl_list layer_surfaces;
+};
+
+struct novi_layer_surface {
+	struct wl_list link; /* novi_output.layer_surfaces */
+	struct novi_output *output;
+	struct wlr_layer_surface_v1 *layer_surface;
+	struct wlr_scene_layer_surface_v1 *scene_layer_surface;
+	struct wl_listener map;
+	struct wl_listener destroy;
+	struct wl_listener commit;
 };
 
 struct novi_toplevel {
@@ -183,31 +223,109 @@ static void keyboard_handle_modifiers(
 		&keyboard->wlr_keyboard->modifiers);
 }
 
-static bool handle_keybinding(struct novi_server *server, xkb_keysym_t sym) {
-	/*
-	 * Here we handle compositor keybindings. This is when the compositor is
-	 * processing keys, rather than passing them on to the client for its own
-	 * processing.
-	 *
-	 * This function assumes Alt is held down.
-	 */
-	switch (sym) {
-	case XKB_KEY_Escape:
-		wl_display_terminate(server->wl_display);
-		break;
-	case XKB_KEY_F1:
-		/* Cycle to the next toplevel */
-		if (wl_list_length(&server->toplevels) < 2) {
+/* Spawns `cmd` via /bin/sh -c, same fork+exec shape main()'s -s startup
+ * command already uses. Used by keybindings, not just at startup. */
+static void spawn(const char *cmd) {
+	pid_t pid = fork();
+	if (pid < 0) {
+		wlr_log_errno(WLR_ERROR, "fork failed for \"%s\"", cmd);
+		return;
+	}
+	if (pid == 0) {
+		/* Detach into its own session so it isn't killed by whatever
+		 * signal eventually stops novi-shell itself, and so its
+		 * lifetime isn't tied to being a direct child novi-shell has
+		 * to reap. */
+		setsid();
+		execl("/bin/sh", "/bin/sh", "-c", cmd, (void *)NULL);
+		/* execl only returns on failure. */
+		_exit(127);
+	}
+}
+
+/* Cycle keyboard focus through server->toplevels, which focus_toplevel()
+ * keeps in most-recently-focused-first order. Forward (Alt+Tab) always
+ * grabs the tail (least-recently-focused); repeating it visits every
+ * window exactly once per full cycle. Reverse (Alt+Shift+Tab) undoes one
+ * step by grabbing the second entry (the one focused immediately before
+ * the current one) rather than maintaining a separate MRU-scroll state
+ * machine -- a reasonable, correct simplification for this milestone,
+ * not full held-Alt scroll-through semantics. */
+static void cycle_toplevel(struct novi_server *server, bool forward) {
+	if (wl_list_length(&server->toplevels) < 2) {
+		return;
+	}
+	struct novi_toplevel *target;
+	if (forward) {
+		target = wl_container_of(server->toplevels.prev, target, link);
+	} else {
+		target = wl_container_of(server->toplevels.next->next, target, link);
+	}
+	focus_toplevel(target, target->xdg_toplevel->base->surface);
+}
+
+/* Super+Q: ask the focused window's client to close itself (the same
+ * request a client-side close button would send) rather than forcibly
+ * destroying it -- lets the client save state / show an "unsaved
+ * changes" prompt like any normal close request would. */
+static void close_focused_toplevel(struct novi_server *server) {
+	struct wlr_surface *focused = server->seat->keyboard_state.focused_surface;
+	if (focused == NULL) {
+		return;
+	}
+	struct wlr_xdg_toplevel *xdg_toplevel =
+		wlr_xdg_toplevel_try_from_wlr_surface(focused);
+	if (xdg_toplevel != NULL) {
+		wlr_xdg_toplevel_send_close(xdg_toplevel);
+	}
+}
+
+/* RFC 0001 decision 7's default keybindings. Alt+Tab/Shift+Tab (window
+ * switching) and Super+Return/Super+Q (terminal/close) are implemented
+ * here; Super+[1-9] workspaces, PrintScreen screenshots, Super+L lock,
+ * and Super+. emoji picker are tracked follow-ups, not yet wired --
+ * each needs state (workspaces) or a client-side helper (screenshot,
+ * lock) this milestone doesn't build. All of this is compositor-
+ * internal default behavior for now; RFC 0001 calls for these to move
+ * to a user-editable config file, also a follow-up, not implemented
+ * here yet. */
+static bool handle_keybinding(struct novi_server *server, uint32_t modifiers,
+		xkb_keysym_t sym) {
+	if (modifiers & WLR_MODIFIER_ALT) {
+		switch (sym) {
+		case XKB_KEY_Escape:
+			/* Not part of RFC 0001's spec -- kept as a development/
+			 * test convenience for exiting the compositor cleanly
+			 * under QEMU, where there's no other way to do so yet. */
+			wl_display_terminate(server->wl_display);
+			return true;
+		case XKB_KEY_Tab:
+			cycle_toplevel(server, true);
+			return true;
+		case XKB_KEY_ISO_Left_Tab:
+			/* Most keyboard layouts report Shift+Tab as this keysym,
+			 * not as Tab with the shift modifier bit set. */
+			cycle_toplevel(server, false);
+			return true;
+		default:
 			break;
 		}
-		struct novi_toplevel *next_toplevel =
-			wl_container_of(server->toplevels.prev, next_toplevel, link);
-		focus_toplevel(next_toplevel, next_toplevel->xdg_toplevel->base->surface);
-		break;
-	default:
-		return false;
 	}
-	return true;
+	if (modifiers & WLR_MODIFIER_LOGO) {
+		switch (sym) {
+		case XKB_KEY_Return:
+			spawn(getenv("NOVI_TERMINAL") ?
+				getenv("NOVI_TERMINAL") : NOVI_DEFAULT_TERMINAL);
+			return true;
+		case XKB_KEY_q:
+		case XKB_KEY_Q:
+			close_focused_toplevel(server);
+			return true;
+		default:
+			break;
+		}
+	}
+	return false;
 }
 
 static void keyboard_handle_key(
@@ -228,12 +346,15 @@ static void keyboard_handle_key(
 
 	bool handled = false;
 	uint32_t modifiers = wlr_keyboard_get_modifiers(keyboard->wlr_keyboard);
-	if ((modifiers & WLR_MODIFIER_ALT) &&
+	if ((modifiers & (WLR_MODIFIER_ALT | WLR_MODIFIER_LOGO)) &&
 			event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
-		/* If alt is held down and this button was _pressed_, we attempt to
-		 * process it as a compositor keybinding. */
+		/* If Alt or Super (Logo) is held down and this key was
+		 * _pressed_, attempt to process it as a compositor keybinding
+		 * before ever considering passing it to the focused client. */
 		for (int i = 0; i < nsyms; i++) {
-			handled = handle_keybinding(server, syms[i]);
+			if (handle_keybinding(server, modifiers, syms[i])) {
+				handled = true;
+			}
 		}
 	}
 
@@ -588,6 +709,8 @@ static void output_frame(struct wl_listener *listener, void *data) {
 	wlr_scene_output_send_frame_done(scene_output, &now);
 }
 
+static void arrange_layers(struct novi_output *output);
+
 static void output_request_state(struct wl_listener *listener, void *data) {
 	/* This function is called when the backend requests a new state for
 	 * the output. For example, Wayland and X11 backends request a new mode
@@ -595,10 +718,26 @@ static void output_request_state(struct wl_listener *listener, void *data) {
 	struct novi_output *output = wl_container_of(listener, output, request_state);
 	const struct wlr_output_event_request_state *event = data;
 	wlr_output_commit_state(output->wlr_output, event->state);
+	/* Resolution may have changed -- layer-shell surfaces anchored to
+	 * this output (a panel spanning full width, say) need their boxes
+	 * recomputed against the new dimensions. */
+	arrange_layers(output);
 }
 
 static void output_destroy(struct wl_listener *listener, void *data) {
 	struct novi_output *output = wl_container_of(listener, output, destroy);
+
+	/* Layer-shell clients hold a pointer back to this output
+	 * (novi_layer_surface.output) that would otherwise dangle once
+	 * `output` is freed below -- tear them down explicitly rather than
+	 * leave that as a use-after-free waiting to happen. destroy() on
+	 * each triggers layer_surface_destroy(), which unlinks itself from
+	 * output->layer_surfaces, so this list is safe to walk with the
+	 * _safe iterator. */
+	struct novi_layer_surface *surface, *tmp;
+	wl_list_for_each_safe(surface, tmp, &output->layer_surfaces, link) {
+		wlr_layer_surface_v1_destroy(surface->layer_surface);
+	}
 
 	wl_list_remove(&output->frame.link);
 	wl_list_remove(&output->request_state.link);
@@ -641,6 +780,12 @@ static void server_new_output(struct wl_listener *listener, void *data) {
 	struct novi_output *output = calloc(1, sizeof(*output));
 	output->wlr_output = wlr_output;
 	output->server = server;
+	wl_list_init(&output->layer_surfaces);
+	/* Backpointer so a layer-shell surface's wlr_output can be mapped
+	 * back to our novi_output wrapper (server_new_layer_surface does
+	 * this when a client requests a specific output, or when we assign
+	 * one ourselves for a client that left it unspecified). */
+	wlr_output->data = output;
 
 	/* Sets up a listener for the frame event. */
 	output->frame.notify = output_frame;
@@ -669,6 +814,156 @@ static void server_new_output(struct wl_listener *listener, void *data) {
 		wlr_output);
 	struct wlr_scene_output *scene_output = wlr_scene_output_create(server->scene, wlr_output);
 	wlr_scene_output_layout_add_output(server->scene_layout, l_output, scene_output);
+
+	arrange_layers(output);
+}
+
+/* ── Layer-shell (wlr-layer-shell-unstable-v1) ──────────────────────
+ *
+ * RFC 0001 decision 5: the panel, launcher, and other novi-shell UI
+ * pieces are separate Wayland clients using this protocol to anchor
+ * themselves to screen edges, not code baked into the compositor.
+ * This section is the compositor-side half only: accept layer-shell
+ * clients, place them in the right z-order layer, and give each one
+ * a correctly-computed box. It does not implement any panel itself.
+ */
+
+static void arrange_layers(struct novi_output *output) {
+	if (output->wlr_output == NULL) {
+		return;
+	}
+
+	struct wlr_box full_area = {0};
+	wlr_output_effective_resolution(output->wlr_output,
+		&full_area.width, &full_area.height);
+	struct wlr_box usable_area = full_area;
+
+	/* wlroots' own scene helper (types/scene/layer_shell_v1.c) already
+	 * implements the protocol's anchor/margin/exclusive-zone math
+	 * correctly -- we just have to call it once per mapped surface on
+	 * this output, in the fixed background -> bottom -> top -> overlay
+	 * order the protocol expects, threading usable_area through so a
+	 * later layer sees the space an earlier one reserved. */
+	static const enum zwlr_layer_shell_v1_layer arrange_order[] = {
+		ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND,
+		ZWLR_LAYER_SHELL_V1_LAYER_BOTTOM,
+		ZWLR_LAYER_SHELL_V1_LAYER_TOP,
+		ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY,
+	};
+	for (size_t i = 0; i < sizeof(arrange_order) / sizeof(arrange_order[0]); i++) {
+		struct novi_layer_surface *surface;
+		wl_list_for_each(surface, &output->layer_surfaces, link) {
+			if (surface->layer_surface->current.layer != arrange_order[i]) {
+				continue;
+			}
+			wlr_scene_layer_surface_v1_configure(surface->scene_layer_surface,
+				&full_area, &usable_area);
+		}
+	}
+}
+
+static void layer_surface_map(struct wl_listener *listener, void *data) {
+	struct novi_layer_surface *surface = wl_container_of(listener, surface, map);
+	wlr_log(WLR_INFO, "layer-shell surface mapped: namespace=\"%s\" layer=%d",
+		surface->layer_surface->namespace ? surface->layer_surface->namespace : "",
+		surface->layer_surface->current.layer);
+}
+
+static void layer_surface_commit(struct wl_listener *listener, void *data) {
+	struct novi_layer_surface *surface = wl_container_of(listener, surface, commit);
+	/* Re-arranging on every commit (not just ones that changed anchor/
+	 * size/margin) is simpler than tracking exactly which committed
+	 * bits changed, and cheap enough with the handful of layer-shell
+	 * clients (a panel, a launcher overlay) this compositor will ever
+	 * host at once. */
+	arrange_layers(surface->output);
+}
+
+static void layer_surface_destroy(struct wl_listener *listener, void *data) {
+	struct novi_layer_surface *surface = wl_container_of(listener, surface, destroy);
+	struct novi_output *output = surface->output;
+
+	wl_list_remove(&surface->link);
+	wl_list_remove(&surface->map.link);
+	wl_list_remove(&surface->destroy.link);
+	wl_list_remove(&surface->commit.link);
+	/* surface->scene_layer_surface frees itself: wlr_scene_layer_surface_v1_create()
+	 * (types/scene/layer_shell_v1.c) hooks the layer_surface's own destroy
+	 * signal to tear down its scene tree and free that struct. */
+	free(surface);
+
+	/* A departing surface may have held a positive exclusive zone (a
+	 * panel, say) -- re-arrange so any remaining layer surfaces get
+	 * that space back. output_destroy() (which is what's tearing this
+	 * output down when output is no longer valid) always empties
+	 * layer_surfaces before freeing the output itself, so this pointer
+	 * is safe to use here. */
+	arrange_layers(output);
+}
+
+static struct wlr_scene_tree *layer_tree_for(struct novi_server *server,
+		enum zwlr_layer_shell_v1_layer layer) {
+	switch (layer) {
+	case ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND:
+		return server->layer_tree_background;
+	case ZWLR_LAYER_SHELL_V1_LAYER_BOTTOM:
+		return server->layer_tree_bottom;
+	case ZWLR_LAYER_SHELL_V1_LAYER_TOP:
+		return server->layer_tree_top;
+	case ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY:
+	default:
+		return server->layer_tree_overlay;
+	}
+}
+
+static void server_new_layer_surface(struct wl_listener *listener, void *data) {
+	struct novi_server *server = wl_container_of(listener, server, new_layer_surface);
+	struct wlr_layer_surface_v1 *layer_surface = data;
+
+	/* Per wlr_layer_shell_v1.h: "the output may be NULL. In this case,
+	 * it is your responsibility to assign an output before returning."
+	 * This compositor only ever has one output under test today, so
+	 * "pick the first one" is correct; a real multi-output setup would
+	 * pick the output under the cursor or the focused one instead. */
+	if (layer_surface->output == NULL) {
+		if (wl_list_empty(&server->outputs)) {
+			wlr_log(WLR_ERROR,
+				"layer-shell client requested a surface but no output exists yet");
+			wlr_layer_surface_v1_destroy(layer_surface);
+			return;
+		}
+		struct novi_output *first_output =
+			wl_container_of(server->outputs.next, first_output, link);
+		layer_surface->output = first_output->wlr_output;
+	}
+
+	struct novi_output *output = layer_surface->output->data;
+	assert(output != NULL);
+
+	struct novi_layer_surface *surface = calloc(1, sizeof(*surface));
+	surface->output = output;
+	surface->layer_surface = layer_surface;
+	surface->scene_layer_surface = wlr_scene_layer_surface_v1_create(
+		layer_tree_for(server, layer_surface->current.layer), layer_surface);
+	if (surface->scene_layer_surface == NULL) {
+		wlr_log(WLR_ERROR, "failed to create wlr_scene_layer_surface_v1");
+		free(surface);
+		wlr_layer_surface_v1_destroy(layer_surface);
+		return;
+	}
+	surface->scene_layer_surface->tree->node.data = surface;
+	layer_surface->data = surface->scene_layer_surface->tree;
+
+	surface->map.notify = layer_surface_map;
+	wl_signal_add(&layer_surface->surface->events.map, &surface->map);
+	surface->destroy.notify = layer_surface_destroy;
+	wl_signal_add(&layer_surface->events.destroy, &surface->destroy);
+	surface->commit.notify = layer_surface_commit;
+	wl_signal_add(&layer_surface->surface->events.commit, &surface->commit);
+
+	wl_list_insert(&output->layer_surfaces, &surface->link);
+
+	arrange_layers(output);
 }
 
 static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
@@ -817,8 +1112,13 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
 	struct novi_toplevel *toplevel = calloc(1, sizeof(*toplevel));
 	toplevel->server = server;
 	toplevel->xdg_toplevel = xdg_toplevel;
-	toplevel->scene_tree =
-		wlr_scene_xdg_surface_create(&toplevel->server->scene->tree, xdg_toplevel->base);
+	/* Parented under layer_tree_toplevels, not the scene root directly:
+	 * that tree was created between layer_tree_bottom and layer_tree_top
+	 * (see main()), so regular windows always render above background/
+	 * bottom layer-shell surfaces and below top/overlay ones (a panel),
+	 * regardless of creation order at runtime. */
+	toplevel->scene_tree = wlr_scene_xdg_surface_create(
+		toplevel->server->layer_tree_toplevels, xdg_toplevel->base);
 	toplevel->scene_tree->node.data = toplevel;
 	xdg_toplevel->base->data = toplevel->scene_tree;
 
@@ -979,6 +1279,17 @@ int main(int argc, char *argv[]) {
 	server.scene = wlr_scene_create();
 	server.scene_layout = wlr_scene_attach_output_layout(server.scene, server.output_layout);
 
+	/* Five persistent scene-tree layers, created in this fixed order so
+	 * z-order across them is guaranteed by scene_tree child ordering
+	 * alone (see the novi_server struct comment): background is always
+	 * bottom-most, overlay always top-most, regular windows always
+	 * sandwiched between "bottom" and "top" layer-shell surfaces. */
+	server.layer_tree_background = wlr_scene_tree_create(&server.scene->tree);
+	server.layer_tree_bottom = wlr_scene_tree_create(&server.scene->tree);
+	server.layer_tree_toplevels = wlr_scene_tree_create(&server.scene->tree);
+	server.layer_tree_top = wlr_scene_tree_create(&server.scene->tree);
+	server.layer_tree_overlay = wlr_scene_tree_create(&server.scene->tree);
+
 	/* Set up xdg-shell version 3. The xdg-shell is a Wayland protocol which is
 	 * used for application windows. For more detail on shells, refer to
 	 * https://drewdevault.com/2018/07/29/Wayland-shells.html.
@@ -989,6 +1300,16 @@ int main(int argc, char *argv[]) {
 	wl_signal_add(&server.xdg_shell->events.new_toplevel, &server.new_xdg_toplevel);
 	server.new_xdg_popup.notify = server_new_xdg_popup;
 	wl_signal_add(&server.xdg_shell->events.new_popup, &server.new_xdg_popup);
+
+	/* wlr-layer-shell-unstable-v1 (RFC 0001 decision 5): lets separate
+	 * client processes -- the panel, launcher, and other novi-shell UI
+	 * pieces, none of which exist yet -- anchor surfaces to screen
+	 * edges. Version 4 matches the protocol version this repo vendors
+	 * (novi-shell/protocol/wlr-layer-shell-unstable-v1.xml) and is the
+	 * latest wlroots 0.18 implements. */
+	server.layer_shell = wlr_layer_shell_v1_create(server.wl_display, 4);
+	server.new_layer_surface.notify = server_new_layer_surface;
+	wl_signal_add(&server.layer_shell->events.new_surface, &server.new_layer_surface);
 
 	/*
 	 * Creates a cursor, which is a wlroots utility for tracking the cursor
