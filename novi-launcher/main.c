@@ -14,15 +14,12 @@
  * evaluation as you type, shown live below the input line. App/file
  * search is a tracked follow-up once there's something real to search.
  *
- * Rendering is a hand-authored minimal bitmap font (digits 0-9 and the
- * operators this calculator actually needs), not a full alphabet: this
- * repo has no font-rendering stack yet (fontconfig/freetype/harfbuzz
- * are real, sizeable dependencies not pulled in for this milestone),
- * and a font table copied from memory without a way to verify every
- * byte against a real source isn't something to ship silently wrong.
- * What's here is small enough to have been designed and visually
- * verified pixel-by-pixel (via a QEMU screendump) rather than assumed
- * correct.
+ * Rendering uses real, anti-aliased text via fcft+pixman (see
+ * common/text.h) -- the same font-rendering pipeline foot itself uses
+ * for terminal glyphs, and JetBrains Mono, the same font
+ * build/09-foot.sh already installs. This replaces an earlier
+ * hand-drawn 3x5 bitmap font placeholder, which existed only because
+ * nothing else in this repo needed real font rendering before foot.
  */
 #include <fcntl.h>
 #include <stdbool.h>
@@ -37,6 +34,7 @@
 #include <xkbcommon/xkbcommon.h>
 
 #include "wlr-layer-shell-unstable-v1-protocol.h"
+#include "../common/text.h"
 
 #define WIN_WIDTH 560
 #define WIN_HEIGHT 120
@@ -47,40 +45,6 @@
 #define CURSOR_COLOR 0xffe0e0f0u
 
 #define INPUT_MAX 127
-
-/* ── Minimal 3x5 bitmap font: digits + the operators a calculator
- * needs. Each glyph is 5 rows; each row's low 3 bits are pixel columns
- * (bit 2 = leftmost, bit 0 = rightmost). Space is all-zero. */
-struct glyph {
-	char ch;
-	uint8_t rows[5];
-};
-
-static const struct glyph FONT[] = {
-	{'0', {0x7, 0x5, 0x5, 0x5, 0x7}},
-	{'1', {0x2, 0x6, 0x2, 0x2, 0x7}},
-	{'2', {0x7, 0x1, 0x7, 0x4, 0x7}},
-	{'3', {0x7, 0x1, 0x7, 0x1, 0x7}},
-	{'4', {0x5, 0x5, 0x7, 0x1, 0x1}},
-	{'5', {0x7, 0x4, 0x7, 0x1, 0x7}},
-	{'6', {0x7, 0x4, 0x7, 0x5, 0x7}},
-	{'7', {0x7, 0x1, 0x1, 0x1, 0x1}},
-	{'8', {0x7, 0x5, 0x7, 0x5, 0x7}},
-	{'9', {0x7, 0x5, 0x7, 0x1, 0x7}},
-	{'+', {0x0, 0x2, 0x7, 0x2, 0x0}},
-	{'-', {0x0, 0x0, 0x7, 0x0, 0x0}},
-	{'*', {0x5, 0x2, 0x5, 0x0, 0x0}},
-	{'/', {0x1, 0x1, 0x2, 0x4, 0x4}},
-	{'.', {0x0, 0x0, 0x0, 0x0, 0x2}},
-	{'(', {0x2, 0x4, 0x4, 0x4, 0x2}},
-	{')', {0x2, 0x1, 0x1, 0x1, 0x2}},
-	{'=', {0x0, 0x7, 0x0, 0x7, 0x0}},
-	{' ', {0x0, 0x0, 0x0, 0x0, 0x0}},
-};
-#define FONT_SCALE 6
-#define GLYPH_W (3 * FONT_SCALE)
-#define GLYPH_H (5 * FONT_SCALE)
-#define GLYPH_GAP FONT_SCALE
 
 struct novi_launcher {
 	struct wl_display *display;
@@ -97,6 +61,8 @@ struct novi_launcher {
 	struct xkb_context *xkb_context;
 	struct xkb_keymap *xkb_keymap;
 	struct xkb_state *xkb_state;
+
+	struct fcft_font *font;
 
 	uint32_t width, height;
 	bool configured;
@@ -252,36 +218,14 @@ static void draw_rect(uint32_t *px, uint32_t stride_px, uint32_t buf_w,
 	}
 }
 
-static const struct glyph *find_glyph(char ch) {
-	for (size_t i = 0; i < sizeof(FONT) / sizeof(FONT[0]); i++) {
-		if (FONT[i].ch == ch) {
-			return &FONT[i];
-		}
-	}
-	return NULL;
-}
-
-/* Draws `text` starting at (x, y), returns the x position just past
- * the last glyph drawn. Unknown characters (this font only covers
- * digits/operators) render as a blank space-width gap, not garbage. */
-static int draw_text(uint32_t *px, uint32_t stride_px, uint32_t buf_w,
-		uint32_t buf_h, int x, int y, const char *text, uint32_t color) {
-	for (const char *c = text; *c; c++) {
-		const struct glyph *g = find_glyph(*c);
-		if (g != NULL) {
-			for (int row = 0; row < 5; row++) {
-				for (int col = 0; col < 3; col++) {
-					if (g->rows[row] & (1 << (2 - col))) {
-						draw_rect(px, stride_px, buf_w, buf_h,
-							x + col * FONT_SCALE, y + row * FONT_SCALE,
-							FONT_SCALE, FONT_SCALE, color);
-					}
-				}
-			}
-		}
-		x += GLYPH_W + GLYPH_GAP;
-	}
-	return x;
+/* Restricts typed input to characters the calculator grammar actually
+ * understands. fcft can render any printable ASCII glyph now (unlike
+ * the old bitmap font, which only had digits/operators at all), but
+ * accepting a character evaluate() can't parse would just display
+ * text that can never produce a result -- not a rendering limit
+ * anymore, a grammar one, so this check stays. */
+static bool is_input_char(char ch) {
+	return (ch >= '0' && ch <= '9') || strchr("+-*/. ()=", ch) != NULL;
 }
 
 static void render(struct novi_launcher *state, uint32_t *px,
@@ -291,30 +235,45 @@ static void render(struct novi_launcher *state, uint32_t *px,
 	draw_rect(px, stride_px, w, h, 0, 0, (int)w, (int)h, BORDER_COLOR);
 	draw_rect(px, stride_px, w, h, 3, 3, (int)w - 6, (int)h - 6, BG_COLOR);
 
+	/* Wraps the same buffer draw_rect() already filled above -- both
+	 * write into the identical memory in place, no double buffering. */
+	pixman_image_t *dest = pixman_image_create_bits_no_clear(
+		PIXMAN_x8r8g8b8, (int)w, (int)h, px, (int)stride_px * 4);
+
+	static const pixman_color_t input_color = {
+		.red = 0xe000, .green = 0xe000, .blue = 0xf000, .alpha = 0xffff,
+	};
+	static const pixman_color_t result_color = {
+		.red = 0x8a00, .green = 0xb400, .blue = 0xf800, .alpha = 0xffff,
+	};
+
 	int text_x = 16;
+	int line_height = state->font->height;
 	int input_y = 16;
+	int baseline_y = input_y + state->font->ascent;
+	int cursor_w = 3;
+
 	if (state->input_len == 0) {
-		/* Empty input: just a blinking-style cursor block -- no font
-		 * glyph needed for this, it's pure geometry. */
-		draw_rect(px, stride_px, w, h, text_x, input_y, FONT_SCALE,
-			GLYPH_H, CURSOR_COLOR);
+		/* Empty input: just a blinking-style cursor block -- pure
+		 * geometry, no glyph needed. */
+		draw_rect(px, stride_px, w, h, text_x, input_y, cursor_w,
+			line_height, CURSOR_COLOR);
 	} else {
-		int end_x = draw_text(px, stride_px, w, h, text_x, input_y,
-			state->input, INPUT_COLOR);
-		draw_rect(px, stride_px, w, h, end_x, input_y, FONT_SCALE,
-			GLYPH_H, CURSOR_COLOR);
+		int end_x = novi_text_draw(dest, state->font, text_x, baseline_y,
+			state->input, input_color);
+		draw_rect(px, stride_px, w, h, end_x, input_y, cursor_w,
+			line_height, CURSOR_COLOR);
 	}
 
 	double result;
 	if (evaluate(state->input, &result)) {
 		char buf[64];
 		snprintf(buf, sizeof(buf), "= %.6g", result);
-		/* The formatted result can contain characters (a leading '-',
-		 * digits, '.') this font covers, plus a space and '=' -- all
-		 * present in FONT already. */
-		draw_text(px, stride_px, w, h, text_x, input_y + GLYPH_H + 16,
-			buf, RESULT_COLOR);
+		novi_text_draw(dest, state->font, text_x,
+			input_y + line_height + 16 + state->font->ascent, buf, result_color);
 	}
+
+	pixman_image_unref(dest);
 }
 
 static void surface_draw_frame(struct novi_launcher *state) {
@@ -441,11 +400,10 @@ static void keyboard_key(void *data, struct wl_keyboard *kb, uint32_t serial,
 		return;
 	}
 
-	/* Only accept characters this font can actually render (digits,
-	 * the calculator operators, space) -- anything else is silently
-	 * ignored rather than drawn as a blank glyph a user can't tell
-	 * apart from "nothing happened." */
-	if (sym >= 32 && sym < 127 && find_glyph((char)sym) != NULL) {
+	/* Only accept characters the calculator grammar understands
+	 * (digits, operators, space) -- anything else is silently ignored
+	 * rather than accepted and shown as text that can never evaluate. */
+	if (sym >= 32 && sym < 127 && is_input_char((char)sym)) {
 		if (state->input_len < INPUT_MAX) {
 			state->input[state->input_len++] = (char)sym;
 			state->input[state->input_len] = '\0';
@@ -585,6 +543,12 @@ int main(void) {
 		return 1;
 	}
 
+	state.font = novi_text_load_font("JetBrains Mono:size=16");
+	if (state.font == NULL) {
+		fprintf(stderr, "novi-launcher: failed to load JetBrains Mono\n");
+		return 1;
+	}
+
 	state.surface = wl_compositor_create_surface(state.compositor);
 	state.layer_surface = zwlr_layer_shell_v1_get_layer_surface(
 		state.layer_shell, state.surface, NULL,
@@ -620,6 +584,9 @@ int main(void) {
 	}
 	if (state.xkb_context != NULL) {
 		xkb_context_unref(state.xkb_context);
+	}
+	if (state.font != NULL) {
+		fcft_destroy(state.font);
 	}
 	wl_display_disconnect(state.display);
 	return 0;

@@ -26,10 +26,14 @@ XDG_SHELL_XML ?= /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml
 DESTDIR ?=
 PREFIX ?= /usr
 
-PKGS = wayland-client xkbcommon
+# fcft: real anti-aliased text rendering (see ../common/text.h),
+# replacing the earlier 3x5 bitmap font placeholder. Pulls in
+# freetype/fontconfig/pixman transitively via --static -- all already
+# built for foot (build/09-foot.sh), no new dependency.
+PKGS = wayland-client xkbcommon fcft
 
 CFLAGS += -std=gnu11 -Wall -Wextra -Wno-unused-parameter \
-	-I. $(shell $(PKG_CONFIG) --cflags $(PKGS))
+	-I. -I../common $(shell $(PKG_CONFIG) --cflags $(PKGS))
 # --static (not plain --libs): wayland-client.pc declares libffi only
 # under Requires.private, so plain --libs omits -lffi entirely. libffi
 # actually is built and present in the rootfs (unlike the libinput/
@@ -61,8 +65,8 @@ wlr-layer-shell-unstable-v1-protocol.c: $(LAYER_SHELL_XML)
 xdg-shell-protocol.c: $(XDG_SHELL_XML)
 	$(WAYLAND_SCANNER) private-code $< $@
 
-novi-launcher: main.c wlr-layer-shell-unstable-v1-protocol.c wlr-layer-shell-unstable-v1-protocol.h xdg-shell-protocol.c
-	$(CC) $(CFLAGS) -o $@ main.c wlr-layer-shell-unstable-v1-protocol.c xdg-shell-protocol.c $(LDLIBS)
+novi-launcher: main.c ../common/text.c wlr-layer-shell-unstable-v1-protocol.c wlr-layer-shell-unstable-v1-protocol.h xdg-shell-protocol.c
+	$(CC) $(CFLAGS) -o $@ main.c ../common/text.c wlr-layer-shell-unstable-v1-protocol.c xdg-shell-protocol.c $(LDLIBS)
 
 install: novi-launcher
 	install -D -m 755 novi-launcher "$(DESTDIR)$(PREFIX)/bin/novi-launcher"

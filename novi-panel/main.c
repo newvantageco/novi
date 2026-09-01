@@ -15,11 +15,12 @@
  * surfaces yet). Each of those is real, separate follow-up work, not
  * an oversight here.
  *
- * Rendering uses the same kind of hand-authored, pixel-verified
- * minimal bitmap font as novi-launcher (digits + a colon, the only
- * glyphs a clock needs) for the same reason: no font-rendering stack
- * exists in this repo, and a font table that can't be checked against
- * a real source isn't something to ship silently wrong.
+ * Rendering uses real, anti-aliased text via fcft+pixman (see
+ * common/text.h) -- the same font-rendering pipeline foot itself
+ * uses for terminal glyphs, and JetBrains Mono, the same font
+ * build/09-foot.sh already installs. This replaces an earlier
+ * hand-drawn 3x5 bitmap font placeholder, which existed only because
+ * nothing else in this repo needed real font rendering before foot.
  */
 #include <fcntl.h>
 #include <stdbool.h>
@@ -35,39 +36,11 @@
 #include <wayland-client.h>
 
 #include "wlr-layer-shell-unstable-v1-protocol.h"
+#include "../common/text.h"
 
 #define PANEL_HEIGHT 32
 #define BG_COLOR 0xff181820u /* opaque near-black, XRGB8888 */
 #define BORDER_COLOR 0xff3a3a4au
-#define CLOCK_COLOR 0xffe0e0f0u
-
-/* ── Minimal 3x5 bitmap font: digits + colon, the only glyphs a clock
- * needs. Same encoding as novi-launcher's font (low 3 bits per row =
- * pixel columns, bit 2 = leftmost) -- not shared as a library with
- * novi-launcher since the two need different (small, non-overlapping
- * beyond digits) glyph sets and this table is a handful of lines. */
-struct glyph {
-	char ch;
-	uint8_t rows[5];
-};
-
-static const struct glyph FONT[] = {
-	{'0', {0x7, 0x5, 0x5, 0x5, 0x7}},
-	{'1', {0x2, 0x6, 0x2, 0x2, 0x7}},
-	{'2', {0x7, 0x1, 0x7, 0x4, 0x7}},
-	{'3', {0x7, 0x1, 0x7, 0x1, 0x7}},
-	{'4', {0x5, 0x5, 0x7, 0x1, 0x1}},
-	{'5', {0x7, 0x4, 0x7, 0x1, 0x7}},
-	{'6', {0x7, 0x4, 0x7, 0x5, 0x7}},
-	{'7', {0x7, 0x1, 0x1, 0x1, 0x1}},
-	{'8', {0x7, 0x5, 0x7, 0x5, 0x7}},
-	{'9', {0x7, 0x5, 0x7, 0x1, 0x7}},
-	{':', {0x0, 0x2, 0x0, 0x2, 0x0}},
-};
-#define FONT_SCALE 4
-#define GLYPH_W (3 * FONT_SCALE)
-#define GLYPH_H (5 * FONT_SCALE)
-#define GLYPH_GAP (FONT_SCALE / 2 + 1)
 
 struct novi_panel {
 	struct wl_display *display;
@@ -78,6 +51,8 @@ struct novi_panel {
 
 	struct wl_surface *surface;
 	struct zwlr_layer_surface_v1 *layer_surface;
+
+	struct fcft_font *font;
 
 	uint32_t width, height;
 	bool configured;
@@ -123,35 +98,6 @@ static void draw_rect(uint32_t *px, uint32_t stride_px, uint32_t buf_w,
 	}
 }
 
-static const struct glyph *find_glyph(char ch) {
-	for (size_t i = 0; i < sizeof(FONT) / sizeof(FONT[0]); i++) {
-		if (FONT[i].ch == ch) {
-			return &FONT[i];
-		}
-	}
-	return NULL;
-}
-
-static int draw_text(uint32_t *px, uint32_t stride_px, uint32_t buf_w,
-		uint32_t buf_h, int x, int y, const char *text, uint32_t color) {
-	for (const char *c = text; *c; c++) {
-		const struct glyph *g = find_glyph(*c);
-		if (g != NULL) {
-			for (int row = 0; row < 5; row++) {
-				for (int col = 0; col < 3; col++) {
-					if (g->rows[row] & (1 << (2 - col))) {
-						draw_rect(px, stride_px, buf_w, buf_h,
-							x + col * FONT_SCALE, y + row * FONT_SCALE,
-							FONT_SCALE, FONT_SCALE, color);
-					}
-				}
-			}
-		}
-		x += GLYPH_W + GLYPH_GAP;
-	}
-	return x;
-}
-
 static void render(struct novi_panel *panel, uint32_t *px, uint32_t stride_px) {
 	uint32_t w = panel->width, h = panel->height;
 	draw_rect(px, stride_px, w, h, 0, 0, (int)w, (int)h, BG_COLOR);
@@ -164,10 +110,22 @@ static void render(struct novi_panel *panel, uint32_t *px, uint32_t stride_px) {
 	snprintf(clock_str, sizeof(clock_str), "%02d:%02d:%02d",
 		tm_now.tm_hour, tm_now.tm_min, tm_now.tm_sec);
 
-	int text_w = (int)strlen(clock_str) * (GLYPH_W + GLYPH_GAP);
+	/* Wraps the same buffer draw_rect() already filled above -- both
+	 * write into the identical memory in place, no double buffering.
+	 * _no_clear: the background is already painted, no need for
+	 * pixman to zero it again. */
+	pixman_image_t *dest = pixman_image_create_bits_no_clear(
+		PIXMAN_x8r8g8b8, (int)w, (int)h, px, (int)stride_px * 4);
+
+	static const pixman_color_t clock_color = {
+		.red = 0xe000, .green = 0xe000, .blue = 0xf000, .alpha = 0xffff,
+	};
+	int text_w = novi_text_width(panel->font, clock_str);
 	int text_x = (int)w - text_w - 12;
-	int text_y = ((int)h - GLYPH_H) / 2;
-	draw_text(px, stride_px, w, h, text_x, text_y, clock_str, CLOCK_COLOR);
+	int baseline_y = ((int)h + panel->font->ascent - panel->font->descent) / 2;
+	novi_text_draw(dest, panel->font, text_x, baseline_y, clock_str, clock_color);
+
+	pixman_image_unref(dest);
 }
 
 static void surface_draw_frame(struct novi_panel *panel) {
@@ -290,6 +248,12 @@ int main(void) {
 		return 1;
 	}
 
+	panel.font = novi_text_load_font("JetBrains Mono:size=11");
+	if (panel.font == NULL) {
+		fprintf(stderr, "novi-panel: failed to load JetBrains Mono\n");
+		return 1;
+	}
+
 	panel.surface = wl_compositor_create_surface(panel.compositor);
 	panel.layer_surface = zwlr_layer_shell_v1_get_layer_surface(
 		panel.layer_shell, panel.surface, NULL,
@@ -368,6 +332,9 @@ int main(void) {
 	}
 	if (panel.surface != NULL) {
 		wl_surface_destroy(panel.surface);
+	}
+	if (panel.font != NULL) {
+		fcft_destroy(panel.font);
 	}
 	wl_display_disconnect(panel.display);
 	return 0;
