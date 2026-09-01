@@ -188,27 +188,43 @@ contributors once there's a community to consult — pre-launch, the
 founder's own approval is what moves this from draft to build, and that's
 been given: implementation is underway.
 
-Built so far, cross-compiled from source against this repo's own musl
-toolchain (`build/06-wayland.sh`, `build/07-novi-shell.sh`): the full
-dependency stack (wayland, wayland-protocols, libxkbcommon, pixman,
+Built and **verified booting to a running compositor** (live QEMU boot,
+serial-console-confirmed), cross-compiled from source against this repo's
+own musl toolchain (`build/06-wayland.sh`, `build/07-novi-shell.sh`): the
+full dependency stack (wayland, wayland-protocols, libxkbcommon, pixman,
 libudev-zero, libevdev, mtdev, libinput, libdrm, libdisplay-info, seatd,
-wlroots itself — 14 libraries, all with real cross-compilation bugs found
-and fixed, not just downloaded), and a first working `novi-shell` binary
-(`novi-shell/`, a wlroots DRM+libinput+pixman compositor core adapted from
-wlroots' own tinywl.c reference). It compiles, links, and runs correctly
-up to the point of connecting to `seatd` over its socket. Wired into
+wlroots, xkeyboard-config — 15 libraries, all with real cross-compilation
+bugs found and fixed, not just downloaded), and a first working
+`novi-shell` binary (`novi-shell/`, a wlroots DRM+libinput+pixman
+compositor core adapted from wlroots' own tinywl.c reference). Wired into
 s6-rc as `seatd` and `novi-shell` services (dependency verified via
-`s6-rc-db`), deliberately kept out of the `default` boot bundle behind a
-new `graphical` bundle until it's actually proven on real output.
+`s6-rc-db`), kept out of the `default` boot bundle behind a `graphical`
+bundle until the panel/launcher layer below exists — switch to it by hand
+with `s6-rc -up change graphical`.
 
-**Still open**: pixel-verified rendering (blocked on this environment's
-QEMU virtio-gpu module not auto-loading yet, and on the root-login policy
-gap noted in §9 blocking an interactive shell to switch runlevels by
-hand); the panel, app launcher, and layer-shell protocol support that
-RFC 0001 actually means by "novi-shell" — what exists today is the
+Getting from "links and starts" to "reaches `novi-shell running on
+WAYLAND_DISPLAY=wayland-0`" took four real, empirically root-caused fixes,
+each found by reading actual boot output rather than guessed: wlroots'
+renderer auto-detection skips its software (pixman) renderer whenever a
+DRM render node is present, assuming GPU-accelerated rendering will
+succeed — this build has no GLES2/Vulkan renderer (deliberately Mesa-free
+for this milestone), so auto-detection found nothing until pixman was
+forced explicitly (`WLR_RENDERER=pixman`); nothing in the init sequence
+created `XDG_RUNTIME_DIR`, which libwayland-server requires to open its
+socket at all; `libxkbcommon` links and runs but embeds no keyboard layout
+data of its own, so `xkeyboard-config` (the actual rules/symbols/keycodes
+database) had to be added as a 15th package before any keymap could be
+compiled; and POSIX shared memory (`shm_open`, used for keymap handoff to
+Wayland clients) needed a `tmpfs` at `/dev/shm`, which devtmpfs at `/dev`
+does not provide on its own.
+
+**Still open**: the panel, app launcher, and layer-shell protocol support
+that RFC 0001 actually means by "novi-shell" — what exists today is the
 compositor core they'll be built on, not that UI layer itself; the
 keyboard-shortcut conventions (Alt+Space search, etc.) RFC 0001 specs are
-not implemented in code yet either.
+not implemented in code yet either; hardware-accelerated rendering
+(GLES2/Vulkan via Mesa) is out of scope for this milestone and stays
+pixman-only until that's picked up separately.
 
 ### Terminal / CLI environment
 
@@ -404,7 +420,7 @@ compositor choice does.
 | 2 | Package/application model | 🟡 Native done, sandbox tier proposed (RFC needed) |
 | 3 | Update/rollback model | 🟡 Track split decided, on-device rollback open |
 | 4 | Hardware strategy | 🟡 x86_64 kernel exists, coverage + aarch64 open |
-| 5 | Desktop strategy | 🟡 RFC approved, compositor core built + s6-wired, unverified on real output, no panel/launcher yet |
+| 5 | Desktop strategy | 🟡 Compositor core built, s6-wired, and boot-verified running (pixman); no panel/launcher/keyboard-shortcut layer yet |
 | 6 | Gaming strategy | 🔴 Open — blocked on #5 |
 | 7 | Developer strategy | 🟡 Native toolchain exists, container tier proposed |
 | 8 | Enterprise strategy | 🟡 LTS branches exist, signing enforcement + fleet mgmt open |
@@ -413,9 +429,7 @@ compositor choice does.
 | 11 | Differentiation | ✅ Articulated above |
 | 12 | Security tooling / pentest track | 🔴 Open — packaging work, blocked on §2/§8/§9 |
 
-**Next concrete step:** verify `novi-shell` actually renders on real output
-(load `virtio_gpu` in the test VM, resolve the root-login gap enough to
-drive a manual runlevel switch or start `graphical` by default for
-testing), then build the panel/launcher/layer-shell UI layer RFC 0001
-actually describes as "novi-shell" on top of the now-working compositor
-core.
+**Next concrete step:** build the panel/launcher/layer-shell UI layer RFC
+0001 actually describes as "novi-shell" — the compositor core it runs on
+top of is now built, s6-wired, and boot-verified — plus the keyboard-driven
+UX conventions (Alt+Space search, etc.) RFC 0001 specs.
