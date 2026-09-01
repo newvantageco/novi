@@ -15,4 +15,17 @@
 # detection oneshot is the real long-term fix for "load whatever GPU
 # module this machine actually needs."
 modprobe virtio_gpu 2>/dev/null || true
+# wlroots' renderer auto-detection skips pixman whenever the DRM
+# backend reports a render node (assuming GLES2/Vulkan will succeed,
+# then never falling back) -- confirmed by reading
+# render/wlr_renderer.c: the pixman branch is gated on
+# `!has_render_node(backend)` in auto mode, so with a render node
+# present (virtio_gpu provides one, /dev/dri/renderD128) it's skipped
+# entirely, and since this build has no GLES2/Vulkan renderer
+# (deliberately Mesa-free, see build/06-wayland.sh), auto-detection
+# finds nothing and fails with "Could not initialize renderer" even
+# though the DRM backend itself came up correctly. Force pixman
+# explicitly rather than relying on a heuristic tuned for GPU-
+# accelerated builds this one isn't.
+export WLR_RENDERER=pixman
 exec novi-shell
