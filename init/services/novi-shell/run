@@ -2,7 +2,14 @@
 # ============================================================
 # novi-shell service — run script
 # The compositor (RFC 0001). Not part of the "default" bundle --
-# switch to it explicitly with: s6-rc -up change graphical
+# switch to it explicitly with: s6-rc -u change graphical
+# (-u = up, NOT -up = up+prune: -p prunes anything outside the target
+# selection's closure, which for "graphical" -- just novi-shell+seatd
+# -- includes getty-ttyS0/getty-tty1/syslog. Confirmed live: running
+# `s6-rc -up change graphical` FROM ttyS0 hangs indefinitely trying to
+# stop the very getty-ttyS0 service supervising that console. `-u`
+# alone layers graphical additively on top of whatever's already up,
+# which is what "switch to it by hand" actually means here.)
 #
 # virtio_gpu is a kernel module (CONFIG_DRM_VIRTIO_GPU=m) nothing
 # else loads automatically -- without it there's no /dev/dri device

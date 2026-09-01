@@ -350,15 +350,22 @@ verification pass): `scripts/mkinitramfs.sh` never mounted anything at
 `/tmp` even though `scripts/mkiso.sh` excludes it from the squashed
 image the same way it excludes `/dev`/`/run` (which *are* mounted) —
 fixed the same way, a 1777 tmpfs alongside the existing `/dev`/`/run`
-mounts. And `s6-rc -up change graphical` itself hangs indefinitely
-(confirmed: `s6-svc -u /run/service/seatd` and
-`/run/service/novi-shell` bring each service up individually within
-seconds when driven directly, so the supervision primitives are fine —
-the hang is in `s6-rc -up`'s own orchestration) — **not fixed**, worked
-around by driving `s6-svc -u` on `seatd` then `novi-shell` directly for
-this verification pass. This is a real, reproducible, currently-open bug
-in the boot path, independent of the icon work, and needs its own
-investigation.
+mounts. And the documented `s6-rc -up change graphical` command itself
+hung indefinitely when actually run from `ttyS0` — root-caused, not just
+worked around: `-p` (prune) tells s6-rc to bring the live state to
+*exactly* the target selection's closure, stopping everything outside it
+first, and "graphical"'s closure (`novi-shell`+`seatd`) doesn't include
+`getty-ttyS0` — so `-p` tried to stop the very console issuing the
+command. Confirmed two ways: `s6-svc -u /run/service/seatd` then
+`/run/service/novi-shell` (bypassing s6-rc's orchestration entirely)
+brought both up in seconds, and dropping just the `p` —
+`s6-rc -u change graphical` — returned immediately and produced the
+identical live compositor+panel. Fixed by correcting the documented
+command (`PLATFORM-ROADMAP.md` §5, `novi-shell/run`'s own comment), not
+by touching `init/skel/runlevel`'s generic `-up`, which is correct
+full-prune runlevel-switch semantics for its own real use (called once
+at boot for "default") — this was specifically "graphical" being layered
+on additively, which was never actually a runlevel switch.
 
 ## Summary
 

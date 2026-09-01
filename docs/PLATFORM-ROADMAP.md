@@ -225,7 +225,8 @@ compositor core adapted from wlroots' own tinywl.c reference). Wired into
 s6-rc as `seatd` and `novi-shell` services (dependency verified via
 `s6-rc-db`), kept out of the `default` boot bundle behind a `graphical`
 bundle until the panel/launcher layer below exists — switch to it by hand
-with `s6-rc -up change graphical`.
+with `s6-rc -u change graphical` (plain `-u`/up, not `-up`/up+prune — see
+§5's live-testing note below for why `-p` is actively dangerous here).
 
 Getting from "links and starts" to "reaches `novi-shell running on
 WAYLAND_DISPLAY=wayland-0`" took four real, empirically root-caused fixes,
@@ -488,15 +489,30 @@ Alt+Space, typed "foot" — a real, pixel-zoomed screendump shows the
 actual generated terminal-icon bitmap rendered next to "-> Terminal" in
 the result's own accent color, and Enter still opened a real `foot`
 window afterward (no regression to the existing search/launch path).
-Getting that boot to work at all surfaced two unrelated real bugs:
-`scripts/mkinitramfs.sh` never mounted anything at `/tmp` despite
+Getting that boot to work at all surfaced two unrelated real bugs, both
+fixed: `scripts/mkinitramfs.sh` never mounted anything at `/tmp` despite
 `mkiso.sh` excluding it from the squashed image the same way it excludes
 `/dev`/`/run` (which *are* mounted) — fixed, same tmpfs-alongside-the-
-others pattern. And `s6-rc -up change graphical` itself hangs
-indefinitely even though driving `s6-svc -u` directly on `seatd` and
-`novi-shell` brings each up in seconds — **not fixed**, worked around
-for this verification pass, and still open (see `ICON-PIPELINE.md`'s
-own write-up of both).
+others pattern. And the documented `s6-rc -up change graphical` command
+itself hangs indefinitely when actually run from `ttyS0` -- root-caused
+(not just worked around): `-p` (prune) tells s6-rc to bring the live
+state to *exactly* the target selection's closure, stopping everything
+outside it first, and "graphical"'s closure is just
+`novi-shell`+`seatd` -- so `-p` tries to stop `getty-ttyS0` (and
+`getty-tty1`, `syslog`) as a side effect, including the very console
+issuing the command. Confirmed two ways: `s6-svc -u` on `seatd` then
+`novi-shell` directly (bypassing s6-rc's orchestration) brings both up
+in seconds with no `-p` involved, and dropping the `p` --
+`s6-rc -u change graphical`, layering up-only, no prune -- returns
+immediately and produces the identical live compositor+panel. Fixed by
+correcting the documented command (this section, above) and
+`novi-shell/run`'s own comment; `init/skel/runlevel`'s generic
+`s6-rc -up change "$1"` (used for real SysV-style full runlevel
+switches, called once at boot for "default") is deliberately left alone
+-- full-prune semantics are correct for an actual runlevel transition,
+this was specifically the graphical bundle being layered on additively
+rather than treated as one, and only the latter path is what
+"switch to it by hand" ever meant.
 
 The maximize dot the decorations landed with is now real too, not a
 dimmed placeholder -- `GUI-DESIGN-LANGUAGE.md` had already flagged it
@@ -558,10 +574,7 @@ separately; the app-grid icon set is generated and wired (see above) but
 only exercised for `terminal` so far (the one real `.app` descriptor);
 status-bar icons (wifi/battery/power) have generated bitmaps too but
 stay unwired, blocked on real wifi/battery data sources that don't exist
-yet, independent of the icons themselves. `s6-rc -up change graphical`
-hangs indefinitely (confirmed live; `s6-svc -u` on the individual
-services works fine, so the bug is in `s6-rc -up`'s own orchestration,
-not the services) — real, reproducible, not yet root-caused.
+yet, independent of the icons themselves.
 
 **Adjacent idea, not started**: decentralized, radio-agnostic mesh
 networking (Reticulum-style — cryptographic identity as the address,
@@ -769,7 +782,7 @@ compositor choice does.
 | 2 | Package/application model | 🟡 Native `pkg`/`mkpkg` now installed, wired into the build, and live-verified end-to-end (real dependency chain, install/remove/search/info) after fixing several real bugs found by first actually running it; sandbox tier still proposed (RFC needed) |
 | 3 | Update/rollback model | 🟡 Track split decided, on-device rollback open |
 | 4 | Hardware strategy | 🟡 x86_64 kernel exists, coverage + aarch64 open |
-| 5 | Desktop strategy | 🟡 Compositor + layer-shell + launcher + foot terminal + top-bar panel, real anti-aliased text rendering (fcft/pixman), a clickable apps button routing pointer input to a layer-shell surface, new windows placed below the panel's exclusive zone, real alpha compositing + rounded corners + a drop shadow on the launcher, server-side window decorations with working close + maximize buttons, all live-verified in QEMU together; design docs' rendering sequence now started on icons too — Lucide's license verified from upstream, apps-button icon shipped and live-verified; the `tools/svg2icon/` offline pipeline is built and its icons are now wired into `novi-launcher`'s search results (`icon=` in `.app` descriptors) and QEMU-live-verified — a real generated terminal icon renders next to a matched result, pixel-confirmed via screendump; status-bar icons are generated but unwired, blocked on real wifi/battery data; real app search too — `pkg-format.md`'s GUI-app-registration convention, foot registered and launchable by typed name, fork+execvp on Enter, live-verified end-to-end; file search still doesn't exist; two unrelated bugs found live-testing this (missing `/tmp` mount, fixed; `s6-rc -up change graphical` hangs, not yet fixed) |
+| 5 | Desktop strategy | 🟡 Compositor + layer-shell + launcher + foot terminal + top-bar panel, real anti-aliased text rendering (fcft/pixman), a clickable apps button routing pointer input to a layer-shell surface, new windows placed below the panel's exclusive zone, real alpha compositing + rounded corners + a drop shadow on the launcher, server-side window decorations with working close + maximize buttons, all live-verified in QEMU together; design docs' rendering sequence now started on icons too — Lucide's license verified from upstream, apps-button icon shipped and live-verified; the `tools/svg2icon/` offline pipeline is built and its icons are now wired into `novi-launcher`'s search results (`icon=` in `.app` descriptors) and QEMU-live-verified — a real generated terminal icon renders next to a matched result, pixel-confirmed via screendump; status-bar icons are generated but unwired, blocked on real wifi/battery data; real app search too — `pkg-format.md`'s GUI-app-registration convention, foot registered and launchable by typed name, fork+execvp on Enter, live-verified end-to-end; file search still doesn't exist; two unrelated bugs found and fixed live-testing this: a missing `/tmp` mount, and the documented `s6-rc -up change graphical` command itself (root-caused: `-p`/prune tries to stop the console's own getty; corrected to plain `-u`) |
 | 6 | Gaming strategy | 🔴 Open — blocked on #5 |
 | 7 | Developer strategy | 🟡 Native toolchain exists, container tier proposed |
 | 8 | Enterprise strategy | 🟡 LTS branches exist, signing enforcement + fleet mgmt open |
@@ -787,12 +800,12 @@ What's left of the icon set: `novi-panel`/`novi-shell` don't call
 `draw_icon()` yet (no app-grid view or status bar content exists to put
 icons in yet, independent of the icons themselves being ready), and the
 status-bar icons stay unwired until real wifi/battery data sources
-exist. Two unrelated bugs surfaced by actually booting this: a missing
-`/tmp` mount in `scripts/mkinitramfs.sh` (fixed) and `s6-rc -up change
-graphical` hanging indefinitely even though the underlying `s6-svc -u`
-primitives work fine when driven directly (not fixed — real, confirmed,
-needs its own investigation into s6-rc's orchestration, not the
-services themselves).
+exist. Two unrelated bugs surfaced by actually booting this, both fixed:
+a missing `/tmp` mount in `scripts/mkinitramfs.sh`, and the documented
+"switch to graphical by hand" command itself, which hung indefinitely
+because of `-p` (prune) trying to stop the issuing console's own getty
+— corrected to `s6-rc -u change graphical` (see §5 above for the full
+root-cause).
 
 App search also went from fully blocked to actionable: `pkg-format.md`'s "GUI
 Application Registration" convention gives `pkg` the "this is a
