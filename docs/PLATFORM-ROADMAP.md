@@ -263,6 +263,22 @@ system dependency:
   the standard," the same manufacturer-agnostic property §4 already
   establishes for the kernel. Nothing here narrows what hardware the
   desktop experience runs on.
+- **What re-implementing it ourselves would actually cost**: Libadwaita
+  already solves adaptive layout (phone/tablet/desktop breakpoints),
+  light/dark and high-contrast switching, correct touch/keyboard/pointer
+  input handling, accessibility (screen readers, focus order, contrast),
+  HiDPI and text-scale handling, and the long tail of window-management
+  edge cases — each individually a real, multi-month problem, and
+  collectively a multi-year one to get right from scratch. This is the
+  same "own the platform, don't reinvent already-solved problems" judgment
+  the philosophy section states for the base OS (musl/s6/BusyBox are
+  reused *source*, not reinvented from zero) — a from-scratch app toolkit
+  would quietly inherit exactly the class of bugs (broken screen-reader
+  focus, wrong behavior at odd DPI scales, subtly wrong touch targets)
+  that a toolkit with years of real-world use has already found and fixed.
+  novi-shell itself (the compositor) still owns its own custom UI — this
+  argument is specifically about the *apps* running inside it, where
+  reuse is free and reinvention is not.
 
 **Open:** whether to adopt Libadwaita's exact visual language verbatim or
 restyle it against `novi-shell`'s own token system (accent color, spacing
