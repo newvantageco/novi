@@ -413,6 +413,40 @@ pixel-exact column scan confirmed the feather's 16-step linear
 gradient and the bottom edge's exact 4px-sliver-then-16px-feather
 shape, both landing precisely on the spec'd values with zero clipping.
 
+Server-side window decorations (§6, item 6 of the design docs'
+sequence, and the one piece of this window that's real compositor work
+rather than client-side rendering) are also done: a title bar strip
+above every toplevel plus a functional close dot -- "the one dot with
+a real, already-implemented compositor primitive behind it" per the
+design doc, since `wlr_xdg_toplevel_send_close()` already existed for
+Super+Q. `wlr_xdg_decoration_manager_v1` is wired and answers
+server-side to any asking client; `foot` genuinely asks (confirmed
+live via its own "using SSD decorations" log line), so this isn't
+speculative protocol plumbing for a hypothetical client. Building this
+surfaced a second real, independent bug: a panel's exclusive zone was
+silently never being applied to `usable_area` at all -- confirmed via
+direct instrumentation showing it staying the full, unreduced output
+size even tens of seconds after boot. Root cause (found by reading
+wlroots' own scene-helper source, not guessed): the exclusive zone is
+only applied when `surface->mapped` is already true, but the only
+`arrange_layers()` call site that ever fires for a typical layer-shell
+client (one that sets its geometry once, at startup) runs from the
+*commit* handler, before mapping completes. This had been silently
+masked in all earlier testing: the panel still visually draws over its
+own reserved region regardless of what `usable_area` tracks, since
+it's simply on a higher scene layer than toplevels -- so a window
+placed as if there were no panel at all still *looked* right, by
+z-order coincidence, not because its logical position was correct. The
+gap only became observable once something (a title bar) needed the
+exclusive zone value to be precise. Fixed by also re-arranging in
+`layer_surface_map()`, where `mapped` is guaranteed true.
+
+Design-doc §8's rendering sequence is now complete through item 6 of
+6 -- text, alpha compositing, rounded rects, drop shadows, and server-
+side decorations are all real, all live-verified. Only item 5 (icon
+rendering) remains, and it's blocked on a maintainer decision, not
+implementation effort (see below).
+
 **Still open**: app/file search itself (blocked on §2's package model
 existing enough to have something to search); Super+[1-9] workspaces
 (needs real per-output workspace state), PrintScreen screenshots,
@@ -631,7 +665,7 @@ compositor choice does.
 | 2 | Package/application model | 🟡 Native `pkg`/`mkpkg` now installed, wired into the build, and live-verified end-to-end (real dependency chain, install/remove/search/info) after fixing several real bugs found by first actually running it; sandbox tier still proposed (RFC needed) |
 | 3 | Update/rollback model | 🟡 Track split decided, on-device rollback open |
 | 4 | Hardware strategy | 🟡 x86_64 kernel exists, coverage + aarch64 open |
-| 5 | Desktop strategy | 🟡 Compositor + layer-shell + launcher + foot terminal + top-bar panel, real anti-aliased text rendering (fcft/pixman), a clickable apps button routing pointer input to a layer-shell surface, new windows placed below the panel's exclusive zone, real alpha compositing + rounded corners + a drop shadow on the launcher, all live-verified in QEMU together; no app search yet; `docs/design/` now has a target visual-language spec |
+| 5 | Desktop strategy | 🟡 Compositor + layer-shell + launcher + foot terminal + top-bar panel, real anti-aliased text rendering (fcft/pixman), a clickable apps button routing pointer input to a layer-shell surface, new windows placed below the panel's exclusive zone, real alpha compositing + rounded corners + a drop shadow on the launcher, server-side window decorations with a working close button, all live-verified in QEMU together; design docs' rendering sequence complete except icons (blocked on a license decision); no app search yet |
 | 6 | Gaming strategy | 🔴 Open — blocked on #5 |
 | 7 | Developer strategy | 🟡 Native toolchain exists, container tier proposed |
 | 8 | Enterprise strategy | 🟡 LTS branches exist, signing enforcement + fleet mgmt open |
@@ -640,19 +674,19 @@ compositor choice does.
 | 11 | Differentiation | ✅ Articulated above |
 | 12 | Security tooling / pentest track | 🔴 Open — packaging work, blocked on §2/§8/§9 |
 
-**Next concrete step:** design doc §8's rendering sequence is now
-through item 4 of 6 (text, alpha compositing, rounded rects, drop
-shadows all real). Item 5 (icon rendering) needs a maintainer decision
+**Next concrete step:** design doc §8's rendering sequence is complete
+except item 5 (icon rendering), which needs a maintainer decision
 first — `ICON-PIPELINE.md` recommends Lucide primary/Tabler secondary,
 but flags their licenses as needing human verification it couldn't do
-itself, so this isn't unilaterally actionable yet. Item 6 (server-side
-window decorations) is real new compositor work, not just client-side
-rendering, and is sequenced last in the doc for exactly that reason.
-Alternatively: wire `novi-launcher` up to real app/file search now
+itself, so this isn't unilaterally actionable yet. Everything else
+sequenced there (text, alpha compositing, rounded rects, drop shadows,
+server-side decorations) is real and live-verified. The other
+actionable option: wire `novi-launcher` up to real app/file search now
 that §2's native `pkg` actually works end-to-end — narrower than fully
 unblocked, though: `pkg` installs files, it doesn't yet register a
 "this is a launchable GUI app" concept anywhere (no desktop-entry
 equivalent exists in `pkg-format.md` yet), so a search integration
 still needs that piece designed first. Dogfoodable now via `foot`'s
-real interactive shell inside the graphical session instead of only
+real interactive shell inside the graphical session (with a real,
+clickable close button) instead of only
 QEMU-injection-and-screendump from outside.
