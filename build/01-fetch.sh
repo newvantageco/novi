@@ -108,6 +108,17 @@ fetch "https://gitlab.freedesktop.org/libinput/libinput/-/archive/${LIBINPUT_VER
 fetch "https://gitlab.freedesktop.org/mesa/drm/-/archive/libdrm-${LIBDRM_VERSION}/drm-libdrm-${LIBDRM_VERSION}.tar.gz"
 fetch "https://gitlab.freedesktop.org/emersion/libdisplay-info/-/archive/${LIBDISPLAY_INFO_VERSION}/libdisplay-info-${LIBDISPLAY_INFO_VERSION}.tar.gz"
 fetch "https://gitlab.freedesktop.org/wlroots/wlroots/-/archive/${WLROOTS_VERSION}/wlroots-${WLROOTS_VERSION}.tar.gz"
+# xkeyboard-config: the runtime keyboard layout database (rules/symbols/
+# keycodes/compat/types data files). libxkbcommon builds fine without
+# it, but at runtime xkb_keymap_new_from_names() needs this data to
+# compile ANY keymap -- confirmed live: novi-shell got all the way
+# through DRM+renderer+allocator+libinput init and then hard-failed
+# ("xkbcommon: ERROR: failed to add default include path
+# /usr/share/X11/xkb") the moment libinput handed it a real input
+# device to build a keymap for. GitLab archive naming doubles the
+# project name for a "xkeyboard-config-N.NN" ref, same pattern as
+# pixman/libdrm above.
+fetch "https://gitlab.freedesktop.org/xkeyboard-config/xkeyboard-config/-/archive/xkeyboard-config-${XKEYBOARD_CONFIG_VERSION}/xkeyboard-config-xkeyboard-config-${XKEYBOARD_CONFIG_VERSION}.tar.gz"
 fetch_git "libxkbcommon" "${LIBXKBCOMMON_VERSION}" \
     "https://github.com/xkbcommon/libxkbcommon" "xkbcommon-${LIBXKBCOMMON_VERSION}"
 fetch_git "libudev-zero" "${LIBUDEV_ZERO_VERSION}" \

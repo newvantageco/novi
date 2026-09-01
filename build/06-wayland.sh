@@ -297,6 +297,29 @@ build_meson wlroots "${WLROOTS_VERSION}" \
     -Dxwayland=disabled -Dexamples=false -Dcolor-management=disabled \
     -Dlibliftoff=disabled -Dxcb-errors=disabled
 
+# ── 15. xkeyboard-config (runtime keyboard layout database) ───────
+#
+# libxkbcommon (step 5) builds and links fine on its own, but it does
+# not embed any keyboard layout data -- xkb_keymap_new_from_names()
+# needs an actual rules/symbols/keycodes/compat/types database on disk
+# at runtime to compile ANY keymap. Confirmed live: novi-shell got all
+# the way through DRM backend + pixman renderer + DRM-dumb allocator +
+# libinput init, then hard-failed the moment libinput handed it a real
+# keyboard device ("xkbcommon: ERROR: failed to add default include
+# path /usr/share/X11/xkb"), because that path never existed. This
+# package is pure data (compat/geometry/keycodes/symbols/types text
+# files plus generated rules) processed at build time entirely by
+# build-machine python3/perl -- there is nothing target-arch-specific
+# to cross-compile, meson_cross's cross-file is a no-op here beyond
+# picking the install prefix. -Dnls=false skips gettext/msgfmt (locale
+# translation of layout descriptions), not needed for keymap
+# compilation to work; xkeyboard-config's own meson.build (2.48)
+# installs both the canonical /usr/share/xkeyboard-config-2/ tree AND
+# a legacy /usr/share/X11/xkb symlink pointing at it, which is exactly
+# the path libxkbcommon's default include path expects.
+build_meson xkeyboard-config "xkeyboard-config-${XKEYBOARD_CONFIG_VERSION}" \
+    -Dnls=false
+
 echo ""
 echo "Wayland/wlroots stack installed. Libraries:"
 find "${ROOTFS}/usr/lib" -maxdepth 1 -iname "libwlroots*" -o -iname "libseat*" -o -iname "libinput*"
