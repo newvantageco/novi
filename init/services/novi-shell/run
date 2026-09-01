@@ -1,0 +1,40 @@
+#!/bin/sh
+# ============================================================
+# novi-shell service — run script
+# The compositor (RFC 0001). Not part of the "default" bundle --
+# switch to it explicitly with: s6-rc -up change graphical
+#
+# virtio_gpu is a kernel module (CONFIG_DRM_VIRTIO_GPU=m) nothing
+# else loads automatically -- without it there's no /dev/dri device
+# at all under QEMU, confirmed via a live boot where novi-shell got
+# all the way through the libseat/seatd handshake successfully and
+# then sat waiting forever for a KMS device that could never appear.
+# Real hardware brings its own GPU driver (amdgpu/i915/nouveau, all
+# built in, not modular -- see kernel/config-x86_64), so this is a
+# harmless no-op there; §4 of the roadmap's proposed hardware-
+# detection oneshot is the real long-term fix for "load whatever GPU
+# module this machine actually needs."
+modprobe virtio_gpu 2>/dev/null || true
+# wlroots' renderer auto-detection skips pixman whenever the DRM
+# backend reports a render node (assuming GLES2/Vulkan will succeed,
+# then never falling back) -- confirmed by reading
+# render/wlr_renderer.c: the pixman branch is gated on
+# `!has_render_node(backend)` in auto mode, so with a render node
+# present (virtio_gpu provides one, /dev/dri/renderD128) it's skipped
+# entirely, and since this build has no GLES2/Vulkan renderer
+# (deliberately Mesa-free, see build/06-wayland.sh), auto-detection
+# finds nothing and fails with "Could not initialize renderer" even
+# though the DRM backend itself came up correctly. Force pixman
+# explicitly rather than relying on a heuristic tuned for GPU-
+# accelerated builds this one isn't.
+export WLR_RENDERER=pixman
+# libwayland-server refuses to create its socket without a valid
+# XDG_RUNTIME_DIR (must exist, be owned by the caller, mode 0700) --
+# confirmed live: with the pixman fix above the DRM backend, renderer
+# and DRM-dumb allocator all now initialize cleanly, and the next (and
+# only) failure is "[wayland] error: XDG_RUNTIME_DIR is invalid or not
+# set in the environment". Nothing in this init ever created a runtime
+# dir for root, so create and own the standard path ourselves.
+mkdir -p -m 0700 /run/user/0
+export XDG_RUNTIME_DIR=/run/user/0
+exec novi-shell

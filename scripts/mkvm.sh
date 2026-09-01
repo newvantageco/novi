@@ -93,9 +93,11 @@ require qemu-system-x86_64
 
 # Check KVM availability
 KVM_ARGS=()
+KVM_ENABLED=false
 if [[ -e /dev/kvm ]]; then
     if [[ -r /dev/kvm && -w /dev/kvm ]]; then
         KVM_ARGS=(-enable-kvm -cpu host)
+        KVM_ENABLED=true
         echo ">>> KVM acceleration enabled (host CPU passthrough)"
     else
         echo "WARNING: /dev/kvm exists but is not accessible. Running without KVM." >&2
@@ -171,13 +173,18 @@ if "${MODE_DISK}"; then
 fi
 
 # ─── ISO / CDROM ──────────────────────────────────────────────────────────────
+# Attached as a plain virtio-blk device, not virtio-scsi+scsi-cd: our kernel
+# config builds CONFIG_VIRTIO_BLK=m but has no CONFIG_VIRTIO_SCSI at all (not
+# even as a module), so a scsi-cd-on-virtio-scsi-pci device would be
+# undetectable at boot. virtio-blk needs no ATAPI/CD-ROM semantics to read an
+# ISO9660 filesystem -- mounting it directly (as init already does) works the
+# same as any other block device.
 ISO_ARGS=()
 if ! "${MODE_NO_ISO}"; then
     [[ -f "${ISO_PATH}" ]] || { echo "ERROR: ISO not found at ${ISO_PATH}"; exit 1; }
     ISO_ARGS=(
-        -drive "file=${ISO_PATH},if=none,id=cd0,media=cdrom,readonly=on"
-        -device virtio-scsi-pci,id=scsi0
-        -device scsi-cd,bus=scsi0.0,drive=cd0,bootindex=2
+        -drive "file=${ISO_PATH},if=none,id=cd0,readonly=on"
+        -device virtio-blk-pci,drive=cd0,bootindex=2
     )
     echo ">>> ISO: ${ISO_PATH}"
 fi
@@ -280,7 +287,7 @@ QEMU_CMD=(
     -qmp "unix:${BUILD_DIR}/qemu-qmp.sock,server,nowait"
 
     # Misc
-    -name "ScamShield Linux"
+    -name "Novi Linux"
     -rtc base=utc,clock=host
     -boot order=dc,menu=on,reboot-timeout=5000
     -no-user-config
@@ -293,11 +300,11 @@ QEMU_CMD=(
 # ─── Launch ───────────────────────────────────────────────────────────────────
 echo ""
 echo "╔════════════════════════════════════════════════════╗"
-echo "║  Launching ScamShield Linux in QEMU/KVM            ║"
+echo "║  Launching Novi Linux in QEMU/KVM                  ║"
 echo "╠════════════════════════════════════════════════════╣"
 printf "║  RAM   : %-41s║\n" "${RAM_MB} MB"
 printf "║  vCPUs : %-41s║\n" "${VCPUS}"
-printf "║  KVM   : %-41s║\n" "$( [[ ${#KVM_ARGS[@]} -gt 0 ]] && echo enabled || echo disabled )"
+printf "║  KVM   : %-41s║\n" "$( "${KVM_ENABLED}" && echo enabled || echo "disabled (tcg)" )"
 printf "║  Disk  : %-41s║\n" "$( "${MODE_DISK}" && echo "${DISK_IMAGE}" || echo "(none)" )"
 printf "║  ISO   : %-41s║\n" "$( "${MODE_NO_ISO}" && echo "(none)" || echo "${ISO_PATH}" )"
 printf "║  Net   : %-41s║\n" "virtio-net (SSH→:2222, HTTP→:8080)"

@@ -40,10 +40,10 @@ scamshield/
 sudo apt install -y \
     build-essential gcc g++ make \
     curl tar xz-utils bzip2 \
-    bison flex libelf-dev \
+    bison flex texinfo libelf-dev \
     bc libssl-dev python3 \
     libmpc-dev libmpfr-dev libgmp-dev \
-    rsync cpio file mksquashfs xorriso grub-common
+    rsync cpio file mksquashfs xorriso grub-common grub-pc-bin grub-efi-amd64-bin mtools kmod
 ```
 
 ## Build
@@ -88,3 +88,7 @@ HOME_URL="https://novilinux.org"
 - [ ] Package repository
 - [ ] Installer
 - [ ] Boot splash
+
+See [`docs/PLATFORM-ROADMAP.md`](docs/PLATFORM-ROADMAP.md) for the full
+platform roadmap — package/app model, update tracks, hardware, desktop,
+gaming, developer, enterprise, security, and governance strategy.

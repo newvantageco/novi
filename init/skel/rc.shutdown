@@ -1,0 +1,7 @@
+#!/bin/sh -e
+# ============================================================
+# rc.shutdown -- bring all s6-rc services down before halt/reboot/
+# poweroff. Uses the same live directory rc.init and runlevel use.
+# ============================================================
+
+exec s6-rc -v2 -l /run/s6-rc -bDa change

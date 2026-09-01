@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# mkinitramfs.sh — Build a minimal initramfs for ScamShield Linux
+# mkinitramfs.sh — Build a minimal initramfs for Novi Linux
 #
 # The resulting initramfs contains:
 #   - busybox (statically linked) for all shell utilities
@@ -27,6 +27,9 @@ WORK_DIR="${BUILD_DIR}/initramfs-work"
 # Busybox binary — prefer static, fallback to system
 BUSYBOX_BIN="${BUSYBOX_BIN:-}"
 BUSYBOX_CANDIDATES=(
+    # Novi's own build (build/03-base.sh installs to /build/rootfs, per
+    # BUILD_DIR=/build in build/00-versions.sh -- not repo-relative)
+    "/build/rootfs/bin/busybox"
     "${REPO_ROOT}/build/busybox-static"
     "/usr/lib/busybox/busybox-static"
     "$(command -v busybox 2>/dev/null || true)"
@@ -35,7 +38,7 @@ BUSYBOX_CANDIDATES=(
 # Squashfs image name (must match mkiso.sh)
 SQUASHFS_IMG_NAME="${SQUASHFS_IMG_NAME:-live/filesystem.squashfs}"
 # Label of the live media (must match mkiso.sh ISO_LABEL)
-LIVE_LABEL="${LIVE_LABEL:-SCAMSHIELD}"
+LIVE_LABEL="${LIVE_LABEL:-NOVI}"
 
 # ─── Argument parsing ─────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -125,7 +128,7 @@ APPLETS=(
     gzip gunzip zcat
     cpio
     true false test
-    [ [[
+    '[' '[['
     printf
 )
 for applet in "${APPLETS[@]}"; do
@@ -140,7 +143,7 @@ done
 echo ">>> Writing /init script ..."
 cat > "${WORK_DIR}/init" <<'INIT_SCRIPT'
 #!/bin/sh
-# ScamShield Linux — initramfs /init
+# Novi Linux — initramfs /init
 # Mounts squashfs+overlayfs then switch_root
 # Runs in: busybox sh (ash), no bash features
 
@@ -190,7 +193,7 @@ has_param() {
 }
 
 LIVE_MEDIA_LABEL="$(get_param live-media-label)"
-LIVE_MEDIA_LABEL="${LIVE_MEDIA_LABEL:-SCAMSHIELD}"
+LIVE_MEDIA_LABEL="${LIVE_MEDIA_LABEL:-NOVI}"
 SQUASHFS_IMG="$(get_param rd.live.squashimg)"
 SQUASHFS_IMG="${SQUASHFS_IMG:-live/filesystem.squashfs}"
 INIT_PATH="$(get_param init)"
@@ -212,6 +215,7 @@ load_module sd_mod
 load_module sr_mod
 load_module usb_storage
 load_module uas
+load_module virtio_blk
 
 # Filesystems
 load_module squashfs
@@ -260,10 +264,37 @@ find_live_device() {
         fi
 
         # Fallback: scan all block devices with blkid
-        for blkdev in /dev/sd?? /dev/sd? /dev/sr? /dev/nvme?n? /dev/mmcblk?; do
+        # (includes /dev/vd* -- virtio-blk's device naming, used for both
+        # the ISO and the installer disk in scripts/mkvm.sh)
+        #
+        # BusyBox's blkid applet ignores "-s LABEL -o value" entirely and
+        # always prints its plain default-format line (confirmed with
+        # set -x tracing: `blkid -s LABEL -o value /dev/vda` printed
+        # `/dev/vda: LABEL="NOVI" TYPE="iso9660"`, not a bare "NOVI") --
+        # so the exact-equality comparison this used to do could never
+        # match, even against the correct device, every single loop
+        # iteration. Parse LABEL="..." out of the plain output instead,
+        # which is what both BusyBox's and util-linux's blkid print by
+        # default with no -o flag at all.
+        #
+        # LABEL alone is not enough to identify the right device, either:
+        # grub-mkrescue's hybrid ISO also carries an Apple HFS+ partition
+        # (for Mac EFI boot) that xorriso stamps with the *same* volume
+        # label as the real ISO9660 filesystem. Confirmed via a live boot
+        # trace -- /dev/vda3 matched LABEL="NOVI" but was
+        # `TYPE="hfsplus"`, and mounting it as iso9660/vfat failed with
+        # "Invalid argument" every time, because /dev/vd?? (partition
+        # devices) is scanned before /dev/vd? (the whole disk, where the
+        # actual ISO9660 volume lives) and the decoy partition matched
+        # first. Requiring TYPE to be one we can actually mount (iso9660
+        # or vfat) skips the decoy regardless of scan order.
+        for blkdev in /dev/sd?? /dev/sd? /dev/vd?? /dev/vd? /dev/sr? /dev/nvme?n? /dev/mmcblk?; do
             [ -b "${blkdev}" ] || continue
-            found_label="$(blkid -s LABEL -o value "${blkdev}" 2>/dev/null || true)"
-            if [ "${found_label}" = "${label}" ]; then
+            blkid_out="$(blkid "${blkdev}" 2>/dev/null)"
+            found_label="$(printf '%s' "${blkid_out}" | sed -n 's/.*[ :]LABEL="\([^"]*\)".*/\1/p')"
+            found_type="$(printf '%s' "${blkid_out}" | sed -n 's/.*[ :]TYPE="\([^"]*\)".*/\1/p')"
+            if [ "${found_label}" = "${label}" ] && \
+               { [ "${found_type}" = "iso9660" ] || [ "${found_type}" = "vfat" ]; }; then
                 echo "${blkdev}"
                 return 0
             fi
@@ -360,7 +391,7 @@ echo ">>> /init written ($(wc -l < "${WORK_DIR}/init") lines)"
 # ─── /etc/mdev.conf (for mdev-based hotplug) ─────────────────────────────────
 mkdir -p "${WORK_DIR}/etc"
 cat > "${WORK_DIR}/etc/mdev.conf" <<'MDEV_CONF'
-# mdev.conf — minimal hotplug rules for ScamShield initramfs
+# mdev.conf — minimal hotplug rules for Novi initramfs
 # Syntax: regex  uid:gid  octal_perms  [>|=path]  [@|-|$cmd]
 
 # Disk devices
@@ -409,10 +440,26 @@ mknod -m 0666 "${WORK_DIR}/dev/tty"     c 5 0  2>/dev/null || true
 mknod -m 0666 "${WORK_DIR}/dev/tty0"    c 4 0  2>/dev/null || true
 mknod -m 0666 "${WORK_DIR}/dev/tty1"    c 4 1  2>/dev/null || true
 
-# ─── /lib/modules symlink (init will load from real root after switch) ────────
-# Modules aren't embedded in initramfs — the running kernel should have them
-# built-in, or the rootfs must provide /lib/modules/<kver>
+# ─── Kernel modules ───────────────────────────────────────────────────────────
+# /init's load_module() calls (virtio_blk, squashfs, overlay, ...) are only
+# meaningful if the .ko files + depmod metadata actually exist somewhere
+# modprobe can see -- and at this point in boot, before the live media is
+# even found, the initramfs IS the only filesystem available. Embed the
+# whole built module tree (small: ~34M/158 .ko at last count) rather than
+# hand-pick a subset and risk missing a transitive dependency.
 mkdir -p "${WORK_DIR}/lib/modules"
+MODULES_SRC="${MODULES_SRC:-/build/rootfs/lib/modules}"
+if [[ -d "${MODULES_SRC}" ]]; then
+    KVER="$(basename "$(find "${MODULES_SRC}" -mindepth 1 -maxdepth 1 -type d | head -1)")"
+    if [[ -n "${KVER}" ]]; then
+        echo ">>> Embedding kernel modules (${KVER}) ..."
+        cp -a "${MODULES_SRC}/${KVER}" "${WORK_DIR}/lib/modules/"
+    else
+        echo "WARNING: no kernel module tree found under ${MODULES_SRC} -- modprobe will find nothing in the initramfs." >&2
+    fi
+else
+    echo "WARNING: MODULES_SRC (${MODULES_SRC}) not found -- modprobe will find nothing in the initramfs." >&2
+fi
 
 # ─── Optional: copy musl libc if dynamic busybox ─────────────────────────────
 # If busybox is dynamic, we need the linker + musl/glibc

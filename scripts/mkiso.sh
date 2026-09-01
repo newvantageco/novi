@@ -8,14 +8,28 @@ set -euo pipefail
 # ─── Defaults ────────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# shellcheck source=../build/00-versions.sh
+source "${REPO_ROOT}/build/00-versions.sh"
 
-ROOTFS_DIR="${ROOTFS_DIR:-${REPO_ROOT}/rootfs}"
-BUILD_DIR="${BUILD_DIR:-${REPO_ROOT}/build}"
-ISO_DIR="${BUILD_DIR}/isoroot"
-OUTPUT_ISO="${1:-${BUILD_DIR}/novi.iso}"
+# ROOTFS_DIR/KERNEL_IMAGE default to where build/*.sh actually produce them
+# (${ROOTFS}, i.e. /build/rootfs, from the sourced 00-versions.sh -- that
+# file's own BUILD_DIR is hardcoded to /build, unrelated to REPO_ROOT).
+# ISO_WORK_DIR is this script's own, unrelated concept: where mkiso.sh
+# stages the ISO it's building. Deliberately NOT named BUILD_DIR -- that
+# name is already taken by the sourced 00-versions.sh's export, and a
+# same-named local default here would silently pick up its value instead
+# of falling back to the repo-relative path intended below.
+ROOTFS_DIR="${ROOTFS_DIR:-${ROOTFS}}"
+ISO_WORK_DIR="${ISO_WORK_DIR:-${REPO_ROOT}/build}"
+ISO_DIR="${ISO_WORK_DIR}/isoroot"
+# Not "${1:-...}": this script takes --flag value pairs, not a bare
+# positional arg, so grabbing raw $1 here would take the *next flag
+# name* (e.g. "--rootfs") as the output path whenever --output isn't
+# the first argument passed.
+OUTPUT_ISO="${OUTPUT_ISO:-${ISO_WORK_DIR}/novi.iso}"
 SQUASHFS_COMP="${SQUASHFS_COMP:-zstd}"     # xz | zstd | lz4
-KERNEL_IMAGE="${KERNEL_IMAGE:-${REPO_ROOT}/kernel/vmlinuz}"
-INITRAMFS_IMAGE="${INITRAMFS_IMAGE:-${BUILD_DIR}/initramfs.cpio.gz}"
+KERNEL_IMAGE="${KERNEL_IMAGE:-${ROOTFS}/boot/vmlinuz-${LINUX_VERSION}}"
+INITRAMFS_IMAGE="${INITRAMFS_IMAGE:-${ISO_WORK_DIR}/initramfs.cpio.gz}"
 GRUB_TIMEOUT="${GRUB_TIMEOUT:-5}"
 ISO_LABEL="NOVI"
 ISO_VERSION="0.1.0"
@@ -111,6 +125,14 @@ set default=0
 set timeout=${GRUB_TIMEOUT}
 set timeout_style=menu
 
+# Serial console (in addition to the graphical/tty0 one) so the boot menu
+# and kernel messages are visible when run headless -- a real distro use
+# case (cloud VMs, QEMU -nographic), not just a debug convenience.
+insmod serial
+serial --unit=0 --speed=115200
+terminal_input console serial
+terminal_output console serial
+
 # Appearance
 if [ -f \$prefix/theme/theme.txt ]; then
     insmod gfxterm
@@ -136,11 +158,14 @@ menuentry "Novi Linux ${ISO_VERSION} — Live" --class linux {
            boot=live \
            root=live:/dev/disk/by-label/${ISO_LABEL} \
            live-media=/dev/disk/by-label/${ISO_LABEL} \
+           live-media-label=${ISO_LABEL} \
            rd.live.image \
            rd.live.squashimg=live/filesystem.squashfs \
            quiet splash \
            rw \
            loglevel=3 \
+           console=tty0 \
+           console=ttyS0,115200n8 \
            mitigations=auto \
            iommu=pt \
            vt.global_cursor_default=0
@@ -154,12 +179,15 @@ menuentry "Novi Linux ${ISO_VERSION} — Safe Mode" --class linux {
            boot=live \
            root=live:/dev/disk/by-label/${ISO_LABEL} \
            live-media=/dev/disk/by-label/${ISO_LABEL} \
+           live-media-label=${ISO_LABEL} \
            rd.live.image \
            rd.live.squashimg=live/filesystem.squashfs \
            nomodeset \
            nosplash \
            rw \
-           loglevel=7
+           loglevel=7 \
+           console=tty0 \
+           console=ttyS0,115200n8
     echo "Loading initramfs..."
     initrd /boot/initramfs.cpio.gz
 }
@@ -207,13 +235,17 @@ du -sx --block-size=1 "${ROOTFS_DIR}" 2>/dev/null \
 echo ">>> Building hybrid ISO with grub-mkrescue ..."
 mkdir -p "$(dirname "${OUTPUT_ISO}")"
 
+# Source directory as a plain trailing positional arg -- the standard
+# grub-mkrescue invocation. The previous "-- SRCDIR graft=point" form
+# isn't valid input for this xorriso version's -as mkisofs emulation
+# ("Not a known command: '...'") and the graft-point override was
+# redundant anyway: boot/grub/grub.cfg is already written inside
+# ISO_DIR at that exact path above.
 grub-mkrescue \
     --output="${OUTPUT_ISO}" \
     --verbose \
     -volid "${ISO_LABEL}" \
-    -- \
     "${ISO_DIR}" \
-    boot/grub/grub.cfg="${ISO_DIR}/boot/grub/grub.cfg" \
     2>&1
 
 # ─── Make hybrid (MBR + GPT + EFI) ──────────────────────────────────────────

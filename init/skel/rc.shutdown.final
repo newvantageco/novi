@@ -1,0 +1,7 @@
+#!/bin/sh -e
+# ============================================================
+# rc.shutdown.final -- runs right before the machine reboots or
+# powers off, after every filesystem is unmounted. rc.shutdown
+# already brings services down cleanly, so there is nothing left
+# to do here.
+# ============================================================

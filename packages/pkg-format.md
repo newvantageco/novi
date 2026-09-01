@@ -99,6 +99,47 @@ ldconfig
 
 ---
 
+## GUI Application Registration
+
+`novi-launcher` (RFC 0001 decision 7's Alt+Space overlay) needs a way to
+discover launchable GUI apps by name. There's no special `pkg`/`mkpkg`
+mechanism for this — a package that provides a launchable app just
+installs one more file under `files/`, the same way it installs anything
+else. `pkg install`/`pkg remove` need no changes: the descriptor is
+extracted and removed automatically along with the rest of the package's
+`files/` tree.
+
+A launchable app registers itself by shipping a file at
+`usr/share/novi/apps/<name>.app` (packages contribute here the same way
+they'd contribute `usr/bin/<name>`). Format is plain `key=value`, one per
+line, same style as `MANIFEST`:
+
+| Field | Required | Description | Example |
+|---|---|---|---|
+| `name` | yes | Display name shown in launcher results | `Terminal` |
+| `exec` | yes | Command to run, whitespace-split argv (no shell — no quoting, globbing, or `$VAR` expansion; a path with spaces isn't representable in v1) | `/usr/bin/foot` |
+| `description` | no | Not yet shown anywhere; reserved for a future results view | `foot terminal emulator` |
+
+### Example: `usr/share/novi/apps/foot.app`
+
+```
+name=Terminal
+exec=/usr/bin/foot
+description=foot terminal emulator
+```
+
+`novi-launcher` scans `/usr/share/novi/apps/*.app` at startup, matches
+typed input against each entry's `name` (case-insensitive substring), and
+`execvp()`s the first match's `exec=` command on Enter. `foot` itself is
+the first entry — it isn't `pkg`-installed (it's baked into the base
+rootfs by `build/09-foot.sh`), so its `.app` file is written directly by
+that build script rather than shipped in a `.pkg.tar.gz`, but the file
+format and the directory `novi-launcher` scans are exactly what a real
+package would use, so packaged apps need no special-casing once `pkg`
+starts installing GUI apps for real.
+
+---
+
 ## Package Database
 
 Installed packages are recorded in `/var/lib/pkg/installed/`.  

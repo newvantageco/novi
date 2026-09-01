@@ -1,6 +1,15 @@
-﻿#!/bin/sh
+#!/bin/sh
 # pkg - minimal package manager for a from-scratch Linux distro
 # Busybox-compatible. Requires: tar, gzip, grep, sed, awk, find, sort, mkdir, rm, cp, ln
+#
+# shellcheck disable=SC3043,SC3040,SC3001
+# `local`, `set -o pipefail`, and `< <(process substitution)` are all
+# outside strict POSIX sh, which is what shellcheck's default `sh`
+# dialect checks against for a `#!/bin/sh` shebang -- but this script's
+# actual target is BusyBox ash (this repo's own /bin/sh, statically
+# linked, no bash anywhere in the base image), and all three are
+# verified working there directly against the real busybox binary this
+# repo builds (`build/rootfs/bin/busybox sh -c '...'`), not assumed.
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
@@ -29,11 +38,21 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# Read a single field from a MANIFEST file (key=value format)
+# Read a single field from a MANIFEST file (key=value format).
+# A missing field is a normal, expected case (most fields in
+# pkg-format.md's MANIFEST spec are optional) -- grep finding no match
+# exits 1, and under this script's `set -e`, every caller that does
+# `x="$(manifest_field ...)"` would otherwise die right there, silently,
+# with no error message. Confirmed live under the actual target shell
+# (BusyBox ash, not just assumed): a bare `x="$(grep ... | ...)"` with
+# no match kills the whole script under `set -euo pipefail` even though
+# "field absent" is exactly the case every optional-field caller must
+# handle gracefully. The `|| true` makes "not found" -> empty string,
+# not a fatal error.
 # Usage: manifest_field <file> <key>
 manifest_field() {
     local file="$1" key="$2"
-    grep "^${key}=" "$file" | head -n1 | sed "s/^${key}=//"
+    grep "^${key}=" "$file" | head -n1 | sed "s/^${key}=//" || true
 }
 
 # Return the installed MANIFEST path for a package name
@@ -123,8 +142,19 @@ resolve_deps() {
     # depends is comma-separated list of package names (optionally with versions)
     if [ -n "$depends" ]; then
         local dep dep_name dep_archive
-        # Replace commas with newlines to iterate
-        printf '%s\n' "$depends" | tr ',' '\n' | while IFS= read -r dep; do
+        # Process substitution (< <(...)), not a pipe into `while read` --
+        # this loop body mutates DEP_QUEUE/DEP_VISITED, which the caller
+        # needs to see. Piping into `while read` makes it the last stage
+        # of a pipeline, which ash (like most POSIX shells, absent bash's
+        # non-default `lastpipe`) runs in a subshell -- every mutation
+        # inside would vanish the moment the loop ends, silently: no
+        # error, DEP_QUEUE just stays empty and dependencies never get
+        # installed. Confirmed live: `hello` (depends=libfoo) installed
+        # with libfoo never even attempted, no error printed anywhere.
+        # `< <(...)` runs the loop directly in this function's shell, so
+        # the mutations stick -- the same pattern cmd_remove() already
+        # uses below for its own directory-cleanup loop.
+        while IFS= read -r dep; do
             dep="$(printf '%s' "$dep" | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//')"
             [ -z "$dep" ] && continue
             # Strip version constraint (e.g. "libc>=2.0" -> "libc")
@@ -151,7 +181,7 @@ resolve_deps() {
 
             resolve_deps "$dep_name" "$dep_archive"
             DEP_QUEUE="$DEP_QUEUE $dep_name:$dep_archive"
-        done
+        done < <(printf '%s\n' "$depends" | tr ',' '\n')
     fi
 }
 
@@ -276,6 +306,12 @@ cmd_install() {
         # Install dependencies in order, then the target
         if [ -n "$DEP_QUEUE" ]; then
             info "Installing dependencies..."
+            # shellcheck disable=SC2086
+            # Deliberately unquoted: DEP_QUEUE is a space-separated
+            # list of "name:path" tokens, and word-splitting it here is
+            # what turns it into one token per line for the loop below
+            # to read -- quoting it would pass the whole string as a
+            # single line instead.
             printf '%s\n' $DEP_QUEUE | while IFS=: read -r dep_name dep_archive; do
                 install_pkg_file "$dep_archive"
             done
@@ -403,6 +439,12 @@ cmd_update() {
         resolve_deps "$pkg_name" "$archive"
 
         if [ -n "$DEP_QUEUE" ]; then
+            # shellcheck disable=SC2086
+            # Deliberately unquoted: DEP_QUEUE is a space-separated
+            # list of "name:path" tokens, and word-splitting it here is
+            # what turns it into one token per line for the loop below
+            # to read -- quoting it would pass the whole string as a
+            # single line instead.
             printf '%s\n' $DEP_QUEUE | while IFS=: read -r dep_name dep_archive; do
                 install_pkg_file "$dep_archive" force
             done
@@ -416,11 +458,24 @@ cmd_search() {
     [ $# -ge 1 ] || die "Usage: pkg search <pattern>"
     local pattern="$1"
     local found=0
+    # Tracks names already printed by the repo/cache loop below, so an
+    # installed package that's ALSO still sitting in the repo/cache
+    # (the common case right after installing it) doesn't get listed
+    # twice -- confirmed live: searching for an installed package
+    # printed the identical line twice, once per loop, before this.
+    local shown=""
 
     # Search repo and cache
     for dir in "$PKG_REPO" "$PKG_CACHE"; do
         [ -d "$dir" ] || continue
-        find "$dir" -maxdepth 2 -name "*.pkg.tar.gz" -type f 2>/dev/null | \
+        # < <(...), not `find | while read` -- the loop body sets
+        # `found`, which the caller reads after the loop; piping into
+        # `while read` runs it as the last stage of a pipeline, which
+        # ash runs in a subshell, silently discarding that assignment
+        # (same class of bug fixed in resolve_deps() above -- confirmed
+        # live here too: a real match printed correctly, immediately
+        # followed by "No packages found" anyway, because `found=1`
+        # never escaped the subshell).
         while read -r archive; do
             local m
             m="$(tar -xzf "$archive" -O MANIFEST 2>/dev/null)" || continue
@@ -434,7 +489,8 @@ cmd_search() {
             is_installed "$n" && inst=" [installed]"
             printf '%-30s %-12s %s%s\n' "$n" "$v" "$d" "$inst"
             found=1
-        done
+            shown="$shown $n"
+        done < <(find "$dir" -maxdepth 2 -name "*.pkg.tar.gz" -type f 2>/dev/null)
     done
 
     # Also search installed packages not necessarily in the cache
@@ -442,6 +498,9 @@ cmd_search() {
         [ -f "$m" ] || continue
         local n v d
         n="$(manifest_field "$m" "name")"
+        case " $shown " in
+            *" $n "*) continue;;
+        esac
         v="$(manifest_field "$m" "version")"
         d="$(manifest_field "$m" "description")"
         printf '%s %s' "$n" "$d" | grep -qi "$pattern" || continue
