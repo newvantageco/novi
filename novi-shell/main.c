@@ -924,6 +924,29 @@ static void layer_surface_map(struct wl_listener *listener, void *data) {
 		surface->layer_surface->namespace ? surface->layer_surface->namespace : "",
 		surface->layer_surface->current.layer);
 
+	/* Re-arrange on map, not just on commit: wlroots' own scene helper
+	 * (types/scene/layer_shell_v1.c's layer_surface_configure()) only
+	 * applies a surface's exclusive zone when `surface->mapped` is
+	 * already true at the moment wlr_scene_layer_surface_v1_configure()
+	 * runs -- confirmed by reading that source directly, not guessed.
+	 * layer_surface_commit() above only calls arrange_layers() on the
+	 * surface's first commit or a later geometry-affecting one (see its
+	 * own comment for why -- unconditional re-arranging caused a real
+	 * infinite ping-pong loop), and a layer-shell client typically sets
+	 * its size/anchor/exclusive-zone once and never again, so that one
+	 * commit-triggered arrange is often the ONLY one that ever fires --
+	 * and at that exact point, this surface isn't mapped yet (mapping
+	 * is a consequence of that same commit, processed after the commit
+	 * signal novi-shell listens on). Net effect, confirmed live: a
+	 * panel's exclusive zone was silently never applied -- new windows
+	 * kept landing at the true top of the screen with usable_area
+	 * staying the full, unreduced output size forever, invisibly masked
+	 * because the panel still draws over that region regardless (it's
+	 * on a higher scene layer), so nothing ever looked wrong without
+	 * decorations to expose the gap. Re-arranging here, once mapped is
+	 * guaranteed true, closes it. */
+	arrange_layers(surface->output);
+
 	/* "exclusive" keyboard-interactivity (the launcher overlay's case:
 	 * it needs to receive typed input the instant it appears) means
 	 * grab keyboard focus now. "on_demand" (click-to-focus layer
