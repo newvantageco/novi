@@ -341,6 +341,16 @@ static void surface_draw_frame(struct novi_launcher *state) {
 		(int32_t)state->width, (int32_t)state->height, (int32_t)stride,
 		WL_SHM_FORMAT_XRGB8888);
 	wl_shm_pool_destroy(pool);
+	/* Flush before closing: wl_shm_create_pool's fd is only actually
+	 * written to the socket (as SCM_RIGHTS ancillary data) at the next
+	 * real flush, not at the moment this call returns. This client's
+	 * own redraws happen to always run inside wl_display_dispatch()'s
+	 * own timing, which never exposed the gap -- but novi-panel's
+	 * near-identical code, redrawing from a hand-rolled poll loop
+	 * instead, hit it for real ("file descriptor expected... message
+	 * create_pool(nhi)"). Same latent risk here, fixed the same way,
+	 * rather than leave a pattern that only worked by scheduling luck. */
+	wl_display_flush(state->display);
 	close(fd);
 
 	render(state, data, state->width);

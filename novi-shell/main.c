@@ -56,6 +56,12 @@
  * into the compositor -- same "novi-shell UI is a layer-shell client,
  * not compositor code" split as any future panel. */
 #define NOVI_DEFAULT_LAUNCHER "novi-launcher"
+/* The top bar (RFC 0001's "novi-shell" UI chrome) -- another
+ * layer-shell client, auto-spawned once the compositor is up, rather
+ * than left for the user to start manually or wired as a separate s6
+ * service (novi-shell already owns spawning its own UI pieces, same
+ * as the terminal/launcher keybindings). */
+#define NOVI_DEFAULT_PANEL "novi-panel"
 
 /* For brevity's sake, struct members are annotated where they are used. */
 enum novi_cursor_mode {
@@ -924,12 +930,37 @@ static void layer_surface_unmap(struct wl_listener *listener, void *data) {
 
 static void layer_surface_commit(struct wl_listener *listener, void *data) {
 	struct novi_layer_surface *surface = wl_container_of(listener, surface, commit);
-	/* Re-arranging on every commit (not just ones that changed anchor/
-	 * size/margin) is simpler than tracking exactly which committed
-	 * bits changed, and cheap enough with the handful of layer-shell
-	 * clients (a panel, a launcher overlay) this compositor will ever
-	 * host at once. */
-	arrange_layers(surface->output);
+	struct wlr_layer_surface_v1 *layer_surface = surface->layer_surface;
+
+	/* Re-arrange only when this commit actually touched geometry-
+	 * affecting state (or hasn't been configured at all yet) -- NOT on
+	 * every commit. Confirmed live, the hard way: arranging
+	 * unconditionally sends a fresh configure via
+	 * wlr_scene_layer_surface_v1_configure() on every single commit,
+	 * including plain content-only redraws (a clock ticking) that
+	 * never called set_size/set_anchor/etc. again -- and both
+	 * novi-launcher and novi-panel ack + immediately re-commit in
+	 * response to any configure, whether or not anything actually
+	 * changed. That closes an infinite compositor<->client ping-pong:
+	 * one boot logged over 1,000 arrange/configure cycles in 13
+	 * seconds, continuously reallocating shm buffers, until the whole
+	 * session visibly degraded (the panel silently stopped updating
+	 * once a terminal was also opened -- almost certainly fd/resource
+	 * churn from the runaway loop, not a z-order bug as it first
+	 * appeared). wlr_layer_surface_v1_state.committed is genuinely
+	 * per-commit (surface_synced_move_state resets pending.committed
+	 * to 0 after each promotion, confirmed by reading
+	 * types/wlr_layer_shell_v1.c), so this check is reliable. */
+	uint32_t geometry_fields =
+		WLR_LAYER_SURFACE_V1_STATE_DESIRED_SIZE |
+		WLR_LAYER_SURFACE_V1_STATE_ANCHOR |
+		WLR_LAYER_SURFACE_V1_STATE_EXCLUSIVE_ZONE |
+		WLR_LAYER_SURFACE_V1_STATE_MARGIN |
+		WLR_LAYER_SURFACE_V1_STATE_LAYER;
+	if (!layer_surface->configured ||
+			(layer_surface->current.committed & geometry_fields)) {
+		arrange_layers(surface->output);
+	}
 }
 
 static void layer_surface_destroy(struct wl_listener *listener, void *data) {
@@ -1454,6 +1485,7 @@ int main(int argc, char *argv[]) {
 			execl("/bin/sh", "/bin/sh", "-c", startup_cmd, (void *)NULL);
 		}
 	}
+	spawn(getenv("NOVI_PANEL") ? getenv("NOVI_PANEL") : NOVI_DEFAULT_PANEL);
 	/* Run the Wayland event loop. This does not return until you exit the
 	 * compositor. Starting the backend rigged up all of the necessary event
 	 * loop configuration to listen to libinput events, DRM events, generate
