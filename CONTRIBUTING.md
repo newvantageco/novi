@@ -41,7 +41,7 @@ sudo apt install -y \
     libmpc-dev libmpfr-dev libgmp-dev \
     rsync cpio file mksquashfs xorriso grub-common grub-pc-bin grub-efi-amd64-bin mtools kmod \
     shellcheck qemu-system-x86 \
-    meson ninja-build pkg-config libwayland-bin hwdata
+    meson ninja-build pkg-config libwayland-bin hwdata gperf
 ```
 
 `meson`/`ninja-build`/`pkg-config` are for `build/06-wayland.sh` onward (the
@@ -55,6 +55,20 @@ builds into the target rootfs. `hwdata` is needed because
 `/usr/share/hwdata/pnp.ids` (a build-time PCI/USB ID data file) to exist
 on the host; confirmed by hitting `ERROR: File
 /usr/share/hwdata/pnp.ids does not exist.` with it missing, not guessed.
+`gperf` is needed by `fontconfig` (`build/09-foot.sh`): without it on
+the host, meson falls back to building fontconfig's vendored `gperf`
+subproject using the cross C++ compiler, which fails outright
+(`Executables created by cpp compiler ... are not runnable` -- a build
+tool has to run on the build machine, not the target).
+
+**Also note:** `meson` (>=1.3.2 from a stock Ubuntu 24.04 apt archive is
+not new enough) needs to actually support `c_std=c23` for
+`wlroots-0.18.0`, which checks `meson.version() >= '1.3.0'` to decide
+whether to request it -- a check that's true for 1.3.2 even though 1.3.2
+itself doesn't recognize `c23` as a valid value, failing with `Unknown C
+std ['c23']`. If `meson --version` shows 1.3.x and this happens, `pip
+install --break-system-packages --upgrade meson` (confirmed fixed by
+1.12.0) rather than trying to patch wlroots' version check.
 
 ### 2. Prerequisites (Arch Linux)
 
