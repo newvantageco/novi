@@ -66,6 +66,21 @@ fetch "https://skarnet.org/software/s6-rc/s6-rc-${S6_RC_VERSION}.tar.gz"
 fetch "https://skarnet.org/software/s6-linux-init/s6-linux-init-${S6_LINUX_INIT_VERSION}.tar.gz"
 
 # Wayland/wlroots stack (novi-shell foundation)
+# libffi: wayland's libwayland-server links against it (confirmed via
+# an actual meson configure run: "Dependency libffi not found"), and
+# it isn't part of musl/gcc/binutils. GitHub's release-ASSET downloads
+# (this one) are served from separate blob-storage infrastructure and
+# aren't affected by the codeload/archive source-download restriction
+# that blocks plain "download this tag as a tarball" links elsewhere
+# in this file -- and unlike Debian's raw .orig source tarball (tried
+# first), a GitHub release asset ships a pre-generated ./configure,
+# no autoreconf/libtool bootstrap required.
+fetch "https://github.com/libffi/libffi/releases/download/v${LIBFFI_VERSION}/libffi-${LIBFFI_VERSION}.tar.gz"
+# expat: wayland's scanner/core links against it for XML protocol
+# parsing (confirmed the same way as libffi above: "Dependency expat
+# not found"). Same GitHub-release-asset path as libffi, for the
+# same reason.
+fetch "https://github.com/libexpat/libexpat/releases/download/R_${EXPAT_VERSION//./_}/expat-${EXPAT_VERSION}.tar.gz"
 fetch "https://gitlab.freedesktop.org/wayland/wayland/-/archive/${WAYLAND_VERSION}/wayland-${WAYLAND_VERSION}.tar.gz"
 fetch "https://gitlab.freedesktop.org/wayland/wayland-protocols/-/archive/${WAYLAND_PROTOCOLS_VERSION}/wayland-protocols-${WAYLAND_PROTOCOLS_VERSION}.tar.gz"
 fetch "https://gitlab.freedesktop.org/pixman/pixman/-/archive/pixman-${PIXMAN_VERSION}/pixman-pixman-${PIXMAN_VERSION}.tar.gz"

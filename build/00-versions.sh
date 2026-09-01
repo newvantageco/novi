@@ -27,6 +27,8 @@ S6_LINUX_INIT_VERSION="1.1.2.0"
 # Wayland/wlroots stack (novi-shell foundation) -- meson-built, see
 # build/06-wayland.sh. libxkbcommon, libudev-zero come from GitHub;
 # seatd comes from sourcehut; everything else from gitlab.freedesktop.org.
+LIBFFI_VERSION="3.4.8"
+EXPAT_VERSION="2.6.2"
 WAYLAND_VERSION="1.23.0"
 WAYLAND_PROTOCOLS_VERSION="1.37"
 LIBXKBCOMMON_VERSION="1.8.1"
