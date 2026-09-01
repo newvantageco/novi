@@ -358,7 +358,7 @@ no-systemd/no-D-Bus stance). The widget/notification review is also
 what surfaced the `desktop_toplevel_at()` bug above.
 
 Pointer/click input now reaches layer-shell surfaces: `novi-panel` has
-a left-aligned "Apps" button (text label, no icon set chosen yet) that
+a left-aligned "Apps" button (text label plus icon, see below) that
 opens `novi-launcher` on click, the mouse-driven equivalent of
 Alt+Space. The compositor-side routing turned out to already be
 correct — `desktop_toplevel_at()` was always resolving the right
@@ -443,9 +443,23 @@ exclusive zone value to be precise. Fixed by also re-arranging in
 
 Design-doc §8's rendering sequence is now complete through item 6 of
 6 -- text, alpha compositing, rounded rects, drop shadows, and server-
-side decorations are all real, all live-verified. Only item 5 (icon
-rendering) remains, and it's blocked on a maintainer decision, not
-implementation effort (see below).
+side decorations are all real, all live-verified. Item 5 (icon
+rendering) has now started too: the icon-set "maintainer decision" it
+was blocked on is resolved -- Lucide's `LICENSE` was fetched and read
+directly from upstream (ISC + MIT, both permissive), not assumed from
+training knowledge, unblocking `ICON-PIPELINE.md`'s recommendation.
+`novi-panel`'s apps button now renders Lucide's `layout-grid` glyph
+(four rounded-rect squares), hand-coded in C via the same rounded-box
+SDF + stroke-coverage technique the launcher's drop shadow already
+uses, live-verified in QEMU at both rest and hover (pixel-sampled
+screendumps, not eyeballed) -- see `ICON-PIPELINE.md`'s "First icon
+shipped" section for why this one icon qualified for hand-coding
+instead of the full SVG pipeline (no SVG rasterizer available on this
+build host, and four rounded rects is simple enough to reproduce
+exactly by hand). The larger icon sets design-doc §8 still needs
+(app-grid icons, status-bar wifi/battery/power) have real curves that
+don't qualify for the same shortcut and remain blocked on standing up
+the `tools/svg2icon/` offline pipeline `ICON-PIPELINE.md` proposes.
 
 The maximize dot the decorations landed with is now real too, not a
 dimmed placeholder -- `GUI-DESIGN-LANGUAGE.md` had already flagged it
@@ -472,9 +486,12 @@ remaining bindings are wired up yet; moving keybindings to RFC 0001's
 user-editable config file instead of compiled-in defaults;
 hardware-accelerated rendering (GLES2/Vulkan via Mesa) is out of scope
 for this milestone and stays pixman-only until that's picked up
-separately; the rest of the design docs' sequenced list (drop-shadow
-sprites, an icon set, server-side window decorations) is documented
-but not yet implemented.
+separately; the app-grid and status-bar (wifi/battery/power) icon sets
+design-doc §8 calls for are still unimplemented, blocked on standing up
+the `tools/svg2icon/` offline SVG-to-bitmap pipeline (real curves,
+don't qualify for the hand-coded parametric shortcut the apps-button
+icon used); status icons are additionally blocked on real wifi/battery
+data sources that don't exist yet either.
 
 **Adjacent idea, not started**: decentralized, radio-agnostic mesh
 networking (Reticulum-style — cryptographic identity as the address,
@@ -682,7 +699,7 @@ compositor choice does.
 | 2 | Package/application model | 🟡 Native `pkg`/`mkpkg` now installed, wired into the build, and live-verified end-to-end (real dependency chain, install/remove/search/info) after fixing several real bugs found by first actually running it; sandbox tier still proposed (RFC needed) |
 | 3 | Update/rollback model | 🟡 Track split decided, on-device rollback open |
 | 4 | Hardware strategy | 🟡 x86_64 kernel exists, coverage + aarch64 open |
-| 5 | Desktop strategy | 🟡 Compositor + layer-shell + launcher + foot terminal + top-bar panel, real anti-aliased text rendering (fcft/pixman), a clickable apps button routing pointer input to a layer-shell surface, new windows placed below the panel's exclusive zone, real alpha compositing + rounded corners + a drop shadow on the launcher, server-side window decorations with working close + maximize buttons, all live-verified in QEMU together; design docs' rendering sequence complete except icons (blocked on a license decision); no app search yet |
+| 5 | Desktop strategy | 🟡 Compositor + layer-shell + launcher + foot terminal + top-bar panel, real anti-aliased text rendering (fcft/pixman), a clickable apps button routing pointer input to a layer-shell surface, new windows placed below the panel's exclusive zone, real alpha compositing + rounded corners + a drop shadow on the launcher, server-side window decorations with working close + maximize buttons, all live-verified in QEMU together; design docs' rendering sequence now started on icons too — Lucide's license verified from upstream, apps-button icon shipped and live-verified; app-grid/status-bar icon sets still open (need the offline SVG pipeline); no app search yet |
 | 6 | Gaming strategy | 🔴 Open — blocked on #5 |
 | 7 | Developer strategy | 🟡 Native toolchain exists, container tier proposed |
 | 8 | Enterprise strategy | 🟡 LTS branches exist, signing enforcement + fleet mgmt open |
@@ -691,13 +708,14 @@ compositor choice does.
 | 11 | Differentiation | ✅ Articulated above |
 | 12 | Security tooling / pentest track | 🔴 Open — packaging work, blocked on §2/§8/§9 |
 
-**Next concrete step:** design doc §8's rendering sequence is complete
-except item 5 (icon rendering), which needs a maintainer decision
-first — `ICON-PIPELINE.md` recommends Lucide primary/Tabler secondary,
-but flags their licenses as needing human verification it couldn't do
-itself, so this isn't unilaterally actionable yet. Everything else
-sequenced there (text, alpha compositing, rounded rects, drop shadows,
-server-side decorations) is real and live-verified. The other
+**Next concrete step:** design doc §8's rendering sequence item 5 (icon
+rendering) is unblocked and has its first real icon shipped (Lucide's
+`layout-grid` on the apps button, license-verified from upstream
+rather than assumed). What's left of it is the app-grid and
+status-bar (wifi/battery/power) icon sets, which need real curves and
+so need the `tools/svg2icon/` offline SVG-to-bitmap pipeline
+`ICON-PIPELINE.md` proposes (Stage 1) actually built — that's now
+purely implementation effort, no decision blocking it. The other
 actionable option: wire `novi-launcher` up to real app/file search now
 that §2's native `pkg` actually works end-to-end — narrower than fully
 unblocked, though: `pkg` installs files, it doesn't yet register a

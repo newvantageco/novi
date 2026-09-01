@@ -228,26 +228,52 @@ inclusion in the build, not a shared `.so`) — consistent with this
 repo's all-static-linking posture (musl, static BusyBox) rather than
 introducing the first shared library between Novi's own UI binaries.
 
-### Icon set recommendation (for a human/future agent to act on — this
-environment cannot fetch anything, so this is not verified or vendored here)
+### Icon set decision: Lucide (verified)
 
-**Lucide** (https://lucide.dev) is the primary recommendation: an
-actively-maintained fork of Feather Icons, **ISC licensed** (permissive,
-GPL-compatible), consistent 24×24 grid, ~1.5–2px stroke flat line-art
-style — a direct style match for the mockup's "simple flat/line-art icon
-+ text label" grid, and it already has named icons for essentially every
-glyph this mockup needs: `terminal` (foot), `folder`/`files`, `globe`
-(web), `pencil`/`file-edit` (editor), `package` (pkg), `settings`
-(settings), `shield` (security tools section), `wifi`, `battery`,
-`power`, `chevron-right`/`chevron-down` (disclosure). **Tabler Icons**
-(https://tabler.io/icons, MIT licensed, similarly large, similar 2px
-stroke weight) is a reasonable secondary source for anything Lucide
-lacks. Both are large, well-known, permissively licensed sets — but
-double-check the current license text on each before vendoring, this
-recommendation is from training knowledge, not a live fetch.
+**Lucide** (https://lucide.dev) is the chosen icon set. Its license was
+fetched and read directly from upstream
+(`https://raw.githubusercontent.com/lucide-icons/lucide/main/LICENSE`):
+**ISC License** (Lucide Icons and Contributors) plus an **MIT License**
+grant for icons carried over from the Feather project (Cole Bemis) that
+Lucide forked from — both permissive, both compatible with this repo's
+use. This is no longer a from-training-knowledge recommendation; the
+license text was actually read before any icon was vendored or
+transcribed.
+
+Lucide has a consistent 24×24 grid, ~2px stroke flat line-art style — a
+direct match for the mockup's "simple flat/line-art icon + text label"
+grid — and named icons for essentially every glyph this UI needs:
+`terminal` (foot), `folder`/`files`, `globe` (web), `pencil`/`file-edit`
+(editor), `package` (pkg), `settings` (settings), `shield` (security
+tools section), `wifi`, `battery`, `power`,
+`chevron-right`/`chevron-down` (disclosure), `layout-grid` (apps
+button — shipped, see below). **Tabler Icons** (https://tabler.io/icons,
+MIT licensed) remains the fallback for anything Lucide lacks, still
+unverified/unvendored — check its license the same way before using it.
 
 Feather Icons itself (the original, MIT) is now effectively superseded
 by Lucide upstream and not separately recommended.
+
+### First icon shipped: novi-panel apps-button (`layout-grid`)
+
+The apps-launcher button in `novi-panel` now renders Lucide's
+`layout-grid` glyph (source:
+`https://raw.githubusercontent.com/lucide-icons/lucide/main/icons/layout-grid.svg`
+— four `<rect width="7" height="7" rx="1">` at (3,3)/(14,3)/(14,14)/(3,14)
+on a 24×24 viewBox, `stroke-width="2"`, unfilled). This one icon took
+the **Stage 1(b) parametric exception** this doc calls out above
+("purely parametric shapes are hand-coded directly rather than via
+SVG") rather than the full Stage 1/2 SVG-rasterizer pipeline: four
+rounded rects is simple enough to reproduce exactly as hand-coded C
+using the same rounded-box SDF + stroke-coverage technique
+`novi-launcher` already uses for its drop shadow, and no SVG rasterizer
+(`rsvg-convert`, ImageMagick, Inkscape, `cairosvg`) was available on
+this build host to run Stage 1 with. See `novi-panel/main.c`
+(`apps_icon_coverage()`, `draw_apps_icon()`) for the implementation.
+This does not replace the Stage 1/2 pipeline recommended below for the
+larger icon sets still needed (app-grid icons, status-bar wifi/battery/
+power) — those have real curves and multiple strokes that don't qualify
+for hand-coding, and remain blocked on standing up `tools/svg2icon/`.
 
 ## Summary
 

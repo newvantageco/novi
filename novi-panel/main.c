@@ -6,31 +6,40 @@
  * top edge, top layer, with a positive exclusive zone so it reserves
  * real screen space rather than floating over other content.
  *
- * v1 scope was a live clock, nothing else -- that's grown by exactly
- * one interactive element: a left-aligned "Apps" button that opens
- * novi-launcher on click, the mouse-driven equivalent of Alt+Space.
- * It's a text label, not an icon+label (per GUI-DESIGN-LANGUAGE.md
- * §7's spec) -- no icon set has been chosen yet (docs/design/
- * ICON-PIPELINE.md is a proposal, not implemented), and shipping a
- * text-only button now rather than waiting for icons is the same
- * "ship what's real, not a placeholder" call the clock itself made.
- * Getting a click to reach here needed the client side of a gap
- * novi-shell's compositor side had already closed without a client to
- * exercise it: wlr_seat_pointer_notify_enter/motion/button() already
- * route correctly to whatever wl_surface is under the cursor (verified
- * by reading desktop_toplevel_at() -- it sets its `*surface` out-param
- * before the toplevel-vs-layer-shell discriminator check, so a
- * layer-shell surface's wl_surface was always being resolved
- * correctly), but nothing reached this *client* because it never
- * created a wl_pointer to receive them. This is that missing half:
- * bind wl_seat, create a wl_pointer, track local surface coordinates,
- * and hit-test them against the button's own rect -- exactly how
- * Wayland expects per-widget hit-testing to work (the compositor only
- * ever resolves "which surface," never "which button inside it").
+ * v1 scope was a live clock, nothing else -- that's grown by a
+ * left-aligned "Apps" button (icon + text, per GUI-DESIGN-LANGUAGE.md
+ * §7's spec) that opens novi-launcher on click, the mouse-driven
+ * equivalent of Alt+Space. Getting a click to reach here needed the
+ * client side of a gap novi-shell's compositor side had already closed
+ * without a client to exercise it: wlr_seat_pointer_notify_enter/
+ * motion/button() already route correctly to whatever wl_surface is
+ * under the cursor (verified by reading desktop_toplevel_at() -- it
+ * sets its `*surface` out-param before the toplevel-vs-layer-shell
+ * discriminator check, so a layer-shell surface's wl_surface was
+ * always being resolved correctly), but nothing reached this *client*
+ * because it never created a wl_pointer to receive them. This is that
+ * missing half: bind wl_seat, create a wl_pointer, track local surface
+ * coordinates, and hit-test them against the button's own rect --
+ * exactly how Wayland expects per-widget hit-testing to work (the
+ * compositor only ever resolves "which surface," never "which button
+ * inside it").
+ *
+ * The apps button's icon is Lucide's "layout-grid"
+ * (https://lucide.dev, ISC-licensed -- verified directly against
+ * lucide-icons/lucide's own LICENSE file, not assumed), hand-coded as
+ * a parametric shape (see apps_icon_coverage()) rather than rasterized
+ * from the actual SVG: this repo's build host has no SVG rasterizer
+ * available (checked -- no rsvg-convert/ImageMagick/inkscape/
+ * cairosvg), and the icon itself is simple enough (four stroked
+ * rounded squares, confirmed by reading the real upstream SVG source)
+ * that hand-coding it is squarely within docs/design/ICON-PIPELINE.md's
+ * own sanctioned "a few purely parametric shapes hand-coded directly
+ * rather than via SVG" category, not a shortcut around it.
+ *
  * Still not done: workspace switcher (novi-shell has no workspace
- * concept yet), rounded corners (no rounded-rect primitive built yet,
- * per GUI-DESIGN-LANGUAGE.md §8 item 3), status icons (wifi/battery/
- * power -- same icon-pipeline gap as the apps button's own icon).
+ * concept yet), status icons (wifi/battery/power -- would reuse the
+ * same coverage-mask technique, just needs real status data sources
+ * this repo doesn't have yet).
  *
  * Rendering uses real, anti-aliased text via fcft+pixman (see
  * common/text.h) -- the same font-rendering pipeline foot itself
@@ -41,6 +50,7 @@
  */
 #include <fcntl.h>
 #include <linux/input-event-codes.h>
+#include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -69,6 +79,29 @@
 #define PANEL_EDGE_PADDING 12
 #define BUTTON_H_PADDING 8
 #define BUTTON_V_MARGIN 4 /* top/bottom gap between button and panel edge */
+
+/* Lucide's layout-grid.svg: four 7-unit rounded squares (rx=1) with a
+ * 4-unit gap between them, 2-unit stroke, on a 24x24 canvas
+ * (https://github.com/lucide-icons/lucide/blob/main/icons/layout-grid.svg,
+ * fetched and read directly, not guessed). Reproduced here at its own
+ * native square/gap/stroke units (7/4/2) rather than scaled to fill a
+ * 24px canvas -- APPS_ICON_SIZE (18 = 2*7+4) comfortably fits the
+ * button's 24px content height (BUTTON_V_MARGIN already applied) with
+ * a few px of breathing room, and preserves Lucide's exact 7:4 square-
+ * to-gap ratio and 2:7 stroke-to-square ratio (so the icon reads with
+ * the same visual weight as the original), just at a smaller overall
+ * canvas than 24px. */
+#define APPS_ICON_SQUARE 7
+#define APPS_ICON_GAP 4
+#define APPS_ICON_RADIUS 1
+#define APPS_ICON_STROKE 2
+#define APPS_ICON_SIZE (2 * APPS_ICON_SQUARE + APPS_ICON_GAP)
+#define APPS_ICON_TEXT_GAP 8 /* gap between the icon and the "Apps" label */
+/* text-secondary / accent, matching apps_label_color/apps_label_hover_
+ * color below exactly (same tokens, packed 0xRRGGBB here since the
+ * icon is drawn via plain draw_rect()-style writes, not pixman). */
+#define APPS_ICON_COLOR 0xa3a7b7u
+#define APPS_ICON_HOVER_COLOR 0x2dd4bfu
 
 /* RFC 0001 decision 7: Alt+Space already opens novi-launcher via
  * novi-shell directly; this is the same command, run from the panel
@@ -178,6 +211,104 @@ static void draw_rect(uint32_t *px, uint32_t stride_px, uint32_t buf_w,
 	}
 }
 
+/* Signed distance from (px,py), relative to a rounded box's own
+ * center, to that box's boundary: negative inside, positive outside,
+ * magnitude is the distance to the nearest edge (corner arc included).
+ * Inigo Quilez's widely-used 2D rounded-box SDF formula (public
+ * domain) -- the same one novi-shell's drop-shadow code uses, applied
+ * here rather than shared, since these are separate client binaries
+ * with no shared geometry module yet. */
+static double rounded_box_sdf(double px, double py, double half_w,
+		double half_h, double radius) {
+	double qx = fabs(px) - half_w + radius;
+	double qy = fabs(py) - half_h + radius;
+	double outside_x = qx > 0.0 ? qx : 0.0;
+	double outside_y = qy > 0.0 ? qy : 0.0;
+	double outside = sqrt(outside_x * outside_x + outside_y * outside_y);
+	double inside = qx > qy ? qx : qy;
+	if (inside > 0.0) {
+		inside = 0.0;
+	}
+	return outside + inside - radius;
+}
+
+/* Per-pixel coverage [0,1] of the apps-grid icon at icon-local
+ * coordinates (x,y) -- see APPS_ICON_* for where the icon's exact
+ * geometry (Lucide's layout-grid.svg) comes from. A "stroke" (the
+ * icon is a line icon, not filled, per GUI-DESIGN-LANGUAGE.md §5) is
+ * just "distance to the shape's boundary is within half the stroke
+ * width," directly expressible from the same signed-distance value a
+ * filled shape's own edge-antialiasing would use -- keeping a band
+ * around zero instead of everything <= 0. Checks all four squares and
+ * takes the strongest hit; they never overlap (there's a real gap
+ * between them), so at most one is ever non-zero per pixel, but max()
+ * is the correct combine for a union of independent shapes regardless. */
+static double apps_icon_coverage(double x, double y) {
+	static const double square_pos[4][2] = {
+		{0, 0},
+		{APPS_ICON_SQUARE + APPS_ICON_GAP, 0},
+		{APPS_ICON_SQUARE + APPS_ICON_GAP, APPS_ICON_SQUARE + APPS_ICON_GAP},
+		{0, APPS_ICON_SQUARE + APPS_ICON_GAP},
+	};
+	double half = APPS_ICON_SQUARE / 2.0;
+	double half_stroke = APPS_ICON_STROKE / 2.0;
+	double best = 0.0;
+	for (int i = 0; i < 4; i++) {
+		double cx = square_pos[i][0] + half;
+		double cy = square_pos[i][1] + half;
+		double d = rounded_box_sdf(x - cx, y - cy, half, half, APPS_ICON_RADIUS);
+		double dist_from_stroke_center = fabs(d) - half_stroke;
+		double coverage = 0.5 - dist_from_stroke_center;
+		if (coverage > 1.0) {
+			coverage = 1.0;
+		} else if (coverage < 0.0) {
+			coverage = 0.0;
+		}
+		if (coverage > best) {
+			best = coverage;
+		}
+	}
+	return best;
+}
+
+/* Composites the icon onto the (already-opaque) button background at
+ * (icon_x, icon_y) -- a plain linear blend toward tint_color per pixel
+ * coverage, written back as another opaque pixel, since this buffer is
+ * XRGB8888 throughout (novi-panel has no real alpha channel anywhere,
+ * unlike novi-launcher; the button background under the icon is
+ * already fully painted by the time this runs). */
+static void draw_apps_icon(uint32_t *px, uint32_t stride_px, uint32_t buf_w,
+		uint32_t buf_h, int icon_x, int icon_y, uint32_t tint_color) {
+	uint8_t tint_r = (tint_color >> 16) & 0xff;
+	uint8_t tint_g = (tint_color >> 8) & 0xff;
+	uint8_t tint_b = tint_color & 0xff;
+	for (int y = 0; y < APPS_ICON_SIZE; y++) {
+		int py = icon_y + y;
+		if (py < 0 || py >= (int)buf_h) {
+			continue;
+		}
+		for (int x = 0; x < APPS_ICON_SIZE; x++) {
+			int pxc = icon_x + x;
+			if (pxc < 0 || pxc >= (int)buf_w) {
+				continue;
+			}
+			double coverage = apps_icon_coverage(x + 0.5, y + 0.5);
+			if (coverage <= 0.0) {
+				continue;
+			}
+			uint32_t *p = &px[py * (int)stride_px + pxc];
+			uint32_t bg = *p;
+			uint8_t bg_r = (bg >> 16) & 0xff;
+			uint8_t bg_g = (bg >> 8) & 0xff;
+			uint8_t bg_b = bg & 0xff;
+			uint8_t out_r = (uint8_t)(tint_r * coverage + bg_r * (1.0 - coverage) + 0.5);
+			uint8_t out_g = (uint8_t)(tint_g * coverage + bg_g * (1.0 - coverage) + 0.5);
+			uint8_t out_b = (uint8_t)(tint_b * coverage + bg_b * (1.0 - coverage) + 0.5);
+			*p = 0xff000000u | ((uint32_t)out_r << 16) | ((uint32_t)out_g << 8) | out_b;
+		}
+	}
+}
+
 static void render(struct novi_panel *panel, uint32_t *px, uint32_t stride_px) {
 	uint32_t w = panel->width, h = panel->height;
 	draw_rect(px, stride_px, w, h, 0, 0, (int)w, (int)h, BG_COLOR);
@@ -187,6 +318,11 @@ static void render(struct novi_panel *panel, uint32_t *px, uint32_t stride_px) {
 	apps_button_rect(panel, &btn_x, &btn_y, &btn_w, &btn_h);
 	draw_rect(px, stride_px, w, h, btn_x, btn_y, btn_w, btn_h,
 		panel->apps_button_hover ? BUTTON_HOVER_BG_COLOR : BUTTON_BG_COLOR);
+
+	int icon_x = btn_x + BUTTON_H_PADDING;
+	int icon_y = btn_y + (btn_h - APPS_ICON_SIZE) / 2;
+	draw_apps_icon(px, stride_px, w, h, icon_x, icon_y,
+		panel->apps_button_hover ? APPS_ICON_HOVER_COLOR : APPS_ICON_COLOR);
 
 	time_t now = time(NULL);
 	struct tm tm_now;
@@ -218,7 +354,7 @@ static void render(struct novi_panel *panel, uint32_t *px, uint32_t stride_px) {
 	static const pixman_color_t apps_label_hover_color = {
 		.red = 0x2d00, .green = 0xd400, .blue = 0xbf00, .alpha = 0xffff,
 	};
-	int label_x = btn_x + BUTTON_H_PADDING;
+	int label_x = icon_x + APPS_ICON_SIZE + APPS_ICON_TEXT_GAP;
 	novi_text_draw(dest, panel->font, label_x, baseline_y, "Apps",
 		panel->apps_button_hover ? apps_label_hover_color : apps_label_color);
 
@@ -459,9 +595,11 @@ int main(void) {
 	}
 	/* Computed once: the button's own text never changes, so neither
 	 * does its width. apps_button_rect() reads this every render/hit-
-	 * test instead of recomputing novi_text_width() each time. */
-	panel.apps_button_w =
-		novi_text_width(panel.font, "Apps") + 2 * BUTTON_H_PADDING;
+	 * test instead of recomputing novi_text_width() each time.
+	 * Left-to-right: left padding, icon, icon-text gap, "Apps" text,
+	 * right padding. */
+	panel.apps_button_w = 2 * BUTTON_H_PADDING + APPS_ICON_SIZE +
+		APPS_ICON_TEXT_GAP + novi_text_width(panel.font, "Apps");
 
 	panel.surface = wl_compositor_create_surface(panel.compositor);
 	panel.layer_surface = zwlr_layer_shell_v1_get_layer_surface(
