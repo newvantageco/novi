@@ -157,7 +157,7 @@ build_meson() {
     local name="$1" version="$2"
     local dir="${name}-${version}"
     shift 2
-    if [ "$1" = "-d" ]; then
+    if [ "${1:-}" = "-d" ]; then
         dir="$2"
         shift 2
     fi
