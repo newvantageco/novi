@@ -20,6 +20,12 @@
  * build/09-foot.sh already installs. This replaces an earlier
  * hand-drawn 3x5 bitmap font placeholder, which existed only because
  * nothing else in this repo needed real font rendering before foot.
+ *
+ * The card also has real rounded corners and a soft drop shadow (see
+ * apply_rounded_corners()/draw_drop_shadow()) via a real ARGB8888
+ * buffer with actual alpha, not a placeholder square -- the wl_shm
+ * surface is deliberately larger than the visible card to leave room
+ * for the shadow to extend past its edges without clipping.
  */
 #include <fcntl.h>
 #include <math.h>
@@ -37,8 +43,14 @@
 #include "wlr-layer-shell-unstable-v1-protocol.h"
 #include "../common/text.h"
 
-#define WIN_WIDTH 560
-#define WIN_HEIGHT 120
+/* The visible card's own size -- unchanged from before the shadow was
+ * added. The wl_shm buffer/layer-shell surface are now larger than
+ * this (see BUFFER_WIDTH/BUFFER_HEIGHT) to leave room for the shadow
+ * to extend past the card's edges; every draw call that used to be
+ * card-relative now adds SHADOW_MARGIN to land in the same place
+ * within the bigger buffer. */
+#define CARD_WIDTH 560
+#define CARD_HEIGHT 120
 /* These are still plain 0xAARRGGBB literals with A=0xff -- a fully
  * opaque premultiplied-alpha pixel is numerically identical to a
  * straight-alpha one (premultiplying by 255/255 is a no-op), so
@@ -53,6 +65,21 @@
 /* GUI-DESIGN-LANGUAGE.md §3's radius-lg token: "Floating cards, the
  * launcher panel, notification toasts, window corners." */
 #define CORNER_RADIUS 12
+
+/* GUI-DESIGN-LANGUAGE.md §4's elevation-1 spec for floating cards:
+ * "y-offset: 4px, feather: 16px, alpha: 0.35, color: #000000". */
+#define SHADOW_OFFSET_Y 4
+#define SHADOW_FEATHER 16
+#define SHADOW_ALPHA_MAX 89 /* 0.35 * 255, rounded */
+/* How far past the card's own edges the buffer needs to extend to fit
+ * the shadow without clipping it -- feather (16) plus the vertical
+ * offset (4) covers the shadow's farthest reach (below the card);
+ * using the same margin on all four sides is simpler than four
+ * different numbers and costs nothing (a few extra always-transparent
+ * pixels on the shorter sides). */
+#define SHADOW_MARGIN (SHADOW_FEATHER + SHADOW_OFFSET_Y)
+#define BUFFER_WIDTH (CARD_WIDTH + 2 * SHADOW_MARGIN)
+#define BUFFER_HEIGHT (CARD_HEIGHT + 2 * SHADOW_MARGIN)
 
 #define INPUT_MAX 127
 
@@ -229,9 +256,9 @@ static void draw_rect(uint32_t *px, uint32_t stride_px, uint32_t buf_w,
 }
 
 /* Punches real transparency into each of the buffer's four corners so
- * this layer-shell surface reads as a rounded card against whatever's
- * behind it, instead of a rounded shape drawn ON an opaque square
- * (which would still show hard square corners in BG_COLOR). Per
+ * a rounded-rect shape drawn into it reads as genuinely rounded
+ * against whatever's behind it, instead of a rounded shape drawn ON an
+ * opaque square (which would still show hard square corners). Per
  * GUI-DESIGN-LANGUAGE.md §4's "precomputed rounded-corner alpha mask"
  * approach, but computed directly here via each pixel's distance to
  * the corner's circle center rather than pixman's trapezoid
@@ -242,9 +269,18 @@ static void draw_rect(uint32_t *px, uint32_t stride_px, uint32_t buf_w,
  * there's no per-frame cost to amortize the way a compositor-lifetime
  * daemon would need to.
  *
- * Must run AFTER all other drawing (background, border, text) in
- * render() -- it overwrites whatever those left in the corner
- * squares, which is exactly the point: carve the rounding out last. */
+ * Operates on whatever buffer it's given -- render() runs it on a
+ * small card-local buffer (background+border only, not yet composited
+ * onto the main surface), not the main output buffer directly. That
+ * matters once there's a drop shadow underneath: punching transparency
+ * via a RAW overwrite into the final, already-composited surface
+ * buffer would erase the shadow value sitting there along with the
+ * card's own color, showing a hole through to the desktop at each
+ * corner instead of the shadow peeking through. Corner-masking the
+ * card in its own small buffer FIRST, then alpha-compositing that
+ * (via PIXMAN_OP_OVER, not a raw write) onto the shadow already in the
+ * main buffer, lets the corners' partial transparency correctly blend
+ * with whatever's underneath instead of replacing it. */
 static void apply_rounded_corners(uint32_t *px, uint32_t stride_px,
 		uint32_t w, uint32_t h, int radius) {
 	for (int cy = 0; cy < radius; cy++) {
@@ -294,6 +330,78 @@ static void apply_rounded_corners(uint32_t *px, uint32_t stride_px,
 	}
 }
 
+/* Signed distance from point (px,py), relative to a rounded box's own
+ * center, to that box's boundary: negative inside, positive outside,
+ * magnitude is the distance to the nearest edge (corner arc included).
+ * This is Inigo Quilez's widely-used 2D rounded-box SDF formula
+ * (public domain, from his signed-distance-functions reference) --
+ * not derived here, just applied: it's the standard, correct way to
+ * get a smoothly-feathered soft edge around a rounded rectangle
+ * without rasterizing per-corner special cases by hand. */
+static double rounded_box_sdf(double px, double py, double half_w,
+		double half_h, double radius) {
+	double qx = fabs(px) - half_w + radius;
+	double qy = fabs(py) - half_h + radius;
+	double outside_x = qx > 0.0 ? qx : 0.0;
+	double outside_y = qy > 0.0 ? qy : 0.0;
+	double outside = sqrt(outside_x * outside_x + outside_y * outside_y);
+	double inside = qx > qy ? qx : qy;
+	if (inside > 0.0) {
+		inside = 0.0;
+	}
+	return outside + inside - radius;
+}
+
+/* Draws the card's drop shadow directly into `px`, which must start
+ * fully transparent -- true here without any explicit clear, because
+ * allocate_shm_file() ftruncate()s a brand new POSIX shm object every
+ * redraw, and the kernel zero-fills those (same guarantee as a fresh
+ * anonymous mmap). Must run FIRST, before the card itself is
+ * composited on top (see render()): the shadow is the same rounded-
+ * rect shape as the card, offset down by SHADOW_OFFSET_Y and feathered
+ * outward by SHADOW_FEATHER using the SDF above, so most of it ends up
+ * hidden directly under the opaque card -- only the sliver that peeks
+ * out past the card's own edges (mainly below, since the offset is
+ * purely vertical) is ever visible, which is exactly the intended
+ * "elevated card" look. */
+static void draw_drop_shadow(uint32_t *px, uint32_t stride_px,
+		uint32_t buf_w, uint32_t buf_h) {
+	double half_w = CARD_WIDTH / 2.0;
+	double half_h = CARD_HEIGHT / 2.0;
+	double center_x = SHADOW_MARGIN + half_w;
+	double center_y = SHADOW_MARGIN + SHADOW_OFFSET_Y + half_h;
+
+	for (int y = 0; y < (int)buf_h; y++) {
+		for (int x = 0; x < (int)buf_w; x++) {
+			double d = rounded_box_sdf(x + 0.5 - center_x, y + 0.5 - center_y,
+				half_w, half_h, CORNER_RADIUS);
+			double coverage;
+			if (d <= 0.0) {
+				coverage = 1.0;
+			} else if (d >= SHADOW_FEATHER) {
+				coverage = 0.0;
+			} else {
+				coverage = 1.0 - d / SHADOW_FEATHER;
+			}
+			if (coverage <= 0.0) {
+				continue;
+			}
+			uint8_t alpha = (uint8_t)(coverage * SHADOW_ALPHA_MAX + 0.5);
+			/* Shadow color is pure black -- at any alpha, premultiplied
+			 * RGB is always 0,0,0, so the alpha byte alone is the
+			 * entire pixel value. (Verified live with a temporary bright
+			 * magenta swap-in, since a real black-on-black shadow is
+			 * mathematically invisible in a screendump against this
+			 * environment's plain black desktop, no matter how correct
+			 * it is -- a pixel-exact scan of that debug render confirmed
+			 * the SDF shape, the 4px offset sliver below the card, and
+			 * the 16px linear feather all landing exactly on the values
+			 * SHADOW_OFFSET_Y/SHADOW_FEATHER specify.) */
+			px[y * (int)stride_px + x] = (uint32_t)alpha << 24;
+		}
+	}
+}
+
 /* Restricts typed input to characters the calculator grammar actually
  * understands. fcft can render any printable ASCII glyph now (unlike
  * the old bitmap font, which only had digits/operators at all), but
@@ -308,18 +416,39 @@ static void render(struct novi_launcher *state, uint32_t *px,
 		uint32_t stride_px) {
 	uint32_t w = state->width, h = state->height;
 
-	draw_rect(px, stride_px, w, h, 0, 0, (int)w, (int)h, BORDER_COLOR);
-	draw_rect(px, stride_px, w, h, 3, 3, (int)w - 6, (int)h - 6, BG_COLOR);
+	/* Shadow first, directly into the (freshly zero-filled, so already
+	 * fully transparent) output buffer -- see draw_drop_shadow()'s own
+	 * comment for why this has to happen before the card, not after. */
+	draw_drop_shadow(px, stride_px, w, h);
 
-	/* Wraps the same buffer draw_rect() already filled above -- both
-	 * write into the identical memory in place, no double buffering.
-	 * a8r8g8b8, not x8r8g8b8: the buffer now carries a real alpha
-	 * channel (see surface_draw_frame()'s WL_SHM_FORMAT_ARGB8888), so
-	 * glyph compositing needs the format that actually reads/writes it,
-	 * even though every glyph draws well inside the fully-opaque
-	 * interior today and never touches the corner pixels. */
+	/* The card itself is built in its own small, card-sized buffer --
+	 * background/border opaque, corners punched transparent -- then
+	 * alpha-composited onto the shadow already sitting in `px`, rather
+	 * than drawn directly into `px` with raw overwrites. A raw overwrite
+	 * would blow away the shadow pixels wherever the card is opaque
+	 * (fine, that's supposed to happen) but ALSO wherever the card's own
+	 * corners are transparent (not fine -- see apply_rounded_corners()'s
+	 * comment: that would erase the shadow there too, showing a hole
+	 * through to the desktop instead of the shadow peeking through). A
+	 * static buffer, not a stack one: CARD_WIDTH*CARD_HEIGHT*4 is ~262KB,
+	 * too large for a stack frame, and this function is only ever called
+	 * from the single-threaded main loop, so reusing one buffer across
+	 * calls is safe. */
+	static uint32_t card_buf[CARD_WIDTH * CARD_HEIGHT];
+	draw_rect(card_buf, CARD_WIDTH, CARD_WIDTH, CARD_HEIGHT,
+		0, 0, CARD_WIDTH, CARD_HEIGHT, BORDER_COLOR);
+	draw_rect(card_buf, CARD_WIDTH, CARD_WIDTH, CARD_HEIGHT,
+		3, 3, CARD_WIDTH - 6, CARD_HEIGHT - 6, BG_COLOR);
+	apply_rounded_corners(card_buf, CARD_WIDTH, CARD_WIDTH, CARD_HEIGHT,
+		CORNER_RADIUS);
+
 	pixman_image_t *dest = pixman_image_create_bits_no_clear(
 		PIXMAN_a8r8g8b8, (int)w, (int)h, px, (int)stride_px * 4);
+	pixman_image_t *card_src = pixman_image_create_bits_no_clear(
+		PIXMAN_a8r8g8b8, CARD_WIDTH, CARD_HEIGHT, card_buf, CARD_WIDTH * 4);
+	pixman_image_composite32(PIXMAN_OP_OVER, card_src, NULL, dest,
+		0, 0, 0, 0, SHADOW_MARGIN, SHADOW_MARGIN, CARD_WIDTH, CARD_HEIGHT);
+	pixman_image_unref(card_src);
 
 	static const pixman_color_t input_color = {
 		.red = 0xe000, .green = 0xe000, .blue = 0xf000, .alpha = 0xffff,
@@ -328,9 +457,14 @@ static void render(struct novi_launcher *state, uint32_t *px,
 		.red = 0x8a00, .green = 0xb400, .blue = 0xf800, .alpha = 0xffff,
 	};
 
-	int text_x = 16;
+	/* All card-relative coordinates from here on need the same
+	 * SHADOW_MARGIN offset the card itself was composited at -- the
+	 * card's interior is now fully opaque at this point (just painted
+	 * above), so a raw draw_rect() for the cursor bar is exactly
+	 * equivalent to a blend there and doesn't need its own pixman call. */
+	int text_x = SHADOW_MARGIN + 16;
 	int line_height = state->font->height;
-	int input_y = 16;
+	int input_y = SHADOW_MARGIN + 16;
 	int baseline_y = input_y + state->font->ascent;
 	int cursor_w = 3;
 
@@ -355,8 +489,6 @@ static void render(struct novi_launcher *state, uint32_t *px,
 	}
 
 	pixman_image_unref(dest);
-
-	apply_rounded_corners(px, stride_px, w, h, CORNER_RADIUS);
 }
 
 static void surface_draw_frame(struct novi_launcher *state) {
@@ -561,8 +693,8 @@ static void layer_surface_configure(void *data,
 		uint32_t width, uint32_t height) {
 	struct novi_launcher *state = data;
 	zwlr_layer_surface_v1_ack_configure(layer_surface, serial);
-	state->width = width > 0 ? width : WIN_WIDTH;
-	state->height = height > 0 ? height : WIN_HEIGHT;
+	state->width = width > 0 ? width : BUFFER_WIDTH;
+	state->height = height > 0 ? height : BUFFER_HEIGHT;
 	state->configured = true;
 	surface_draw_frame(state);
 }
@@ -643,7 +775,13 @@ int main(void) {
 	state.layer_surface = zwlr_layer_shell_v1_get_layer_surface(
 		state.layer_shell, state.surface, NULL,
 		ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, "novi-launcher");
-	zwlr_layer_surface_v1_set_size(state.layer_surface, WIN_WIDTH, WIN_HEIGHT);
+	/* Requesting BUFFER_WIDTH/HEIGHT, not CARD_WIDTH/HEIGHT: the surface
+	 * itself has to be big enough to hold the shadow's full reach around
+	 * the card, not just the card. With anchor=0 (centered, unchanged
+	 * below), the extra margin is symmetric, so the card still ends up
+	 * centered on screen -- only the invisible (mostly-transparent)
+	 * padding around it grew. */
+	zwlr_layer_surface_v1_set_size(state.layer_surface, BUFFER_WIDTH, BUFFER_HEIGHT);
 	zwlr_layer_surface_v1_set_anchor(state.layer_surface, 0);
 	zwlr_layer_surface_v1_set_exclusive_zone(state.layer_surface, -1);
 	zwlr_layer_surface_v1_set_keyboard_interactivity(state.layer_surface,
