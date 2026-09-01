@@ -71,7 +71,13 @@ require gzip
 # ─── Build initramfs if not present ──────────────────────────────────────────
 if [[ ! -f "${INITRAMFS_IMAGE}" ]]; then
     echo ">>> Initramfs not found, building with mkinitramfs.sh..."
-    "${SCRIPT_DIR}/mkinitramfs.sh" --output "${INITRAMFS_IMAGE}"
+    # Invoked via `bash`, not executed directly: scripts/*.sh are tracked
+    # in git as mode 100644 (confirmed with `git ls-files -s`, true for
+    # most of this repo's scripts, not just this one), so a fresh clone
+    # has no execute bit on mkinitramfs.sh regardless of what's on any
+    # one contributor's working copy -- direct execution fails outright
+    # with "Permission denied" on a from-scratch checkout.
+    bash "${SCRIPT_DIR}/mkinitramfs.sh" --output "${INITRAMFS_IMAGE}"
 fi
 
 # ─── Prepare ISO tree ─────────────────────────────────────────────────────────
