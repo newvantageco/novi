@@ -620,8 +620,12 @@ the panel clock and app-search icon rendering were unaffected.
 
 **Still open**: file search (indexed filesystem lookup) still doesn't
 exist, and no package installs a `.app` descriptor yet since no real
-GUI apps are packaged -- app search only has one real entry (foot) to
-find until that changes; RFC 0001 decision 7's entire default
+GUI apps are packaged -- app search has two real entries (`foot`,
+`novi-settings`) baked into the base rootfs directly, still none
+installed via `pkg`; `novi-settings` itself is Account/password only,
+keyboard-only (no `wl_pointer` click-to-focus yet), and a single-panel
+app with no sidebar/multi-section navigation to extend into yet; RFC
+0001 decision 7's entire default
 keybinding set is now wired, but workspaces are per-server, not the
 RFC's own per-output framing (see §5 body's own scoping note -- real
 multi-output support doesn't exist anywhere else in this compositor
@@ -845,7 +849,7 @@ compositor choice does.
 | 2 | Package/application model | 🟡 Native `pkg`/`mkpkg` now installed, wired into the build, and live-verified end-to-end (real dependency chain, install/remove/search/info) after fixing several real bugs found by first actually running it; sandbox tier still proposed (RFC needed) |
 | 3 | Update/rollback model | 🟡 Track split decided, on-device rollback open |
 | 4 | Hardware strategy | 🟡 x86_64 kernel exists, coverage + aarch64 open |
-| 5 | Desktop strategy | 🟡 Compositor + layer-shell + launcher + foot terminal + top-bar panel, real anti-aliased text rendering (fcft/pixman), a clickable apps button routing pointer input to a layer-shell surface, new windows placed below the panel's exclusive zone, real alpha compositing + rounded corners + a drop shadow on the launcher, server-side window decorations with working close + maximize buttons, all live-verified in QEMU together; design docs' rendering sequence now started on icons too — Lucide's license verified from upstream, apps-button icon shipped and live-verified; the `tools/svg2icon/` offline pipeline is built and its icons are now wired into `novi-launcher`'s search results (`icon=` in `.app` descriptors) and QEMU-live-verified — a real generated terminal icon renders next to a matched result, pixel-confirmed via screendump; status-bar icons are generated but unwired, blocked on real wifi/battery data; real app search too — `pkg-format.md`'s GUI-app-registration convention, foot registered and launchable by typed name, fork+execvp on Enter, live-verified end-to-end; file search still doesn't exist; Super+. symbol picker (not full emoji — no emoji-capable font exists) now wired too, `novi-launcher --symbols` copying to the clipboard via novi-shell's existing `wl_data_device_manager`, QEMU-live-verified down to the exact pasted UTF-8 bytes; found and fixed a real, previously-invisible `common/text.c` bug along the way (byte-per-codepoint rendering silently mojibake'd any multi-byte UTF-8 glyph); two more unrelated bugs found and fixed live-testing all this: a missing `/tmp` mount, and the documented `s6-rc -up change graphical` command itself (root-caused: `-p`/prune tries to stop the console's own getty; corrected to plain `-u`); a real taskbar now too — `novi-panel` is a `wlr-foreign-toplevel-management-unstable-v1` client (the standard taskbar protocol, XML vendored under `protocol/`), minimize is a real function instead of a dimmed placeholder, QEMU-live-verified end to end (minimize, restore via taskbar click, close removing the entry, all pixel-confirmed); PrintScreen screenshots also wired — `novi-screenshot/` is a `wlr-screencopy-unstable-v1` client writing an uncompressed 24-bit BMP, `novi-shell`'s key dispatch gained its first no-modifier binding to reach it, QEMU-live-verified with the actual BMP bytes read back (correct header, exact expected file size, correct bottom-up pixel orientation against a screendump of the same frame); Super+L session lock also real now — `novi-lockscreen` checks a typed password against `/etc/shadow` via musl's real `crypt(3)`, and `novi-shell` gained a `locked` flag that actually disables every keybinding and blocks focus-stealing while active (not just a visual overlay), QEMU-live-verified including the bypass attempt itself (Super+Q/Alt+Space confirmed inert while locked via `ps`, wrong password rejected, correct password unlocked and restored normal keybindings); RFC 0001 decision 7's default keybinding set is now fully wired — Super+[1-9]/Shift+[1-9] workspaces landed last, per-server not per-output (no multi-output support exists anywhere else in this compositor either), and surfaced a real bug along the way: Shift+digit reports a different keysym entirely on this compositor's hardcoded US layout (Shift+3 is `XKB_KEY_numbersign`, never `XKB_KEY_3`), the same class of bug the existing Shift+Tab handling already worked around for one key, just needing nine shifted forms covered instead of one; confirmed both broken (stray `@`/`#` typed into a focused terminal) and fixed (window actually moves, workspace becomes genuinely empty) via QEMU screendumps |
+| 5 | Desktop strategy | 🟡 Compositor + layer-shell + launcher + foot terminal + top-bar panel, real anti-aliased text rendering (fcft/pixman), a clickable apps button routing pointer input to a layer-shell surface, new windows placed below the panel's exclusive zone, real alpha compositing + rounded corners + a drop shadow on the launcher, server-side window decorations with working close + maximize buttons, all live-verified in QEMU together; design docs' rendering sequence now started on icons too — Lucide's license verified from upstream, apps-button icon shipped and live-verified; the `tools/svg2icon/` offline pipeline is built and its icons are now wired into `novi-launcher`'s search results (`icon=` in `.app` descriptors) and QEMU-live-verified — a real generated terminal icon renders next to a matched result, pixel-confirmed via screendump; status-bar icons are generated but unwired, blocked on real wifi/battery data; real app search too — `pkg-format.md`'s GUI-app-registration convention, foot registered and launchable by typed name, fork+execvp on Enter, live-verified end-to-end; file search still doesn't exist; Super+. symbol picker (not full emoji — no emoji-capable font exists) now wired too, `novi-launcher --symbols` copying to the clipboard via novi-shell's existing `wl_data_device_manager`, QEMU-live-verified down to the exact pasted UTF-8 bytes; found and fixed a real, previously-invisible `common/text.c` bug along the way (byte-per-codepoint rendering silently mojibake'd any multi-byte UTF-8 glyph); two more unrelated bugs found and fixed live-testing all this: a missing `/tmp` mount, and the documented `s6-rc -up change graphical` command itself (root-caused: `-p`/prune tries to stop the console's own getty; corrected to plain `-u`); a real taskbar now too — `novi-panel` is a `wlr-foreign-toplevel-management-unstable-v1` client (the standard taskbar protocol, XML vendored under `protocol/`), minimize is a real function instead of a dimmed placeholder, QEMU-live-verified end to end (minimize, restore via taskbar click, close removing the entry, all pixel-confirmed); PrintScreen screenshots also wired — `novi-screenshot/` is a `wlr-screencopy-unstable-v1` client writing an uncompressed 24-bit BMP, `novi-shell`'s key dispatch gained its first no-modifier binding to reach it, QEMU-live-verified with the actual BMP bytes read back (correct header, exact expected file size, correct bottom-up pixel orientation against a screendump of the same frame); Super+L session lock also real now — `novi-lockscreen` checks a typed password against `/etc/shadow` via musl's real `crypt(3)`, and `novi-shell` gained a `locked` flag that actually disables every keybinding and blocks focus-stealing while active (not just a visual overlay), QEMU-live-verified including the bypass attempt itself (Super+Q/Alt+Space confirmed inert while locked via `ps`, wrong password rejected, correct password unlocked and restored normal keybindings); RFC 0001 decision 7's default keybinding set is now fully wired — Super+[1-9]/Shift+[1-9] workspaces landed last, per-server not per-output (no multi-output support exists anywhere else in this compositor either), and surfaced a real bug along the way: Shift+digit reports a different keysym entirely on this compositor's hardcoded US layout (Shift+3 is `XKB_KEY_numbersign`, never `XKB_KEY_3`), the same class of bug the existing Shift+Tab handling already worked around for one key, just needing nine shifted forms covered instead of one; confirmed both broken (stray `@`/`#` typed into a focused terminal) and fixed (window actually moves, workspace becomes genuinely empty) via QEMU screendumps; first first-party app now exists too — `novi-settings` (Account/change-password), this repo's first plain `xdg-shell` window app rather than a layer-shell overlay, real SHA-512 `crypt(3)` + atomic `/etc/shadow` rewrite, QEMU-live-verified via the actual round trip (password set through the GUI successfully unlocked `novi-lockscreen`, not just "a message appeared") |
 | 6 | Gaming strategy | 🔴 Open — blocked on #5 |
 | 7 | Developer strategy | 🟡 Native toolchain exists, container tier proposed |
 | 8 | Enterprise strategy | 🟡 LTS branches exist, signing enforcement + fleet mgmt open |
@@ -1117,3 +1121,56 @@ RFC 0001 decision 7's entire default keybinding set is done: Alt+Space,
 Alt+Tab/Shift+Tab, Super+Return/Q, Super+[1-9]/Shift+[1-9],
 Super+./symbol picker, PrintScreen, and Super+L, every one QEMU-live-
 verified against its own real behavior, not just "the process starts."
+
+### First first-party app: novi-settings
+
+The compositor's whole interaction shell was essentially done at this
+point, but the desktop had almost nothing to actually run: one real
+launchable app (`foot`, a third-party binary this repo bakes in), for
+an "everyday users" pillar this doc's own Philosophy section names as
+equal to developer/pentest/gaming. `novi-settings` closes a real,
+previously-missing gap, not a mockup: this system has had no GUI way to
+set a password at all — `novi-lockscreen`'s own header comment already
+noted the stock `/etc/shadow` ships an empty hash because "no `passwd`
+flow has ever run" — so the only way to make Super+L's lock feature
+actually usable day-to-day was dropping to a shell and running
+`passwd` by hand. `novi-settings`'s "Account" panel is that missing
+GUI path, and nothing more in v1: two fields, New password and Confirm,
+no "current password" field at all -- root changing its own password
+never needs the old one first (standard Unix semantics; only a
+non-root user changing their own needs to prove the old one), which is
+both more correct and simpler than a fake three-field form. Real
+SHA-512 `crypt(3)` hashing with a genuine random salt from
+`/dev/urandom` (not a placeholder), an atomic `/etc/shadow` rewrite
+(write to a temp file, `rename()` over the original — a crash or power
+loss mid-write can never leave it half-written), every other shadow
+field and every other line preserved byte-for-byte.
+
+This is also this repo's first first-party app built as a plain
+`xdg-shell` window rather than a layer-shell overlay — a real,
+decorated, closable, taskbar-listed window like `foot`, not a
+full-screen or centered overlay the way `novi-launcher`/`novi-panel`/
+`novi-lockscreen` all are. `novi-shell` already decorates every
+`xdg_toplevel` unconditionally regardless of what the client requests
+(its own `xdg_decoration_manager` comment), so `novi-settings` didn't
+need to negotiate decoration mode at all — a real, documented scope
+narrowing specific to this one compositor, not something a portable
+app would get away with. Keyboard-only interaction (Tab/Shift+Tab
+between fields, Enter to advance or submit) — no `wl_pointer`/click-
+to-focus yet, a real v1 limit matching every other new client's own
+honest scoping in this doc, not an oversight.
+
+QEMU-live-verified end to end, including the test that actually proves
+the round trip rather than just "a message appeared": typed mismatched
+passwords first and confirmed the real validation path ("Passwords
+don't match", both fields cleared, screendump-confirmed); then typed
+matching ones and confirmed "Password changed"; then read `/etc/shadow`
+directly over the serial console and confirmed a real `$6$`-prefixed
+hash with a proper 16-character salt, `0600 root:root` permissions
+preserved, and every other field (`19000:0:99999:7:::`) untouched byte-
+for-byte. The actual proof, not just "a plausible-looking hash exists":
+closed `novi-settings`, locked the session with Super+L, and typed the
+*exact same new password* into `novi-lockscreen` — it unlocked,
+confirming `novi-settings`'s write and `novi-lockscreen`'s independent
+`crypt(3)` read of that same file genuinely agree, not just that each
+one looks right in isolation.
