@@ -92,6 +92,19 @@
  * agree on this constant by both using it (novi-lockscreen's own
  * main.c defines the identical string next to its own explanation). */
 #define NOVI_LOCK_NAMESPACE "novi-lockscreen"
+/* RFC 0001 decision 7: Super+[1-9] workspaces. The RFC frames this as
+ * per-output (the sway/i3 convention), but every other part of this
+ * compositor that deals with "which output" -- new-toplevel placement,
+ * layer-shell surfaces with no output requested -- already commits to
+ * "there is exactly one output, use it" (see server_new_layer_surface()
+ * and server_new_xdg_toplevel()'s own comments) rather than real
+ * multi-output logic nothing here has ever tested. Workspace state
+ * follows that same, honest scoping: one set of NOVI_WORKSPACE_COUNT
+ * workspaces on novi_server itself, not per-novi_output -- a real
+ * multi-output workspace model is future work alongside real
+ * multi-output placement generally, not something to half-build here
+ * against zero multi-monitor test coverage. */
+#define NOVI_WORKSPACE_COUNT 9
 /* The top bar (RFC 0001's "novi-shell" UI chrome) -- another
  * layer-shell client, auto-spawned once the compositor is up, rather
  * than left for the user to start manually or wired as a separate s6
@@ -239,6 +252,13 @@ struct novi_server {
 	 * moving focus away from it mid-lock, since handle_keybinding()
 	 * runs before seat-focus routing, not through it. */
 	bool locked;
+
+	/* RFC 0001 decision 7: Super+[1-9] workspaces. 1-indexed (matching
+	 * the keys themselves) so this can be compared directly against a
+	 * novi_toplevel.workspace with no off-by-one translation at either
+	 * end. See NOVI_WORKSPACE_COUNT's own comment for why this lives on
+	 * novi_server, not per-output. */
+	int active_workspace;
 };
 
 struct novi_output {
@@ -299,6 +319,16 @@ struct novi_toplevel {
 	 * minimized window (Alt+Tab or a taskbar's request_activate) all go
 	 * through this same pair. */
 	bool minimized;
+	/* RFC 0001 decision 7: which of NOVI_WORKSPACE_COUNT workspaces this
+	 * toplevel belongs to (1-indexed, see novi_server.active_workspace).
+	 * Set once at map time to whatever's active then -- new windows open
+	 * on the current workspace, matching every real i3/sway-family
+	 * compositor's behavior -- and changed only by an explicit
+	 * Super+Shift+[1-9] (move_focused_to_workspace()). Visibility is
+	 * `workspace == server->active_workspace && !minimized`: these two
+	 * hidden-reasons are independent (see switch_workspace()'s own
+	 * comment), not one flag doing double duty. */
+	int workspace;
 	struct wlr_box saved_geometry;
 	struct wl_listener map;
 	struct wl_listener unmap;
@@ -350,6 +380,13 @@ static void unmaximize_toplevel(struct novi_toplevel *toplevel);
  * the state-owning pair together" reason as maximize/unmaximize. */
 static void minimize_toplevel(struct novi_toplevel *toplevel);
 static void unminimize_toplevel(struct novi_toplevel *toplevel);
+/* Forward-declared for the same reason: handle_keybinding() (below)
+ * needs to call these for Super+[1-9]/Super+Shift+[1-9], but they're
+ * defined next to minimize_toplevel() further down (same "state-owning
+ * pair stays together" grouping -- these two own novi_toplevel.workspace
+ * the same way minimize_toplevel()/unminimize_toplevel() own .minimized). */
+static void switch_workspace(struct novi_server *server, int workspace);
+static void move_focused_to_workspace(struct novi_server *server, int workspace);
 
 static void focus_toplevel(struct novi_toplevel *toplevel, struct wlr_surface *surface) {
 	/* Note: this function only deals with keyboard focus. */
@@ -367,6 +404,25 @@ static void focus_toplevel(struct novi_toplevel *toplevel, struct wlr_surface *s
 		 * comment for why the keyboard-shortcut path needs its own,
 		 * separate guard instead of relying on this alone. */
 		return;
+	}
+	if (toplevel->workspace != toplevel->server->active_workspace) {
+		/* Alt+Tab and a taskbar's "activate" request can both land on a
+		 * toplevel that lives on a workspace that isn't currently
+		 * visible (the taskbar shows every open window regardless of
+		 * workspace -- see novi-panel/main.c). Real desktops switch you
+		 * to wherever the window you're activating actually is, rather
+		 * than silently focusing something that stays hidden; this is
+		 * that switch. Done before the minimized check below on
+		 * purpose: switch_workspace() has to run first so
+		 * unminimize_toplevel()'s own visibility computation (workspace
+		 * == active_workspace) sees the workspace it's ABOUT to be
+		 * shown on, not the one being switched away from. switch_
+		 * workspace() may itself focus some other toplevel as part of
+		 * making the new workspace visible (its own default MRU pick)
+		 * -- harmless, since this function's own focus-setting code
+		 * below still runs afterward and re-focuses THIS toplevel
+		 * regardless of whatever it picked in the meantime. */
+		switch_workspace(toplevel->server, toplevel->workspace);
 	}
 	if (toplevel->minimized) {
 		/* Alt+Tab and a taskbar's "activate" request both just call this
@@ -500,16 +556,44 @@ static void close_focused_toplevel(struct novi_server *server) {
 	}
 }
 
-/* RFC 0001 decision 7's default keybindings. Alt+Tab/Shift+Tab (window
- * switching), Super+Return/Super+Q (terminal/close), Super+. (symbol
- * picker), PrintScreen (screenshot, checked separately in
- * keyboard_handle_key() since it takes no modifier), and Super+L
- * (lock) are implemented; Super+[1-9] workspaces is the one remaining
- * tracked follow-up, needing real per-output workspace state this
- * milestone doesn't build. All of this is compositor-internal default
- * behavior for now; RFC 0001 calls for these to move to a
- * user-editable config file, also a follow-up, not implemented here
- * yet. */
+/* Maps a keysym back to its Super+[1-9] workspace number (1-9), or 0 if
+ * it isn't one -- needed because xkb_state_key_get_syms() (what
+ * keyboard_handle_key() actually calls) returns the keysym AFTER
+ * applying the current modifier state, and on a standard US layout
+ * (the only one this compositor's hardcoded xkb_keymap_new_from_names()
+ * call ever produces -- see server_new_keyboard()) Shift+3 reports
+ * XKB_KEY_numbersign ('#'), never XKB_KEY_3. A plain `case XKB_KEY_3:`
+ * switch can never match Super+Shift+3's actual keysym, silently
+ * falling through to deliver "#" to the focused client instead --
+ * confirmed live: exactly that happened before this fix, typed
+ * straight into a focused foot window. This is the identical class of
+ * bug XKB_KEY_ISO_Left_Tab's own case (right below) already works
+ * around for Shift+Tab; digits just have nine shifted forms to cover
+ * instead of Tab's one. */
+static int workspace_digit_for_keysym(xkb_keysym_t sym) {
+	switch (sym) {
+	case XKB_KEY_1: case XKB_KEY_exclam: return 1;
+	case XKB_KEY_2: case XKB_KEY_at: return 2;
+	case XKB_KEY_3: case XKB_KEY_numbersign: return 3;
+	case XKB_KEY_4: case XKB_KEY_dollar: return 4;
+	case XKB_KEY_5: case XKB_KEY_percent: return 5;
+	case XKB_KEY_6: case XKB_KEY_asciicircum: return 6;
+	case XKB_KEY_7: case XKB_KEY_ampersand: return 7;
+	case XKB_KEY_8: case XKB_KEY_asterisk: return 8;
+	case XKB_KEY_9: case XKB_KEY_parenleft: return 9;
+	default: return 0;
+	}
+}
+
+/* RFC 0001 decision 7's default keybindings, all implemented:
+ * Alt+Tab/Shift+Tab (window switching), Super+Return/Super+Q (terminal/
+ * close), Super+[1-9]/Super+Shift+[1-9] (workspaces -- see
+ * NOVI_WORKSPACE_COUNT's own comment for the per-server, not per-output,
+ * scoping), Super+. (symbol picker), PrintScreen (screenshot, checked
+ * separately in keyboard_handle_key() since it takes no modifier), and
+ * Super+L (lock). All of this is compositor-internal default behavior
+ * for now; RFC 0001 calls for these to move to a user-editable config
+ * file, a follow-up, not implemented here yet. */
 static bool handle_keybinding(struct novi_server *server, uint32_t modifiers,
 		xkb_keysym_t sym) {
 	if (modifiers & WLR_MODIFIER_ALT) {
@@ -544,6 +628,22 @@ static bool handle_keybinding(struct novi_server *server, uint32_t modifiers,
 		}
 	}
 	if (modifiers & WLR_MODIFIER_LOGO) {
+		/* RFC 0001 decision 7: Super+[1-9] switch workspace,
+		 * Super+Shift+[1-9] move the focused window to one -- checked
+		 * here, before the switch below, rather than as switch cases:
+		 * workspace_digit_for_keysym() already covers both a digit's
+		 * shifted and unshifted keysym (see its own comment for why
+		 * that's required at all), so this one check replaces what
+		 * would otherwise need to be 18 separate case labels. */
+		int workspace_n = workspace_digit_for_keysym(sym);
+		if (workspace_n != 0) {
+			if (modifiers & WLR_MODIFIER_SHIFT) {
+				move_focused_to_workspace(server, workspace_n);
+			} else {
+				switch_workspace(server, workspace_n);
+			}
+			return true;
+		}
 		switch (sym) {
 		case XKB_KEY_Return:
 			spawn(getenv("NOVI_TERMINAL") ?
@@ -1506,6 +1606,12 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 	/* Called when the surface is mapped, or ready to display on-screen. */
 	struct novi_toplevel *toplevel = wl_container_of(listener, toplevel, map);
 
+	/* New windows open on the current workspace -- every real i3/sway-
+	 * family compositor's behavior, and simplest for a user (a freshly
+	 * launched app appears where you are, not wherever workspace 1
+	 * happens to be). */
+	toplevel->workspace = toplevel->server->active_workspace;
+
 	wl_list_insert(&toplevel->server->toplevels, &toplevel->link);
 
 	/* Foreign-toplevel-management handle: created here (not in
@@ -1807,9 +1913,115 @@ static void unminimize_toplevel(struct novi_toplevel *toplevel) {
 		return;
 	}
 	toplevel->minimized = false;
-	wlr_scene_node_set_enabled(&toplevel->scene_tree->node, true);
+	/* Only actually show it if its own workspace is the visible one --
+	 * unminimizing (e.g. a taskbar click) doesn't imply "also switch
+	 * to wherever this window lives," that's what focus_toplevel()'s
+	 * own workspace guard is for (see its comment) when this runs on
+	 * the path that leads there. Called with the node left disabled
+	 * here is correct, not a bug: a minimized toplevel on a
+	 * currently-inactive workspace becoming "not minimized anymore"
+	 * should still need a workspace switch to actually see it, exactly
+	 * like a real desktop. */
+	struct novi_server *server = toplevel->server;
+	wlr_scene_node_set_enabled(&toplevel->scene_tree->node,
+		toplevel->workspace == server->active_workspace);
 	if (toplevel->foreign_handle != NULL) {
 		wlr_foreign_toplevel_handle_v1_set_minimized(toplevel->foreign_handle, false);
+	}
+}
+
+/* RFC 0001 decision 7: Super+[1-9]. Switches which workspace is visible
+ * on this (only) output -- see NOVI_WORKSPACE_COUNT's own comment for
+ * why this is per-server, not per-output. A toplevel's visibility is
+ * always `workspace == active_workspace && !minimized`: these are
+ * independent hidden-reasons (a minimized window on the active
+ * workspace stays hidden; a non-minimized window on another workspace
+ * is also hidden), so both minimize_toplevel()/unminimize_toplevel()
+ * above and this function each apply that same formula rather than one
+ * flag silently overriding the other. */
+static void switch_workspace(struct novi_server *server, int workspace) {
+	if (workspace == server->active_workspace) {
+		return;
+	}
+	server->active_workspace = workspace;
+
+	struct wlr_surface *prev_focus = server->seat->keyboard_state.focused_surface;
+	struct novi_toplevel *focus_candidate = NULL;
+	struct novi_toplevel *t;
+	wl_list_for_each(t, &server->toplevels, link) {
+		bool visible = t->workspace == workspace && !t->minimized;
+		wlr_scene_node_set_enabled(&t->scene_tree->node, visible);
+		/* server->toplevels is MRU-ordered (focus_toplevel() moves
+		 * whatever it focuses to the front) -- the first visible match
+		 * walking front-to-back is exactly "the most recently used
+		 * window on this workspace," the same convention
+		 * minimize_toplevel()'s own "next" pick and cycle_toplevel()
+		 * already use, not a new one invented here. */
+		if (visible && focus_candidate == NULL) {
+			focus_candidate = t;
+		}
+	}
+
+	if (focus_candidate != NULL) {
+		focus_toplevel(focus_candidate, focus_candidate->xdg_toplevel->base->surface);
+		return;
+	}
+	/* Nothing visible on the new workspace -- explicitly deactivate
+	 * whatever was focused before (it's about to be hidden, if it
+	 * wasn't already) and clear seat focus, the same cleanup
+	 * minimize_toplevel() does when hiding the last visible window. */
+	if (prev_focus != NULL) {
+		struct wlr_xdg_toplevel *prev_xdg_toplevel =
+			wlr_xdg_toplevel_try_from_wlr_surface(prev_focus);
+		if (prev_xdg_toplevel != NULL) {
+			wlr_xdg_toplevel_set_activated(prev_xdg_toplevel, false);
+		}
+	}
+	wlr_seat_keyboard_notify_clear_focus(server->seat);
+}
+
+/* RFC 0001 decision 7: Super+Shift+[1-9]. Moves whichever toplevel
+ * currently holds keyboard focus to a different workspace -- a no-op
+ * if nothing's focused (e.g. focus is on a layer-shell overlay, or
+ * nothing at all) or if it's already on that workspace. Unlike
+ * switch_workspace(), this never changes server->active_workspace
+ * itself: real i3/sway behavior is "the window leaves with you staying
+ * put," not "follow it to where it went." */
+static void move_focused_to_workspace(struct novi_server *server, int workspace) {
+	struct wlr_surface *focused = server->seat->keyboard_state.focused_surface;
+	if (focused == NULL) {
+		return;
+	}
+	struct novi_toplevel *toplevel = NULL;
+	struct novi_toplevel *t;
+	wl_list_for_each(t, &server->toplevels, link) {
+		if (t->xdg_toplevel->base->surface == focused) {
+			toplevel = t;
+			break;
+		}
+	}
+	if (toplevel == NULL || toplevel->workspace == workspace) {
+		return;
+	}
+	toplevel->workspace = workspace;
+
+	/* It just left the visible workspace -- hide it and hand focus to
+	 * whatever's next, the same "find the next visible MRU toplevel or
+	 * clear focus" pattern minimize_toplevel() uses when hiding
+	 * whatever currently holds focus. */
+	wlr_scene_node_set_enabled(&toplevel->scene_tree->node, false);
+	wlr_xdg_toplevel_set_activated(toplevel->xdg_toplevel, false);
+	struct novi_toplevel *next = NULL;
+	wl_list_for_each(t, &server->toplevels, link) {
+		if (t != toplevel && !t->minimized && t->workspace == server->active_workspace) {
+			next = t;
+			break;
+		}
+	}
+	if (next != NULL) {
+		focus_toplevel(next, next->xdg_toplevel->base->surface);
+	} else {
+		wlr_seat_keyboard_notify_clear_focus(server->seat);
 	}
 }
 
@@ -2039,6 +2251,13 @@ int main(int argc, char *argv[]) {
 	}
 
 	struct novi_server server = {0};
+	/* Matches every toplevel's own default (xdg_toplevel_map() sets
+	 * workspace = server->active_workspace at map time) -- 1, not the
+	 * calloc'd 0, since Super+[1-9] only ever produces 1-9. Leaving
+	 * this at 0 would make every window mapped before the first
+	 * workspace switch belong to a workspace number no keybinding can
+	 * ever reach again once one *is* pressed. */
+	server.active_workspace = 1;
 	/* The Wayland display is managed by libwayland. It handles accepting
 	 * clients from the Unix socket, manging Wayland globals, and so on. */
 	server.wl_display = wl_display_create();

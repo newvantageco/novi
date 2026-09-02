@@ -621,9 +621,11 @@ the panel clock and app-search icon rendering were unaffected.
 **Still open**: file search (indexed filesystem lookup) still doesn't
 exist, and no package installs a `.app` descriptor yet since no real
 GUI apps are packaged -- app search only has one real entry (foot) to
-find until that changes; Super+[1-9] workspaces (needs real per-output
-workspace state) is RFC 0001 decision 7's only remaining unwired
-binding; PrintScreen screenshots are wired but v1-scoped (whole-output
+find until that changes; RFC 0001 decision 7's entire default
+keybinding set is now wired, but workspaces are per-server, not the
+RFC's own per-output framing (see §5 body's own scoping note -- real
+multi-output support doesn't exist anywhere else in this compositor
+either); PrintScreen screenshots are wired but v1-scoped (whole-output
 only, file-only, BMP not PNG -- see above); Super+L lock has no
 rate-limiting/backoff on repeated wrong attempts yet (a real follow-up,
 not urgent on a local single-user system with no network exposure to
@@ -843,7 +845,7 @@ compositor choice does.
 | 2 | Package/application model | 🟡 Native `pkg`/`mkpkg` now installed, wired into the build, and live-verified end-to-end (real dependency chain, install/remove/search/info) after fixing several real bugs found by first actually running it; sandbox tier still proposed (RFC needed) |
 | 3 | Update/rollback model | 🟡 Track split decided, on-device rollback open |
 | 4 | Hardware strategy | 🟡 x86_64 kernel exists, coverage + aarch64 open |
-| 5 | Desktop strategy | 🟡 Compositor + layer-shell + launcher + foot terminal + top-bar panel, real anti-aliased text rendering (fcft/pixman), a clickable apps button routing pointer input to a layer-shell surface, new windows placed below the panel's exclusive zone, real alpha compositing + rounded corners + a drop shadow on the launcher, server-side window decorations with working close + maximize buttons, all live-verified in QEMU together; design docs' rendering sequence now started on icons too — Lucide's license verified from upstream, apps-button icon shipped and live-verified; the `tools/svg2icon/` offline pipeline is built and its icons are now wired into `novi-launcher`'s search results (`icon=` in `.app` descriptors) and QEMU-live-verified — a real generated terminal icon renders next to a matched result, pixel-confirmed via screendump; status-bar icons are generated but unwired, blocked on real wifi/battery data; real app search too — `pkg-format.md`'s GUI-app-registration convention, foot registered and launchable by typed name, fork+execvp on Enter, live-verified end-to-end; file search still doesn't exist; Super+. symbol picker (not full emoji — no emoji-capable font exists) now wired too, `novi-launcher --symbols` copying to the clipboard via novi-shell's existing `wl_data_device_manager`, QEMU-live-verified down to the exact pasted UTF-8 bytes; found and fixed a real, previously-invisible `common/text.c` bug along the way (byte-per-codepoint rendering silently mojibake'd any multi-byte UTF-8 glyph); two more unrelated bugs found and fixed live-testing all this: a missing `/tmp` mount, and the documented `s6-rc -up change graphical` command itself (root-caused: `-p`/prune tries to stop the console's own getty; corrected to plain `-u`); a real taskbar now too — `novi-panel` is a `wlr-foreign-toplevel-management-unstable-v1` client (the standard taskbar protocol, XML vendored under `protocol/`), minimize is a real function instead of a dimmed placeholder, QEMU-live-verified end to end (minimize, restore via taskbar click, close removing the entry, all pixel-confirmed); PrintScreen screenshots also wired — `novi-screenshot/` is a `wlr-screencopy-unstable-v1` client writing an uncompressed 24-bit BMP, `novi-shell`'s key dispatch gained its first no-modifier binding to reach it, QEMU-live-verified with the actual BMP bytes read back (correct header, exact expected file size, correct bottom-up pixel orientation against a screendump of the same frame); Super+L session lock also real now — `novi-lockscreen` checks a typed password against `/etc/shadow` via musl's real `crypt(3)`, and `novi-shell` gained a `locked` flag that actually disables every keybinding and blocks focus-stealing while active (not just a visual overlay), QEMU-live-verified including the bypass attempt itself (Super+Q/Alt+Space confirmed inert while locked via `ps`, wrong password rejected, correct password unlocked and restored normal keybindings) |
+| 5 | Desktop strategy | 🟡 Compositor + layer-shell + launcher + foot terminal + top-bar panel, real anti-aliased text rendering (fcft/pixman), a clickable apps button routing pointer input to a layer-shell surface, new windows placed below the panel's exclusive zone, real alpha compositing + rounded corners + a drop shadow on the launcher, server-side window decorations with working close + maximize buttons, all live-verified in QEMU together; design docs' rendering sequence now started on icons too — Lucide's license verified from upstream, apps-button icon shipped and live-verified; the `tools/svg2icon/` offline pipeline is built and its icons are now wired into `novi-launcher`'s search results (`icon=` in `.app` descriptors) and QEMU-live-verified — a real generated terminal icon renders next to a matched result, pixel-confirmed via screendump; status-bar icons are generated but unwired, blocked on real wifi/battery data; real app search too — `pkg-format.md`'s GUI-app-registration convention, foot registered and launchable by typed name, fork+execvp on Enter, live-verified end-to-end; file search still doesn't exist; Super+. symbol picker (not full emoji — no emoji-capable font exists) now wired too, `novi-launcher --symbols` copying to the clipboard via novi-shell's existing `wl_data_device_manager`, QEMU-live-verified down to the exact pasted UTF-8 bytes; found and fixed a real, previously-invisible `common/text.c` bug along the way (byte-per-codepoint rendering silently mojibake'd any multi-byte UTF-8 glyph); two more unrelated bugs found and fixed live-testing all this: a missing `/tmp` mount, and the documented `s6-rc -up change graphical` command itself (root-caused: `-p`/prune tries to stop the console's own getty; corrected to plain `-u`); a real taskbar now too — `novi-panel` is a `wlr-foreign-toplevel-management-unstable-v1` client (the standard taskbar protocol, XML vendored under `protocol/`), minimize is a real function instead of a dimmed placeholder, QEMU-live-verified end to end (minimize, restore via taskbar click, close removing the entry, all pixel-confirmed); PrintScreen screenshots also wired — `novi-screenshot/` is a `wlr-screencopy-unstable-v1` client writing an uncompressed 24-bit BMP, `novi-shell`'s key dispatch gained its first no-modifier binding to reach it, QEMU-live-verified with the actual BMP bytes read back (correct header, exact expected file size, correct bottom-up pixel orientation against a screendump of the same frame); Super+L session lock also real now — `novi-lockscreen` checks a typed password against `/etc/shadow` via musl's real `crypt(3)`, and `novi-shell` gained a `locked` flag that actually disables every keybinding and blocks focus-stealing while active (not just a visual overlay), QEMU-live-verified including the bypass attempt itself (Super+Q/Alt+Space confirmed inert while locked via `ps`, wrong password rejected, correct password unlocked and restored normal keybindings); RFC 0001 decision 7's default keybinding set is now fully wired — Super+[1-9]/Shift+[1-9] workspaces landed last, per-server not per-output (no multi-output support exists anywhere else in this compositor either), and surfaced a real bug along the way: Shift+digit reports a different keysym entirely on this compositor's hardcoded US layout (Shift+3 is `XKB_KEY_numbersign`, never `XKB_KEY_3`), the same class of bug the existing Shift+Tab handling already worked around for one key, just needing nine shifted forms covered instead of one; confirmed both broken (stray `@`/`#` typed into a focused terminal) and fixed (window actually moves, workspace becomes genuinely empty) via QEMU screendumps |
 | 6 | Gaming strategy | 🔴 Open — blocked on #5 |
 | 7 | Developer strategy | 🟡 Native toolchain exists, container tier proposed |
 | 8 | Enterprise strategy | 🟡 LTS branches exist, signing enforcement + fleet mgmt open |
@@ -1064,8 +1066,54 @@ showed the normal session again, and Alt+Space immediately worked again
 itself and that `focus_toplevel()`'s guard clearing didn't leave
 keyboard focus stranded afterward.
 
-Only one RFC 0001 decision 7 binding remains: Super+[1-9] workspaces,
-needing real per-output workspace state in the compositor — the
-largest remaining piece, but not blocked on any decision, exactly
-"implementation effort" the way the icon pipeline, symbol picker,
-taskbar, screenshot capture, and lock all were.
+Super+[1-9] workspaces are wired now too — RFC 0001 decision 7 is fully
+implemented. Scoped per-server, not per-output as the RFC's own prose
+frames it: every other part of this compositor that deals with "which
+output" (new-toplevel placement, layer-shell surfaces requesting no
+specific output) already commits to "there is exactly one output, use
+it," so a real per-output workspace model would be new, untested
+multi-monitor logic layered on top of a codebase that has never
+actually run on more than one output — a real per-output model is
+future work alongside real multi-output support generally, not
+something to half-build here. `novi_server.active_workspace` (1-9) and
+a new `novi_toplevel.workspace` field (set to whatever's active at map
+time, so new windows open where you are) drive it: switching workspace
+walks every toplevel, enabling or disabling its scene node by whether
+`workspace == active_workspace && !minimized` — the same
+`wlr_scene_node_set_enabled()` primitive minimize already uses, since
+minimize and workspace-visibility are independent hidden-reasons, not
+one flag doing double duty. Alt+Tab/taskbar-activate on a toplevel from
+a hidden workspace now switches to it automatically first (real desktop
+behavior — activating a window brings you to wherever it is, rather
+than silently focusing something that stays invisible).
+
+Getting this right surfaced a real bug, not caught until actually
+testing the *combined* modifier case rather than each modifier alone:
+`keyboard_handle_key()` reads keysyms through
+`xkb_state_key_get_syms()`, which returns the keysym *after* applying
+the current modifier state — so on the hardcoded "us" layout this
+compositor's `xkb_keymap_new_from_names()` call always produces,
+Shift+3 reports `XKB_KEY_numbersign` ('#'), never `XKB_KEY_3` with a
+separate Shift bit. A plain `case XKB_KEY_3:` can never match
+Super+Shift+3's actual keysym at all — confirmed live, twice: the
+literal `@` and `#` characters landed straight in a focused `foot`
+window instead of moving it, on both the QMP `send-key` chord and a
+manually-sequenced, explicitly-timed `input-send-event` down/up
+sequence (ruling out a QMP timing artifact before concluding it was a
+real code bug). This is the exact class of bug this file's own
+Alt+Tab/Shift+Tab binding already has a fix for one keysym
+(`XKB_KEY_ISO_Left_Tab`) — digits just need nine shifted forms covered
+instead of Tab's one, so `workspace_digit_for_keysym()` maps both the
+unshifted and shifted keysym for each digit (1/!, 2/@, 3/#, ... 9/() )
+back to its workspace number, checked before the modifier switch
+rather than as switch cases. Confirmed fixed live the same two ways the
+bug was confirmed real: Super+Shift+2 now actually moves the focused
+window (screendump-confirmed it vanished from workspace 1 with no
+stray character typed anywhere), Super+2 shows it arrived and focused
+on workspace 2, and Super+1 confirms workspace 1 is now genuinely
+empty, not just visually similar.
+
+RFC 0001 decision 7's entire default keybinding set is done: Alt+Space,
+Alt+Tab/Shift+Tab, Super+Return/Q, Super+[1-9]/Shift+[1-9],
+Super+./symbol picker, PrintScreen, and Super+L, every one QEMU-live-
+verified against its own real behavior, not just "the process starts."
