@@ -622,9 +622,10 @@ the panel clock and app-search icon rendering were unaffected.
 exist, and no package installs a `.app` descriptor yet since no real
 GUI apps are packaged -- app search only has one real entry (foot) to
 find until that changes; Super+[1-9] workspaces
-(needs real per-output workspace state), PrintScreen screenshots, and
-Super+L lock — none of RFC 0001 decision 7's remaining bindings are
-wired up yet; moving keybindings to RFC 0001's
+(needs real per-output workspace state) and Super+L lock (needs a real
+auth-gated overlay) are RFC 0001 decision 7's only remaining unwired
+bindings; PrintScreen screenshots are wired but v1-scoped (whole-output
+only, file-only, BMP not PNG -- see above); moving keybindings to RFC 0001's
 user-editable config file instead of compiled-in defaults;
 hardware-accelerated rendering (GLES2/Vulkan via Mesa) is out of scope
 for this milestone and stays pixman-only until that's picked up
@@ -840,7 +841,7 @@ compositor choice does.
 | 2 | Package/application model | 🟡 Native `pkg`/`mkpkg` now installed, wired into the build, and live-verified end-to-end (real dependency chain, install/remove/search/info) after fixing several real bugs found by first actually running it; sandbox tier still proposed (RFC needed) |
 | 3 | Update/rollback model | 🟡 Track split decided, on-device rollback open |
 | 4 | Hardware strategy | 🟡 x86_64 kernel exists, coverage + aarch64 open |
-| 5 | Desktop strategy | 🟡 Compositor + layer-shell + launcher + foot terminal + top-bar panel, real anti-aliased text rendering (fcft/pixman), a clickable apps button routing pointer input to a layer-shell surface, new windows placed below the panel's exclusive zone, real alpha compositing + rounded corners + a drop shadow on the launcher, server-side window decorations with working close + maximize buttons, all live-verified in QEMU together; design docs' rendering sequence now started on icons too — Lucide's license verified from upstream, apps-button icon shipped and live-verified; the `tools/svg2icon/` offline pipeline is built and its icons are now wired into `novi-launcher`'s search results (`icon=` in `.app` descriptors) and QEMU-live-verified — a real generated terminal icon renders next to a matched result, pixel-confirmed via screendump; status-bar icons are generated but unwired, blocked on real wifi/battery data; real app search too — `pkg-format.md`'s GUI-app-registration convention, foot registered and launchable by typed name, fork+execvp on Enter, live-verified end-to-end; file search still doesn't exist; Super+. symbol picker (not full emoji — no emoji-capable font exists) now wired too, `novi-launcher --symbols` copying to the clipboard via novi-shell's existing `wl_data_device_manager`, QEMU-live-verified down to the exact pasted UTF-8 bytes; found and fixed a real, previously-invisible `common/text.c` bug along the way (byte-per-codepoint rendering silently mojibake'd any multi-byte UTF-8 glyph); two more unrelated bugs found and fixed live-testing all this: a missing `/tmp` mount, and the documented `s6-rc -up change graphical` command itself (root-caused: `-p`/prune tries to stop the console's own getty; corrected to plain `-u`); a real taskbar now too — `novi-panel` is a `wlr-foreign-toplevel-management-unstable-v1` client (the standard taskbar protocol, XML vendored under `protocol/`), minimize is a real function instead of a dimmed placeholder, QEMU-live-verified end to end (minimize, restore via taskbar click, close removing the entry, all pixel-confirmed) |
+| 5 | Desktop strategy | 🟡 Compositor + layer-shell + launcher + foot terminal + top-bar panel, real anti-aliased text rendering (fcft/pixman), a clickable apps button routing pointer input to a layer-shell surface, new windows placed below the panel's exclusive zone, real alpha compositing + rounded corners + a drop shadow on the launcher, server-side window decorations with working close + maximize buttons, all live-verified in QEMU together; design docs' rendering sequence now started on icons too — Lucide's license verified from upstream, apps-button icon shipped and live-verified; the `tools/svg2icon/` offline pipeline is built and its icons are now wired into `novi-launcher`'s search results (`icon=` in `.app` descriptors) and QEMU-live-verified — a real generated terminal icon renders next to a matched result, pixel-confirmed via screendump; status-bar icons are generated but unwired, blocked on real wifi/battery data; real app search too — `pkg-format.md`'s GUI-app-registration convention, foot registered and launchable by typed name, fork+execvp on Enter, live-verified end-to-end; file search still doesn't exist; Super+. symbol picker (not full emoji — no emoji-capable font exists) now wired too, `novi-launcher --symbols` copying to the clipboard via novi-shell's existing `wl_data_device_manager`, QEMU-live-verified down to the exact pasted UTF-8 bytes; found and fixed a real, previously-invisible `common/text.c` bug along the way (byte-per-codepoint rendering silently mojibake'd any multi-byte UTF-8 glyph); two more unrelated bugs found and fixed live-testing all this: a missing `/tmp` mount, and the documented `s6-rc -up change graphical` command itself (root-caused: `-p`/prune tries to stop the console's own getty; corrected to plain `-u`); a real taskbar now too — `novi-panel` is a `wlr-foreign-toplevel-management-unstable-v1` client (the standard taskbar protocol, XML vendored under `protocol/`), minimize is a real function instead of a dimmed placeholder, QEMU-live-verified end to end (minimize, restore via taskbar click, close removing the entry, all pixel-confirmed); PrintScreen screenshots also wired — `novi-screenshot/` is a `wlr-screencopy-unstable-v1` client writing an uncompressed 24-bit BMP, `novi-shell`'s key dispatch gained its first no-modifier binding to reach it, QEMU-live-verified with the actual BMP bytes read back (correct header, exact expected file size, correct bottom-up pixel orientation against a screendump of the same frame) |
 | 6 | Gaming strategy | 🔴 Open — blocked on #5 |
 | 7 | Developer strategy | 🟡 Native toolchain exists, container tier proposed |
 | 8 | Enterprise strategy | 🟡 LTS branches exist, signing enforcement + fleet mgmt open |
@@ -940,11 +941,69 @@ reappeared), then closed a window via its close dot and confirmed its
 taskbar entry actually disappeared (the `closed` event path, not just
 the open path).
 
+PrintScreen screenshots (RFC 0001 decision 7) are wired now too: a new
+`novi-screenshot/` client binds `wlr-screencopy-unstable-v1` (XML
+vendored under `protocol/` for the same reason every other wlroots
+protocol here is — the server side is entirely wlroots' own, enabled
+with one `wlr_screencopy_manager_v1_create()` call in `novi-shell`'s
+`main()`, same shape as the data-device and foreign-toplevel managers
+next to it), captures the focused output's current frame into a
+`wl_shm` buffer, and writes it as an uncompressed 24-bit BMP to
+`/root/screenshot-<timestamp>.bmp`. `novi-shell`'s key-dispatch loop
+needed a real change, not just another binding in the existing
+Alt/Super-gated table: PrintScreen takes no modifier on every real
+keyboard, so `keyboard_handle_key()` now has a second, unconditional
+check for `XKB_KEY_Print` alongside the Alt/Super-gated loop, spawning
+`novi-screenshot` (overridable via `NOVI_SCREENSHOT`, matching every
+other spawned binding's `NOVI_*` env override convention). v1 scope is
+deliberately narrower than RFC 0001's full description: whole-output
+capture only (`capture_output`, not `capture_output_region` — region
+select needs an interactive rubber-band overlay, a real UI surface this
+one-shot tool deliberately isn't, so Shift+PrintScreen stays unwired
+until that overlay exists) and file-only, not "clipboard + file" (an
+image `wl_data_source` is a real, separate follow-up, not done here).
+BMP rather than PNG for the same reason ICON-PIPELINE.md gave for never
+adding SVG *decoding*: this repo has zero image-*encoding* capability
+either (no libpng, no zlib) and a 24-bit uncompressed BMP needs none of
+it while still being a real, universally-openable format.
+
+QEMU-live-verified end to end, including a from-scratch fix to the
+verification environment itself: the sandboxed host this session runs
+in has no `/dev/kvm`, and the project's existing OVMF+GRUB+q35 boot
+path (`scripts/mkvm.sh`'s own shape) turned out to hang for many
+real minutes under this host's TCG once `virtio-gpu-pci` and the
+xhci/USB input devices were both present together — confirmed via QMP
+register polling that the vCPU was making genuine (if glacial) forward
+progress, not deadlocked, then isolated by bisecting the device list
+with direct `-kernel`/`-initrd` boots (skipping OVMF/GRUB entirely):
+`machine=pc` + a single `virtio-gpu-pci` device boots to a shell in
+seconds, so the slowdown is specific to xhci/USB (or q35's ACPI table
+generation for that many PCIe devices) under this host's TCG, not
+`virtio-gpu-pci` itself and not this project's own boot path in
+general — real hardware and less-constrained TCG hosts are unaffected;
+using `machine=pc`'s always-present i8042 PS/2 controller for keyboard
+input (libinput/evdev don't care whether a keyboard is PS/2 or USB)
+sidesteps the slow path entirely for headless testing. Booted the ISO
+this way, brought up `graphical` (`s6-rc -u change graphical`), a
+screendump confirmed the live compositor and panel rendering correctly,
+sent PrintScreen via QMP `send-key`, and confirmed a real
+`/root/screenshot-*.bmp` landed: exactly the expected size for a
+1280×800 24-bit BMP (3,072,054 bytes, matching the header math exactly,
+not just "a file exists"), every header field read back correct via
+`od` (`BM` magic, file size, 54-byte pixel offset, 40-byte info header,
+1280×800, 1 plane, 24 bits/pixel, `BI_RGB`, correct pixel-data size),
+and the actual pixel bytes confirmed both correct content and correct
+bottom-up/`y_invert` row orientation: the file's first row reads pure
+black (0,0,0) — the screen's black background — and its last row reads
+a consistent dark navy (matching the panel bar's actual color in the
+same screendump), which is exactly right for a bottom-up BMP whose
+bottom-of-file row is the bottom of the screen and top-of-file row is
+the top, where the panel actually is.
+
 Next candidates, in roughly increasing order of what they need: Super+L
 lock (needs a real auth-gated layer-shell overlay — the one remaining
 binding this project's own security bar makes non-trivial, not
-"cheap"), PrintScreen screenshots (needs a screencopy protocol plus
-writing a file), and Super+[1-9] workspaces (needs real per-output
-workspace state in the compositor, the largest of the three). None are
-blocked on a decision — all three are exactly "implementation effort"
-the way the icon pipeline, symbol picker, and taskbar were.
+"cheap"), and Super+[1-9] workspaces (needs real per-output workspace
+state in the compositor, the larger of the two). Neither is blocked on
+a decision — both are exactly "implementation effort" the way the icon
+pipeline, symbol picker, taskbar, and screenshot capture were.

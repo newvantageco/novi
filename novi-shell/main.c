@@ -42,6 +42,7 @@
 #include <wlr/types/wlr_output_layout.h>
 #include <wlr/types/wlr_pointer.h>
 #include <wlr/types/wlr_scene.h>
+#include <wlr/types/wlr_screencopy_v1.h>
 #include <wlr/types/wlr_seat.h>
 #include <wlr/types/wlr_subcompositor.h>
 #include <wlr/types/wlr_xcursor_manager.h>
@@ -64,6 +65,13 @@
  * binary, re-invoked with --symbols (see novi-launcher/main.c's own
  * header comment for why this is "symbol", not full emoji). */
 #define NOVI_DEFAULT_SYMBOL_PICKER "novi-launcher --symbols"
+/* RFC 0001 decision 7: bare PrintScreen (no modifier) captures the
+ * whole screen via novi-screenshot/ -- a separate client, same split
+ * as the launcher/symbol picker above. Unlike every other binding
+ * here, this one is dispatched with no Alt/Super requirement (see
+ * keyboard_handle_key()'s separate check below), matching what every
+ * PrintScreen key on real keyboards already means. */
+#define NOVI_DEFAULT_SCREENSHOT "novi-screenshot"
 /* The top bar (RFC 0001's "novi-shell" UI chrome) -- another
  * layer-shell client, auto-spawned once the compositor is up, rather
  * than left for the user to start manually or wired as a separate s6
@@ -538,6 +546,19 @@ static void keyboard_handle_key(
 		 * before ever considering passing it to the focused client. */
 		for (int i = 0; i < nsyms; i++) {
 			if (handle_keybinding(server, modifiers, syms[i])) {
+				handled = true;
+			}
+		}
+	}
+
+	if (!handled && event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
+		/* PrintScreen needs no modifier (see NOVI_DEFAULT_SCREENSHOT's
+		 * comment) so it can't live inside the Alt/Super-gated loop
+		 * above -- check it unconditionally instead. */
+		for (int i = 0; i < nsyms; i++) {
+			if (syms[i] == XKB_KEY_Print) {
+				spawn(getenv("NOVI_SCREENSHOT") ?
+					getenv("NOVI_SCREENSHOT") : NOVI_DEFAULT_SCREENSHOT);
 				handled = true;
 			}
 		}
@@ -1976,6 +1997,11 @@ int main(int argc, char *argv[]) {
 	 * request activate/minimize/maximize/close on them. */
 	server.foreign_toplevel_manager =
 		wlr_foreign_toplevel_manager_v1_create(server.wl_display);
+	/* wlr-screencopy-unstable-v1: lets novi-screenshot/ (PrintScreen,
+	 * RFC 0001 decision 7) capture an output's contents. wlroots
+	 * implements the whole server side; this is the one line needed to
+	 * turn it on, same as the two manager creates just above. */
+	wlr_screencopy_manager_v1_create(server.wl_display);
 
 	/* Creates an output layout, which a wlroots utility for working with an
 	 * arrangement of screens in a physical layout. */
