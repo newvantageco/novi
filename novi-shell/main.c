@@ -25,6 +25,7 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
 #include <time.h>
 #include <unistd.h>
 #include <wayland-server-core.h>
@@ -72,6 +73,25 @@
  * keyboard_handle_key()'s separate check below), matching what every
  * PrintScreen key on real keyboards already means. */
 #define NOVI_DEFAULT_SCREENSHOT "novi-screenshot"
+/* RFC 0001 decision 7: Super+L session lock -- another separate
+ * client (novi-lockscreen/), not compositor code, same split as every
+ * other binding above. Unlike those, a lock is a real security
+ * boundary, not a convenience overlay: novi_server.locked and its
+ * guards in keyboard_handle_key()/focus_toplevel() are what actually
+ * make this safe, not just novi-lockscreen's own layer-shell surface
+ * existing (that alone is exactly what novi-launcher already does,
+ * and novi-launcher grabbing keyboard focus was never meant to
+ * withstand another keybinding stealing it back). */
+#define NOVI_DEFAULT_LOCK "novi-lockscreen"
+/* The zwlr_layer_surface_v1 namespace novi-lockscreen identifies itself
+ * with (its get_layer_surface() call's namespace argument) -- how
+ * layer_surface_map()/layer_surface_unmap() recognize "this is the
+ * lock surface, toggle novi_server.locked" among every other
+ * layer-shell client without a bespoke protocol extension just for
+ * that. Matched by exact string, so novi-lockscreen and novi-shell
+ * agree on this constant by both using it (novi-lockscreen's own
+ * main.c defines the identical string next to its own explanation). */
+#define NOVI_LOCK_NAMESPACE "novi-lockscreen"
 /* The top bar (RFC 0001's "novi-shell" UI chrome) -- another
  * layer-shell client, auto-spawned once the compositor is up, rather
  * than left for the user to start manually or wired as a separate s6
@@ -206,6 +226,19 @@ struct novi_server {
 	 * wlr_data_device_manager_v1/wlr_layer_shell_v1 above); this is the
 	 * one manager object, created once. */
 	struct wlr_foreign_toplevel_manager_v1 *foreign_toplevel_manager;
+
+	/* RFC 0001 decision 7: Super+L session lock. True while
+	 * novi-lockscreen's fullscreen, keyboard-exclusive layer-shell
+	 * surface is mapped (see server_new_layer_surface()'s namespace
+	 * check). This flag is the compositor's own half of "locked" --
+	 * see keyboard_handle_key()'s and focus_toplevel()'s guards for why
+	 * a layer-shell surface grabbing keyboard focus on its own, the
+	 * mechanism every other overlay (launcher, symbol picker) already
+	 * uses, isn't a real lock by itself: nothing stops a *different*
+	 * global keybinding (Super+Q, Alt+Tab, another Alt+Space) from
+	 * moving focus away from it mid-lock, since handle_keybinding()
+	 * runs before seat-focus routing, not through it. */
+	bool locked;
 };
 
 struct novi_output {
@@ -321,6 +354,18 @@ static void unminimize_toplevel(struct novi_toplevel *toplevel);
 static void focus_toplevel(struct novi_toplevel *toplevel, struct wlr_surface *surface) {
 	/* Note: this function only deals with keyboard focus. */
 	if (toplevel == NULL) {
+		return;
+	}
+	if (toplevel->server->locked) {
+		/* Refuse every path that reaches this function while locked --
+		 * a pointer click hit-testing to a toplevel can't happen for
+		 * real (the lock surface is a full-output OVERLAY-layer surface
+		 * with exclusive_zone=-1, so it's hit before anything under it
+		 * ever could be), but a newly mapped toplevel's own
+		 * auto-focus-on-map call still reaches here, and this is the
+		 * one choke point all such callers share. See novi_server.locked's
+		 * comment for why the keyboard-shortcut path needs its own,
+		 * separate guard instead of relying on this alone. */
 		return;
 	}
 	if (toplevel->minimized) {
@@ -456,14 +501,15 @@ static void close_focused_toplevel(struct novi_server *server) {
 }
 
 /* RFC 0001 decision 7's default keybindings. Alt+Tab/Shift+Tab (window
- * switching), Super+Return/Super+Q (terminal/close), and Super+. (symbol
- * picker) are implemented here; Super+[1-9] workspaces, PrintScreen
- * screenshots, and Super+L lock are tracked follow-ups, not yet wired --
- * each needs state (workspaces) or a client-side helper (screenshot,
- * lock) this milestone doesn't build. All of this is compositor-
- * internal default behavior for now; RFC 0001 calls for these to move
- * to a user-editable config file, also a follow-up, not implemented
- * here yet. */
+ * switching), Super+Return/Super+Q (terminal/close), Super+. (symbol
+ * picker), PrintScreen (screenshot, checked separately in
+ * keyboard_handle_key() since it takes no modifier), and Super+L
+ * (lock) are implemented; Super+[1-9] workspaces is the one remaining
+ * tracked follow-up, needing real per-output workspace state this
+ * milestone doesn't build. All of this is compositor-internal default
+ * behavior for now; RFC 0001 calls for these to move to a
+ * user-editable config file, also a follow-up, not implemented here
+ * yet. */
 static bool handle_keybinding(struct novi_server *server, uint32_t modifiers,
 		xkb_keysym_t sym) {
 	if (modifiers & WLR_MODIFIER_ALT) {
@@ -507,6 +553,18 @@ static bool handle_keybinding(struct novi_server *server, uint32_t modifiers,
 		case XKB_KEY_Q:
 			close_focused_toplevel(server);
 			return true;
+		case XKB_KEY_l:
+		case XKB_KEY_L:
+			/* RFC 0001 decision 7: session lock. novi-lockscreen sets
+			 * server->locked itself once its surface actually maps
+			 * (server_new_layer_surface()'s namespace check) rather
+			 * than this setting it directly -- if the client fails to
+			 * start, or refuses to lock because no password is set
+			 * (see novi-lockscreen/main.c), the compositor should never
+			 * believe it's locked when no real lock surface exists to
+			 * back that up. */
+			spawn(getenv("NOVI_LOCK") ? getenv("NOVI_LOCK") : NOVI_DEFAULT_LOCK);
+			return true;
 		case XKB_KEY_period:
 			/* RFC 0001 decision 7: symbol picker. Same spawn-fresh-
 			 * overlay pattern as Alt+Space above, just a different
@@ -539,7 +597,18 @@ static void keyboard_handle_key(
 
 	bool handled = false;
 	uint32_t modifiers = wlr_keyboard_get_modifiers(keyboard->wlr_keyboard);
-	if ((modifiers & (WLR_MODIFIER_ALT | WLR_MODIFIER_LOGO)) &&
+	/* While locked, no compositor keybinding fires at all -- every key
+	 * just falls through to the final wlr_seat_keyboard_notify_key()
+	 * below, which delivers only to whatever holds seat keyboard focus.
+	 * That's always novi-lockscreen's own surface while locked (it
+	 * grabbed focus on map, and focus_toplevel()'s own guard stops
+	 * anything from stealing it back) -- so this is the other half of
+	 * making Super+L a real lock, not just an overlay: without this,
+	 * Super+Q or another Alt+Space while "locked" would still run,
+	 * since handle_keybinding() normally runs before any focus check at
+	 * all. See novi_server.locked's own comment for the full picture. */
+	if (!server->locked &&
+			(modifiers & (WLR_MODIFIER_ALT | WLR_MODIFIER_LOGO)) &&
 			event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
 		/* If Alt or Super (Logo) is held down and this key was
 		 * _pressed_, attempt to process it as a compositor keybinding
@@ -551,7 +620,8 @@ static void keyboard_handle_key(
 		}
 	}
 
-	if (!handled && event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
+	if (!server->locked && !handled &&
+			event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
 		/* PrintScreen needs no modifier (see NOVI_DEFAULT_SCREENSHOT's
 		 * comment) so it can't live inside the Alt/Super-gated loop
 		 * above -- check it unconditionally instead. */
@@ -1186,6 +1256,19 @@ static void layer_surface_map(struct wl_listener *listener, void *data) {
 	 * guaranteed true, closes it. */
 	arrange_layers(surface->output);
 
+	/* This is the lock surface mapping: flip novi_server.locked so
+	 * keyboard_handle_key() and focus_toplevel() start refusing every
+	 * path that could steal focus or run a keybinding while locked.
+	 * Deliberately checked by namespace, not by anything novi-lockscreen
+	 * requests of the protocol itself (keyboard-interactivity=exclusive
+	 * alone is exactly what novi-launcher already uses for a plain
+	 * overlay) -- see novi_server.locked's own comment for why that
+	 * alone was never a real lock. */
+	if (surface->layer_surface->namespace != NULL &&
+			strcmp(surface->layer_surface->namespace, NOVI_LOCK_NAMESPACE) == 0) {
+		surface->output->server->locked = true;
+	}
+
 	/* "exclusive" keyboard-interactivity (the launcher overlay's case:
 	 * it needs to receive typed input the instant it appears) means
 	 * grab keyboard focus now. "on_demand" (click-to-focus layer
@@ -1205,6 +1288,17 @@ static void layer_surface_unmap(struct wl_listener *listener, void *data) {
 	struct novi_layer_surface *surface = wl_container_of(listener, surface, unmap);
 	struct novi_server *server = surface->output->server;
 	struct wlr_seat *seat = server->seat;
+
+	/* Clear the lock *before* the focus-restore logic below runs --
+	 * focus_toplevel() itself refuses to move focus while
+	 * server->locked is true (see its own guard), so leaving this set
+	 * past this point would make a successful unlock (novi-lockscreen
+	 * exiting after a correct password) restore no keyboard focus at
+	 * all instead of handing it back to the top toplevel. */
+	if (surface->layer_surface->namespace != NULL &&
+			strcmp(surface->layer_surface->namespace, NOVI_LOCK_NAMESPACE) == 0) {
+		server->locked = false;
+	}
 
 	/* Only act if this surface actually held keyboard focus (a
 	 * non-interactive layer surface unmapping shouldn't disturb

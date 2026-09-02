@@ -621,11 +621,13 @@ the panel clock and app-search icon rendering were unaffected.
 **Still open**: file search (indexed filesystem lookup) still doesn't
 exist, and no package installs a `.app` descriptor yet since no real
 GUI apps are packaged -- app search only has one real entry (foot) to
-find until that changes; Super+[1-9] workspaces
-(needs real per-output workspace state) and Super+L lock (needs a real
-auth-gated overlay) are RFC 0001 decision 7's only remaining unwired
-bindings; PrintScreen screenshots are wired but v1-scoped (whole-output
-only, file-only, BMP not PNG -- see above); moving keybindings to RFC 0001's
+find until that changes; Super+[1-9] workspaces (needs real per-output
+workspace state) is RFC 0001 decision 7's only remaining unwired
+binding; PrintScreen screenshots are wired but v1-scoped (whole-output
+only, file-only, BMP not PNG -- see above); Super+L lock has no
+rate-limiting/backoff on repeated wrong attempts yet (a real follow-up,
+not urgent on a local single-user system with no network exposure to
+brute-force); moving keybindings to RFC 0001's
 user-editable config file instead of compiled-in defaults;
 hardware-accelerated rendering (GLES2/Vulkan via Mesa) is out of scope
 for this milestone and stays pixman-only until that's picked up
@@ -841,7 +843,7 @@ compositor choice does.
 | 2 | Package/application model | 🟡 Native `pkg`/`mkpkg` now installed, wired into the build, and live-verified end-to-end (real dependency chain, install/remove/search/info) after fixing several real bugs found by first actually running it; sandbox tier still proposed (RFC needed) |
 | 3 | Update/rollback model | 🟡 Track split decided, on-device rollback open |
 | 4 | Hardware strategy | 🟡 x86_64 kernel exists, coverage + aarch64 open |
-| 5 | Desktop strategy | 🟡 Compositor + layer-shell + launcher + foot terminal + top-bar panel, real anti-aliased text rendering (fcft/pixman), a clickable apps button routing pointer input to a layer-shell surface, new windows placed below the panel's exclusive zone, real alpha compositing + rounded corners + a drop shadow on the launcher, server-side window decorations with working close + maximize buttons, all live-verified in QEMU together; design docs' rendering sequence now started on icons too — Lucide's license verified from upstream, apps-button icon shipped and live-verified; the `tools/svg2icon/` offline pipeline is built and its icons are now wired into `novi-launcher`'s search results (`icon=` in `.app` descriptors) and QEMU-live-verified — a real generated terminal icon renders next to a matched result, pixel-confirmed via screendump; status-bar icons are generated but unwired, blocked on real wifi/battery data; real app search too — `pkg-format.md`'s GUI-app-registration convention, foot registered and launchable by typed name, fork+execvp on Enter, live-verified end-to-end; file search still doesn't exist; Super+. symbol picker (not full emoji — no emoji-capable font exists) now wired too, `novi-launcher --symbols` copying to the clipboard via novi-shell's existing `wl_data_device_manager`, QEMU-live-verified down to the exact pasted UTF-8 bytes; found and fixed a real, previously-invisible `common/text.c` bug along the way (byte-per-codepoint rendering silently mojibake'd any multi-byte UTF-8 glyph); two more unrelated bugs found and fixed live-testing all this: a missing `/tmp` mount, and the documented `s6-rc -up change graphical` command itself (root-caused: `-p`/prune tries to stop the console's own getty; corrected to plain `-u`); a real taskbar now too — `novi-panel` is a `wlr-foreign-toplevel-management-unstable-v1` client (the standard taskbar protocol, XML vendored under `protocol/`), minimize is a real function instead of a dimmed placeholder, QEMU-live-verified end to end (minimize, restore via taskbar click, close removing the entry, all pixel-confirmed); PrintScreen screenshots also wired — `novi-screenshot/` is a `wlr-screencopy-unstable-v1` client writing an uncompressed 24-bit BMP, `novi-shell`'s key dispatch gained its first no-modifier binding to reach it, QEMU-live-verified with the actual BMP bytes read back (correct header, exact expected file size, correct bottom-up pixel orientation against a screendump of the same frame) |
+| 5 | Desktop strategy | 🟡 Compositor + layer-shell + launcher + foot terminal + top-bar panel, real anti-aliased text rendering (fcft/pixman), a clickable apps button routing pointer input to a layer-shell surface, new windows placed below the panel's exclusive zone, real alpha compositing + rounded corners + a drop shadow on the launcher, server-side window decorations with working close + maximize buttons, all live-verified in QEMU together; design docs' rendering sequence now started on icons too — Lucide's license verified from upstream, apps-button icon shipped and live-verified; the `tools/svg2icon/` offline pipeline is built and its icons are now wired into `novi-launcher`'s search results (`icon=` in `.app` descriptors) and QEMU-live-verified — a real generated terminal icon renders next to a matched result, pixel-confirmed via screendump; status-bar icons are generated but unwired, blocked on real wifi/battery data; real app search too — `pkg-format.md`'s GUI-app-registration convention, foot registered and launchable by typed name, fork+execvp on Enter, live-verified end-to-end; file search still doesn't exist; Super+. symbol picker (not full emoji — no emoji-capable font exists) now wired too, `novi-launcher --symbols` copying to the clipboard via novi-shell's existing `wl_data_device_manager`, QEMU-live-verified down to the exact pasted UTF-8 bytes; found and fixed a real, previously-invisible `common/text.c` bug along the way (byte-per-codepoint rendering silently mojibake'd any multi-byte UTF-8 glyph); two more unrelated bugs found and fixed live-testing all this: a missing `/tmp` mount, and the documented `s6-rc -up change graphical` command itself (root-caused: `-p`/prune tries to stop the console's own getty; corrected to plain `-u`); a real taskbar now too — `novi-panel` is a `wlr-foreign-toplevel-management-unstable-v1` client (the standard taskbar protocol, XML vendored under `protocol/`), minimize is a real function instead of a dimmed placeholder, QEMU-live-verified end to end (minimize, restore via taskbar click, close removing the entry, all pixel-confirmed); PrintScreen screenshots also wired — `novi-screenshot/` is a `wlr-screencopy-unstable-v1` client writing an uncompressed 24-bit BMP, `novi-shell`'s key dispatch gained its first no-modifier binding to reach it, QEMU-live-verified with the actual BMP bytes read back (correct header, exact expected file size, correct bottom-up pixel orientation against a screendump of the same frame); Super+L session lock also real now — `novi-lockscreen` checks a typed password against `/etc/shadow` via musl's real `crypt(3)`, and `novi-shell` gained a `locked` flag that actually disables every keybinding and blocks focus-stealing while active (not just a visual overlay), QEMU-live-verified including the bypass attempt itself (Super+Q/Alt+Space confirmed inert while locked via `ps`, wrong password rejected, correct password unlocked and restored normal keybindings) |
 | 6 | Gaming strategy | 🔴 Open — blocked on #5 |
 | 7 | Developer strategy | 🟡 Native toolchain exists, container tier proposed |
 | 8 | Enterprise strategy | 🟡 LTS branches exist, signing enforcement + fleet mgmt open |
@@ -1000,10 +1002,70 @@ same screendump), which is exactly right for a bottom-up BMP whose
 bottom-of-file row is the bottom of the screen and top-of-file row is
 the top, where the panel actually is.
 
-Next candidates, in roughly increasing order of what they need: Super+L
-lock (needs a real auth-gated layer-shell overlay — the one remaining
-binding this project's own security bar makes non-trivial, not
-"cheap"), and Super+[1-9] workspaces (needs real per-output workspace
-state in the compositor, the larger of the two). Neither is blocked on
-a decision — both are exactly "implementation effort" the way the icon
-pipeline, symbol picker, taskbar, and screenshot capture were.
+Super+L session lock is real now too, not the "cheap" overlay RFC 0001's
+own prose called it — this project's own security bar made it the one
+binding that actually needed compositor-level changes, not just a new
+client. A visual full-screen layer-shell surface alone (the exact
+mechanism novi-launcher's overlay already uses) was never going to be
+enough: nothing about that stops a *different* global keybinding
+(Super+Q, another Alt+Space, Alt+Tab) from running and stealing focus
+back, since `handle_keybinding()` fires before any focus check at all.
+So this is two real pieces, not one:
+
+`novi-lockscreen/` is a new layer-shell client, anchored to all four
+edges with `exclusive_zone=-1` (covering `novi-panel`'s own top bar
+too, not just the area below it) and keyboard-interactivity=exclusive,
+rendering a plain "Locked" screen with a fixed-width password-length
+dot indicator (the common GNOME/macOS convention: length is shown,
+content isn't) via the same fcft+pixman pipeline every other UI client
+here uses. It checks a typed password against a *real* password, not a
+placeholder: `/etc/shadow`'s own `root` entry (the one interactive user
+this system has today), verified with musl's real `crypt(3)` — the
+same primitive `passwd`/`login` already rely on, confirmed working via
+`nm` showing both `crypt` and `explicit_bzero` live in musl's libc.a
+directly (no separate `-lcrypt` needed, unlike glibc). If root has no
+password set — this repo's stock `/etc/shadow` ships an empty hash
+field, since no `passwd` flow has ever run on a fresh install — it
+refuses to lock at all (checked before ever opening a Wayland
+connection), logging why rather than either accepting any input as
+correct or locking someone out with nothing that could ever unlock it.
+Escape deliberately does not dismiss this overlay (unlike every other
+one in this repo) — it only clears the typed field; the only way out is
+a correct password.
+
+The other half is in `novi-shell` itself: a new `novi_server.locked`
+flag, set/cleared by `layer_surface_map()`/`layer_surface_unmap()`
+recognizing `novi-lockscreen`'s own `zwlr_layer_surface_v1` namespace
+(a plain string match both sides share as `NOVI_LOCK_NAMESPACE`, not a
+new protocol extension), gates the two real bypass paths:
+`keyboard_handle_key()` skips its entire keybinding-dispatch table
+while locked (every key just falls through to whatever holds seat
+keyboard focus, which is always the lock surface itself once mapped),
+and `focus_toplevel()` itself refuses to run at all while locked — the
+one choke point every focus-stealing path shares (a pointer click can't
+physically reach anything under a full-output OVERLAY-layer surface
+anyway, but a newly-mapped toplevel's own auto-focus-on-map call still
+reaches this function, and this guard closes it too).
+
+QEMU-live-verified end to end, including the actual bypass this whole
+design exists to prevent, not just the happy path: set a real password
+live (`passwd root`), brought up `graphical`, confirmed the desktop
+rendering normally, sent Super+L via QMP and confirmed `novi-lockscreen`
+was running and the full-screen "Locked" prompt rendered correctly
+(covering the panel). Then, while locked, sent Super+Q and Alt+Space and
+confirmed via `ps` that neither had any effect — no `novi-launcher`
+process ever spawned, `novi-lockscreen`'s own PID never changed —
+proving the keybinding lockout actually holds, not just that the
+overlay looks right. Typed a wrong password: rejected, dots cleared,
+"Incorrect password" rendered in red, still locked. Typed the correct
+password: `novi-lockscreen` exited cleanly, the desktop screendump
+showed the normal session again, and Alt+Space immediately worked again
+(a fresh `novi-launcher` process appeared), confirming both the unlock
+itself and that `focus_toplevel()`'s guard clearing didn't leave
+keyboard focus stranded afterward.
+
+Only one RFC 0001 decision 7 binding remains: Super+[1-9] workspaces,
+needing real per-output workspace state in the compositor — the
+largest remaining piece, but not blocked on any decision, exactly
+"implementation effort" the way the icon pipeline, symbol picker,
+taskbar, screenshot capture, and lock all were.
