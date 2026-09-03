@@ -34,4 +34,35 @@ s6-rc-init -c /etc/s6-rc/compiled -l /run/s6-rc /run/service
 
 ### 3. Bring the compiled "default" bundle up (or whatever runlevel
 ### was requested on the kernel command line -- see scripts/runlevel).
-exec /etc/s6-linux-init/scripts/runlevel "$rl"
+###
+### Called rather than exec'd (it used to be exec'd) so that step 4 can
+### run after it. Nothing is lost by that: `s6-rc change` exits once
+### the transition finishes, so rc.init already returned here at the
+### end of boot -- the exec was only saving one process.
+/etc/s6-linux-init/scripts/runlevel "$rl" ||
+    echo 'rc.init: runlevel transition reported failure' 1>&2
+
+### 4. Converge the declared system state (RFC 0002).
+###
+### /etc/novi/system.conf is the system's declared truth; this is what
+### makes the machine BOOT INTO it rather than merely being pushable to
+### it after login.
+###
+### It has to be here, after the transition, and not as an s6-rc
+### oneshot inside the bundle -- which is where it was tried first and
+### does not work. A oneshot runs *during* the transition, and a nested
+### `s6-rc change` cannot proceed while that transition holds the live
+### state lock. Confirmed live rather than reasoned about: the oneshot
+### reported success, `novi-state-apply` showed up in `s6-rc -a list`,
+### and the declared desktop never started -- while the very same
+### `novi-state boot`, run by hand a moment later, brought it straight
+### up.
+###
+### `novi-state boot` is already unfailable by construction (it honours
+### novi.state=off on the kernel command line and always exits 0), but
+### the guard and `|| true` stay anyway: this script runs under `-e` as
+### PID 1's stage 2, and nothing about the system's *configuration*
+### should ever be able to turn into a failed boot.
+if command -v novi-state >/dev/null 2>&1; then
+    novi-state boot || true
+fi

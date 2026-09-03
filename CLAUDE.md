@@ -79,7 +79,22 @@ world-readable file the project encourages committing to git.
 `system.conf` is for configuration; anything whose confidentiality
 matters keeps its own 0600 storage.
 
-Two smaller things worth knowing before extending this:
+**Boot convergence lives in `init/skel/rc.init`, not in an s6-rc
+oneshot** — and that placement is load-bearing, not preference. A
+oneshot inside the `default` bundle runs *during* that bundle's
+transition, and a nested `s6-rc change` cannot proceed while the
+transition holds the live-state lock. It fails in the worst way:
+reporting success and appearing `up` in `s6-rc -a list` while having
+converged nothing. Convergence has to run after `s6-rc change` returns,
+which is why `rc.init` calls the runlevel script instead of `exec`ing
+it. Don't "tidy" that back into a service.
+
+`novi-state boot` must stay unfailable: it always exits 0, honours
+`novi.state=off` on the kernel command line, and runs `cmd_apply` in a
+**subshell** because `die()` ends in `exit 1` and would otherwise take
+the whole script — and the boot step — down with it.
+
+Three smaller things worth knowing before extending this:
 
 - The GUI's `novi-state` calls **block the Wayland event loop**. Fine
   for a `set` (one awk pass) or an `apply` (a couple of s6-rc
@@ -90,6 +105,12 @@ Two smaller things worth knowing before extending this:
   function: callers use `have="$(observe_key …)"`, and a command
   substitution is a subshell, so the assignment would be discarded.
   Same subshell trap `packages/pkg` hit for real.
+- **`bash build/16-s6-rc-db.sh` after ANY change under `init/`.** Both
+  the s6-rc database and the s6-linux-init scripts are *generated*; the
+  running system reads the generated copies, never `init/`, so an
+  unregenerated change simply doesn't exist at boot. That stage is the
+  two generation steps from `04-s6.sh` on their own — seconds instead
+  of rebuilding the whole skarnet stack.
 
 ## Architecture: cross-toolchain bootstrap order
 

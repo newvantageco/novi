@@ -48,6 +48,11 @@ which settings the running system doesn't currently match, writes your
 changes back into the file (comments and all), and picks up edits you
 made in `$EDITOR` a moment ago. Not a hidden copy. The same document.
 
+The machine **boots into** that file too, so it governs your system
+rather than just describing it. If a declared state ever locks you out,
+`novi.state=off` in the bootloader skips convergence and gives you a
+normal boot back.
+
 See [`docs/rfcs/0002-declarative-system-state.md`](docs/rfcs/0002-declarative-system-state.md).
 
 ---
@@ -144,8 +149,8 @@ HOME_URL="https://novilinux.org"
 - [x] Desktop layer (Wayland compositor, panel, launcher, lock, settings)
 - [x] Declarative system state (`novi-state`, RFC 0002)
 - [x] Settings is a front-end to the same file (System panel, live drift)
+- [x] Boot-time convergence — the machine boots into the declared state
 - [ ] More state domains: packages, users, network, keybindings
-- [ ] Boot-time convergence (apply declared state at boot)
 - [ ] Package repository
 - [ ] Installer
 - [ ] Boot splash

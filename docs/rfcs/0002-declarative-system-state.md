@@ -273,6 +273,80 @@ iteration and invalidates after every converge, because s6-rc brings a
 service's dependencies up with it (`novi-shell` pulls `seatd`), so a
 list cached before a converge is stale for every key after it.
 
+### Boot-time convergence
+
+Until this landed, the document governed the machine only *after* you
+logged in and asked it to. Declaring `services.novi-shell = on` and
+rebooting got you a bare console — the state file was something you
+could push the system to, not something the system booted into. That is
+a real hole in "the document is the truth", and closing it is what
+makes the claim hold across a power cycle.
+
+`novi-state boot` runs once per boot and converges. Two safety
+properties make it defensible to enable by default, because a state
+engine that can brick a boot is worse than no state engine:
+
+1. **It always exits 0.** A failed converge must never stop a machine
+   from reaching a login prompt you can fix it from.
+2. **`novi.state=off` on the kernel command line skips it entirely** —
+   the recovery path for when the declared state is itself the problem
+   (someone declares every getty off). Same shape as `single` or
+   `init=/bin/sh`, and reachable from the bootloader without needing
+   the machine to boot first.
+
+`state.apply_on_boot = off` in the document turns it off the ordinary
+way. That key is the first of a `state.*` class that configures the
+engine rather than the machine: such keys observe as their own declared
+value and never register as drift, because there is no external fact to
+compare against.
+
+**Where it runs, and the wrong answer that was tried first.** The
+obvious design — an s6-rc oneshot in the `default` bundle — does not
+work, and failed in a way worth recording because it looked like it
+worked. The oneshot ran, reported success, and appeared as `up` in
+`s6-rc -a list`; the declared desktop simply never started. The cause:
+a oneshot in a bundle runs *during* that bundle's transition, and a
+nested `s6-rc change` cannot proceed while the transition holds the
+live-state lock. It failed instantly, and safety property (1) turned
+that into a clean exit rather than a visible error. The same
+`novi-state boot`, run by hand seconds later, brought the desktop
+straight up — which is what proved the code was right and the *timing*
+was wrong.
+
+Convergence therefore runs from `init/skel/rc.init`, immediately after
+the initial `s6-rc change` returns. `rc.init` no longer `exec`s into
+the runlevel script so that something can follow it; nothing is lost,
+since `s6-rc change` exits when the transition completes and `rc.init`
+already ended there.
+
+Verified live, all three paths, each from a cold boot:
+
+- **Stock default** (desktop declared off): boots to a console, reports
+  converged (exit 0), and writes **no generation** — convergence found
+  nothing to do, and correctly declined to burn one.
+- **Desktop declared on in the shipped image**: boots straight into a
+  graphical session — panel, Apps button, clock — with **zero input**.
+  No login, no commands. The machine booted into what the document
+  said.
+- **`novi.state=off` on the kernel command line**: document still
+  declares `services.novi-shell = on`, `s6-rc -a list` reports it not
+  running, machine sits at a plain console. The escape hatch works.
+
+A bug in the safety property itself was found and fixed before any of
+that: `die()` ends in `exit 1`, and `cmd_apply` runs in the same shell,
+so a converge failure tore the script down before `|| warn` could run —
+`novi-state boot` exited 1, which would have marked the boot step
+failed. Exactly the outcome property (1) promises cannot happen.
+`cmd_apply` now runs in a subshell so the exit is confined to it, and
+the failure surfaces as a console warning instead. Measured before and
+after: exit 1, then exit 0, with the warning still printed.
+
+Generations are now pruned to the most recent 20
+(`NOVI_STATE_KEEP`). Without that, a machine whose declared state
+differs from what the `default` bundle starts — the normal case for
+anyone who declared a desktop — would write one generation per boot,
+forever.
+
 ### What deliberately does *not* go in the document
 
 The Account panel still writes `/etc/shadow` directly, and that is now
@@ -290,26 +364,26 @@ exists without declaring their secret.
 
 ## Roadmap
 
-**Landed (this RFC):** the engine, generations, `hostname` and
-`services.*` domains, and `novi-settings`' System panel — the GUI
-reading and writing the same document, both directions verified live.
+**Landed (this RFC):** the engine, generations, `hostname`,
+`services.*` and `state.*` domains, `novi-settings`' System panel (the
+GUI reading and writing the same document, both directions verified
+live), and boot-time convergence with a kernel-command-line escape
+hatch.
 
 **Next, in dependency order:**
 
 1. **More domains:** `packages.*` (declare installed packages, converge
    via `pkg`), `users.*`, `network.*`, `desktop.*` (keybindings, theme
    — RFC 0001 already calls for keybindings to move to a user-editable
-   config file; this is that file).
-2. **Boot-time convergence** as an s6-rc oneshot, so the declared state
-   is what a machine boots into, not just what it can be pushed to.
-   This is also what would make a bad `apply` survivable by rebooting.
-3. **Move the subprocess calls off the GUI event loop.** They block it
+   config file; this is that file). `packages.*` is the one that makes
+   "commit your machine, reproduce it elsewhere" literally true.
+2. **Move the subprocess calls off the GUI event loop.** They block it
    today. Fine at this scale (an `apply` is a couple of s6-rc
    transitions) and noted in a comment where someone will hit it, but
    it stops being fine the first time a domain converges something slow
    — a package install.
-4. **`novi-state diff` in CI**, and a `--json` projection for tooling.
-5. **Concurrent-edit safety.** Two writers racing on `system.conf`
+3. **`novi-state diff` in CI**, and a `--json` projection for tooling.
+4. **Concurrent-edit safety.** Two writers racing on `system.conf`
    (the GUI and an editor) can currently lose one side's change; the
    atomic `mv` keeps the file well-formed but does not detect a
    conflict. A generation counter or mtime check on write would.

@@ -879,6 +879,19 @@ Writes go through `novi-state set` rather than the GUI writing the file
 itself, deliberately: one writer means one behavior, and the comment
 preservation can't drift between two implementations.
 
+**And the machine now boots into the declared state**, which is what
+makes the document govern the system rather than merely describe what
+you could push it to. Verified from cold boots: an image whose document
+declared `services.novi-shell = on` came up in a full graphical session
+with **zero input** — no login, no commands — while the stock
+console-first default boots converged and doesn't even burn a
+generation doing nothing. Safety is what makes that defensible by
+default: convergence can never fail a boot (it always exits 0), and
+`novi.state=off` on the kernel command line skips it entirely for when
+the declared state is itself what's wrong — verified too. Flipping the
+shipped image from console-first to desktop-first is now literally one
+line in that file.
+
 One thing stays out of the document on purpose: the Account panel still
 writes `/etc/shadow` directly, because a password hash has no business
 in a world-readable file this section actively encourages committing to

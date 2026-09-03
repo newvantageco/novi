@@ -190,6 +190,13 @@ observe_key() {
     case "$key" in
         hostname)   observe_hostname ;;
         services.*) observe_service "${key#services.}" ;;
+        # `state.*` keys configure this engine itself (see cmd_boot),
+        # not the machine -- there is no external fact to go and look
+        # at, so the declared value IS the observation and they never
+        # register as drift. Stated explicitly rather than left to fall
+        # through to "unmanaged", which would make `diff` report
+        # permanent, unfixable drift on a key that is working fine.
+        state.*)    state_get "$key" ;;
         *)          printf 'unmanaged' ;;
     esac
 }
@@ -234,6 +241,9 @@ converge_key() {
     case "$key" in
         hostname)   converge_hostname "$want" ;;
         services.*) converge_service "${key#services.}" "$want" ;;
+        # Nothing to converge: a state.* key is read by this engine when
+        # it next runs, so declaring it is already the whole effect.
+        state.*)    : ;;
         *)          warn "no converger for '$key' -- declared but not applied" ;;
     esac
 }
@@ -246,6 +256,36 @@ converge_key() {
 # immutable. Rollback restores one and re-applies it. This is what
 # turns "I changed something and now it's broken" into a bounded,
 # reversible event rather than an archaeology problem.
+
+# Keep the most recent GEN_KEEP snapshots and drop older ones.
+#
+# Needed once convergence runs at every boot (cmd_boot): a machine
+# whose declared state differs from what the `default` bundle starts --
+# which is the normal case for anyone who declared a desktop -- would
+# otherwise write one generation per boot, forever. Pruning the oldest
+# is right rather than skipping the snapshot: the recent ones are the
+# ones anybody rolls back to, and a boot that really did change the
+# system deserves the same record as any other apply.
+GEN_KEEP="${NOVI_STATE_KEEP:-20}"
+
+prune_generations() {
+    local count g
+    [ -d "$GEN_DIR" ] || return 0
+    count=0
+    for g in "$GEN_DIR"/*.conf; do
+        [ -e "$g" ] || continue
+        count=$((count + 1))
+    done
+    [ "$count" -le "$GEN_KEEP" ] && return 0
+    # Names are zero-padded and therefore sort oldest-first, so the
+    # excess to remove is simply the front of the list.
+    for g in "$GEN_DIR"/*.conf; do
+        [ -e "$g" ] || continue
+        [ "$count" -le "$GEN_KEEP" ] && break
+        rm -f "$g"
+        count=$((count - 1))
+    done
+}
 
 next_generation() {
     local n=1 g
@@ -295,6 +335,7 @@ snapshot_generation() {
             printf '%s = %s\n' "$key" "$have"
         done
     } > "$GEN_DIR/${gen}.conf"
+    prune_generations
     printf '%s' "$gen"
 }
 
@@ -389,6 +430,51 @@ cmd_apply() {
     msg "applied $changed change(s)"
 }
 
+# Converge at boot, so the document is what the machine actually boots
+# into rather than merely what it can be pushed to. Run as an s6-rc
+# oneshot in the `default` bundle (init/services/novi-state-apply).
+#
+# Two things make this safe enough to enable by default, and both
+# matter -- a state engine that can brick a boot is worse than none:
+#
+#   1. It ALWAYS exits 0. A failed converge must never stop a machine
+#      from finishing boot and giving you a login prompt to fix it
+#      from.
+#   2. `novi.state=off` on the kernel command line skips it entirely.
+#      That is the recovery path when the declared state itself is what
+#      is wrong (say, someone declared every getty off) -- the same
+#      shape as `single` or `init=/bin/sh`, reachable from the
+#      bootloader without needing the machine to boot first.
+#
+# `state.apply_on_boot = off` in the document turns it off the ordinary
+# way, for anyone who wants convergence to stay a manual act.
+cmd_boot() {
+    if [ -r /proc/cmdline ] && grep -qw 'novi.state=off' /proc/cmdline; then
+        msg "boot convergence disabled on the kernel command line"
+        return 0
+    fi
+    if [ ! -f "$STATE_FILE" ]; then
+        msg "no state file at $STATE_FILE -- nothing to converge"
+        return 0
+    fi
+    if [ "$(state_get state.apply_on_boot)" = "off" ]; then
+        msg "boot convergence disabled by state.apply_on_boot"
+        return 0
+    fi
+    # In a SUBSHELL, deliberately, and this is load-bearing rather than
+    # stylistic: die() ends with `exit 1`, and cmd_apply runs in this
+    # same shell, so a converge failure (s6-rc missing, a service that
+    # won't start) would tear down the whole script before `|| warn`
+    # could ever run -- exiting 1 and marking the boot oneshot failed,
+    # which is precisely the outcome guarantee (1) above promises can't
+    # happen. Verified before the fix: `novi-state boot` exited 1 when
+    # a converge failed. The subshell confines that exit, so the
+    # failure becomes a visible warning on the console and in the log,
+    # and boot carries on to a usable login prompt.
+    ( cmd_apply ) || warn "boot convergence failed -- continuing boot anyway"
+    return 0
+}
+
 cmd_history() {
     local g gen
     [ -d "$GEN_DIR" ] || { msg "no generations yet"; return 0; }
@@ -438,10 +524,16 @@ Usage:
   novi-state apply [--dry-run]    make actual match declared
   novi-state history              list saved generations
   novi-state rollback [gen]       restore a generation and apply it
+  novi-state boot                 converge at boot (s6-rc oneshot; never fails)
 
 Keys:
   hostname                        the system hostname
   services.<name>                 on | off  (an s6-rc service)
+  state.apply_on_boot             on | off  (converge on every boot)
+
+Recovery:
+  Add novi.state=off to the kernel command line to skip boot
+  convergence entirely -- for when the declared state is the problem.
 EOF
     exit 1
 }
@@ -454,5 +546,6 @@ case "${1:-}" in
     apply)    shift; cmd_apply "$@" ;;
     history)  shift; cmd_history "$@" ;;
     rollback) shift; cmd_rollback "$@" ;;
+    boot)     shift; cmd_boot "$@" ;;
     *)        usage ;;
 esac
