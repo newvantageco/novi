@@ -141,13 +141,39 @@ observe_hostname() {
 # authoritative answer (it reads the live state, not the compiled db),
 # and is what the compositor bring-up path already uses elsewhere in
 # this repo.
+#
+# Cached per run, because the naive version forked `s6-rc -a list` once
+# per declared service and `diff` is the hot path -- novi-settings' own
+# System panel calls it on every refresh, and the cost was visible
+# there (a redraw lagging behind the keystroke that asked for it).
+#
+# The cache MUST be primed from the parent shell via
+# service_cache_load(), never lazily inside observe_service(): every
+# caller reads it as `have="$(observe_key ...)"`, and a command
+# substitution is a subshell, so an assignment made in there is
+# discarded the moment it returns. That is the same subshell trap
+# `packages/pkg` already hit for real (its dependency resolution
+# silently did nothing because the collecting loop was the last stage
+# of a pipeline). Priming in the parent works because subshells
+# *inherit* variables -- they just cannot hand changes back.
+SERVICE_LIST_CACHE=""
+SERVICE_LIST_LOADED=0
+
+service_cache_load() {
+    [ "$SERVICE_LIST_LOADED" -eq 1 ] && return 0
+    if command -v s6-rc >/dev/null 2>&1; then
+        SERVICE_LIST_CACHE="$(s6-rc -a list 2>/dev/null || true)"
+    fi
+    SERVICE_LIST_LOADED=1
+}
+
 observe_service() {
     local name="$1"
     if ! command -v s6-rc >/dev/null 2>&1; then
         printf 'unknown'
         return 0
     fi
-    if s6-rc -a list 2>/dev/null | grep -qx "$name"; then
+    if printf '%s\n' "$SERVICE_LIST_CACHE" | grep -qx "$name"; then
         printf 'on'
     else
         printf 'off'
@@ -252,6 +278,7 @@ snapshot_generation() {
     local gen key want have
     gen="$(next_generation)"
     mkdir -p "$GEN_DIR"
+    service_cache_load
     {
         printf '# Novi generation %s -- the system as observed before this apply.\n' "$gen"
         printf '# Restore with: novi-state rollback %s\n\n' "$gen"
@@ -302,6 +329,9 @@ cmd_set() {
 cmd_diff() {
     local key want have drift=0
     [ -f "$STATE_FILE" ] || die "no state file at $STATE_FILE"
+    # Nothing changes during a diff, so one snapshot of the live
+    # service list serves every key.
+    service_cache_load
     for key in $(state_keys); do
         want="$(state_get "$key")"
         have="$(observe_key "$key")"
@@ -342,11 +372,18 @@ cmd_apply() {
     msg "snapshot saved as generation $gen"
 
     for key in $(state_keys); do
+        # Re-primed each iteration because the previous converge may
+        # have moved more than the one service it named: s6-rc brings
+        # up a service's declared dependencies with it (novi-shell
+        # pulls seatd), so a list cached before that is stale for
+        # every key after it.
+        service_cache_load
         want="$(state_get "$key")"
         have="$(observe_key "$key")"
         [ "$want" = "$have" ] && continue
         info "$key: $have -> $want"
         converge_key "$key" "$want"
+        SERVICE_LIST_LOADED=0
         changed=$((changed + 1))
     done
     msg "applied $changed change(s)"

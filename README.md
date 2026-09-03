@@ -41,8 +41,12 @@ $ novi-state rollback                # and stops. reversibly.
 ```
 
 One plain-text file. Real `diff`. Real rollback. Every setting visible,
-greppable, and committable to git — with a graphical Settings app
-writing that same file, not a hidden copy of it.
+greppable, and committable to git.
+
+And the Settings app is a front-end to *that same file* — it shows you
+which settings the running system doesn't currently match, writes your
+changes back into the file (comments and all), and picks up edits you
+made in `$EDITOR` a moment ago. Not a hidden copy. The same document.
 
 See [`docs/rfcs/0002-declarative-system-state.md`](docs/rfcs/0002-declarative-system-state.md).
 
@@ -139,7 +143,7 @@ HOME_URL="https://novilinux.org"
 
 - [x] Desktop layer (Wayland compositor, panel, launcher, lock, settings)
 - [x] Declarative system state (`novi-state`, RFC 0002)
-- [ ] Settings writes through `novi-state` instead of straight to `/etc`
+- [x] Settings is a front-end to the same file (System panel, live drift)
 - [ ] More state domains: packages, users, network, keybindings
 - [ ] Boot-time convergence (apply declared state at boot)
 - [ ] Package repository

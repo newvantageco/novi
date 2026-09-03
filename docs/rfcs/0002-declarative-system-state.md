@@ -222,26 +222,97 @@ answered "already converged — nothing to apply", because
 values) instead of observing the system. Fixed as described under
 "Generations" above, and re-verified from a clean boot.
 
+### The GUI is now a front-end to the same document
+
+`novi-settings` gained a **System** panel, which is what turns this
+RFC's central claim from an assertion into something demonstrable. It
+lists every key in `/etc/novi/system.conf` with its declared value,
+marks the ones the running system doesn't currently match, toggles with
+Space, and applies with Enter.
+
+Two implementation constraints hold the claim up:
+
+- **Writes go through `novi-state set`, never through the GUI's own
+  file writer.** novi-state's `state_set()` edits in place, preserving
+  comments and ordering; a second implementation in C would be a second
+  thing that can drift from it, and the first time the GUI clobbered a
+  user's comments the document would stop being worth hand-editing —
+  which is the whole proposition. One writer, one behavior.
+- **Drift comes from `novi-state diff`, not from observing anything in
+  C.** A parallel "is this service up" check in the GUI would be
+  exactly the second source of truth this RFC exists to abolish.
+
+Verified live, both directions:
+
+1. Opened Settings from the launcher, `→` to the System panel: all six
+   declared keys listed, no drift markers, correctly converged.
+2. Toggled `services.syslog` with Space. The row went to `* off` in the
+   accent colour with "Declared — press Enter to apply", and on disk
+   `system.conf` line 30 had changed while line 29's comment
+   (`# Structured system logging (s6-log).`) was **intact** — and
+   `s6-rc` still reported syslog *up*, because declaring is not
+   applying.
+3. Enter. `s6-rc` then reported syslog down, generation `0002` was
+   written, and the marker cleared to "Applied — system matches the
+   document". **A GUI change is as rollback-able as a CLI one.**
+4. Hand-edited the file from a terminal with `sed` — deliberately *not*
+   through `novi-state`, to prove the GUI reads the real file — then
+   took keyboard focus away and gave it back. The GUI showed the
+   hand-edit and flagged it as drifted, **with no reload key pressed**.
+
+An efficiency problem surfaced there and was fixed in the canonical
+path: `observe_service()` forked `s6-rc -a list` once *per declared
+service*, and `diff` is the hot path (the System panel calls it on
+every refresh). The live list is now read once per run and cached.
+Priming that cache has to happen in the parent shell, never lazily
+inside `observe_service()` — every caller reads it as
+`have="$(observe_key …)"`, and a command substitution is a subshell, so
+an assignment made in there is discarded on return. That is the same
+subshell trap `packages/pkg` hit for real. `apply` re-primes each
+iteration and invalidates after every converge, because s6-rc brings a
+service's dependencies up with it (`novi-shell` pulls `seatd`), so a
+list cached before a converge is stale for every key after it.
+
+### What deliberately does *not* go in the document
+
+The Account panel still writes `/etc/shadow` directly, and that is now
+a **decision, not a gap**: a password hash has no business in a
+world-readable file that this RFC actively encourages people to commit
+to git. Secrets stay in their own 0600 store. The panel says so on
+screen rather than leaving it looking like unfinished work.
+
+The general rule this sets: `system.conf` is for *configuration*, and
+anything whose confidentiality matters keeps its own storage with its
+own permissions. A future `users.*` domain can declare that a user
+exists without declaring their secret.
+
 ---
 
 ## Roadmap
 
 **Landed (this RFC):** the engine, generations, `hostname` and
-`services.*` domains.
+`services.*` domains, and `novi-settings`' System panel — the GUI
+reading and writing the same document, both directions verified live.
 
 **Next, in dependency order:**
 
-1. **`novi-settings` writes through `novi-state`.** The GUI currently
-   writes `/etc/shadow` directly — the very split-brain this RFC
-   opposes, in this project's own code. Until Settings is a front-end
-   to the document, the central claim is only half-true.
-2. **More domains:** `packages.*` (declare installed packages, converge
+1. **More domains:** `packages.*` (declare installed packages, converge
    via `pkg`), `users.*`, `network.*`, `desktop.*` (keybindings, theme
    — RFC 0001 already calls for keybindings to move to a user-editable
    config file; this is that file).
-3. **Boot-time convergence** as an s6-rc oneshot, so the declared state
+2. **Boot-time convergence** as an s6-rc oneshot, so the declared state
    is what a machine boots into, not just what it can be pushed to.
+   This is also what would make a bad `apply` survivable by rebooting.
+3. **Move the subprocess calls off the GUI event loop.** They block it
+   today. Fine at this scale (an `apply` is a couple of s6-rc
+   transitions) and noted in a comment where someone will hit it, but
+   it stops being fine the first time a domain converges something slow
+   — a package install.
 4. **`novi-state diff` in CI**, and a `--json` projection for tooling.
+5. **Concurrent-edit safety.** Two writers racing on `system.conf`
+   (the GUI and an editor) can currently lose one side's change; the
+   atomic `mv` keeps the file well-formed but does not detect a
+   conflict. A generation counter or mtime check on write would.
 
 **Deliberately out of scope for now:** atomic rootfs A/B switching (§3)
 — this RFC gives that a spine to hang from (generations are already the

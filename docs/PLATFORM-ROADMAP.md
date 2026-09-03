@@ -863,10 +863,27 @@ took it back down (pixel-confirmed). Generations snapshot *observed*
 state, so rollback restores where the machine really was — and rollback
 is itself reversible.
 
-The honest gap: `novi-settings` still writes `/etc/shadow` directly
-rather than through the document — the same split-brain this section
-criticizes, in this repo's own code. Closing that is the next step in
-RFC 0002's roadmap, and until it lands the claim is half-built.
+**And the GUI is a real front-end to that same file**, which is what
+makes the claim demonstrable rather than merely stated.
+`novi-settings`' System panel lists every declared key, **marks the
+ones the running system doesn't match** (no other desktop's settings
+app can show drift, because none has a declared state to compare
+against), toggles with Space and applies with Enter. Verified both
+directions live: a GUI toggle changed `system.conf` on disk *with the
+surrounding comments intact* and left the running system alone until
+Enter — then applied it and wrote a generation, so a GUI change is as
+rollback-able as a CLI one. And a `sed` hand-edit made in a terminal
+showed up in the GUI, flagged as drift, with no reload key pressed.
+
+Writes go through `novi-state set` rather than the GUI writing the file
+itself, deliberately: one writer means one behavior, and the comment
+preservation can't drift between two implementations.
+
+One thing stays out of the document on purpose: the Account panel still
+writes `/etc/shadow` directly, because a password hash has no business
+in a world-readable file this section actively encourages committing to
+git. Secrets keep their own 0600 store, and the panel says so on
+screen. `system.conf` is for configuration.
 
 ### And this serves all four audiences at once
 

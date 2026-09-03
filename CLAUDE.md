@@ -67,9 +67,29 @@ Two invariants worth not breaking:
   bug was real and caught live; don't reintroduce it.
 
 **Anything new that changes persistent system configuration should go
-through `novi-state`, not straight to `/etc`.** `novi-settings` writing
-`/etc/shadow` directly is a known, tracked exception awaiting exactly
-that fix (RFC 0002's roadmap) — not a pattern to copy.
+through `novi-state`, not straight to `/etc`.** `novi-settings`' System
+panel is the worked example: it *reads* `system.conf` directly (reading
+breaks no invariant) but every *write* shells out to `novi-state set`,
+and drift comes from `novi-state diff` rather than a second observer
+written in C. Don't reimplement either in a client.
+
+The one deliberate exception is secrets: the Account panel writes
+`/etc/shadow` directly because a password hash must not land in a
+world-readable file the project encourages committing to git.
+`system.conf` is for configuration; anything whose confidentiality
+matters keeps its own 0600 storage.
+
+Two smaller things worth knowing before extending this:
+
+- The GUI's `novi-state` calls **block the Wayland event loop**. Fine
+  for a `set` (one awk pass) or an `apply` (a couple of s6-rc
+  transitions); not fine once a domain converges something slow, like a
+  package install. There's a comment at the call site.
+- `observe_service()`'s live-service-list cache **must be primed from
+  the parent shell** (`service_cache_load`), never lazily inside the
+  function: callers use `have="$(observe_key …)"`, and a command
+  substitution is a subshell, so the assignment would be discarded.
+  Same subshell trap `packages/pkg` hit for real.
 
 ## Architecture: cross-toolchain bootstrap order
 
