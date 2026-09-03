@@ -1,0 +1,421 @@
+#!/bin/sh
+# novi-state — Novi's declarative system state engine (RFC 0002)
+#
+# The one idea: /etc/novi/system.conf IS the system's configuration.
+# Not a cache of it, not a hint to it, not one of several places it
+# might live -- the single declared truth, in a plain text file a
+# person can read, a `git diff` can show, and a GUI can write. Every
+# other OS keeps two unreconciled copies of this: what the GUI wrote
+# (dconf/registry/plists -- invisible, unversioned, undiffable) and
+# what the config files say. Novi keeps one.
+#
+# Four verbs make that real, and the split between them is the point:
+#
+#   show      what the system is DECLARED to be
+#   diff      declared vs. what it ACTUALLY is right now (drift)
+#   apply     make actual match declared (snapshots a generation first)
+#   rollback  restore a previous generation and re-apply it
+#
+# Declaring and applying are deliberately separate steps. `set` only
+# edits the document; nothing touches the running system until `apply`.
+# That's what makes "review the diff before it happens" possible at
+# all, and it's why a GUI toggle and a text edit can be the same
+# operation -- both just write the document.
+#
+# Busybox-compatible (this repo's /bin/sh is a static BusyBox ash).
+#
+# shellcheck disable=SC3043
+# `local` is outside strict POSIX sh, which is what shellcheck's `sh`
+# dialect checks -- but the real target is BusyBox ash, which supports
+# it, exactly as packages/pkg already documents and relies on.
+set -eu
+
+STATE_FILE="${NOVI_STATE_FILE:-/etc/novi/system.conf}"
+GEN_DIR="${NOVI_STATE_GENERATIONS:-/var/lib/novi-state/generations}"
+
+msg()  { printf '==> %s\n'    "$*" >&2; }
+info() { printf '  -> %s\n'   "$*" >&2; }
+warn() { printf 'WARN: %s\n'  "$*" >&2; }
+die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+
+need_root() {
+    [ "$(id -u)" -eq 0 ] || die "This operation requires root."
+}
+
+# ---------------------------------------------------------------------------
+# The document
+# ---------------------------------------------------------------------------
+#
+# Format: `key = value`, one per line. `#` starts a comment. Blank
+# lines and indentation are allowed and preserved. Keys are dotted
+# paths (`services.novi-shell`), values are bare words.
+#
+# Deliberately NOT TOML/JSON/YAML: this file has to be parsed by a
+# BusyBox shell script AND by a C GUI (novi-settings) with no parser
+# library on either side, stay greppable (`grep services. system.conf`),
+# stay diffable line-by-line in git, and stay comfortable to hand-edit
+# with comments. A flat dotted-key format is the only one of those that
+# is all five at once. Nesting buys nothing here and costs a parser.
+
+# Emit the declared state as normalized `key=value` lines, sorted.
+# Comments, blank lines, and incidental whitespace are stripped -- this
+# is the machine-readable projection of the document, not the document.
+state_normalize() {
+    local file="$1"
+    [ -f "$file" ] || return 0
+    sed -e 's/#.*$//' -e 's/[[:space:]]*$//' -e 's/^[[:space:]]*//' "$file" \
+        | grep -E '^[a-zA-Z0-9._-]+[[:space:]]*=' \
+        | sed -e 's/[[:space:]]*=[[:space:]]*/=/' \
+        | sort
+}
+
+# Every key currently declared, one per line.
+state_keys() {
+    state_normalize "$STATE_FILE" | cut -d= -f1
+}
+
+# The declared value for one key, or empty if undeclared.
+state_get() {
+    local key="$1"
+    state_normalize "$STATE_FILE" | grep "^${key}=" | head -n1 | cut -d= -f2- || true
+}
+
+# Escape a key for safe use inside a POSIX basic regular expression --
+# dotted keys (`services.novi-shell`) would otherwise let `.` match any
+# character, so `services.novi-shell` would also match a hypothetical
+# `servicesXnovi-shell` line.
+key_regex() {
+    printf '%s' "$1" | sed 's/[].[^$*\\/]/\\&/g'
+}
+
+# Set a key in the document IN PLACE, preserving every comment, blank
+# line, and the existing ordering -- a surgical value replacement, not
+# a regenerate-from-scratch. This is what keeps the file genuinely
+# two-way: a GUI writing a key must not destroy the comments a person
+# wrote around it, or the file stops being something anyone wants to
+# hand-edit and the whole single-source-of-truth claim collapses.
+state_set() {
+    local key="$1" value="$2"
+    local key_re tmp
+    key_re="$(key_regex "$key")"
+    mkdir -p "$(dirname "$STATE_FILE")"
+    [ -f "$STATE_FILE" ] || : > "$STATE_FILE"
+    tmp="${STATE_FILE}.tmp.$$"
+
+    awk -v key="$key" -v value="$value" -v key_re="^[ \t]*${key_re}[ \t]*=" '
+        BEGIN { done = 0 }
+        {
+            if (!done && $0 ~ key_re) {
+                match($0, /^[ \t]*/)
+                print substr($0, 1, RLENGTH) key " = " value
+                done = 1
+                next
+            }
+            print
+        }
+        END { if (!done) print key " = " value }
+    ' "$STATE_FILE" > "$tmp"
+
+    # Atomic replace: a crash mid-write can never leave the system's
+    # single source of truth half-written.
+    mv "$tmp" "$STATE_FILE"
+}
+
+# ---------------------------------------------------------------------------
+# Observation: what the system ACTUALLY is, right now
+# ---------------------------------------------------------------------------
+#
+# One observer per key, each reading the real live system -- never a
+# cache, never the state file itself. `diff` is only meaningful if
+# these genuinely go and look.
+
+observe_hostname() {
+    if [ -r /proc/sys/kernel/hostname ]; then
+        cat /proc/sys/kernel/hostname
+    else
+        hostname 2>/dev/null || printf 'unknown'
+    fi
+}
+
+# s6-rc's own live view of which services are up. `-a list` is the
+# authoritative answer (it reads the live state, not the compiled db),
+# and is what the compositor bring-up path already uses elsewhere in
+# this repo.
+observe_service() {
+    local name="$1"
+    if ! command -v s6-rc >/dev/null 2>&1; then
+        printf 'unknown'
+        return 0
+    fi
+    if s6-rc -a list 2>/dev/null | grep -qx "$name"; then
+        printf 'on'
+    else
+        printf 'off'
+    fi
+}
+
+# Observed value for any declared key. An unrecognized key observes as
+# "unmanaged" rather than erroring: an unknown key in the document is a
+# forward-compatibility case (a newer novi-state, a hand-written note),
+# not corruption, and `diff` should say so plainly instead of refusing
+# to run at all.
+observe_key() {
+    local key="$1"
+    case "$key" in
+        hostname)   observe_hostname ;;
+        services.*) observe_service "${key#services.}" ;;
+        *)          printf 'unmanaged' ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# Convergence: make actual match declared
+# ---------------------------------------------------------------------------
+
+converge_hostname() {
+    local want="$1"
+    hostname "$want" || die "failed to set hostname to '$want'"
+    # Persist so the next boot agrees with the document too -- an
+    # apply that only changed the running system would silently drift
+    # back on reboot, which is exactly the split-brain this whole tool
+    # exists to prevent.
+    printf '%s\n' "$want" > /etc/hostname
+}
+
+converge_service() {
+    local name="$1" want="$2"
+    command -v s6-rc >/dev/null 2>&1 || die "s6-rc not found; cannot manage services"
+    case "$want" in
+        on)
+            # -u (up), never -up: `-p` prunes to exactly the named
+            # selection, which would stop everything outside it --
+            # including the console getty issuing the command. That
+            # exact trap is already documented in this repo's own
+            # PLATFORM-ROADMAP (§5) after it hung a live session.
+            s6-rc -u change "$name" || die "failed to start service '$name'"
+            ;;
+        off)
+            s6-rc -d change "$name" || die "failed to stop service '$name'"
+            ;;
+        *)
+            die "service '$name': value must be 'on' or 'off', got '$want'"
+            ;;
+    esac
+}
+
+converge_key() {
+    local key="$1" want="$2"
+    case "$key" in
+        hostname)   converge_hostname "$want" ;;
+        services.*) converge_service "${key#services.}" "$want" ;;
+        *)          warn "no converger for '$key' -- declared but not applied" ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# Generations
+# ---------------------------------------------------------------------------
+#
+# Every apply snapshots the document it applied, numbered and
+# immutable. Rollback restores one and re-applies it. This is what
+# turns "I changed something and now it's broken" into a bounded,
+# reversible event rather than an archaeology problem.
+
+next_generation() {
+    local n=1 g
+    mkdir -p "$GEN_DIR"
+    for g in "$GEN_DIR"/*.conf; do
+        [ -e "$g" ] || continue
+        g="$(basename "$g" .conf)"
+        # Strip leading zeros so arithmetic doesn't read them as octal.
+        g="$(printf '%s' "$g" | sed 's/^0*//')"
+        [ -n "$g" ] || g=0
+        [ "$g" -lt "$n" ] || n=$((g + 1))
+    done
+    printf '%04d' "$n"
+}
+
+# Snapshot what the system ACTUALLY IS right now -- not what the state
+# file currently says. The distinction is the whole value of a
+# generation: by the time `apply` runs, the document has already been
+# edited to the new desired state, so copying it would save the change
+# rather than what the change replaced, and `rollback` would restore
+# the very thing it was meant to undo. (Caught exactly that way: a live
+# rollback answered "already converged -- nothing to apply".)
+#
+# Snapshotting observation instead also makes generations ground truth
+# rather than a second-hand copy -- if the running system had drifted
+# from the document before this apply, the generation records where the
+# machine really was, which is what someone rolling back actually wants
+# to get back to.
+snapshot_generation() {
+    local gen key want have
+    gen="$(next_generation)"
+    mkdir -p "$GEN_DIR"
+    {
+        printf '# Novi generation %s -- the system as observed before this apply.\n' "$gen"
+        printf '# Restore with: novi-state rollback %s\n\n' "$gen"
+        for key in $(state_keys); do
+            have="$(observe_key "$key")"
+            # A key we cannot observe (no converger, or a tool missing)
+            # would otherwise be recorded as the literal word "unknown"
+            # and then fail to converge if this generation were ever
+            # restored. Record what was declared instead: it is the
+            # best available answer and it always applies cleanly.
+            case "$have" in
+                unknown|unmanaged) want="$(state_get "$key")"; have="$want" ;;
+            esac
+            printf '%s = %s\n' "$key" "$have"
+        done
+    } > "$GEN_DIR/${gen}.conf"
+    printf '%s' "$gen"
+}
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+cmd_show() {
+    [ -f "$STATE_FILE" ] || die "no state file at $STATE_FILE"
+    cat "$STATE_FILE"
+}
+
+cmd_get() {
+    local key="${1:-}"
+    [ -n "$key" ] || die "usage: novi-state get <key>"
+    state_get "$key"
+}
+
+cmd_set() {
+    local key="${1:-}" value="${2:-}"
+    [ -n "$key" ] || die "usage: novi-state set <key> <value>"
+    [ -n "$value" ] || die "usage: novi-state set <key> <value>"
+    need_root
+    state_set "$key" "$value"
+    info "declared: $key = $value"
+    info "run 'novi-state apply' to make it so"
+}
+
+# Declared vs. actual. Exit status is deliberately meaningful:
+# 0 = converged (no drift), 1 = drift found. That makes it usable as a
+# check in a script or a CI job, not just something a human reads.
+cmd_diff() {
+    local key want have drift=0
+    [ -f "$STATE_FILE" ] || die "no state file at $STATE_FILE"
+    for key in $(state_keys); do
+        want="$(state_get "$key")"
+        have="$(observe_key "$key")"
+        if [ "$want" != "$have" ]; then
+            drift=1
+            printf -- '- %s = %s   (actual)\n' "$key" "$have"
+            printf -- '+ %s = %s   (declared)\n' "$key" "$want"
+        fi
+    done
+    if [ "$drift" -eq 0 ]; then
+        msg "system matches declared state"
+        return 0
+    fi
+    return 1
+}
+
+cmd_apply() {
+    local dry=0 key want have gen changed=0
+    [ "${1:-}" = "--dry-run" ] && dry=1
+    [ -f "$STATE_FILE" ] || die "no state file at $STATE_FILE"
+
+    # Nothing to do is worth saying plainly, and worth NOT burning a
+    # generation on -- generations should mean "the system actually
+    # changed here," not "someone ran apply."
+    if cmd_diff >/dev/null 2>&1; then
+        msg "already converged -- nothing to apply"
+        return 0
+    fi
+
+    if [ "$dry" -eq 1 ]; then
+        msg "would apply (dry run):"
+        cmd_diff || true
+        return 0
+    fi
+
+    need_root
+    gen="$(snapshot_generation)"
+    msg "snapshot saved as generation $gen"
+
+    for key in $(state_keys); do
+        want="$(state_get "$key")"
+        have="$(observe_key "$key")"
+        [ "$want" = "$have" ] && continue
+        info "$key: $have -> $want"
+        converge_key "$key" "$want"
+        changed=$((changed + 1))
+    done
+    msg "applied $changed change(s)"
+}
+
+cmd_history() {
+    local g gen
+    [ -d "$GEN_DIR" ] || { msg "no generations yet"; return 0; }
+    for g in "$GEN_DIR"/*.conf; do
+        [ -e "$g" ] || { msg "no generations yet"; return 0; }
+        gen="$(basename "$g" .conf)"
+        printf '%s  %s\n' "$gen" "$(state_normalize "$g" | tr '\n' ' ')"
+    done
+}
+
+cmd_rollback() {
+    local gen="${1:-}" src
+    [ -d "$GEN_DIR" ] || die "no generations to roll back to"
+    if [ -z "$gen" ]; then
+        # Default: the most recent snapshot, which is the state as it
+        # was BEFORE the latest apply -- "undo the last apply". A glob
+        # loop rather than parsing `ls`: generation names are
+        # zero-padded and sort lexically, so the last iteration is the
+        # newest, with no filename parsing to get wrong.
+        local g
+        for g in "$GEN_DIR"/*.conf; do
+            [ -e "$g" ] || continue
+            gen="$(basename "$g" .conf)"
+        done
+        [ -n "$gen" ] || die "no generations to roll back to"
+    fi
+    src="$GEN_DIR/${gen}.conf"
+    [ -f "$src" ] || die "no such generation: $gen"
+    need_root
+    msg "rolling back to generation $gen"
+    cp "$src" "$STATE_FILE"
+    cmd_apply
+}
+
+usage() {
+    cat >&2 <<'EOF'
+novi-state — Novi's declarative system state (RFC 0002)
+
+  /etc/novi/system.conf is the system's single source of truth.
+  Edit it by hand or through Settings -- both write the same file.
+
+Usage:
+  novi-state show                 print the declared state
+  novi-state get <key>            print one declared value
+  novi-state set <key> <value>    declare a value (does not apply it)
+  novi-state diff                 declared vs. actual (exit 1 if drifted)
+  novi-state apply [--dry-run]    make actual match declared
+  novi-state history              list saved generations
+  novi-state rollback [gen]       restore a generation and apply it
+
+Keys:
+  hostname                        the system hostname
+  services.<name>                 on | off  (an s6-rc service)
+EOF
+    exit 1
+}
+
+case "${1:-}" in
+    show)     shift; cmd_show "$@" ;;
+    get)      shift; cmd_get "$@" ;;
+    set)      shift; cmd_set "$@" ;;
+    diff)     shift; cmd_diff "$@" ;;
+    apply)    shift; cmd_apply "$@" ;;
+    history)  shift; cmd_history "$@" ;;
+    rollback) shift; cmd_rollback "$@" ;;
+    *)        usage ;;
+esac

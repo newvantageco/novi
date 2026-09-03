@@ -796,14 +796,96 @@ governance is ready for the areas above to start generating RFCs.
 
 ## 11. What Makes Novi Different
 
-Not "yet another from-scratch distro" — the differentiator is that the
-from-scratch base (musl/s6) is being used to build a platform that
-*separates concerns other distros bundle together*: one rootfs/pkg
-foundation, two update tracks (§3) instead of forcing rolling-vs-stable
-as a distro-choice decision, and an application model (§2) that keeps the
-native package set small while still giving users glibc-world app
-availability through sandboxing — without the user ever needing to know
-which tier an app came from.
+**One source of truth for the whole system —
+[`/etc/novi/system.conf`](../rootfs/etc/novi/system.conf) — that the GUI
+and the text editor both write, with real diff and real rollback.**
+That's the differentiator. Everything else in this doc is good
+architecture; this is the part nobody else has.
+
+### First, honestly: what is *not* a differentiator
+
+This section used to claim it was "separating concerns other distros
+bundle together" — small native base, breadth via sandboxing, two
+update tracks. That's a sound architecture and it stays. It is not
+distinguishing, and pretending otherwise helps nobody:
+
+- Small immutable base + sandboxed apps *is* Fedora Silverblue, SteamOS
+  3, Vanilla OS, blendOS, ChromeOS. It's the industry consensus now.
+- Two update tracks *is* openSUSE Leap/Tumbleweed, Fedora
+  stable/rawhide, Debian stable/sid.
+- From-scratch musl + s6 *is* Alpine, Void, Chimera, Adélie, oasis, KISS.
+
+Each of those is a real project with years of head start. "We did it
+too, from scratch" is not a reason for anyone to switch.
+
+### The gap nobody has closed
+
+On every mainstream Linux desktop, **the GUI and the config files are
+two parallel, unreconciled sources of truth.** Toggle something in
+GNOME Settings and it goes to dconf: binary, ungreppable, absent from
+your dotfiles, undiffable, unversioned, and unknown to the config file
+that nominally governs the same thing. Edit the config file and the GUI
+has no idea. They drift silently, forever. No command answers "what is
+actually configured here, and what changed since Tuesday."
+
+NixOS and Guix genuinely solve determinism — **by amputating the GUI to
+do it.** Configuration is a functional-language text file; no
+first-party GUI writes the system's truth, and the settings apps that
+exist fight the model. The current price of reproducibility is "give up
+the graphical settings surface, and learn a language."
+
+Novi's position: **you shouldn't have to choose.** Clicking a toggle and
+editing a text file should be the same operation on the same document.
+
+### Why Novi specifically can do this
+
+Because it owns every layer with no upstream to negotiate with: s6-rc
+(already a declarative dependency graph), `pkg` (already has an install
+DB), `novi-shell`, and `novi-settings`. The four layers that would each
+have to cooperate on any other distro are all in this one repo. There's
+no GNOME release cycle to petition and no dconf to work around.
+
+It's also the machinery behind a Philosophy commitment that was
+otherwise just a stated value — **"user control over their own
+machine"**: a system that never hides what's configured, and an update
+model the user drives. `novi-state diff` is what makes that checkable
+instead of aspirational.
+
+### What exists today
+
+`novi-state` (RFC 0002) is built and QEMU-verified, not proposed:
+`show` / `diff` / `apply` / `rollback` / `history`, with `hostname` and
+`services.*` domains live. Verified end to end on a clean boot — a
+fresh machine reports converged (exit 0); declaring
+`services.novi-shell = on` and running `apply` **brought the desktop
+into existence from a text file** (screendump-confirmed); `rollback`
+took it back down (pixel-confirmed). Generations snapshot *observed*
+state, so rollback restores where the machine really was — and rollback
+is itself reversible.
+
+The honest gap: `novi-settings` still writes `/etc/shadow` directly
+rather than through the document — the same split-brain this section
+criticizes, in this repo's own code. Closing that is the next step in
+RFC 0002's roadmap, and until it lands the claim is half-built.
+
+### And this serves all four audiences at once
+
+Everyday users get a real undo. Developers get `git commit` for their
+machine. Security practitioners get "has anything on this box changed"
+as an audit primitive and a clean known state after an engagement
+(§12). Gamers get to try the risky driver tweak and revert cleanly. One
+mechanism, four use cases — which is what the Philosophy section means
+by one rootfs serving all four, rather than four spins.
+
+### The architecture underneath (unchanged, still true)
+
+One rootfs/pkg foundation, two update tracks (§3) instead of forcing
+rolling-vs-stable as a distro-choice decision, and an application model
+(§2) that keeps the native package set small while still giving users
+glibc-world app availability through sandboxing — without the user ever
+needing to know which tier an app came from. Good architecture, and the
+foundation the above is built on; just not, by itself, the reason to
+pick Novi.
 
 ---
 

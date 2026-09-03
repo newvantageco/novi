@@ -45,6 +45,32 @@ Package tooling: `packages/mkpkg <src-dir> <out-dir>` builds a
 `<name>-<version>-<arch>.pkg.tar.gz`; `packages/pkg install <file-or-name>`
 installs one. Format spec: `packages/pkg-format.md`.
 
+## Architecture: `novi-state` is the system's single source of truth
+
+`packages/novi-state` (RFC 0002, `docs/rfcs/0002-declarative-system-state.md`)
+is the project's actual differentiator, not a side utility:
+`/etc/novi/system.conf` is the declared system state, and
+`show`/`diff`/`apply`/`rollback` converge the running system to it.
+Observers read real live state (`/proc/sys/kernel/hostname`,
+`s6-rc -a list`) — never a cache, or `diff` is meaningless.
+
+Two invariants worth not breaking:
+
+- **`state_set` edits in place, preserving comments and ordering.** The
+  file must stay pleasant to hand-edit, or the "GUI and text editor
+  write the same document" claim collapses and it becomes another
+  machine-owned blob.
+- **Generations snapshot *observed* state, not the state file.** By the
+  time `apply` runs, the file already holds the new values, so copying
+  it would save the change instead of what the change replaced, and
+  `rollback` would restore the very thing it was meant to undo. That
+  bug was real and caught live; don't reintroduce it.
+
+**Anything new that changes persistent system configuration should go
+through `novi-state`, not straight to `/etc`.** `novi-settings` writing
+`/etc/shadow` directly is a known, tracked exception awaiting exactly
+that fix (RFC 0002's roadmap) — not a pattern to copy.
+
 ## Architecture: cross-toolchain bootstrap order
 
 `build/00-versions.sh` is sourced by every `build/*.sh` script and exports
