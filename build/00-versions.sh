@@ -65,6 +65,15 @@ JETBRAINS_MONO_VERSION="2.304"
 # full fsck and a risk to data rather than a journal replay. RFC 0008.
 E2FSPROGS_VERSION="1.47.1"
 
+# WiFi (RFC 0009). wpa_supplicant is built with its INTERNAL crypto, so
+# it pulls in no OpenSSL -- the base image deliberately has none, and
+# novi-verify exists precisely so that stays true. hostapd comes from
+# the same source tree and is built only to test against; it is not
+# installed into the image.
+LIBNL_VERSION="3.11.0"
+WPA_SUPPLICANT_VERSION="2.11"
+IW_VERSION="6.9"
+
 # TweetNaCl is versioned by release date, not a semver tag. This is the
 # only "version" its authors publish; the sha256 pins in 01-fetch.sh
 # are what actually fix the code.

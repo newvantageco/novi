@@ -198,6 +198,26 @@ observe_network() {
     local sub="$1"
     case "$sub" in
         dhcp) observe_service network ;;
+        # `network.wifi` maps to the wifi service (wpa_supplicant), and
+        # `network.wifi.interface` to the spec that service recorded --
+        # the same shape as `network.dhcp` / `network.interface`, and
+        # for the same reasons. There is deliberately no
+        # `services.wifi` key.
+        #
+        # What is NOT here is any credential. A WiFi passphrase is a
+        # secret and system.conf is world-readable; /etc/novi/wifi.conf
+        # at 0600 holds them, and novi-wifi manages it. Configuration
+        # is declared; secrets are not (RFC 0005).
+        wifi) observe_service wifi ;;
+        wifi.interface)
+            if [ "$(observe_service wifi)" != "on" ]; then
+                state_get "network.$sub"
+            elif [ -r "/run/novi/network.wifi.interface" ]; then
+                cat "/run/novi/network.wifi.interface"
+            else
+                printf 'unknown'
+            fi
+            ;;
         interface|dns)
             # With the service down there is no running configuration
             # to be out of step with, so the declared value is the
@@ -392,6 +412,15 @@ converge_network() {
     local sub="$1" want="$2"
     case "$sub" in
         dhcp) converge_service network "$want" ;;
+        wifi) converge_service wifi "$want" ;;
+        wifi.interface)
+            if s6-rc -a list 2>/dev/null | grep -qx wifi; then
+                s6-rc -d change wifi ||
+                    die "failed to stop 'wifi' to apply network.$sub"
+                s6-rc -u change wifi ||
+                    die "failed to restart 'wifi' after setting network.$sub"
+            fi
+            ;;
         interface|dns)
             # The service reads these once, at start, so making the
             # declaration true means restarting it. Only if it is
@@ -841,6 +870,8 @@ Keys:
   network.dhcp                    on | off  (the DHCP client service)
   network.interface               auto | <name>  (which NIC to use)
   network.dns                     auto | 1.1.1.1,9.9.9.9
+  network.wifi                    on | off  (the supplicant; see novi-wifi)
+  network.wifi.interface          auto | <name>
   users.<name>.shell              /bin/sh | absent  (declares the account)
   users.<name>.groups             wheel,video,input | none
   packages.<name>                 present | absent

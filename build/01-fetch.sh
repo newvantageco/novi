@@ -198,6 +198,26 @@ else
     echo "[skip]  ${JBMONO_ZIP} already exists"
 fi
 
+# WiFi: libnl (wpa_supplicant's nl80211 driver needs it), wpa_supplicant
+# and hostapd (same upstream tree; hostapd is test-only -- see
+# build/25-wifi.sh), and iw for diagnostics.
+#
+# libnl publishes tarballs as GitHub *release assets*, which this
+# environment can reach; its source-archive endpoints it cannot. Same
+# split this file already documents for JetBrains Mono.
+LIBNL_TARBALL="libnl-${LIBNL_VERSION}.tar.gz"
+if [ ! -f "${LIBNL_TARBALL}" ]; then
+    echo "[fetch] ${LIBNL_TARBALL}"
+    curl -fL --retry 3 -o "${LIBNL_TARBALL}" \
+        "https://github.com/thom311/libnl/releases/download/libnl$(echo "${LIBNL_VERSION}" | tr . _)/${LIBNL_TARBALL}"
+else
+    echo "[skip]  ${LIBNL_TARBALL} already exists"
+fi
+
+fetch "https://w1.fi/releases/wpa_supplicant-${WPA_SUPPLICANT_VERSION}.tar.gz"
+fetch "https://w1.fi/releases/hostapd-${WPA_SUPPLICANT_VERSION}.tar.gz"
+fetch "https://www.kernel.org/pub/software/network/iw/iw-${IW_VERSION}.tar.xz"
+
 # e2fsprogs — real mke2fs (journalled ext4) and e2fsck. From tytso's own
 # kernel.org directory, the upstream home of the project.
 fetch "https://www.kernel.org/pub/linux/kernel/people/tytso/e2fsprogs/v${E2FSPROGS_VERSION}/e2fsprogs-${E2FSPROGS_VERSION}.tar.xz"

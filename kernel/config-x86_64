@@ -396,6 +396,18 @@ CONFIG_WIRELESS=y
 CONFIG_CFG80211=y
 CONFIG_MAC80211=y
 CONFIG_MAC80211_MESH=n
+# A simulated 802.11 radio. QEMU has no WiFi hardware of any kind, so
+# without this there is no way to test the supplicant, the service, the
+# state domain or the association at all -- and shipping WiFi support
+# that has never associated with anything would be a claim, not a
+# feature. Two hwsim radios talk to each other over the kernel's own
+# virtual medium: one runs hostapd, one runs wpa_supplicant, and the
+# WPA2 four-way handshake between them is real.
+#
+# A module, not built in: it is a test facility, and a machine with
+# real hardware should not have a phantom radio unless somebody asks
+# for one.
+CONFIG_MAC80211_HWSIM=m
 CONFIG_IWLWIFI=m
 CONFIG_IWLDVM=m
 CONFIG_IWLMVM=m

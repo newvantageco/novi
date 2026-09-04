@@ -73,11 +73,36 @@ done
 # 127.0.0.1 resolves to something before any external network exists.
 ip link set lo up 2>/dev/null || true
 
+# Wired first, wireless second.
+#
+# A laptop has both, and udhcpc runs on exactly one interface here, so
+# something has to choose. Wired wins: it is the one that works without
+# credentials, and on a machine with a cable plugged in it is what the
+# person plugging it in meant. `network.interface = wlan0` overrides.
+#
+# Per-interface DHCP -- a lease on every link that has one -- is the
+# right long-term answer and a bigger change than this service; RFC
+# 0009 says so rather than pretending this is finished.
 pick_interface() {
+    pick_interface_pass wired || pick_interface_pass wireless
+}
+
+pick_interface_pass() {
+    want="$1"
     for d in /sys/class/net/*; do
         [ -d "$d" ] || continue
         n="${d##*/}"
         [ "$n" = "lo" ] && continue
+
+        # A wireless device is one the kernel gave a phy80211 link, not
+        # one whose name starts with "wl". Naming is a convention;
+        # /sys/class/net/*/phy80211 is the kernel saying what the
+        # device is.
+        if [ -d "$d/phy80211" ]; then
+            [ "$want" = "wireless" ] || continue
+        else
+            [ "$want" = "wired" ] || continue
+        fi
 
         # ARPHRD_ETHER (1) only. Skipping just "lo" is not enough: a
         # kernel with CONFIG_IPV6_SIT creates `sit0`, an IPv6-in-IPv4

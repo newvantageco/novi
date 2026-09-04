@@ -1,0 +1,260 @@
+#!/bin/sh
+# novi-wifi — manage the WiFi networks this machine knows.
+#
+#   novi-wifi list                 networks this machine has credentials for
+#   novi-wifi add <ssid>           add one (prompts for the passphrase)
+#   novi-wifi forget <ssid>        remove one
+#   novi-wifi scan                 what is on the air right now
+#   novi-wifi status               what the supplicant is doing
+#
+# WHY THIS IS NOT novi-state. A WiFi passphrase is a secret, and
+# /etc/novi/system.conf is world-readable and is a file this project
+# actively encourages committing to git. RFC 0005 settled the rule --
+# configuration is declared, secrets are not -- and this is the second
+# place it applies, after /etc/shadow.
+#
+# So the split is: system.conf declares THAT this machine uses WiFi
+# (`network.wifi = on`), and this file's 0600 store holds WHICH
+# networks and their keys. `novi-state diff` can tell you the
+# supplicant should be running; it cannot tell anyone your passphrase.
+#
+# The store is wpa_supplicant's own configuration format rather than
+# something novi-invented that gets translated. One file, one parser,
+# already understood by every piece of documentation about WiFi on
+# Linux -- and if this tool is ever inadequate, `vi` still works.
+#
+# shellcheck disable=SC3043
+set -eu
+
+CONF="${NOVI_WIFI_CONF:-/etc/novi/wifi.conf}"
+CTRL_DIR="/run/wpa_supplicant"
+
+msg()  { printf '==> %s\n'    "$*" >&2; }
+info() { printf '  -> %s\n'   "$*" >&2; }
+warn() { printf 'WARN: %s\n'  "$*" >&2; }
+die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+
+need_root() { [ "$(id -u)" -eq 0 ] || die "This operation requires root."; }
+
+usage() {
+    cat <<'USAGE'
+novi-wifi — the WiFi networks this machine knows
+
+Usage:
+  novi-wifi list             networks this machine has credentials for
+  novi-wifi add <ssid>       add one (prompts for the passphrase)
+  novi-wifi forget <ssid>    remove one
+  novi-wifi scan             what is on the air right now
+  novi-wifi status           what the supplicant is doing
+
+Turning WiFi on and off is declared state, not a command here:
+
+  novi-state set network.wifi on
+  novi-state apply
+
+Passphrases live in /etc/novi/wifi.conf, mode 0600, deliberately NOT in
+/etc/novi/system.conf -- that file is world-readable and meant to be
+committed to git. Configuration is declared; secrets are not.
+USAGE
+}
+
+ensure_conf() {
+    if [ ! -f "$CONF" ]; then
+        mkdir -p "$(dirname "$CONF")"
+        # The header is wpa_supplicant's, not decoration: without
+        # ctrl_interface the supplicant has no control socket and
+        # `novi-wifi status` has nothing to talk to.
+        cat > "$CONF" <<WPACONF
+# WiFi credentials for this machine. Mode 0600, root only.
+#
+# This is wpa_supplicant's own configuration format. novi-wifi edits
+# it; so can you. It is deliberately NOT part of
+# /etc/novi/system.conf, which is world-readable and meant to be
+# committed to git -- configuration is declared, secrets are not.
+ctrl_interface=${CTRL_DIR}
+update_config=1
+WPACONF
+        chmod 600 "$CONF"
+    fi
+    # Re-asserted every time rather than only at creation: a mode that
+    # is only correct when a file is new is a mode that goes wrong.
+    chmod 600 "$CONF"
+}
+
+# The SSIDs currently in the store. Parsed with awk rather than by
+# sourcing anything: this file is a secret store, and executing it to
+# read it would be a way to turn a bad edit into arbitrary code.
+list_ssids() {
+    [ -f "$CONF" ] || return 0
+    awk -F'"' '/^[[:space:]]*ssid=/ { print $2 }' "$CONF"
+}
+
+cmd_list() {
+    local n=0 s
+    ensure_conf
+    for s in $(list_ssids); do
+        printf '%s\n' "$s"
+        n=$((n + 1))
+    done
+    [ "$n" -gt 0 ] || info "no networks configured -- add one with: novi-wifi add <ssid>"
+}
+
+cmd_add() {
+    local ssid="${1:-}"
+    [ -n "$ssid" ] || die "Usage: novi-wifi add <ssid>"
+    need_root
+    ensure_conf
+
+    case "$ssid" in
+        *'"'*) die "an SSID containing a double quote is not supported" ;;
+    esac
+
+    if list_ssids | grep -qxF "$ssid"; then
+        die "'$ssid' is already configured (novi-wifi forget '$ssid' first)"
+    fi
+
+    command -v wpa_passphrase >/dev/null 2>&1 ||
+        die "wpa_passphrase not found"
+
+    local pass1 pass2
+    while : ; do
+        printf '  passphrase for %s: ' "$ssid" >&2
+        stty -echo 2>/dev/null || true
+        # shellcheck disable=SC2162
+        read pass1
+        stty echo 2>/dev/null || true
+        printf '\n' >&2
+
+        printf '  passphrase again: ' >&2
+        stty -echo 2>/dev/null || true
+        # shellcheck disable=SC2162
+        read pass2
+        stty echo 2>/dev/null || true
+        printf '\n' >&2
+
+        if [ "$pass1" != "$pass2" ]; then
+            warn "passphrases did not match -- try again"
+            continue
+        fi
+        # WPA-PSK's own limits, checked here so the failure is a
+        # sentence rather than a supplicant that silently never
+        # associates.
+        #
+        # An arithmetic test, NOT `case "${#pass1}" in ?|??|...)`.
+        # ${#pass1} is the length rendered as a string, so a
+        # 13-character passphrase is "13", which the two-`?` pattern
+        # matches -- every passphrase between 10 and 99 characters was
+        # rejected as "at least 8 characters". Found by feeding it a
+        # 13-character one.
+        if [ "${#pass1}" -lt 8 ] || [ "${#pass1}" -gt 63 ]; then
+            warn "a WPA passphrase must be 8 to 63 characters"
+            continue
+        fi
+        break
+    done
+
+    # wpa_passphrase derives the 256-bit PSK, so the passphrase itself
+    # is not stored. That is not real protection -- the PSK is
+    # equivalent for joining the network -- but it does stop a
+    # passphrase someone reuses elsewhere from sitting in a file in
+    # plaintext.
+    local block
+    block="$(wpa_passphrase "$ssid" "$pass1" 2>/dev/null | grep -v '^[[:space:]]*#psk=')" ||
+        die "wpa_passphrase failed"
+    pass1=""; pass2=""
+
+    printf '\n%s\n' "$block" >> "$CONF"
+    chmod 600 "$CONF"
+    info "'$ssid' added to $CONF"
+
+    if [ "$(novi-state get network.wifi 2>/dev/null || printf off)" != "on" ]; then
+        info "WiFi is not enabled yet. To turn it on:"
+        info "    novi-state set network.wifi on && novi-state apply"
+    else
+        info "run 'novi-state apply' or reconnect to pick it up"
+    fi
+}
+
+cmd_forget() {
+    local ssid="${1:-}"
+    [ -n "$ssid" ] || die "Usage: novi-wifi forget <ssid>"
+    need_root
+    ensure_conf
+
+    list_ssids | grep -qxF "$ssid" || die "'$ssid' is not configured"
+
+    # Deleting the whole network={...} block the ssid belongs to. awk
+    # tracks brace depth rather than matching on blank lines, because
+    # this file is hand-editable and a person's formatting is not a
+    # parser contract.
+    awk -v want="$ssid" '
+        /^[[:space:]]*network[[:space:]]*=[[:space:]]*{/ {
+            block = $0 "\n"; depth = 1; drop = 0; next
+        }
+        depth > 0 {
+            block = block $0 "\n"
+            if ($0 ~ /{/) depth++
+            if ($0 ~ /}/) depth--
+            if ($0 ~ /^[[:space:]]*ssid="/) {
+                split($0, a, "\"")
+                if (a[2] == want) drop = 1
+            }
+            if (depth == 0) {
+                if (!drop) printf "%s", block
+                block = ""
+            }
+            next
+        }
+        { print }
+    ' "$CONF" > "$CONF.new" || die "could not rewrite $CONF"
+    chmod 600 "$CONF.new"
+    mv "$CONF.new" "$CONF"
+    info "'$ssid' removed"
+}
+
+wifi_iface() {
+    local d n
+    for d in /sys/class/net/*; do
+        [ -d "$d/phy80211" ] || continue
+        n="${d##*/}"
+        printf '%s\n' "$n"
+        return 0
+    done
+    return 1
+}
+
+cmd_scan() {
+    need_root
+    local iface
+    iface="$(wifi_iface)" || die "no wireless interface found"
+    command -v iw >/dev/null 2>&1 || die "iw not found"
+    ip link set "$iface" up 2>/dev/null || true
+    msg "Scanning on $iface"
+    # SSID and signal strength, not iw's full dump. `iw scan` needs
+    # root and prints a page per BSS; what a person wants is a list of
+    # names they might recognise.
+    iw dev "$iface" scan 2>/dev/null | awk '
+        /signal:/ { sig = $2 }
+        /^\tSSID: / {
+            sub(/^\tSSID: /, "")
+            if (length($0)) printf "%-32s %8s dBm\n", $0, sig
+        }' | sort -u
+}
+
+cmd_status() {
+    command -v wpa_cli >/dev/null 2>&1 || die "wpa_cli not found"
+    local iface
+    iface="$(wifi_iface)" || die "no wireless interface found"
+    wpa_cli -i "$iface" -p "$CTRL_DIR" status 2>/dev/null ||
+        die "the supplicant is not running (novi-state set network.wifi on && novi-state apply)"
+}
+
+case "${1:-}" in
+    list)   shift; cmd_list "$@" ;;
+    add)    shift; cmd_add "$@" ;;
+    forget) shift; cmd_forget "$@" ;;
+    scan)   shift; cmd_scan "$@" ;;
+    status) shift; cmd_status "$@" ;;
+    -h|--help|help) usage ;;
+    *)      usage; exit 1 ;;
+esac

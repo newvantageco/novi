@@ -41,6 +41,9 @@ below for why `/build` is hardcoded and unrelated to the repo checkout path.
 - `bash build/20-repo.sh` — build and sign the first-party package
   repository into `/build/repo` (RFC 0006); serve that directory over HTTP
   and point a machine at it with `mirror =` in `/etc/novi/pkg.conf`
+- `bash build/25-wifi.sh` — libnl, wpa_supplicant, `iw`, `novi-wifi`
+  (RFC 0009); also builds hostapd into `/build/wifi-test/` for the hwsim
+  test harness, deliberately not into the image
 - `bash build/23-e2fsprogs.sh`, `bash build/24-novi-gpt.sh` — real `mke2fs`
   (journalled ext4) and the GPT writer UEFI installs need (RFC 0008)
 - `bash build/21-desktop-split.sh` — **destructive**: removes the packaged
@@ -416,6 +419,44 @@ seconds; the old "OVMF is pathologically slow" note had bisected the
 slowdown to xhci and then never re-tested without it. Always pass
 `-vga none` when screendumping a compositor, too — `-machine pc` adds a
 std VGA device and `screendump` defaults to device 0.
+
+## Architecture: WiFi, and the second secret store
+
+RFC 0009 (`docs/rfcs/0009-wifi.md`).
+
+- **wpa_supplicant is built with `CONFIG_TLS=internal`**, so it links no
+  OpenSSL. The base image has none and `novi-verify` exists so it stays
+  that way. iwd was rejected because its control interface is D-Bus.
+- **No WPA3**, and that is a decision, not an omission: SAE/OWE need EC
+  crypto that internal TLS does not implement (it links to
+  `undefined reference to crypto_ec_get_prime`). mbedTLS is the named way
+  in. It connects to WPA3 routers in transition mode, not to WPA3-only
+  networks.
+- **`network.wifi` and `network.wifi.interface` are all that is declared.**
+  Passphrases live in `/etc/novi/wifi.conf` at 0600, in wpa_supplicant's
+  own format, managed by `novi-wifi`. Same rule as `/etc/shadow`:
+  configuration is declared, secrets are not.
+- **Wired beats wireless** in `pick_interface()`, and a wireless device is
+  one with `/sys/class/net/*/phy80211` — the kernel saying what it is, not
+  a name starting with `wl`.
+- **hostapd is built by `25-wifi.sh` and never installed.** It is the test
+  peer; verification runs two `mac80211_hwsim` radios, one AP one station,
+  with a real WPA2 handshake between them. It needs `CONFIG_TLS=internal`
+  too — its default backend is OpenSSL and it does not ask.
+
+**`s6-rc -a list` reporting a longrun "up" has now hidden three separate
+crash-loops** (RFC 0004's `syslog`; here, `wpa_supplicant -s` rejected
+because `CONFIG_DEBUG_SYSLOG` was not compiled in, printing usage and
+exiting while `novi-state diff` reported the machine converged). When a
+service does not do its job, check `s6-svstat` and
+`/run/uncaught-logs/current`, never the service list. Making `diff` itself
+notice this is on RFC 0009's roadmap and is deliberately not done yet: the
+obvious implementation reintroduces the boot race RFC 0004 fixed.
+
+**And a shell trap worth not repeating:** `case "${#var}" in ?|??|???)` does
+not test length — `${#var}` is the length *rendered as a string*, so `"13"`
+matches the two-`?` pattern. That rejected every WiFi passphrase between 10
+and 99 characters. Use an arithmetic test.
 
 ## Architecture: cross-toolchain bootstrap order
 

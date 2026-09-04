@@ -71,9 +71,9 @@ novi/
 │   ├── 03-base.sh            ← BusyBox userland + rootfs layout
 │   ├── 04-s6.sh              ← s6 supervision stack
 │   ├── 05-kernel.sh          ← Linux kernel
-│   └── 06..24-*.sh           ← Wayland stack, desktop, pkg, novi-state,
+│   └── 06..25-*.sh           ← Wayland stack, desktop, pkg, novi-state,
 │                                installer, networking, signed repo, split,
-│                                e2fsprogs, novi-gpt
+│                                e2fsprogs, novi-gpt, wifi
 ├── novi-shell/               ← the compositor (RFC 0001)
 ├── novi-panel/               ← top bar + taskbar
 ├── novi-launcher/            ← Alt+Space search / symbol picker
@@ -99,6 +99,7 @@ novi/
 │   ├── mkpkg                 ← package builder
 │   ├── novi-state            ← declarative state engine (RFC 0002)
 │   ├── novi-install          ← disk installer (RFC 0003)
+│   ├── novi-wifi             ← WiFi credentials, 0600 (RFC 0009)
 │   ├── mkrepo                ← repository index builder + signer (RFC 0006)
 │   └── pkg-format.md         ← package format spec
 └── scripts/
@@ -155,6 +156,19 @@ $ pkg install foot
 A tampered package fails its hash and is discarded; a tampered index
 fails its signature and the previous one is kept. Both are verified,
 not asserted — see [RFC 0006](docs/rfcs/0006-package-repository-and-signing.md).
+
+WiFi works the same way — the network is declared, the passphrase is
+not:
+
+```console
+$ novi-wifi add my-network              # prompts; never echoes; 0600
+$ novi-state set network.wifi on && novi-state apply
+```
+
+`system.conf` says *that* this machine uses WiFi. `/etc/novi/wifi.conf`
+says *which* networks, at mode 0600. `novi-state diff` can tell you the
+supplicant should be running; it cannot tell anyone your passphrase.
+WPA2 only for now — see [RFC 0009](docs/rfcs/0009-wifi.md).
 
 And because installed software is just another declared key, it rolls
 back like everything else:
@@ -272,8 +286,9 @@ HOME_URL="https://novilinux.org"
 - [x] Signed package repository (`pkg sync`, `novi-verify`, `packages.*`, RFC 0006)
 - [x] Console-only base; the desktop is packages (RFC 0007)
 - [x] UEFI/GPT install + journalled ext4 root (RFC 0008)
+- [x] WiFi (`network.wifi`, `novi-wifi`, WPA2, RFC 0009)
 - [ ] Separate console and desktop ISOs ← next
-- [ ] More state domains: keybindings, static IP, WiFi
+- [ ] More state domains: keybindings, static IP; WPA3
 - [ ] UEFI/GPT install, journalled root
 - [ ] Boot splash
 

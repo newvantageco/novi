@@ -1328,6 +1328,75 @@ Secure Boot is the notable gap: `BOOTX64.EFI` is unsigned, so a machine
 with Secure Boot enabled refuses it. That needs a shim, a key somebody
 enrols, and a decision about whose key.
 
+## 19. WiFi
+
+RFC 0009. RFC 0008 made Novi installable on real hardware; a laptop
+with no Ethernet port then installs perfectly and cannot reach the
+package repository, which is the delivery mechanism for the desktop and
+everything else past the base image. WiFi is what makes the rest of
+this document reachable on the machines people actually own.
+
+wpa_supplicant, built with **internal crypto** so it links no OpenSSL --
+the base image has none, and `novi-verify` (§16) exists precisely so
+that stays true. Adding a TLS stack in order to get onto a network
+would undo that in one step. iwd was the alternative and is rejected:
+its control interface is D-Bus, which would drag a message bus daemon
+into a base image whose whole point is that it does not have one.
+
+**No WPA3, stated rather than discovered.** SAE and OWE need
+elliptic-curve crypto that internal TLS does not implement -- it links
+cleanly up to `undefined reference to crypto_ec_get_prime`. The real
+answer is mbedTLS (small, self-contained, has EC, supported by
+wpa_supplicant 2.11) and it is its own piece of work. WPA2-Personal and
+WPA2-Enterprise cover essentially every network in service and WPA3
+routers run transition mode, so this connects to those too -- but not
+to a WPA3-only network.
+
+**The credentials are the interesting part**, and they are §15's rule
+applied a second time: configuration is declared, secrets are not.
+`system.conf` declares `network.wifi = on` -- *that* this machine uses
+WiFi. `/etc/novi/wifi.conf`, mode 0600, holds *which* networks and
+their keys. `novi-state diff` can tell you the supplicant should be
+running; it cannot tell anyone your passphrase. The store is
+wpa_supplicant's own format, not a Novi invention that gets translated:
+one file, one parser, already described by every piece of WiFi
+documentation on Linux, and `vi` still works when `novi-wifi` does not
+suffice.
+
+Verified against a real access point, because QEMU has no WiFi hardware
+at all: two `mac80211_hwsim` radios over the kernel's virtual medium,
+one running hostapd with WPA2 and udhcpd behind it, one running Novi's
+supplicant -- on a machine with **no wired NIC**, so WiFi is
+demonstrably what connected it. `wpa_state=COMPLETED`,
+`key_mgmt=WPA2-PSK`, `pairwise_cipher=CCMP`, a DHCP lease at
+192.168.50.20 on wlan0, a default route through the AP, and ping 2/2.
+hostapd is built from the same upstream tree and deliberately never
+installed into the image; it reaches the test VM on a separate disk.
+
+Three bugs, two of them written here:
+
+- A passphrase length check written as `case "${#p}" in ?|??|???)`,
+  which tests the *digits of the length* -- so `"13"` matched the
+  two-`?` pattern and every passphrase between 10 and 99 characters was
+  rejected as too short.
+- `wpa_supplicant -s` was not a valid option in the build, because
+  `CONFIG_DEBUG_SYSLOG` was never enabled. It printed usage and exited,
+  s6 restarted it, and **`s6-rc -a list` reported the service up the
+  whole time** -- so `novi-state diff` said the machine was converged
+  while nothing had ever associated. That is the third crash-loop this
+  project has had hidden by "up" meaning "wanted up" for a longrun.
+  Making `diff` notice it is on the roadmap and deliberately not done
+  here, because the obvious implementation reintroduces the boot race
+  §14 fixed.
+- `sit0` again, in the same neighbourhood: "the first interface that is
+  not lo" picks an IPv6-in-IPv4 tunnel pseudo-device.
+
+The honest gap besides WPA3 is **firmware**: ath9k needs none, but
+iwlwifi, ath10k/ath11k, brcmfmac, mt7921 and rtw88 all do, and this
+image ships none. On a large fraction of real laptops the driver loads
+and the radio does not come up. That is a packaging and licensing
+question (§2, §10), not a code one.
+
 ## Status Summary
 
 | # | Area | State |
@@ -1350,27 +1419,32 @@ enrols, and a decision about whose key.
 | 16 | Package repository & signing | ✅ Signed index (Ed25519 via a hash-pinned TweetNaCl verifier on-target), SHA-256 per package, `pkg sync` + mirror fetch, `packages.*` state domain, first-party desktop repository; both tamper cases verified live. Desktop still also in the base image; release keys, index expiry and version constraints are roadmap |
 | 17 | Base/desktop split | ✅ Console-only base (one library left in /usr/lib), desktop is 25 packages on the medium, split computed from the ELF graph with a build-failing safety check; live-desktop boot, `pkg install novi-desktop` offline, and `novi-install --profile desktop` all verified. Separate console/desktop ISOs and finer-grained packages are roadmap |
 | 18 | UEFI install & journalled root | ✅ Firmware detected from /sys/firmware/efi; GPT+ESP via a purpose-built `novi-gpt`, real ext4 via e2fsprogs, one menu written to two prefixes. Both paths verified end to end. Secure Boot, kernel updates to the ESP, swap//home/encryption are roadmap |
+| 19 | WiFi | ✅ wpa_supplicant with internal crypto (no OpenSSL), `network.wifi` declared with credentials in a 0600 store, wired-first interface selection; verified end to end against a real WPA2 AP on hwsim radios with no wired NIC present. WPA3 (needs mbedTLS), firmware packages, per-interface DHCP and a panel applet are roadmap |
 
-**Next concrete step: WiFi.** With RFC 0008 landed, Novi installs on
-real hardware -- and then a laptop with no Ethernet port cannot reach
-the package repository, which is the whole delivery mechanism for
-everything past the base. WiFi needs a supplicant (`wpa_supplicant` or
-`iwd`) in the base image, which is the first genuinely new upstream
-dependency in a while, plus `network.wifi.*` keys and somewhere to keep
-a PSK -- and a PSK is a secret, so §15's rule applies: it does not go
-in `system.conf`.
+**Next concrete step: two ISOs and a published repository.** Novi now
+installs on both firmware paths, keeps a journalled root, reaches the
+network over wire or WiFi, and delivers its desktop as signed packages.
+What it does not have is anywhere to point a second machine at: the
+repository exists only on whoever ran `build/20-repo.sh`, and one ISO
+carries both the console and desktop paths.
 
 Ordered honestly, what is left:
 
-1. **WiFi**, and the rest of `network.*` -- static IPv4, DHCPv6.
-2. **Two ISOs and a published repository** -- a console image and a
-   desktop image, an offline release key, something at a stable URL,
-   and a signed `valid-until` so a validly-signed *stale* index cannot
-   be replayed to hold a machine at a version with a known hole.
-3. **Secure Boot**, so an installed machine does not require disabling
-   a security feature to boot.
-4. **Finer-grained packages, and more root layouts** -- swap, a
-   separate `/home`, encryption.
+1. **Two ISOs and a published repository** -- a console image and a
+   desktop image; an offline release key (the build currently generates
+   a development key and trusts it, which is right when you built both
+   and is not how a release works); something at a stable URL; and a
+   signed `valid-until` so a validly-signed *stale* index cannot be
+   replayed to hold a machine at a version with a known hole.
+2. **WPA3 and WiFi firmware** -- mbedTLS as the crypto backend, and a
+   firmware package for the chips that need blobs. Without the second,
+   WiFi does not come up on a large fraction of real laptops.
+3. **Secure Boot** -- `BOOTX64.EFI` is unsigned, so a machine with
+   Secure Boot on refuses it.
+4. **`novi-state diff` should notice a crash-looping longrun** -- three
+   separate bugs have now hidden behind `s6-rc -a list` reporting
+   "wanted up". This needs its own design; the obvious fix reintroduces
+   a boot race.
 
 ---
 

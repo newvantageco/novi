@@ -1,0 +1,95 @@
+#!/bin/sh
+# ============================================================
+# wifi service — run script
+#
+# wpa_supplicant, supervised. RFC 0009.
+#
+# Declared by `network.wifi` in /etc/novi/system.conf, not by a
+# `services.wifi` key -- the network domain owns it, for the same
+# reason it owns `network.dhcp`: two keys governing one service is the
+# split-brain this project exists to avoid.
+#
+# The credentials are NOT here and not in system.conf. /etc/novi/wifi.conf
+# is mode 0600 and holds them; system.conf is world-readable and meant
+# to be committed to git. Configuration is declared, secrets are not
+# (RFC 0005).
+# ============================================================
+
+RUN_DIR=/run/novi
+mkdir -p "$RUN_DIR" /run/wpa_supplicant
+
+# WiFi drivers this kernel builds as modules. Nothing else loads them:
+# there is no udev, and the network service's list is wired NICs only.
+#
+# Most of these need firmware this image does not ship -- see RFC 0009,
+# which says so rather than leaving it to be discovered. ath9k and
+# mac80211_hwsim need none; iwlwifi, ath10k/11k, brcmfmac, mt7921 and
+# rtw88 all do.
+for m in mac80211_hwsim iwlwifi iwlmvm iwldvm ath9k ath10k_pci ath11k_pci \
+         brcmfmac mt7921e rtw88_8822ce rtl8xxxu; do
+    modprobe "$m" 2>/dev/null || true
+done
+
+# A wireless interface is one the kernel has given a phy80211 link --
+# not a name that starts with "wl". Naming conventions are a
+# convention; /sys/class/net/*/phy80211 is the kernel telling you what
+# the device actually is.
+pick_wifi_interface() {
+    for d in /sys/class/net/*; do
+        [ -d "$d/phy80211" ] || continue
+        printf '%s\n' "${d##*/}"
+        return 0
+    done
+    return 1
+}
+
+IFSPEC="$(novi-state get network.wifi.interface 2>/dev/null || printf 'auto')"
+[ -n "$IFSPEC" ] || IFSPEC=auto
+printf '%s\n' "$IFSPEC" > "$RUN_DIR/network.wifi.interface"
+
+# Readiness as soon as the recorded spec exists, before anything slow.
+# Same reason as the network service: `s6-rc change` returns the moment
+# a longrun is started unless it says otherwise, and rc.init runs boot
+# convergence immediately after -- which would observe a spec that had
+# not been written yet, call it drift, and restart this service on
+# every boot.
+echo >&3
+
+IFACE=""
+n=0
+while [ -z "$IFACE" ]; do
+    if [ "$IFSPEC" = "auto" ]; then
+        IFACE="$(pick_wifi_interface || true)"
+    elif [ -d "/sys/class/net/${IFSPEC}/phy80211" ]; then
+        IFACE="$IFSPEC"
+    fi
+    [ -n "$IFACE" ] && break
+    n=$((n + 1))
+    [ $((n % 30)) -eq 1 ] &&
+        echo "wifi: waiting for a wireless interface (${IFSPEC}) ..." >&2
+    sleep 2
+done
+
+echo "wifi: using ${IFACE} (declared: ${IFSPEC})" >&2
+printf '%s\n' "$IFACE" > "$RUN_DIR/network.wifi.device"
+ip link set "$IFACE" up 2>/dev/null || true
+
+# -c: the 0600 credential store. Created empty by novi-wifi if absent,
+# so the supplicant starts and can be talked to even before any network
+# has been added -- a supplicant that refuses to run until configured
+# is one you cannot use `novi-wifi scan` against.
+CONF=/etc/novi/wifi.conf
+if [ ! -f "$CONF" ]; then
+    echo "wifi: no $CONF yet -- add a network with: novi-wifi add <ssid>" >&2
+    mkdir -p /etc/novi
+    printf 'ctrl_interface=/run/wpa_supplicant\nupdate_config=1\n' > "$CONF"
+    chmod 600 "$CONF"
+fi
+
+# -s logs through syslog, which this system now has (RFC 0004), so
+# association failures land in /var/log/messages instead of nowhere.
+# It requires CONFIG_DEBUG_SYSLOG=y at build time (build/25-wifi.sh);
+# without it wpa_supplicant does not know the flag, prints its usage
+# and exits -- and s6-rc still reports the service "up", because for a
+# longrun that means "wanted up".
+exec wpa_supplicant -s -i "$IFACE" -c "$CONF" -D nl80211
