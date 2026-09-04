@@ -953,6 +953,52 @@ compositor choice does.
 
 ---
 
+## 13. Installation & Persistence
+
+RFC 0003. Novi is installable onto a disk and remembers what you do to
+it. Before this, the ISO was RAM-only — a squashfs with a tmpfs overlay
+— so every claim `novi-state` makes about generations, rollback and
+booting into a declared state was being made by a machine with no
+memory.
+
+The design constraint worth recording here, because it recurs: the
+installed userland is a static BusyBox with no GRUB tooling and no
+intention of acquiring any. So `grub-install` is **split across build
+time and install time** — `scripts/mkiso.sh` runs `grub-mkimage` on the
+build host and stages `boot.img`, `core.img` (prefix
+`(hd0,msdos1)/boot/grub`) and the i386-pc module set into `/novi-boot`
+on the ISO; `packages/novi-install` only *places* them, with two `dd`s
+and a `cp`. Generation needs a build host. Placement does not.
+
+The same split is the pattern to reach for whenever the target needs
+something only a build host can produce.
+
+Scope of v1, stated rather than discovered: BIOS/MBR only (UEFI/GPT is
+the right long-term default and is deliberately not first — an
+unverified installer is worth less than no installer), one ext2
+partition with no journal (BusyBox `mke2fs`; the kernel mounts it with
+the ext4 driver via `CONFIG_EXT4_USE_FOR_EXT2=y`), and the installed
+system inherits the live session's users, which today means root-only.
+
+Verified in QEMU end to end, not reasoned about: install onto a blank
+disk, cold-boot from that disk through SeaBIOS → GRUB-from-the-MBR →
+the generated menu, `mount` reporting a real writable `/dev/vda1` root
+with no overlay, `novi-state diff` clean (so boot convergence works on
+an installed system), a marker file surviving a full power cycle, and a
+live ISO boot with the installed disk attached still taking the live
+path. Details and the bug it surfaced — a live-media bind mount that
+had been silently buried under a later `mount --move` for as long as it
+had existed — are in RFC 0003.
+
+Two things fell out of doing this that are worth their own mention.
+`bash build.sh` now runs **every** `build/NN-*.sh` stage instead of
+stopping at 05: the desktop, the package tooling, `novi-state` and the
+installer all existed but were never reached by the one command the
+README tells people to run. And the generated boot menu ships the
+`novi.state=off` recovery entry, so RFC 0002's promise that a
+lock-you-out declared state is escapable from the bootloader is
+something you can select rather than something you have to know.
+
 ## Status Summary
 
 | # | Area | State |
@@ -969,8 +1015,32 @@ compositor choice does.
 | 10 | Community/governance | ✅ Decided |
 | 11 | Differentiation | ✅ Articulated above |
 | 12 | Security tooling / pentest track | 🔴 Open — packaging work, blocked on §2/§8/§9 |
+| 13 | Installation & persistence | ✅ Installable and QEMU-verified end to end (install → cold boot from disk via GRUB in the MBR → marker file survives a power cycle → live ISO unregressed); BIOS/MBR + journal-less ext2 + root-only are the stated v1 limits, UEFI/GPT and e2fsprogs are next |
 
-**Next concrete step:** the `tools/svg2icon/` offline SVG-to-bitmap
+**Next concrete step: networking.** With RFC 0003 landed, a Novi
+machine can be installed and keeps its state — and still has no way to
+reach a network. There is no DHCP client, no `network.*` state domain,
+and therefore nothing for `pkg` to install *from* even once a package
+repository exists. Everything downstream (package repo, real users,
+updates, the whole §2/§3 story) is behind it. That makes networking the
+single highest-leverage thing left, not one item among several.
+
+Ordered honestly, what stands between here and "an OS someone could
+actually use":
+
+1. **Networking** — DHCP + DNS as an s6 service, surfaced as a
+   `network.*` `novi-state` domain so it is declared like everything
+   else rather than being the one thing configured out-of-band.
+2. **Real users** — `users.*` domain; today an installed machine is
+   root-only because it inherits the live session's `/etc/passwd`.
+3. **A package repository** — `pkg` works; there is nothing to point it
+   at.
+4. **UEFI/GPT install and a journalled filesystem** — the two stated
+   limits of RFC 0003's v1.
+
+---
+
+*Historical, kept for the root-cause records:* the `tools/svg2icon/` offline SVG-to-bitmap
 pipeline (`ICON-PIPELINE.md` Stage 1+2) is built, wired into
 `novi-launcher`'s search results, and QEMU-live-verified end to end —
 booted the ISO, opened Alt+Space, typed "foot", and a real screendump

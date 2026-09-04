@@ -69,7 +69,8 @@ novi/
 │   ├── 03-base.sh            ← BusyBox userland + rootfs layout
 │   ├── 04-s6.sh              ← s6 supervision stack
 │   ├── 05-kernel.sh          ← Linux kernel
-│   └── 06..15-*.sh           ← Wayland stack, desktop, pkg, novi-state
+│   └── 06..17-*.sh           ← Wayland stack, desktop, pkg, novi-state,
+│                                installer
 ├── novi-shell/               ← the compositor (RFC 0001)
 ├── novi-panel/               ← top bar + taskbar
 ├── novi-launcher/            ← Alt+Space search / symbol picker
@@ -89,6 +90,7 @@ novi/
 │   ├── pkg                   ← package manager
 │   ├── mkpkg                 ← package builder
 │   ├── novi-state            ← declarative state engine (RFC 0002)
+│   ├── novi-install          ← disk installer (RFC 0003)
 │   └── pkg-format.md         ← package format spec
 └── scripts/
     ├── mkinitramfs.sh        ← initramfs builder
@@ -111,12 +113,39 @@ sudo apt install -y \
 ## Build
 
 ```bash
-bash build.sh
+bash build.sh                 # every stage: toolchain → kernel → desktop → installer
+bash build.sh --base-only     # stop after the kernel: bootable console, nothing else
+bash build.sh --from 15       # resume a build you already got past stage 14
 ```
 
 Output: `/build/rootfs/`  
 ISO: `scripts/mkiso.sh` → `novi.iso`  
 Test: `scripts/mkvm.sh` → QEMU with KVM
+
+## Install it
+
+The ISO is a live system with the installer on it. Boot it, log in, and:
+
+```console
+$ novi-install list
+==> Candidate target disks
+  -> /dev/vda  75 MiB  [live media -- not a candidate]
+  -> /dev/vdb  8192 MiB
+
+$ novi-install install --disk /dev/vdb --hostname my-machine
+```
+
+That gives you a partitioned disk, a real writable root filesystem, and
+GRUB in the MBR — a machine that remembers, which is what makes
+`novi-state`'s generations and rollback mean anything.
+
+The installed boot menu includes a **"skip declared-state
+convergence"** entry (`novi.state=off`), so a `system.conf` that locks
+you out is one menu selection away from a normal boot.
+
+v1 is BIOS/MBR only, one journal-less ext2 partition, and inherits the
+live session's users (root-only). Those limits and the reasoning are in
+[`docs/rfcs/0003-installation-and-persistence.md`](docs/rfcs/0003-installation-and-persistence.md).
 
 ## Stack
 
@@ -150,9 +179,11 @@ HOME_URL="https://novilinux.org"
 - [x] Declarative system state (`novi-state`, RFC 0002)
 - [x] Settings is a front-end to the same file (System panel, live drift)
 - [x] Boot-time convergence — the machine boots into the declared state
-- [ ] More state domains: packages, users, network, keybindings
+- [x] Installer + on-disk persistence (`novi-install`, RFC 0003)
+- [ ] Networking (DHCP/DNS, `network.*` state domain) ← next
+- [ ] More state domains: packages, users, keybindings
 - [ ] Package repository
-- [ ] Installer
+- [ ] UEFI/GPT install, journalled root
 - [ ] Boot splash
 
 See [`docs/PLATFORM-ROADMAP.md`](docs/PLATFORM-ROADMAP.md) for the full

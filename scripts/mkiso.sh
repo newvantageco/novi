@@ -226,6 +226,54 @@ for mt in "${MEMTEST_PATHS[@]}"; do
     fi
 done
 
+# ─── Stage BIOS boot artifacts for the on-disk installer ─────────────────────
+#
+# RFC 0003. `novi-install` has to make a target disk bootable, but the
+# Novi rootfs contains no bootloader at all -- there is no grub-install
+# to run on the installed system, and building GRUB into the rootfs
+# just to install it once is a lot of weight for a one-shot job.
+#
+# Instead, split what grub-install does across build time and install
+# time: the two pieces it writes to disk are generated HERE, on a build
+# host that already has GRUB's tools (CONTRIBUTING.md lists
+# grub-common/grub-pc-bin as prerequisites), shipped inside the ISO,
+# and merely *placed* by the installer. The installer then needs no
+# GRUB tooling at all -- only `dd` and `cp`, both of which BusyBox has.
+#
+#   boot.img  512 bytes -> the MBR's boot code (first 446 bytes of it)
+#   core.img  ~30KB     -> the post-MBR gap; knows how to read ext2 and
+#                          find /boot/grub on the root partition
+#   i386-pc/  modules   -> what core.img loads once it can read the fs
+#
+# The prefix baked into core.img is where it looks for those modules
+# and grub.cfg, so it has to match the layout novi-install creates
+# (single ext2/4 partition, msdos table, /boot/grub on it).
+echo ">>> Staging BIOS boot artifacts for the installer ..."
+GRUB_LIB_DIR="/usr/lib/grub/i386-pc"
+if [[ -d "${GRUB_LIB_DIR}" ]] && command -v grub-mkimage &>/dev/null; then
+    NOVI_BOOT_DIR="${ISO_DIR}/novi-boot"
+    mkdir -p "${NOVI_BOOT_DIR}"
+    cp "${GRUB_LIB_DIR}/boot.img" "${NOVI_BOOT_DIR}/boot.img"
+    # The module list is the minimum needed to get from the gap to a
+    # kernel: read an msdos partition table, read the ext2/4 filesystem
+    # on it, then run a normal menu and boot Linux.
+    grub-mkimage \
+        -O i386-pc \
+        -o "${NOVI_BOOT_DIR}/core.img" \
+        -p '(hd0,msdos1)/boot/grub' \
+        biosdisk part_msdos ext2 normal linux configfile search \
+        search_fs_uuid search_label echo test ls boot
+    mkdir -p "${NOVI_BOOT_DIR}/i386-pc"
+    cp "${GRUB_LIB_DIR}"/*.mod "${GRUB_LIB_DIR}"/*.lst "${NOVI_BOOT_DIR}/i386-pc/" 2>/dev/null || true
+    echo ">>> BIOS boot artifacts: boot.img $(stat -c%s "${NOVI_BOOT_DIR}/boot.img")B, core.img $(stat -c%s "${NOVI_BOOT_DIR}/core.img")B, $(ls "${NOVI_BOOT_DIR}/i386-pc" | wc -l) modules"
+else
+    # Not fatal: the ISO still boots and runs live. Only `novi-install`
+    # is affected, and it checks for these and says so plainly rather
+    # than producing an unbootable disk.
+    echo ">>> WARNING: GRUB tools/modules not found -- ISO will boot live," >&2
+    echo ">>>          but novi-install will refuse to install from it." >&2
+fi
+
 # ─── Write filesystem manifest ────────────────────────────────────────────────
 echo ">>> Writing filesystem manifest ..."
 if command -v chroot &>/dev/null && [[ -f "${ROOTFS_DIR}/usr/bin/dpkg" ]]; then

@@ -1,0 +1,540 @@
+#!/bin/sh
+# novi-install — put the running Novi live system onto a disk.
+#
+# The live ISO runs entirely in RAM: a read-only squashfs with a tmpfs
+# overlay on top, so every change is gone at the next power cycle. This
+# turns that into a real machine -- a partitioned disk, a writable root
+# filesystem, a bootloader in the MBR, and a system that remembers.
+#
+# The design constraint that shapes this whole script: the installed
+# system has no build host to lean on. There is no grub-install here,
+# because GRUB's tooling is a build-time dependency and Novi's rootfs is
+# a static BusyBox. So `scripts/mkiso.sh` does the half of grub-install
+# that needs those tools -- generating boot.img and a core.img with the
+# prefix already baked in -- and stages the result in /novi-boot on the
+# ISO. What is left for install time is placement: two `dd`s and a
+# directory copy, all of which BusyBox can do. See
+# docs/rfcs/0003-installation-and-persistence.md.
+#
+# Scope of v1, stated plainly rather than discovered later:
+#   * BIOS/MBR boot only. No UEFI, no GPT.
+#   * One partition, the whole disk, ext2 (BusyBox mke2fs makes no
+#     journal). The kernel mounts it with the ext4 driver
+#     (CONFIG_EXT4_USE_FOR_EXT2=y), but an unclean shutdown still means
+#     a full fsck rather than a journal replay.
+#   * Wipes the target disk completely.
+#
+# shellcheck disable=SC3043
+# `local` is outside strict POSIX sh, which is what shellcheck's `sh`
+# dialect checks -- but the real target is BusyBox ash, which supports
+# it, exactly as packages/pkg and packages/novi-state already document.
+set -eu
+
+msg()  { printf '==> %s\n'    "$*" >&2; }
+info() { printf '  -> %s\n'   "$*" >&2; }
+warn() { printf 'WARN: %s\n'  "$*" >&2; }
+die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+
+need_root() {
+    [ "$(id -u)" -eq 0 ] || die "This operation requires root."
+}
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+LIVE_DIR="${NOVI_LIVE_DIR:-/run/live}"       # ISO, bind-mounted by /init
+MNT="${NOVI_INSTALL_MNT:-/mnt/novi-target}"
+ROOT_LABEL="${NOVI_ROOT_LABEL:-NOVI_ROOT}"
+
+TARGET_DISK=""
+NEW_HOSTNAME=""
+ASSUME_YES=0
+WITH_BOOTLOADER=1
+MOUNTED=0
+
+usage() {
+    cat <<'USAGE'
+novi-install — install Novi Linux onto a disk
+
+Usage:
+  novi-install list                     show candidate target disks
+  novi-install install --disk DEV [options]
+
+Options:
+  --disk DEV          target disk, e.g. /dev/sda or /dev/vda (REQUIRED)
+  --hostname NAME     hostname for the installed system (default: keep)
+  --no-bootloader     partition, format and copy, but write no MBR
+  -y, --yes           do not ask for confirmation (the disk IS erased)
+  -h, --help          this text
+
+The target disk is erased completely. There is no partial install, no
+dual-boot layout, and no undo.
+USAGE
+}
+
+# ---------------------------------------------------------------------------
+# Cleanup
+# ---------------------------------------------------------------------------
+cleanup() {
+    if [ "$MOUNTED" -eq 1 ]; then
+        umount "$MNT" 2>/dev/null || true
+        MOUNTED=0
+    fi
+}
+trap cleanup EXIT INT TERM
+
+# ---------------------------------------------------------------------------
+# Disk discovery
+# ---------------------------------------------------------------------------
+
+# The device the live media itself is on. Installing onto it would pull
+# the floor out from under the running system halfway through the copy,
+# so it is excluded from the candidate list and refused by name.
+live_device() {
+    local dev
+    dev="$(awk -v d="$LIVE_DIR" '$2 == d { print $1; exit }' /proc/mounts 2>/dev/null || true)"
+    [ -n "$dev" ] || return 0
+    # /run/live is a bind mount of the ISO mount, so /proc/mounts names
+    # the real backing device for it either way.
+    printf '%s\n' "$dev"
+}
+
+# Whole disks only. /sys/block also lists loop, ram, zram, device-mapper
+# and md nodes, none of which anyone means by "install to a disk", plus
+# sr* (the optical drive the ISO is likely in).
+list_disks() {
+    local d name
+    for d in /sys/block/*; do
+        [ -d "$d" ] || continue
+        name="${d##*/}"
+        case "$name" in
+            loop*|ram*|zram*|dm-*|md*|sr*|fd*) continue ;;
+        esac
+        printf '%s\n' "$name"
+    done
+}
+
+disk_size_human() {
+    local name="$1" sectors
+    sectors="$(cat "/sys/block/${name}/size" 2>/dev/null || echo 0)"
+    # /sys/block/*/size is always in 512-byte sectors regardless of the
+    # device's real logical block size. Integer MiB is plenty here.
+    printf '%s MiB\n' "$(( sectors / 2048 ))"
+}
+
+disk_model() {
+    local name="$1"
+    cat "/sys/block/${name}/device/model" 2>/dev/null || printf 'unknown'
+}
+
+cmd_list() {
+    local name live
+    live="$(live_device)"
+    msg "Candidate target disks"
+    for name in $(list_disks); do
+        case "$live" in
+            "/dev/${name}"*) info "/dev/${name}  $(disk_size_human "$name")  [live media -- not a candidate]"; continue ;;
+        esac
+        info "/dev/${name}  $(disk_size_human "$name")  $(disk_model "$name" | tr -d '\n')"
+    done
+}
+
+# ---------------------------------------------------------------------------
+# Partitioning
+# ---------------------------------------------------------------------------
+
+# nvme0n1 -> nvme0n1p1, but sda -> sda1. The `p` goes in exactly where
+# the base name already ends in a digit.
+partition_of() {
+    local disk="$1"
+    case "$disk" in
+        *[0-9]) printf '%sp1\n' "$disk" ;;
+        *)      printf '%s1\n'  "$disk" ;;
+    esac
+}
+
+unmount_everything_on() {
+    local disk="$1" mp
+    # Reverse order so nested mounts (/mnt/x/y before /mnt/x) come off first.
+    for mp in $(awk -v d="$disk" 'index($1, d) == 1 { print $2 }' /proc/mounts | tac); do
+        warn "unmounting $mp (on $disk)"
+        umount "$mp" 2>/dev/null || umount -l "$mp" 2>/dev/null || true
+    done
+}
+
+partition_disk() {
+    local disk="$1" part
+
+    msg "Partitioning $disk (MBR, one Linux partition)"
+
+    unmount_everything_on "$disk"
+
+    # Zero the first 1 MiB: the old partition table, any old bootloader,
+    # and the post-MBR gap core.img is about to go into. Also zero the
+    # last 1 MiB so a leftover GPT backup header at the end of the disk
+    # cannot make the kernel prefer a GPT that no longer exists.
+    dd if=/dev/zero of="$disk" bs=1M count=1 conv=notrunc 2>/dev/null || \
+        die "cannot write to $disk"
+    local sectors
+    sectors="$(cat "/sys/block/$(basename "$disk")/size" 2>/dev/null || echo 0)"
+    if [ "$sectors" -gt 4096 ]; then
+        dd if=/dev/zero of="$disk" bs=512 count=2048 \
+           seek=$(( sectors - 2048 )) conv=notrunc 2>/dev/null || true
+    fi
+    sync
+
+    # First sector 2048 is not cosmetic alignment here: it leaves the
+    # ~1 MiB post-MBR gap that core.img is written into further down.
+    # A partition starting at the old default of 63 would be overwritten
+    # by the bootloader, or vice versa.
+    #
+    # BusyBox fdisk has no sfdisk-style script mode, so it is driven by
+    # the keystrokes a person would type: new DOS label, new primary
+    # partition 1 from 2048 to the end of the disk, mark it bootable,
+    # write. Verified against this repo's own static BusyBox.
+    printf 'o\nn\np\n1\n2048\n\na\n1\nw\n' | fdisk -u "$disk" >/dev/null 2>&1 || true
+
+    # fdisk's own BLKRRPART often fails while anything on the disk is
+    # still open; partprobe afterwards is what actually makes the kernel
+    # publish the new partition node.
+    partprobe "$disk" 2>/dev/null || true
+    sync
+
+    part="$(partition_of "$disk")"
+    local tries=0
+    while [ ! -b "$part" ] && [ "$tries" -lt 10 ]; do
+        tries=$(( tries + 1 ))
+        sleep 1
+        partprobe "$disk" 2>/dev/null || true
+        if [ -x /sbin/mdev ]; then
+            mdev -s 2>/dev/null || true
+        fi
+    done
+    [ -b "$part" ] || die "partition $part never appeared after partitioning $disk"
+
+    info "created $part"
+    printf '%s\n' "$part"
+}
+
+format_partition() {
+    local part="$1"
+    msg "Creating filesystem on $part (label $ROOT_LABEL)"
+    # -F because the partition node was just created and mke2fs is
+    # otherwise squeamish about a device it thinks is in use.
+    mke2fs -F -L "$ROOT_LABEL" "$part" >/dev/null 2>&1 || \
+        die "mke2fs failed on $part"
+    sync
+    info "filesystem created"
+}
+
+# ---------------------------------------------------------------------------
+# Copying the system
+# ---------------------------------------------------------------------------
+
+copy_system() {
+    msg "Copying the running system to $MNT (this takes a while)"
+
+    mkdir -p "$MNT"
+    mount "$(partition_of "$TARGET_DISK")" "$MNT" || \
+        die "could not mount the new filesystem at $MNT"
+    MOUNTED=1
+
+    # Copy from `/`, not from the squashfs: `/` is the overlay, so
+    # whatever the person changed in this live session (a password, a
+    # novi-state edit) is part of what gets installed. That is what a
+    # live installer is for.
+    #
+    # The exclusions are the kernel-owned mounts plus /mnt itself --
+    # which is where the target filesystem is mounted right now, and
+    # copying it into itself would not terminate.
+    ( cd / && tar -cf - \
+        --exclude=./proc \
+        --exclude=./sys \
+        --exclude=./dev \
+        --exclude=./run \
+        --exclude=./tmp \
+        --exclude=./mnt \
+        --exclude=./lost+found \
+        . ) | ( cd "$MNT" && tar -xf - ) || \
+        die "copying the system failed"
+
+    # Recreate the mount points the copy deliberately skipped.
+    mkdir -p "$MNT/proc" "$MNT/sys" "$MNT/dev" "$MNT/run" "$MNT/mnt" "$MNT/boot"
+    mkdir -p "$MNT/tmp" && chmod 1777 "$MNT/tmp"
+    sync
+    info "system copied"
+}
+
+# ---------------------------------------------------------------------------
+# Making the copy an installed system rather than a copy of a live one
+# ---------------------------------------------------------------------------
+
+write_fstab() {
+    msg "Writing /etc/fstab"
+    cat > "$MNT/etc/fstab" <<FSTAB
+# /etc/fstab — Novi Linux
+#
+# The root filesystem is found by LABEL, not by device node: /dev/sda
+# and /dev/vda are the same disk under different controllers, and a
+# label survives being moved between them.
+#
+# ext2 is what BusyBox's mke2fs writes; the kernel mounts it with the
+# ext4 driver (CONFIG_EXT4_USE_FOR_EXT2). There is no journal.
+LABEL=${ROOT_LABEL}   /       ext4    rw,noatime      0 1
+
+# The kernel-owned filesystems are mounted by s6-linux-init's stage 1,
+# not from here. They are listed for the benefit of anything that reads
+# fstab to find out what the system looks like.
+proc                  /proc   proc    defaults        0 0
+sysfs                 /sys    sysfs   defaults        0 0
+devtmpfs              /dev    devtmpfs defaults       0 0
+tmpfs                 /tmp    tmpfs   mode=1777       0 0
+FSTAB
+}
+
+set_hostname() {
+    [ -n "$NEW_HOSTNAME" ] || return 0
+    msg "Setting hostname to '$NEW_HOSTNAME'"
+
+    # Through novi-state, not sed: /etc/novi/system.conf is the declared
+    # truth (RFC 0002), and `set` is the one edit that preserves the
+    # file's comments and ordering. NOVI_STATE_FILE points it at the
+    # target's copy instead of the live system's.
+    if [ -x /usr/bin/novi-state ] && [ -f "$MNT/etc/novi/system.conf" ]; then
+        NOVI_STATE_FILE="$MNT/etc/novi/system.conf" \
+            /usr/bin/novi-state set hostname "$NEW_HOSTNAME" >/dev/null 2>&1 || \
+            warn "could not update the declared hostname"
+    fi
+
+    # Also write /etc/hostname directly, so the first boot comes up with
+    # the right name before boot convergence has run at all.
+    printf '%s\n' "$NEW_HOSTNAME" > "$MNT/etc/hostname"
+}
+
+install_kernel() {
+    msg "Installing kernel and initramfs into $MNT/boot"
+
+    mkdir -p "$MNT/boot"
+
+    # The ISO carries the exact kernel/initramfs pair that just booted
+    # this session, under stable names. Prefer them; fall back to
+    # whatever versioned vmlinuz the rootfs itself shipped.
+    local kernel=""
+    if [ -f "$LIVE_DIR/boot/vmlinuz" ]; then
+        kernel="$LIVE_DIR/boot/vmlinuz"
+    else
+        # Fall back to the versioned image the rootfs itself shipped
+        # (/boot/vmlinuz-6.10.3, copied in with the rest of the system).
+        local candidate
+        for candidate in "$MNT"/boot/vmlinuz-*; do
+            [ -f "$candidate" ] || continue
+            kernel="$candidate"
+            break
+        done
+    fi
+    [ -n "$kernel" ] || \
+        die "no kernel image found to install (looked in $LIVE_DIR/boot and $MNT/boot)"
+    cp "$kernel" "$MNT/boot/vmlinuz.new" && mv "$MNT/boot/vmlinuz.new" "$MNT/boot/vmlinuz"
+
+    if [ -f "$LIVE_DIR/boot/initramfs.cpio.gz" ]; then
+        cp "$LIVE_DIR/boot/initramfs.cpio.gz" "$MNT/boot/initramfs.cpio.gz"
+    else
+        die "no initramfs found at $LIVE_DIR/boot/initramfs.cpio.gz"
+    fi
+
+    info "kernel and initramfs installed"
+}
+
+# ---------------------------------------------------------------------------
+# Bootloader
+# ---------------------------------------------------------------------------
+
+write_grub_cfg() {
+    mkdir -p "$MNT/boot/grub"
+    cat > "$MNT/boot/grub/grub.cfg" <<GRUBCFG
+# Novi Linux — installed system boot menu
+# Written by novi-install.
+
+set default=0
+set timeout=3
+set timeout_style=menu
+
+insmod part_msdos
+insmod ext2
+insmod all_video
+insmod gzio
+
+# Serial as well as VGA, so a headless machine still shows the menu.
+insmod serial
+serial --unit=0 --speed=115200
+terminal_input console serial
+terminal_output console serial
+
+menuentry "Novi Linux" --class linux {
+    linux  /boot/vmlinuz root=LABEL=${ROOT_LABEL} rw \\
+           quiet loglevel=3 \\
+           console=tty0 console=ttyS0,115200n8 \\
+           vt.global_cursor_default=0
+    initrd /boot/initramfs.cpio.gz
+}
+
+menuentry "Novi Linux (verbose)" --class linux {
+    linux  /boot/vmlinuz root=LABEL=${ROOT_LABEL} rw \\
+           loglevel=7 \\
+           console=tty0 console=ttyS0,115200n8
+    initrd /boot/initramfs.cpio.gz
+}
+
+# If a declared state ever locks you out -- every getty turned off, say
+# -- this entry boots without converging to it. See RFC 0002.
+menuentry "Novi Linux (skip declared-state convergence)" --class linux {
+    linux  /boot/vmlinuz root=LABEL=${ROOT_LABEL} rw \\
+           novi.state=off loglevel=7 \\
+           console=tty0 console=ttyS0,115200n8
+    initrd /boot/initramfs.cpio.gz
+}
+GRUBCFG
+}
+
+install_bootloader() {
+    local disk="$1" src="$LIVE_DIR/novi-boot" core_sectors
+
+    msg "Installing the bootloader on $disk"
+
+    write_grub_cfg
+
+    if [ ! -d "$src" ]; then
+        warn "no staged GRUB artifacts at $src"
+        warn "the system is installed but NOT bootable on its own --"
+        warn "boot the ISO and pass root=LABEL=${ROOT_LABEL} by hand."
+        return 0
+    fi
+
+    [ -f "$src/boot.img" ] || die "$src/boot.img missing"
+    [ -f "$src/core.img" ] || die "$src/core.img missing"
+
+    # GRUB's modules must be readable from the installed filesystem:
+    # core.img was built with prefix (hd0,msdos1)/boot/grub and loads
+    # the rest of GRUB from there at boot.
+    mkdir -p "$MNT/boot/grub/i386-pc"
+    cp "$src"/i386-pc/* "$MNT/boot/grub/i386-pc/" 2>/dev/null || \
+        warn "no GRUB modules staged -- boot may fail"
+    sync
+
+    # Stage 1: the first 446 bytes of the MBR. Exactly 446, never 512 --
+    # bytes 446..509 are the partition table that was just written, and
+    # a 512-byte dd would erase it.
+    dd if="$src/boot.img" of="$disk" bs=446 count=1 conv=notrunc 2>/dev/null || \
+        die "could not write boot.img to the MBR of $disk"
+
+    # Stage 1.5: core.img into the post-MBR gap, sector 1 onwards. The
+    # partition starts at sector 2048, so there is room for 2047
+    # sectors; refuse rather than write into the filesystem.
+    core_sectors="$(( ( $(wc -c < "$src/core.img") + 511 ) / 512 ))"
+    [ "$core_sectors" -lt 2047 ] || \
+        die "core.img is ${core_sectors} sectors -- too big for the 2047-sector gap"
+    dd if="$src/core.img" of="$disk" bs=512 seek=1 conv=notrunc 2>/dev/null || \
+        die "could not write core.img to the post-MBR gap of $disk"
+
+    sync
+    info "bootloader installed (${core_sectors} sectors of core.img in the gap)"
+}
+
+# ---------------------------------------------------------------------------
+# Confirmation
+# ---------------------------------------------------------------------------
+
+confirm_destruction() {
+    local disk="$1" name
+    name="$(basename "$disk")"
+
+    printf '\n' >&2
+    printf '  ABOUT TO ERASE %s (%s, %s)\n' \
+        "$disk" "$(disk_size_human "$name")" "$(disk_model "$name" | tr -d '\n')" >&2
+    printf '  Everything on that disk will be destroyed. There is no undo.\n\n' >&2
+
+    if [ "$ASSUME_YES" -eq 1 ]; then
+        info "--yes given, proceeding"
+        return 0
+    fi
+
+    printf "  Type 'yes' to continue: " >&2
+    local answer=""
+    read -r answer || answer=""
+    [ "$answer" = "yes" ] || die "aborted -- nothing was written"
+}
+
+# ---------------------------------------------------------------------------
+# install
+# ---------------------------------------------------------------------------
+
+cmd_install() {
+    need_root
+
+    [ -n "$TARGET_DISK" ] || die "no target disk given (try: novi-install list)"
+    [ -b "$TARGET_DISK" ] || die "$TARGET_DISK is not a block device"
+
+    local live
+    live="$(live_device)"
+    case "$live" in
+        "") : ;;
+        "${TARGET_DISK}"*)
+            die "$TARGET_DISK holds the live media this system is running from" ;;
+    esac
+
+    for tool in fdisk mke2fs partprobe tar dd mount umount sync; do
+        command -v "$tool" >/dev/null 2>&1 || die "missing required tool: $tool"
+    done
+
+    confirm_destruction "$TARGET_DISK"
+
+    partition_disk "$TARGET_DISK" >/dev/null
+    format_partition "$(partition_of "$TARGET_DISK")"
+    copy_system
+    write_fstab
+    set_hostname
+    install_kernel
+    if [ "$WITH_BOOTLOADER" -eq 1 ]; then
+        install_bootloader "$TARGET_DISK"
+    else
+        info "--no-bootloader given, skipping the MBR"
+    fi
+
+    sync
+    umount "$MNT" || warn "could not unmount $MNT cleanly"
+    MOUNTED=0
+    sync
+
+    msg "Novi is installed on $TARGET_DISK"
+    info "remove the installation media and reboot"
+}
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+
+[ $# -gt 0 ] || { usage; exit 1; }
+
+ACTION="$1"; shift
+case "$ACTION" in
+    list|-h|--help|help) : ;;
+    install) : ;;
+    *) die "unknown command '$ACTION' (try: novi-install --help)" ;;
+esac
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --disk)      TARGET_DISK="${2:-}"; shift 2 ;;
+        --hostname)  NEW_HOSTNAME="${2:-}"; shift 2 ;;
+        --no-bootloader) WITH_BOOTLOADER=0; shift ;;
+        -y|--yes)    ASSUME_YES=1; shift ;;
+        -h|--help)   usage; exit 0 ;;
+        *) die "unknown option '$1'" ;;
+    esac
+done
+
+case "$ACTION" in
+    list)              cmd_list ;;
+    -h|--help|help)    usage ;;
+    install)           cmd_install ;;
+esac

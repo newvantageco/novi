@@ -17,11 +17,13 @@ this file.
 
 ## Build commands
 
-Full pipeline: `bash build.sh` (runs `build/01-fetch.sh` through
-`build/05-kernel.sh` in order). Each stage can also be run standalone
-(`bash build/0N-*.sh`) but stages depend on prior stages' output in
-`/build/{sources,tools,sysroot,rootfs}` — see Architecture below for why
-`/build` is hardcoded and unrelated to the repo checkout path.
+Full pipeline: `bash build.sh` — it **discovers** `build/NN-*.sh` and runs
+all of them in numeric order, so a new stage is part of the build the moment
+the file exists. `--base-only` stops after the kernel (01–05: bootable
+console, no desktop/pkg/state/installer), `--from NN` resumes. Each stage can
+also be run standalone (`bash build/NN-*.sh`) but stages depend on prior
+stages' output in `/build/{sources,tools,sysroot,rootfs}` — see Architecture
+below for why `/build` is hardcoded and unrelated to the repo checkout path.
 
 - `bash build/01-fetch.sh` — download all sources (idempotent, skips existing files)
 - `bash build/02-toolchain.sh` — cross-compiler: binutils → gcc → musl (7 phases, order matters — see below)
@@ -34,6 +36,8 @@ Full pipeline: `bash build.sh` (runs `build/01-fetch.sh` through
   build output lives at `/build/rootfs` and `/build/rootfs/boot/vmlinuz-<ver>`
   — pass `--rootfs`/`--kernel` explicitly until those defaults are fixed)
 - `bash scripts/mkvm.sh [--disk]` — boot the ISO in QEMU/KVM
+- `novi-install install --disk DEV` (on the booted live system) — install to
+  disk (RFC 0003)
 
 Lint: `shellcheck build/*.sh scripts/*.sh packages/pkg packages/mkpkg`.
 Full verification sequence (from `CONTRIBUTING.md`): shellcheck clean →
@@ -111,6 +115,50 @@ Three smaller things worth knowing before extending this:
   unregenerated change simply doesn't exist at boot. That stage is the
   two generation steps from `04-s6.sh` on their own — seconds instead
   of rebuilding the whole skarnet stack.
+
+## Architecture: installation splits `grub-install` in half
+
+RFC 0003 (`docs/rfcs/0003-installation-and-persistence.md`). The installed
+userland is a static BusyBox with no GRUB tooling, so `packages/novi-install`
+cannot run `grub-install`. The work is split by what actually needs a build
+host:
+
+- **Generate** (`scripts/mkiso.sh`, build host): `grub-mkimage` produces
+  `core.img` with the prefix `(hd0,msdos1)/boot/grub` baked in; that plus
+  `boot.img` and the i386-pc module set are staged into `/novi-boot` on the
+  ISO.
+- **Place** (`packages/novi-install`, target): `dd` `boot.img` into the MBR's
+  first **446** bytes (never 512 — 446..509 is the partition table you just
+  wrote), `dd` `core.img` from sector 1, `cp` the modules to
+  `/boot/grub/i386-pc`.
+
+The baked-in prefix is a real coupling between the two scripts: it fixes MBR
+partitioning, partition 1, and GRUB under `/boot/grub`. Changing the layout
+means regenerating `core.img`, not just changing the installer.
+
+Three things worth knowing before touching this:
+
+- **The partition starts at sector 2048 to create the post-MBR gap**, not for
+  alignment aesthetics. `core.img` (~278 sectors) lives in sectors 1..2047.
+  `novi-install` refuses to write a `core.img` that doesn't fit rather than
+  discovering the overlap later as filesystem corruption.
+- **`/init` has two boot paths now**, and they share one
+  `finalize_and_switch()` for the handoff (move `/dev`,`/proc`,`/sys`,`/run`,
+  mount `/tmp`, find init, `switch_root`). The disk path is taken when `root=`
+  is present and `boot=live` is not. That guard is load-bearing: the ISO's own
+  menu entries pass *both* `boot=live` and `root=live:/dev/disk/by-label/NOVI`,
+  so without it a live boot on a machine with Novi installed would take the
+  disk path.
+- **Bind-mount `/run/live` AFTER `mount --move /run /newroot/run`, never
+  before.** Binding first and then moving the initramfs's own `/run` on top
+  buries the bind — the mount still exists, nothing can reach it, and
+  `/run/live` simply doesn't exist in the booted system. That was live for as
+  long as the bind had existed and nothing noticed, because nothing needed the
+  live media after boot until the installer did.
+
+The installer sets the target's hostname with `novi-state set` (via
+`NOVI_STATE_FILE`), not `sed` — same reason as everything else: `state_set`
+is the one edit that preserves the document's comments and ordering.
 
 ## Architecture: cross-toolchain bootstrap order
 

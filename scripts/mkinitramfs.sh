@@ -199,6 +199,88 @@ SQUASHFS_IMG="${SQUASHFS_IMG:-live/filesystem.squashfs}"
 INIT_PATH="$(get_param init)"
 INIT_PATH="${INIT_PATH:-/sbin/init}"
 
+# An installed Novi system (packages/novi-install, RFC 0003) boots with a
+# real root filesystem on disk -- no ISO to find, no squashfs, no overlay,
+# and crucially no tmpfs upperdir, so changes survive a reboot. That is the
+# entire difference between "live" and "installed".
+#
+# `boot=live` forces the live path even when a root= is also present. The
+# ISO's own GRUB entries pass it, so an installed disk sitting in the same
+# machine can never hijack a live boot.
+ROOT_SPEC="$(get_param root)"
+case "${ROOT_SPEC}" in
+    # dracut-style live spec (`root=live:/dev/disk/by-label/NOVI`, which the
+    # ISO's own menu entries pass) names the live media, not a root
+    # filesystem. boot=live already covers the ISO; this covers a
+    # hand-edited command line that dropped it.
+    live:*) ROOT_SPEC="" ;;
+esac
+ROOTFSTYPE="$(get_param rootfstype)"
+ROOTFLAGS="$(get_param rootflags)"
+
+# ── Handoff to the real root ──────────────────────────────────────────────────
+#
+# Everything below this point is identical whether /newroot came from a
+# squashfs+overlay (live) or from a real partition (installed), so both
+# paths end here rather than each growing its own copy that can drift.
+finalize_and_switch() {
+    # ── Move virtual mounts into new root ────────────────────────────────────────
+    info "Moving /dev, /proc, /sys into new root ..."
+    mkdir -p /newroot/dev /newroot/proc /newroot/sys /newroot/run
+
+    # Move (not bind) so they're owned by the new root
+    mount --move /dev  /newroot/dev  2>/dev/null || \
+        mount -t devtmpfs devtmpfs /newroot/dev
+    mount --move /proc /newroot/proc 2>/dev/null || \
+        mount -t proc proc /newroot/proc
+    mount --move /sys  /newroot/sys  2>/dev/null || \
+        mount -t sysfs sysfs /newroot/sys
+    mount --move /run  /newroot/run  2>/dev/null || \
+        mount -t tmpfs tmpfs /newroot/run
+
+    # The live media has to be reachable from the installed-system side:
+    # novi-install reads the kernel, the initramfs and the staged GRUB
+    # artifacts out of /run/live, and none of them exist anywhere else.
+    #
+    # This bind MUST come after the /run move above, not before it.
+    # Binding first and then moving the initramfs's own /run on top of
+    # /newroot/run buries the bind under the new mount -- the mount is
+    # still there, but nothing can reach it, and /run/live simply does
+    # not exist in the booted system. Confirmed live: `ls /run/live` ->
+    # "No such file or directory", with the bind reported as successful.
+    if [ -n "${LIVE_MOUNT:-}" ] && [ -d "${LIVE_MOUNT}" ]; then
+        mkdir -p /newroot/run/live
+        mount --bind "${LIVE_MOUNT}" /newroot/run/live || \
+            warn "could not bind ${LIVE_MOUNT} to /run/live -- novi-install will not find the media"
+    fi
+
+    # scripts/mkiso.sh's mksquashfs invocation excludes /tmp from the
+    # squashed image entirely (`-e proc sys dev run tmp`, the same
+    # exclusion list as the other runtime-mounted directories), but unlike
+    # dev/proc/sys/run above, nothing ever mounted anything AT /tmp -- so a
+    # live boot ended up with no /tmp directory at all (confirmed live: `ls
+    # /tmp` failed with "No such file or directory", not guessed). 1777 to
+    # match the mode build/03-base.sh already sets on the build-time
+    # rootfs's own (squashed-out) /tmp.
+    mkdir -p /newroot/tmp
+    mount -t tmpfs -o mode=1777 tmpfs /newroot/tmp
+
+    # ── Verify new root has an init ───────────────────────────────────────────────
+    for candidate in "${INIT_PATH}" /sbin/init /usr/sbin/init /lib/systemd/systemd /bin/sh; do
+        if [ -x "/newroot${candidate}" ]; then
+            REAL_INIT="${candidate}"
+            break
+        fi
+    done
+
+    [ -n "${REAL_INIT:-}" ] || panic "/newroot has no usable init binary"
+    info "Handing off to: /newroot${REAL_INIT}"
+
+    # ── switch_root ───────────────────────────────────────────────────────────────
+    exec switch_root /newroot "${REAL_INIT}" "$@" \
+        || panic "switch_root failed"
+}
+
 # ── Load kernel modules ───────────────────────────────────────────────────────
 info "Loading essential kernel modules ..."
 
@@ -244,6 +326,96 @@ else
     # Busybox mdev fallback
     echo /sbin/mdev > /proc/sys/kernel/hotplug 2>/dev/null || true
     mdev -s 2>/dev/null || true
+fi
+
+# ── Disk-root boot path (installed system) ────────────────────────────────────
+#
+# Taken when the bootloader passed a root= and did NOT pass boot=live. This
+# is the path an installed Novi uses: mount the partition read-write and
+# hand off. No squashfs, no overlay, no tmpfs -- the root filesystem IS the
+# writable one, so nothing is discarded on reboot.
+resolve_root_device() {
+    local spec="$1"
+    local key="" want="" attempt=0 blkdev out got
+
+    case "${spec}" in
+        LABEL=*) key="LABEL"; want="${spec#LABEL=}" ;;
+        UUID=*)  key="UUID";  want="${spec#UUID=}"  ;;
+        /dev/*)  key="";      want="${spec}"        ;;
+        *)       return 1 ;;
+    esac
+
+    while [ ${attempt} -lt 30 ]; do
+        if [ -z "${key}" ]; then
+            if [ -b "${want}" ]; then
+                echo "${want}"
+                return 0
+            fi
+        else
+            # Partitions before whole disks: root lives on a partition on
+            # every layout novi-install produces, and a whole-disk match
+            # would only ever be a coincidence worth losing to the real one.
+            #
+            # BusyBox blkid ignores "-s FOO -o value" and always prints its
+            # default `dev: LABEL="x" UUID="y" TYPE="z"` line (the same trap
+            # find_live_device() documents below), so parse that instead.
+            # The [ :] before the key name is what keeps a UUID= query from
+            # matching the PARTUUID= field on the same line.
+            for blkdev in /dev/sd?? /dev/vd?? /dev/nvme?n?p? /dev/mmcblk?p? \
+                          /dev/sd? /dev/vd? /dev/nvme?n? /dev/mmcblk?; do
+                [ -b "${blkdev}" ] || continue
+                out="$(blkid "${blkdev}" 2>/dev/null)"
+                got="$(printf '%s' "${out}" | sed -n "s/.*[ :]${key}=\"\([^\"]*\)\".*/\1/p")"
+                if [ "${got}" = "${want}" ]; then
+                    echo "${blkdev}"
+                    return 0
+                fi
+            done
+        fi
+
+        attempt=$((attempt + 1))
+        info "Waiting for root device ${spec}... (${attempt}/30)"
+        sleep 1
+        [ $((attempt % 5)) -eq 0 ] && mdev -s 2>/dev/null || true
+    done
+
+    return 1
+}
+
+if [ -n "${ROOT_SPEC}" ] && ! has_param boot=live; then
+    info "Disk root requested: root=${ROOT_SPEC}"
+
+    ROOT_DEV="$(resolve_root_device "${ROOT_SPEC}")" || \
+        panic "Could not find root device '${ROOT_SPEC}'"
+    info "Root device resolved to: ${ROOT_DEV}"
+
+    # rw is the default and the point; `ro` on the command line still wins
+    # for anyone who wants the traditional fsck-then-remount-rw sequence.
+    # Written as full `if`s, not `cond && assign`: /init runs under `set -e`,
+    # where a trailing `&&` whose test is false makes the whole list exit 1
+    # and takes the boot down with it.
+    ROOT_OPTS="rw,noatime"
+    if has_param ro; then
+        ROOT_OPTS="ro,noatime"
+    fi
+    if [ -n "${ROOTFLAGS}" ]; then
+        ROOT_OPTS="${ROOT_OPTS},${ROOTFLAGS}"
+    fi
+
+    info "Mounting ${ROOT_DEV} on /newroot (${ROOT_OPTS}) ..."
+    if [ -n "${ROOTFSTYPE}" ]; then
+        mount -t "${ROOTFSTYPE}" -o "${ROOT_OPTS}" "${ROOT_DEV}" /newroot || \
+            panic "Could not mount ${ROOT_DEV} as ${ROOTFSTYPE}"
+    else
+        # ext2/3/4 all mount through the ext4 driver here
+        # (CONFIG_EXT4_USE_FOR_EXT2=y in kernel/config-x86_64), which is
+        # what makes BusyBox mke2fs's journal-less ext2 usable as a root.
+        mount -o "${ROOT_OPTS}" "${ROOT_DEV}" /newroot 2>/dev/null || \
+        mount -t ext4 -o "${ROOT_OPTS}" "${ROOT_DEV}" /newroot || \
+            panic "Could not mount ${ROOT_DEV}"
+    fi
+
+    finalize_and_switch "$@"
 fi
 
 # ── Find live media device ────────────────────────────────────────────────────
@@ -351,49 +523,7 @@ mount -t overlay overlay \
 
 info "Overlay mounted at /newroot"
 
-# ── Bind-mount live media into new root (for installer access) ────────────────
-mkdir -p /newroot/run/live
-mount --bind "${LIVE_MOUNT}" /newroot/run/live 2>/dev/null || true
-
-# ── Move virtual mounts into new root ────────────────────────────────────────
-info "Moving /dev, /proc, /sys into new root ..."
-mkdir -p /newroot/dev /newroot/proc /newroot/sys /newroot/run
-
-# Move (not bind) so they're owned by the new root
-mount --move /dev  /newroot/dev  2>/dev/null || \
-    mount -t devtmpfs devtmpfs /newroot/dev
-mount --move /proc /newroot/proc 2>/dev/null || \
-    mount -t proc proc /newroot/proc
-mount --move /sys  /newroot/sys  2>/dev/null || \
-    mount -t sysfs sysfs /newroot/sys
-mount --move /run  /newroot/run  2>/dev/null || \
-    mount -t tmpfs tmpfs /newroot/run
-
-# scripts/mkiso.sh's mksquashfs invocation excludes /tmp from the
-# squashed image entirely (`-e proc sys dev run tmp`, the same
-# exclusion list as the other runtime-mounted directories), but unlike
-# dev/proc/sys/run above, nothing ever mounted anything AT /tmp -- so a
-# live boot ended up with no /tmp directory at all (confirmed live: `ls
-# /tmp` failed with "No such file or directory", not guessed). 1777 to
-# match the mode build/03-base.sh already sets on the build-time
-# rootfs's own (squashed-out) /tmp.
-mkdir -p /newroot/tmp
-mount -t tmpfs -o mode=1777 tmpfs /newroot/tmp
-
-# ── Verify new root has an init ───────────────────────────────────────────────
-for candidate in "${INIT_PATH}" /sbin/init /usr/sbin/init /lib/systemd/systemd /bin/sh; do
-    if [ -x "/newroot${candidate}" ]; then
-        REAL_INIT="${candidate}"
-        break
-    fi
-done
-
-[ -n "${REAL_INIT:-}" ] || panic "/newroot has no usable init binary"
-info "Handing off to: /newroot${REAL_INIT}"
-
-# ── switch_root ───────────────────────────────────────────────────────────────
-exec switch_root /newroot "${REAL_INIT}" "$@" \
-    || panic "switch_root failed"
+finalize_and_switch "$@"
 INIT_SCRIPT
 
 chmod 0755 "${WORK_DIR}/init"
