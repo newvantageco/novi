@@ -1,0 +1,105 @@
+#!/bin/sh
+# novi-hotplug — react to a device appearing after boot.
+#
+# Run by busybox `uevent` once per kernel netlink notification, with
+# the notification's own variables already in the environment (ACTION,
+# SUBSYSTEM, DEVPATH, MODALIAS, DEVNAME, ...). It is not a daemon and
+# takes no arguments; the daemon is `uevent` itself, which is 120
+# lines of busybox rather than 120 lines of ours.
+#
+# This is the same rule novi-hwdetect applies, against a different
+# source. novi-hwdetect walks /sys for devices that already exist and
+# is therefore a *coldplug* tool: it answers "what is in this machine"
+# once, in the initramfs, before the root filesystem is found. It can
+# never answer "what did someone just plug in", because by the time it
+# has finished walking it is over. This handler is the same
+# modalias -> modprobe rule driven by the kernel telling us instead of
+# us asking. Two sources, one rule; do not merge them, and do not let
+# either grow a hardcoded device list.
+#
+# `uevent` runs this with spawn_and_wait, so a slow handler stalls the
+# queue -- but not, importantly, at the cost of losing events: it
+# forces a 128 MB netlink receive buffer, so the kernel holds them
+# while we work. Slow is survivable here. Blocking forever is not,
+# which is why nothing below can wait on a device.
+#
+# shellcheck disable=SC3043
+set -u
+
+ACTION="${ACTION:-}"
+SUBSYSTEM="${SUBSYSTEM:-}"
+DEVPATH="${DEVPATH:-}"
+
+# Log to syslog, which RFC 0004 exists to provide. A private log file
+# in /run would need its own rotation and would be one more thing that
+# can silently stop working; /var/log/messages already survives a
+# reboot and is where someone debugging a device will look. `logger`
+# is one fork, and only on the events below -- not on every uevent.
+note() {
+    logger -t hotplug -p daemon.info "$*" 2>/dev/null || true
+}
+
+case "$ACTION" in
+    add)
+        # The kernel names the driver it wants; modprobe matches it
+        # against the modules.alias depmod generated at build time.
+        # -q because most aliases have no driver in this kernel and
+        # that is an answer, not an error.
+        if [ -n "${MODALIAS:-}" ]; then
+            modprobe -q "$MODALIAS" 2>/dev/null || true
+        fi
+
+        # Devices a person would recognise having plugged in. Not
+        # every uevent -- a single USB stick emits a dozen, most of
+        # them about internal plumbing nobody wants in a log.
+        case "$SUBSYSTEM" in
+            block|net|sound|input)
+                note "added ${SUBSYSTEM}/${DEVPATH##*/}${DEVNAME:+ (${DEVNAME})}"
+                ;;
+        esac
+
+        # A sound card that arrives after boot has never been through
+        # `alsactl init`, and ALSA's default state on a fresh card is
+        # *muted*. That is RFC 0011's trap reached by a different road:
+        # rc.init unmutes the cards that exist at boot, so the built-in
+        # speakers work and the USB headset someone plugs in afterwards
+        # is silent, which reads as "unsupported device" rather than
+        # "nobody moved the slider".
+        #
+        # Backgrounded: `uevent` waits on this handler, and alsactl on
+        # an unfamiliar card is the one thing here that could take real
+        # time. Nothing depends on its result, so nothing should wait
+        # for it.
+        case "${SUBSYSTEM}:${DEVPATH##*/}" in
+            sound:card[0-9]*)
+                card="${DEVPATH##*/card}"
+                # Logged, because a silent call is exactly how the
+                # boot-time version of this stayed broken: "the card
+                # is at 94%" proves nothing when 94% might be what the
+                # driver already defaulted to. The log line says the
+                # code path ran; `alsactl init` says what it did.
+                note "unmuting sound card ${card} (alsactl init)"
+                (alsactl init "$card" >/dev/null 2>&1 || true) &
+                ;;
+        esac
+        ;;
+
+    remove)
+        case "$SUBSYSTEM" in
+            block|net|sound|input)
+                note "removed ${SUBSYSTEM}/${DEVPATH##*/}"
+                ;;
+        esac
+        ;;
+esac
+
+# Deliberately NOT done here: bringing up a network interface that
+# appears after boot. The network service picks one interface when it
+# starts and keeps it, so a dock's ethernet plugged in later is
+# detected, gets its driver loaded and appears in `ip link` -- and gets
+# no lease. Fixing that properly means per-interface DHCP, which RFC
+# 0009 already names as its own piece of work. Reaching into the
+# network service from a uevent handler would be the split-brain this
+# project keeps refusing to build.
+
+exit 0

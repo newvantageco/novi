@@ -199,6 +199,25 @@ default state of a fresh sound card is *muted*, so without it a working
 audio path is silence — and `novi-power` for battery, AC and cpufreq,
 with `power.governor` declared like everything else.
 
+It notices devices that arrive *later*, too. A `/sys` walk answers
+"what is in this machine" once and is then over, so a supervised
+listener on the kernel's uevent socket applies the same rule to
+whatever gets plugged in — a headset, a dock's ethernet, a memory
+stick:
+
+```console
+$ grep hotplug: /var/log/messages
+hotplug: added sound/card1
+hotplug: unmuting sound card 1 (alsactl init)
+hotplug: added block/sda (sda)
+```
+
+See [RFC 0012](docs/rfcs/0012-hotplug.md). Automounting a stick is
+deliberately not done yet: the mechanism is there, the *policy* is a
+real decision (read-write risks a corrupted stick on an unclean pull,
+read-only makes it useless), and a half-made choice there loses
+someone's files.
+
 **Stated plainly: none of it has been run on a physical machine yet.**
 Every claim in this repository is QEMU-verified, and §21 is exactly the
 part QEMU cannot answer. See
@@ -325,10 +344,11 @@ HOME_URL="https://novilinux.org"
 - [x] WiFi (`network.wifi`, `novi-wifi`, WPA2, RFC 0009)
 - [x] Real upgrades + index freshness (`pkg update`, `valid-until`, RFC 0010)
 - [x] Hardware enablement (`novi-hwdetect`, firmware, ALSA, power, RFC 0011)
+- [x] Hotplug — devices that arrive after boot (`novi-hotplug`, RFC 0012)
 - [ ] **Boot it on real hardware** ← next, and nothing here replaces it
 - [ ] A published repository + offline release key
 - [ ] A Microsoft-signed shim (real Secure Boot); WPA3 (needs mbedTLS)
-- [ ] Hotplug; lid/power-button/hotkeys; Mesa
+- [ ] Automount + `novi-eject`; lid/power-button/hotkeys; Mesa
 - [ ] More state domains: keybindings, static IP
 - [ ] Boot splash
 

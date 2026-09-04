@@ -1559,6 +1559,68 @@ been entered. This work makes a real machine much more likely to work,
 and demonstrates nothing about whether one does. No further QEMU work
 would change that -- the next step is a USB stick and a laptop.
 
+## 22. Hotplug
+
+RFC 0012. §21 replaced three hardcoded `modprobe` lists with one rule --
+the kernel publishes a `modalias`, `depmod` built `modules.alias`, hand
+one to the other -- and applied it by walking `/sys`. That makes
+`novi-hwdetect` a coldplug tool by construction: it answers "what is in
+this machine" once, and by the time the walk finishes it is over. Plug
+something in afterwards and nothing on this system noticed. For a USB
+WiFi dongle, a dock's ethernet, a headset and a memory stick, the driver
+is a module sitting in the image that never gets loaded -- the device
+correctly enumerated, visible in `/sys`, and dead.
+
+The listener is busybox `uevent`, supervised like anything else. It
+binds `NETLINK_KOBJECT_UEVENT` and runs a handler per notification with
+the kernel's variables in its environment, and it forces a **128 MB**
+receive buffer -- which is the property that decides whether a burst of
+events queues or drops. Writing our own would be making that decision
+again, less carefully. `packages/novi-hotplug` is the §21 rule against
+that stream, plus syslog notes for devices a person would recognise,
+plus `alsactl init` for a sound card that arrives late.
+
+It deliberately does not create device nodes (devtmpfs does, in the
+kernel, before any of this runs -- `mdev` is present in this busybox and
+unused on purpose) and deliberately does not touch networking (an
+interface appearing after boot gets a driver and no lease; per-interface
+DHCP is §19's work, and reaching into the network service from a uevent
+handler is the split-brain this project keeps refusing to build).
+
+**Verified over QMP, so the plug events are genuinely runtime.**
+`snd_usb_audio` -- a module named in no list anywhere in this system,
+confirmed by grepping every one of them -- goes from absent to live on
+`device_add usb-audio`, with its two dependencies, and `aplay -l` shows
+the card. A `device_add usb-storage` carrying a 32 MB FAT image produces
+`/dev/sda` and `/dev/sda1`, `blkid` identifies it, and the file on it
+reads back through a real `mount`. `device_del` removes both cleanly.
+`novi-state diff` clean throughout.
+
+Two things learned by running it that will mislead the next person, both
+now recorded: **`alsactl init` exits 99 on success** ("initialized using
+a generic method" is the documented path for a card no ruleset matches),
+and **it only knows standard mixer control names** -- QEMU's emulated
+USB audio card invents `Audio Output Volume Control`, so a muted control
+on it stays muted, reproduced twice. Real headsets use standard names;
+the one device available to test with is the one whose naming defeats
+the mechanism. The handler logs that it called alsactl precisely because
+"did it run" and "did it work" are separate questions.
+
+**And §21's unmute claim is now actually proven.** It said the HDA card
+reading 73% `[on]` after boot "only happens because `alsactl init` ran",
+which was an inference and a weak one -- 73% could have been the
+driver's default. Muting `Master` to 0% `[off]` and running
+`alsactl init 0` returns it to 73% / **-20.00dB** / `[on]`, and -20dB is
+literally the value in `/usr/share/alsa/init/default`. The claim was
+right; the evidence for it was not, until someone went back and checked.
+
+**Deliberately not done: automount.** The mechanism is there -- a stick
+appears, is logged, and mounts by hand -- and what is missing is policy,
+which is real: read-write invites data loss on an unclean pull,
+read-only makes a USB stick useless for what people use USB sticks for.
+That wants a `hotplug.automount` key, a `novi-eject`, and a decision,
+not a quick `mount` bolted into a uevent handler.
+
 ## Status Summary
 
 | # | Area | State |
@@ -1584,6 +1646,7 @@ would change that -- the next step is a USB stick and a laptop.
 | 19 | WiFi | ✅ wpa_supplicant with internal crypto (no OpenSSL), `network.wifi` declared with credentials in a 0600 store, wired-first interface selection; verified end to end against a real WPA2 AP on hwsim radios with no wired NIC present. WPA3 (needs mbedTLS), firmware packages, per-interface DHCP and a panel applet are roadmap |
 | 20 | Repository freshness & upgrades | ✅ `valid-until` inside the signature (replay closed, verified with a re-signed 40-day-old index), `pkg update` driven by the index with `sort -V` comparison and no silent downgrades. Index serial, cache pruning and version constraints are roadmap |
 | 21 | Hardware enablement | ✅ Generic modalias-driven driver loading (`novi-hwdetect`, in the initramfs before the root search), 699 MB of curated firmware + `regulatory.db` + Intel SOF, ALSA with `alsactl init` at boot, `novi-power` and a `power.governor` state domain, a laptop-oriented kernel config, and a self-signed `bootx64.efi`. Verified in QEMU on drivers no list names (three virtio modules + an e1000 lease) — **but never once on physical hardware**, which is the whole subject. Firmware-as-packages, a real shim, hotplug, lid/hotkeys and Mesa are roadmap |
+| 22 | Hotplug | ✅ Supervised uevent listener (busybox `uevent`, 128 MB netlink buffer) + `novi-hotplug`: §21's modalias rule against the kernel's event stream, syslog notes, `alsactl init` for late-arriving sound cards. QMP-verified at runtime — a driver in no list loading on plug, a USB stick mounting and reading back, clean removal. Automount (needs policy), per-interface DHCP and a desktop that notices are roadmap |
 
 **Next concrete step: write the ISO to a USB stick and boot a real
 machine.** This is no longer a development task, and that is the point.
@@ -1616,8 +1679,8 @@ Ordered honestly, what is left after that:
    key nothing trusts. This is an organisational step before a
    technical one.
 4. **WPA3**, which needs mbedTLS as wpa_supplicant's crypto backend.
-5. **Hotplug** -- `novi-hwdetect` runs at boot; plug something in
-   afterwards and nothing notices. Wants a real uevent listener.
+5. **Automount for removable media** -- hotplug itself is done (§22);
+   what is left is policy, and `novi-eject` to go with it.
 6. **Lid, power button and hotkeys** -- `novi-power suspend` works;
    nothing calls it.
 7. **Mesa**, for GPU acceleration. The compositor renders in software,

@@ -1,5 +1,6 @@
 syslog
 klog
+hotplug
 getty-tty1
 getty-ttyS0
 network

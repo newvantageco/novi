@@ -188,6 +188,39 @@ wherever this work is described. `novi-hwdetect` is verified on three
 virtio devices — the easiest case there is — and the firmware has never
 been requested by a device.
 
+## Architecture: hotplug is the other half of hwdetect
+
+RFC 0012 (`docs/rfcs/0012-hotplug.md`).
+
+- **`novi-hwdetect` is coldplug and cannot be anything else.** It walks
+  `/sys` once, so it answers "what is in this machine" and never "what
+  did someone just plug in". `packages/novi-hotplug` is the same
+  modalias-to-`modprobe` rule driven by the kernel's uevent netlink
+  stream instead of a directory walk. Two sources, one rule — don't
+  merge them, and don't let either grow a device list.
+- **The listener is busybox `uevent`, not ours.** It forces a 128 MB
+  netlink receive buffer, which is the whole ballgame: events queue in
+  the kernel during a burst rather than being dropped. It runs the
+  handler with `spawn_and_wait`, so a slow handler stalls the queue but
+  loses nothing. Nothing in the handler may *block*, though — hence the
+  backgrounded `alsactl`.
+- **`mdev` is deliberately unused.** devtmpfs (`CONFIG_DEVTMPFS_MOUNT`)
+  creates the device nodes in the kernel before any of this runs; mdev
+  would be a second creator with its own rule file to keep in sync.
+- **`alsactl init` exits 99 on success.** "Hardware is initialized using
+  a generic method" + exit 99 is the documented path for a card no
+  ruleset matches, and it did initialise. Do not "fix" the 99.
+- **`alsactl init` only knows standard mixer control names** (`Master
+  Playback Volume`, `PCM …`, `Headphone …`, `Speaker …`). QEMU's
+  emulated USB audio card invents `Audio Output Volume Control`, so a
+  muted control on it stays muted — reproduced twice. Real headsets use
+  standard names. This is why the handler *logs* that it called
+  alsactl: whether it ran and whether it worked are separate questions.
+- **The handler does not touch networking.** An interface that appears
+  after boot gets a driver and no lease, because `network` picks one
+  interface at start. Per-interface DHCP is RFC 0009's work; reaching
+  into the network service from a uevent handler is split-brain.
+
 ## Architecture: installation splits `grub-install` in half
 
 RFC 0003 (`docs/rfcs/0003-installation-and-persistence.md`). The installed

@@ -108,6 +108,7 @@ install -D -m 644 "${REPO_ROOT}/rootfs/etc/profile" "${ROOTFS}/etc/profile"
 # machine that cannot load the driver for its own disk or NIC cannot
 # install a package to fix that.
 install -D -m 755 "${REPO_ROOT}/packages/novi-hwdetect" "${ROOTFS}/sbin/novi-hwdetect"
+install -D -m 755 "${REPO_ROOT}/packages/novi-hotplug" "${ROOTFS}/sbin/novi-hotplug"
 
 # Battery, AC, CPU frequency and suspend. Base image for the same
 # reason: a laptop that cannot tell you it is about to die, and cannot
