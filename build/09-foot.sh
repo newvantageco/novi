@@ -22,54 +22,20 @@ source "${SCRIPT_DIR}/lib-meson-cross.sh"
 command -v chroot >/dev/null 2>&1 || { echo "ERROR: chroot not found (needed for fc-cache)" >&2; exit 1; }
 command -v unzip >/dev/null 2>&1 || { echo "ERROR: unzip not found (needed to unpack the font)" >&2; exit 1; }
 
-# ── 1. freetype ─────────────────────────────────────────────────────
+# ── Font libraries: NOT here any more ────────────────────────────────
 #
-# -Dzlib=internal: freetype bundles its own minimal gzip decompressor
-# (src/gzip/) specifically so consumers don't need a system zlib just
-# to read gzip-compressed font tables -- avoids pulling in zlib as a
-# whole separate new dependency for this one feature. harfbuzz/brotli/
-# bzip2/png are all optional advanced-hinting/format features this
-# terminal-font use case doesn't need; disabled to keep the dependency
-# chain from growing any further than it already has.
-build_meson freetype "VER-${FREETYPE_VERSION}" \
-    -Dzlib=internal -Dharfbuzz=disabled -Dbrotli=disabled \
-    -Dbzip2=disabled -Dpng=disabled -Dtests=disabled
-
-# ── 2. fontconfig ────────────────────────────────────────────────────
+# freetype, fontconfig, tllist and fcft used to be built in this stage.
+# They moved to 06-wayland.sh, and that is a correctness fix rather than
+# tidying: novi-launcher (stage 08) and novi-panel (stage 10) both link
+# fcft, and both run BEFORE this stage. novi-launcher's own Makefile
+# said "all already built for foot (build/09-foot.sh), no new
+# dependency" -- true in a tree where stage 09 had run at some point in
+# the past, false in build order. A genuinely clean `bash build.sh`
+# stopped at stage 08 with `cannot find -lfcft`.
 #
-# -Dxml-backend=expat: already built (build/06-wayland.sh step 2),
-# avoids needing libxml2 as a second, redundant XML parser in the
-# rootfs. -Dcache-build=disabled: that option runs fc-cache at `ninja
-# install` time on the BUILD machine, which would try to execute a
-# freshly cross-compiled TARGET fc-cache binary directly on this x86_64
-# Linux host -- same architecture, so it wouldn't even fail loudly, it
-# would just scan and cache the *host's* font directories into the
-# rootfs's cache path instead of the rootfs's own fonts (which aren't
-# installed yet at this point in the build anyway). Cache is built
-# correctly, chrooted, after the font is installed -- see below.
-build_meson fontconfig "${FONTCONFIG_VERSION}" \
-    -Dnls=disabled -Dtests=disabled -Dtests-external-fonts=disabled \
-    -Dxml-backend=expat -Ddoc=disabled -Dcache-build=disabled
-
-# ── 3. tllist (header-only, used by both fcft and foot) ─────────────
-build_meson tllist "${TLLIST_VERSION}" -d tllist
-
-# ── 4. fcft ───────────────────────────────────────────────────────────
-#
-# Pinned to the 2.x line in 00-versions.sh (not latest) because foot
-# 1.9.2 requires fcft <3.0.0 -- confirmed by reading foot's own
-# meson.build, not assumed. grapheme-shaping=disabled and
-# run-shaping=disabled together avoid needing harfbuzz or libutf8proc
-# at all: this is a monospace terminal font (Latin text, no complex
-# script shaping), so neither buys anything for this use case. (fcft
-# 2.5.1 -- unlike the 3.x line -- has no SVG/color-emoji option at all,
-# so there's nothing to disable there; confirmed by reading this exact
-# version's meson_options.txt after -Dsvg-backend=none, copied from
-# having inspected the 3.x tag instead of this one, failed with
-# "Unknown option: svg-backend".)
-build_meson fcft "${FCFT_VERSION}" -d fcft \
-    -Dgrapheme-shaping=disabled -Drun-shaping=disabled \
-    -Ddocs=disabled -Dexamples=false -Dtest-text-shaping=false
+# It survived because nobody had built this project from an empty
+# /build in a long time, and CI's "Build & Test" job validates sources
+# and manifests without compiling anything.
 
 # ── 5. JetBrains Mono (default terminal font) ────────────────────────
 #

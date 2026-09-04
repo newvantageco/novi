@@ -52,11 +52,31 @@ while IFS= read -r rel; do
     fi
 done < "${MANIFEST}"
 
-# Prune directories the removal emptied. -depth so children go first;
-# rmdir rather than rm -rf so a directory that still holds something
-# survives untouched.
-find "${ROOTFS}/usr/share" "${ROOTFS}/usr/lib" "${ROOTFS}/etc/fonts" \
-     -depth -type d -empty -exec rmdir {} + 2>/dev/null || true
+# Prune directories the removal emptied. rmdir rather than rm -rf, so a
+# directory that still holds something survives untouched.
+#
+# usr/include is in this list because RFC 0015 made the headers a
+# package too: without it the base kept empty directories named after
+# libraries it no longer contains, which reads like a broken install
+# rather than a deliberate one.
+#
+# The loop is not belt-and-braces. `find -depth -type d -empty -exec
+# rmdir {} +` looks like it handles nesting and does not: -empty is
+# evaluated during the traversal, so a parent that still contains an
+# about-to-be-deleted empty child is not empty *at the moment it is
+# tested*. One pass removes only the deepest level. That left
+# usr/include/alsa/sound behind as a three-deep chain of empty
+# directories, and would have quietly done the same under usr/share for
+# as long as this script has existed. Repeat until a pass changes
+# nothing; bounded so a bug here cannot spin forever.
+prune_pass() {
+    find "${ROOTFS}/usr/share" "${ROOTFS}/usr/lib" "${ROOTFS}/etc/fonts" \
+         "${ROOTFS}/usr/include" \
+         -depth -type d -empty -print -exec rmdir {} + 2>/dev/null | wc -l
+}
+for _ in 1 2 3 4 5 6 7 8; do
+    [ "$(prune_pass)" -eq 0 ] && break
+done
 
 AFTER="$(du -sh "${ROOTFS}" | cut -f1)"
 
