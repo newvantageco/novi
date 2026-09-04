@@ -85,3 +85,22 @@ s6-rc-init -c /etc/s6-rc/compiled -l /run/s6-rc /run/service
 if command -v novi-state >/dev/null 2>&1; then
     novi-state boot || true
 fi
+
+### 5. Live boot only: install the desktop from the medium (RFC 0007).
+###
+### The base image is console-only -- the desktop is packages, and the
+### ISO carries the signed repository. A live boot that wants a desktop
+### therefore installs one into the tmpfs overlay, which takes a couple
+### of seconds and demonstrates the package system rather than
+### describing it. The ISO's "Live Desktop" menu entry is what passes
+### the flag; nothing else ever does, so an installed machine never
+### takes this path.
+###
+### The helper is unfailable by construction (every error is a message
+### and exit 0), and the `|| true` stays anyway for the same reason it
+### does above: nothing about optional software should be able to turn
+### into a failed boot.
+if grep -qw 'novi.live.desktop' /proc/cmdline 2>/dev/null &&
+   command -v novi-live-desktop >/dev/null 2>&1; then
+    novi-live-desktop || true
+fi

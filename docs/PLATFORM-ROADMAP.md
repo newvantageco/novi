@@ -1181,6 +1181,76 @@ tamper cases: a package with one flipped byte failed its SHA-256 and
 was discarded, and an index with an appended package line failed its
 signature and left the previous index in place.
 
+## 17. The Base/Desktop Split
+
+RFC 0007. §2 of this document describes a small native base with
+everything else delivered as packages. RFC 0006 built the repository;
+this is the part that actually took something *out* of the base. Until
+now the desktop was in the image AND in the repository -- the
+architecture described rather than the one shipped.
+
+The gap was not cosmetic. A console-only machine -- a server, a build
+host, the thing a "small native base" is for -- was carrying a Wayland
+compositor, wlroots, libdrm, pixman, fontconfig, freetype, a font
+family and a terminal emulator it would never run. And the package
+system, with nothing load-bearing to carry, was decoration.
+
+**What leaves is computed, not listed.**
+`tools/pkgsplit/pkgsplit.py` takes `closure(NEEDED)` from the desktop
+binaries, subtracts `closure(NEEDED)` from everything else that ships,
+and fails the build if anything staying behind still links against
+anything moving out. Inter-package `depends=` is derived the same way:
+`wlroots depends on libdisplay-info, libdrm, libinput, libudev,
+libxkbcommon, pixman, seatd, wayland` is read out of the binaries, not
+typed in. A hand-written list is how a split rots -- someone adds a
+library in a build stage, nobody updates the list, and the
+"console-only" image quietly grows a Wayland stack again.
+
+**But the graph is not the only input, because it cannot see dlopen.**
+libdrm loads libdrm_amdgpu/nouveau/radeon by name at runtime and
+libwayland-egl has no in-image consumer, so nothing NEEDed them and the
+first split left all four sitting in a "console-only" base. Found by
+looking at what was left behind, not by reasoning about it. So there
+are two inputs with different jobs: the graph finds what is reachable,
+the package table claims what is ours, and a file matching neither is a
+hard error rather than a guess.
+
+The exercise turned up something worth recording on its own: the base
+image was carrying **build-time tooling** that `make install` had
+dropped in -- `fc-cache`, `fc-list`, `libinput`, `mtdev-test`,
+`di-edid-decode`, `xmlwf`, `wayland-scanner`. While those sat in
+/usr/bin they counted as part of the base, so fontconfig, freetype,
+libinput, libudev, libevdev, libmtdev, expat and libdisplay-info all
+counted as "needed by the base" and could never move. Eight libraries
+held in a console image by eight programs nobody would run on one. The
+split only became possible once those were named as desktop-side too.
+
+After it, `/usr/lib` in the base contains exactly one library:
+`libskarnet`, which s6 needs.
+
+**Console-only base does not mean network-only desktop.** The ISO
+carries the whole signed repository at `/novi-repo` and the shipped
+`pkg.conf` points at `/run/live/novi-repo`; `pkg` treats a mirror
+starting with `/` as a local directory. Same index signature, same
+per-package SHA-256; only the transport differs. So `pkg install
+novi-desktop` on a live system with no network at all resolves and
+installs 25 packages in about seven seconds -- and `novi-install
+--profile desktop` (the default) does the same into the target, in a
+chroot, then declares `packages.novi-desktop = present` and turns the
+session on, so a fresh install boots graphical AND reports no drift.
+
+A live ISO that could only show a console would be a real regression,
+so the "Live Desktop" menu entry passes `novi.live.desktop` and rc.init
+installs the desktop into the tmpfs overlay during boot. It is the
+package system demonstrating itself rather than being described.
+
+One more bug the work exposed, in the network service: **"the first
+interface that is not lo" picked `sit0`**, the IPv6-in-IPv4 tunnel
+pseudo-device a CONFIG_IPV6_SIT kernel creates at boot, which sorts
+before `eth0`. Confirmed live -- "network: using sit0", then udhcpc
+broadcasting DISCOVER forever down a tunnel with no link.
+`pick_interface()` now requires ARPHRD_ETHER.
+
 ## Status Summary
 
 | # | Area | State |
@@ -1201,26 +1271,24 @@ signature and left the previous index in place.
 | 14 | Networking & logging | ✅ DHCP + resolver as a supervised service with a `network.*` state domain, syslogd/klogd replacing a logger that had never once run; verified live and installed, including logs surviving a reboot. Static IP, WiFi and DHCPv6 are roadmap |
 | 15 | Users & accounts | ✅ `users.*` domain, a real group database, installer-created accounts with passwords; "configuration is declared, secrets are not" is now a stated platform rule. Non-root `novi-settings`, `users.*.home`/`.uid`, and undeclared-user removal are roadmap |
 | 16 | Package repository & signing | ✅ Signed index (Ed25519 via a hash-pinned TweetNaCl verifier on-target), SHA-256 per package, `pkg sync` + mirror fetch, `packages.*` state domain, first-party desktop repository; both tamper cases verified live. Desktop still also in the base image; release keys, index expiry and version constraints are roadmap |
+| 17 | Base/desktop split | ✅ Console-only base (one library left in /usr/lib), desktop is 25 packages on the medium, split computed from the ELF graph with a build-failing safety check; live-desktop boot, `pkg install novi-desktop` offline, and `novi-install --profile desktop` all verified. Separate console/desktop ISOs and finer-grained packages are roadmap |
 
-**Next concrete step: split the desktop out of the base image.** §2's
-whole architecture is a small native base with everything else
-delivered as packages. Every piece of that now exists -- a package
-format, a package manager, a signed repository, a fetch path, and
-`packages.*` in the declared state -- and the desktop is still baked
-into the base image *as well as* being in the repository. Doing the
-split is what turns §2 from a described architecture into the one this
-distro actually has, and it is the first change where the console ISO
-and the desktop ISO become genuinely different images.
+**Next concrete step: two ISOs, and a published repository.** The split
+makes a console ISO and a desktop ISO possible -- right now one image
+carries both paths, which is the correct intermediate step and not the
+end of it. Alongside that, the repository still only exists on whatever
+machine ran `build/20-repo.sh`: a real release key (offline, signing
+off the build host), something at a stable URL, and a signed
+`valid-until` so a validly-signed *stale* index cannot be replayed to
+hold a machine at a version with a known hole.
 
 Ordered honestly, what is left:
 
-1. **Split the desktop out of the base** -- the base image becomes
-   console-only; `novi-install` grows a "desktop" profile that declares
-   the desktop packages and lets convergence install them.
-2. **A published repository and a real release key** -- offline key,
-   signing off the build host, something at a stable URL, and a signed
-   `valid-until` so a validly-signed *stale* index cannot be replayed
-   to hold a machine at a version with a known hole.
+1. **Two ISOs and a published repository** -- including the release-key
+   and index-expiry work above.
+2. **Finer-grained packages** -- `novi-shell` still drags the whole
+   wlroots stack; someone who wants only `foot` under another
+   compositor should not need it. Packaging, not new mechanism.
 3. **The remaining `network.*` work** -- static IPv4, WiFi (needs a
    supplicant in the base image), DHCPv6.
 4. **UEFI/GPT install and a journalled filesystem** -- the two stated

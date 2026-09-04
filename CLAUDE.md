@@ -41,6 +41,9 @@ below for why `/build` is hardcoded and unrelated to the repo checkout path.
 - `bash build/20-repo.sh` — build and sign the first-party package
   repository into `/build/repo` (RFC 0006); serve that directory over HTTP
   and point a machine at it with `mirror =` in `/etc/novi/pkg.conf`
+- `bash build/21-desktop-split.sh` — **destructive**: removes the packaged
+  desktop from `/build/rootfs`, leaving a console-only base (RFC 0007).
+  Must run after 20; re-running 06..14 puts the files back
 - **`bash build/16-s6-rc-db.sh` after ANY change under `init/`** (see below),
   then `bash scripts/mkinitramfs.sh --output build/initramfs.cpio.gz` and
   `bash scripts/mkiso.sh` to get it into a bootable image
@@ -313,6 +316,56 @@ verification has to happen inside a booted Novi.
 the real system), *and* `pkg` no longer uses process substitution anywhere:
 the loops that must run in the parent shell write a temp file and read it
 back. The trust-critical path should not depend on a shell extension.
+
+## Architecture: the base/desktop split is computed, not listed
+
+RFC 0007 (`docs/rfcs/0007-base-desktop-split.md`). The base image is
+console-only; the desktop is 25 packages, and the installation medium
+carries the signed repository at `/novi-repo`.
+
+`tools/pkgsplit/pkgsplit.py` decides what leaves, from the ELF dependency
+graph — `closure(NEEDED)` from the desktop binaries minus `closure(NEEDED)`
+from everything else that ships — and **fails the build** if anything
+staying behind still links against something moving out. Inter-package
+`depends=` lines are derived the same way. Do not replace this with a
+hand-written list: that is how a split rots, one library at a time.
+
+Three things it is important not to break:
+
+- **The graph is not the only input, because it cannot see `dlopen`.**
+  libdrm loads `libdrm_amdgpu`/`libdrm_nouveau`/`libdrm_radeon` by name at
+  runtime and `libwayland-egl` has no in-image consumer, so nothing NEEDs
+  them and the first split left all four in a "console-only" base. So:
+  the graph finds what is *reachable*, `PACKAGE_TABLE` claims what is
+  *ours*, and anything claimed that the base does not need moves too. A
+  file matching no pattern is a hard error, never a guess.
+- **`build/21-desktop-split.sh` deletes exactly what `20-repo.sh`
+  packaged**, from the manifest 20 wrote. One source of truth, or the two
+  drift and the image ends up broken or still fat. Re-running stages
+  06..14 puts the files back; that ordering is what `build.sh` does.
+- **The s6 service definitions for `seatd`/`novi-shell`/`graphical` stay
+  in the base** even though their binaries do not. s6-rc does not check
+  that a run script's binary exists, so a declared-off service pointing at
+  a not-yet-installed binary is inert, not broken — and a machine that
+  installs `novi-desktop` can then just flip the key.
+
+Two smaller ones:
+
+- `novi-install` installs the desktop **in a chroot**, not with `pkg`'s
+  `PKG_ROOT`. `PKG_ROOT` relocates where files land but *not* the install
+  database, so a `PKG_ROOT` install writes the target's files and the live
+  system's database — an installed machine that does not know what it has.
+- The shipped `pkg.conf` says `mirror = /run/live/novi-repo`, which is the
+  installation medium. `novi-install` comments it out on the target unless
+  given `--mirror`, or every installed machine gets a `pkg sync` that fails
+  pointing at a directory nobody chose.
+
+**A network interface is not "the first thing in /sys/class/net that is
+not lo".** A kernel with `CONFIG_IPV6_SIT` creates `sit0`, a tunnel
+pseudo-device, and it sorts before `eth0` — confirmed live: "network:
+using sit0", then udhcpc broadcasting DISCOVER forever down a tunnel with
+no link. `pick_interface()` requires `/sys/class/net/*/type` to be 1
+(ARPHRD_ETHER).
 
 ## Architecture: cross-toolchain bootstrap order
 

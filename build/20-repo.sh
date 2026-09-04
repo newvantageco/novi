@@ -2,18 +2,21 @@
 # ============================================================
 # 20-repo.sh — Build and sign the first-party package repository
 #
-# RFC 0006. `pkg` and `mkpkg` have worked for a while and there has
-# never been anything to point them at. This stage produces one: a
-# signed repository under ${BUILD_DIR}/repo, ready to be served over
-# HTTP (or copied to a mirror) and consumed by `pkg sync`.
+# RFC 0006 gave `pkg` something to fetch from. RFC 0007 decides WHAT is
+# in it: the desktop, so the base image can stop carrying it.
 #
-# WHAT GOES IN IT, and why these specifically: the desktop. §2 of the
-# platform roadmap wants a small native base with everything else
-# delivered as packages, and the desktop is the largest thing currently
-# baked into the base image that a console-only machine has no use for.
-# Packaging it is the first real step of that split -- these packages
-# are built from exactly the binaries the earlier stages produced, so
-# the repository's contents and the image's contents cannot drift.
+# The file set is not hand-listed. tools/pkgsplit/pkgsplit.py computes
+# it from the ELF dependency graph -- closure(NEEDED) from the desktop
+# binaries, minus closure(NEEDED) from everything else that ships --
+# and fails the build if anything left in the base still links against
+# something being moved out. A hand-written list is how a split rots:
+# someone adds a library in 06-wayland.sh, nobody updates the list, and
+# the "console-only" image quietly grows a Wayland stack again.
+#
+# Inter-package dependencies are computed the same way, by mapping each
+# NEEDED soname back to its owning package. `wlroots depends on
+# libdisplay-info, libdrm, libinput, libudev, libxkbcommon, pixman,
+# seatd, wayland` is read out of the binaries, not typed in.
 #
 # THE SIGNING KEY. This generates a development key under
 # ${BUILD_DIR}/keys on first run and installs its PUBLIC half into the
@@ -35,9 +38,19 @@ REPO_OUT="${REPO_OUT:-${BUILD_DIR}/repo}"
 KEY_DIR="${KEY_DIR:-${BUILD_DIR}/keys}"
 KEY_FILE="${KEY_DIR}/novi-repo.key"
 STAGE_DIR="${BUILD_DIR}/repo-staging"
+MANIFEST="${BUILD_DIR}/repo-desktop-files.list"
+READELF="${TOOLS}/bin/${TARGET_TRIPLE}-readelf"
 
 command -v openssl &>/dev/null || {
     echo "ERROR: openssl is required to sign the repository index." >&2
+    exit 1
+}
+command -v python3 &>/dev/null || {
+    echo "ERROR: python3 is required (tools/pkgsplit)." >&2
+    exit 1
+}
+[ -x "${READELF}" ] || {
+    echo "ERROR: ${READELF} not found -- run build/02-toolchain.sh first." >&2
     exit 1
 }
 
@@ -51,74 +64,32 @@ if [[ ! -f "${KEY_FILE}" ]]; then
     chmod 600 "${KEY_FILE}"
 fi
 
-# ── Package definitions ───────────────────────────────────────────────────
-#
-# name|version|depends|description|file [file ...]
-#
-# Paths are relative to ${ROOTFS}. A package whose files are all
-# missing is skipped with a warning rather than shipped empty: the
-# desktop stages (06..14) are separate from this one and someone may
-# reasonably have built only the base.
-PACKAGES=(
-"fcft|${FCFT_VERSION}||Font loading and glyph rasterisation library|usr/lib/libfcft.so usr/lib/libfcft.so.3 usr/lib/libfcft.so.3.5.1"
-"foot|${FOOT_VERSION}|fcft|Fast, lightweight Wayland terminal emulator|usr/bin/foot usr/bin/footclient"
-"novi-shell|${OS_VERSION}||The Novi Wayland compositor (RFC 0001)|usr/bin/novi-shell"
-"novi-panel|${OS_VERSION}||Top bar and taskbar for the Novi desktop|usr/bin/novi-panel"
-"novi-launcher|${OS_VERSION}||Alt+Space application launcher and symbol picker|usr/bin/novi-launcher"
-"novi-settings|${OS_VERSION}||Settings: account and declared system state|usr/bin/novi-settings"
-"novi-lockscreen|${OS_VERSION}||Super+L session lock|usr/bin/novi-lockscreen"
-"novi-screenshot|${OS_VERSION}||PrintScreen screen capture|usr/bin/novi-screenshot"
-)
-
+# ── Work out the split and stage every package ────────────────────────────
+echo ">>> Computing the base/desktop split from the ELF dependency graph ..."
 rm -rf "${STAGE_DIR}" "${REPO_OUT}"
 mkdir -p "${STAGE_DIR}" "${REPO_OUT}"
 
-built=0
-skipped=()
-for spec in "${PACKAGES[@]}"; do
-    IFS='|' read -r name version depends description files <<< "${spec}"
+python3 "${REPO_ROOT}/tools/pkgsplit/pkgsplit.py" \
+    --rootfs   "${ROOTFS}" \
+    --readelf  "${READELF}" \
+    --stage    "${STAGE_DIR}" \
+    --arch     "${TARGET_ARCH}" \
+    --versions "${SCRIPT_DIR}/00-versions.sh" \
+    --manifest "${MANIFEST}"
 
-    # Only ship what actually exists.
-    present=()
-    for f in ${files}; do
-        [[ -e "${ROOTFS}/${f}" ]] && present+=("${f}")
-    done
-    if (( ${#present[@]} == 0 )); then
-        skipped+=("${name}")
-        continue
-    fi
-
-    stage="${STAGE_DIR}/${name}"
-    mkdir -p "${stage}/files"
-    for f in "${present[@]}"; do
-        mkdir -p "${stage}/files/$(dirname "${f}")"
-        # -a: these are the built artifacts themselves, symlinks
-        # (libfcft.so -> libfcft.so.3) included. Dereferencing them
-        # would triple the package size and break the soname the
-        # dynamic linker actually looks for.
-        cp -a "${ROOTFS}/${f}" "${stage}/files/${f}"
-    done
-
-    {
-        echo "name=${name}"
-        echo "version=${version}"
-        echo "arch=${TARGET_ARCH}"
-        [[ -n "${depends}" ]] && echo "depends=${depends}"
-        echo "description=${description}"
-    } > "${stage}/MANIFEST"
-
+# ── Build them ────────────────────────────────────────────────────────────
+echo ">>> Packaging ..."
+count=0
+for stage in "${STAGE_DIR}"/*/; do
+    [[ -f "${stage}/MANIFEST" ]] || continue
     bash "${REPO_ROOT}/packages/mkpkg" "${stage}" "${REPO_OUT}" >/dev/null
-    echo "    packaged ${name} ${version}"
-    built=$(( built + 1 ))
+    count=$(( count + 1 ))
 done
-
-(( built > 0 )) || {
-    echo "ERROR: no packages could be built -- run the desktop stages (06..14) first." >&2
+(( count > 0 )) || {
+    echo "ERROR: no packages were built -- run the desktop stages (06..14) first." >&2
     exit 1
 }
-if (( ${#skipped[@]} > 0 )); then
-    echo ">>> Skipped (not built in this rootfs): ${skipped[*]}"
-fi
+echo "    ${count} package(s) built"
 
 # ── Index + signature ─────────────────────────────────────────────────────
 echo ">>> Indexing and signing ..."
@@ -128,9 +99,8 @@ sh "${REPO_ROOT}/packages/mkrepo" "${REPO_OUT}" --key "${KEY_FILE}"
 install -D -m 644 "${REPO_OUT}/index.pub" "${ROOTFS}/etc/novi/keys/novi-repo.pub"
 
 echo ""
-echo "Repository built: ${REPO_OUT}"
-ls -la "${REPO_OUT}" | head -20
+echo "Repository built: ${REPO_OUT}  ($(du -sh "${REPO_OUT}" | cut -f1))"
+echo "Desktop file manifest: ${MANIFEST} ($(wc -l < "${MANIFEST}") files)"
 echo ""
-echo "Serve it and point a machine at it:"
-echo "    (cd ${REPO_OUT} && python3 -m http.server 8000)"
-echo "    # on the target: mirror = http://<host>:8000  in /etc/novi/pkg.conf"
+echo "  bash build/21-desktop-split.sh   # remove those files from the base image"
+echo "  bash scripts/mkiso.sh            # the ISO carries this repo at /novi-repo"

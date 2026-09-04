@@ -149,15 +149,46 @@ index_field() {
 
 have_mirror() { [ -n "$PKG_MIRROR" ]; }
 
-# Download a URL to a path. wget rather than curl: BusyBox has wget and
-# does not have curl, and this has to work on the shipped image.
-fetch_url() {
-    local url="$1" dest="$2"
-    command -v wget >/dev/null 2>&1 || die "wget not found; cannot fetch $url"
+# A mirror can be a local directory as well as a URL. That is not a
+# convenience: the ISO carries the whole signed repository at
+# /run/live/novi-repo, which is what lets a live system install the
+# desktop with no network at all -- and what lets novi-install put a
+# desktop on a target machine that has never seen one. The same
+# verification runs either way; only the transport differs.
+mirror_is_local() {
+    case "$PKG_MIRROR" in
+        /*|file://*) return 0 ;;
+        *)           return 1 ;;
+    esac
+}
+
+mirror_local_path() {
+    case "$PKG_MIRROR" in
+        file://*) printf '%s' "${PKG_MIRROR#file://}" ;;
+        *)        printf '%s' "$PKG_MIRROR" ;;
+    esac
+}
+
+# Fetch one repository file (an index, a signature, a package) to a path.
+# wget rather than curl: BusyBox has wget and does not have curl, and
+# this has to work on the shipped image. BusyBox wget has no file://
+# support either, so a local mirror is a copy.
+fetch_repo_file() {
+    local rel="$1" dest="$2"
+
     rm -f "$dest.part"
-    if ! wget -q -O "$dest.part" "$url"; then
-        rm -f "$dest.part"
-        return 1
+    if mirror_is_local; then
+        local src
+        src="$(mirror_local_path)/$rel"
+        [ -f "$src" ] || return 1
+        cp "$src" "$dest.part" || return 1
+    else
+        command -v wget >/dev/null 2>&1 ||
+            die "wget not found; cannot fetch $rel from $PKG_MIRROR"
+        if ! wget -q -O "$dest.part" "${PKG_MIRROR%/}/$rel"; then
+            rm -f "$dest.part"
+            return 1
+        fi
     fi
     mv "$dest.part" "$dest"
 }
@@ -222,8 +253,8 @@ EOF
     # statement about what is in it now.
     if [ ! -f "$dest" ]; then
         msg "Fetching $i_name $i_ver from $PKG_MIRROR"
-        fetch_url "${PKG_MIRROR%/}/$i_file" "$dest" ||
-            die "could not download $i_file from $PKG_MIRROR"
+        fetch_repo_file "$i_file" "$dest" ||
+            die "could not fetch $i_file from $PKG_MIRROR"
     fi
 
     local got
@@ -655,13 +686,13 @@ cmd_sync() {
     mkdir -p "$(dirname "$PKG_INDEX")" "$PKG_TMP"
 
     local new="$PKG_TMP/index" newsig="$PKG_TMP/index.sig"
-    fetch_url "${PKG_MIRROR%/}/index" "$new" ||
-        die "could not download the index from $PKG_MIRROR"
+    fetch_repo_file "index" "$new" ||
+        die "could not fetch the index from $PKG_MIRROR"
     # A missing signature is not fatal here -- verify_signature() is
     # what decides, and it is the single place that knows whether this
     # machine has opted out. Deciding it in two places is how one of
     # them ends up more permissive than the other.
-    fetch_url "${PKG_MIRROR%/}/index.sig" "$newsig" || true
+    fetch_repo_file "index.sig" "$newsig" || true
 
     verify_signature "$new" "$newsig" "the repository index"
 
@@ -849,7 +880,7 @@ Usage:
 are different operations and have different names on purpose.
 
 Configuration (/etc/novi/pkg.conf):
-  mirror          = https://example.org/novi/x86_64
+  mirror          = https://example.org/novi/x86_64   (or a local directory)
   key             = /etc/novi/keys/novi-repo.pub
   allow_unsigned  = no
 

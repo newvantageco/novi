@@ -179,6 +179,28 @@ menuentry "Novi Linux ${ISO_VERSION} — Live" --class linux {
     initrd /boot/initramfs.cpio.gz
 }
 
+menuentry "Novi Linux ${ISO_VERSION} — Live Desktop" --class linux {
+    echo "Loading Novi (desktop)..."
+    linux  /boot/vmlinuz \
+           boot=live \
+           root=live:/dev/disk/by-label/${ISO_LABEL} \
+           live-media=/dev/disk/by-label/${ISO_LABEL} \
+           live-media-label=${ISO_LABEL} \
+           rd.live.image \
+           rd.live.squashimg=live/filesystem.squashfs \
+           novi.live.desktop \
+           quiet splash \
+           rw \
+           loglevel=3 \
+           console=tty0 \
+           console=ttyS0,115200n8 \
+           mitigations=auto \
+           iommu=pt \
+           vt.global_cursor_default=0
+    echo "Loading initramfs..."
+    initrd /boot/initramfs.cpio.gz
+}
+
 menuentry "Novi Linux ${ISO_VERSION} — Safe Mode" --class linux {
     echo "Loading Novi (safe mode)..."
     linux  /boot/vmlinuz \
@@ -248,6 +270,33 @@ done
 # The prefix baked into core.img is where it looks for those modules
 # and grub.cfg, so it has to match the layout novi-install creates
 # (single ext2/4 partition, msdos table, /boot/grub on it).
+# ─── Stage the package repository onto the media ─────────────────────────────
+#
+# The ISO carries the whole signed repository (RFC 0007). That is what
+# makes the base image console-only without making the desktop
+# network-only: /etc/novi/pkg.conf points at /run/live/novi-repo, so a
+# live system can `pkg install novi-desktop` with no network, and
+# `novi-install --profile desktop` can put one on a target machine that
+# has never been online. Signature and hash verification are identical
+# either way -- only the transport differs.
+NOVI_REPO_DIR="${NOVI_REPO_DIR:-${BUILD_DIR}/repo}"
+if [[ -f "${NOVI_REPO_DIR}/index" ]]; then
+    echo ">>> Staging the package repository from ${NOVI_REPO_DIR} ..."
+    mkdir -p "${ISO_DIR}/novi-repo"
+    cp -a "${NOVI_REPO_DIR}"/. "${ISO_DIR}/novi-repo/"
+    # The private signing key lives in ${BUILD_DIR}/keys and never in
+    # the repo directory, but check anyway: shipping one on an ISO is
+    # the kind of mistake that cannot be taken back once published.
+    find "${ISO_DIR}/novi-repo" -name '*.key' -o -name '*.pem' | while read -r k; do
+        echo "REFUSING: private key material found in the repository: ${k}" >&2
+        exit 1
+    done
+    echo ">>> repository: $(ls "${ISO_DIR}/novi-repo"/*.pkg.tar.gz 2>/dev/null | wc -l) package(s), $(du -sh "${ISO_DIR}/novi-repo" | cut -f1)"
+else
+    echo ">>> WARNING: no package repository at ${NOVI_REPO_DIR} -- the ISO will" >&2
+    echo ">>>          have no desktop to install. Run build/20-repo.sh first." >&2
+fi
+
 echo ">>> Staging BIOS boot artifacts for the installer ..."
 GRUB_LIB_DIR="/usr/lib/grub/i386-pc"
 if [[ -d "${GRUB_LIB_DIR}" ]] && command -v grub-mkimage &>/dev/null; then

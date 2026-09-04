@@ -71,8 +71,8 @@ novi/
 │   ├── 03-base.sh            ← BusyBox userland + rootfs layout
 │   ├── 04-s6.sh              ← s6 supervision stack
 │   ├── 05-kernel.sh          ← Linux kernel
-│   └── 06..20-*.sh           ← Wayland stack, desktop, pkg, novi-state,
-│                                installer, networking, signed repo
+│   └── 06..22-*.sh           ← Wayland stack, desktop, pkg, novi-state,
+│                                installer, networking, signed repo, split
 ├── novi-shell/               ← the compositor (RFC 0001)
 ├── novi-panel/               ← top bar + taskbar
 ├── novi-launcher/            ← Alt+Space search / symbol picker
@@ -80,6 +80,7 @@ novi/
 ├── novi-lockscreen/          ← Super+L session lock
 ├── novi-screenshot/          ← PrintScreen capture
 ├── novi-verify/              ← Ed25519 verifier (package trust root)
+├── tools/pkgsplit/           ← computes the base/desktop split (RFC 0007)
 ├── init/
 │   ├── s6/
 │   │   ├── stage1            ← PID 1 (mounts vfs, hands to stage2)
@@ -161,10 +162,26 @@ $ novi-state set packages.foot absent && novi-state apply
 $ novi-state rollback        # foot comes back, from the mirror
 ```
 
+**The base image is console-only.** `/usr/lib` in it contains exactly
+one library — `libskarnet`, for s6. The desktop (compositor, panel,
+launcher, terminal, fonts, and the whole Wayland/wlroots stack) is 25
+packages, and the installation medium carries the signed repository, so
+installing it needs no network at all:
+
+```console
+$ pkg install novi-desktop        # 25 packages, ~7 seconds, from the ISO
+```
+
+Which files leave the base is **computed** from the ELF dependency
+graph, not listed by hand, and the build fails if anything left behind
+still links against something being moved out — see
+[RFC 0007](docs/rfcs/0007-base-desktop-split.md).
+
 Build your own repository with `bash build/20-repo.sh` and serve the
-directory over HTTP. There is no default mirror: there is no public
-Novi repository yet, and pointing a package manager at a host that does
-not exist is worse than pointing it at nothing.
+directory over HTTP, or point `mirror` at a local directory. There is
+no default public mirror: there is no public Novi repository yet, and
+pointing a package manager at a host that does not exist is worse than
+pointing it at nothing.
 
 ## Install it
 
@@ -177,7 +194,7 @@ $ novi-install list
   -> /dev/vdb  8192 MiB
 
 $ novi-install install --disk /dev/vdb --hostname my-machine \
-      --user alice --set-root-password
+      --user alice --set-root-password --profile desktop
 ```
 
 That gives you a partitioned disk, a real writable root filesystem, and
@@ -187,6 +204,11 @@ GRUB in the MBR — a machine that remembers, which is what makes
 The installed boot menu includes a **"skip declared-state
 convergence"** entry (`novi.state=off`), so a `system.conf` that locks
 you out is one menu selection away from a normal boot.
+
+`--profile desktop` (the default) installs the desktop packages from
+the medium into the target and declares them, so the machine boots
+into a graphical session on its first boot with no network involved.
+`--profile console` skips it.
 
 `--user` creates the account *while installing* — with a password, in
 `wheel`/`video`/`input`/`audio`/`seat` — and then declares it in the
@@ -235,7 +257,8 @@ HOME_URL="https://novilinux.org"
 - [x] Networking + real system logging (`network.*`, syslogd/klogd, RFC 0004)
 - [x] Real users (`users.*`, account database, installer accounts, RFC 0005)
 - [x] Signed package repository (`pkg sync`, `novi-verify`, `packages.*`, RFC 0006)
-- [ ] Split the desktop out of the base image ← next
+- [x] Console-only base; the desktop is packages (RFC 0007)
+- [ ] Separate console and desktop ISOs ← next
 - [ ] More state domains: keybindings, static IP, WiFi
 - [ ] UEFI/GPT install, journalled root
 - [ ] Boot splash

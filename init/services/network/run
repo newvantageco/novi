@@ -78,6 +78,18 @@ pick_interface() {
         [ -d "$d" ] || continue
         n="${d##*/}"
         [ "$n" = "lo" ] && continue
+
+        # ARPHRD_ETHER (1) only. Skipping just "lo" is not enough: a
+        # kernel with CONFIG_IPV6_SIT creates `sit0`, an IPv6-in-IPv4
+        # tunnel pseudo-device, at boot -- and it sorts before eth0.
+        # Confirmed live on a machine with no NIC attached at all:
+        # "network: using sit0", then udhcpc broadcasting DISCOVER
+        # forever down a tunnel that has no link and never will.
+        # Anything that is not an Ethernet-like device (tunnels, gre,
+        # teql, dummy) has the same problem.
+        [ -r "$d/type" ] || continue
+        [ "$(cat "$d/type")" = "1" ] || continue
+
         printf '%s\n' "$n"
         return 0
     done
