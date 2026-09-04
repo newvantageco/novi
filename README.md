@@ -23,6 +23,8 @@ operation, on the same file.**
 ```console
 $ cat /etc/novi/system.conf          # this IS your system's config
 hostname = novi
+network.dhcp = on
+network.dns = auto
 services.novi-shell = off
 
 $ novi-state diff                    # has anything drifted?
@@ -69,8 +71,8 @@ novi/
 │   ├── 03-base.sh            ← BusyBox userland + rootfs layout
 │   ├── 04-s6.sh              ← s6 supervision stack
 │   ├── 05-kernel.sh          ← Linux kernel
-│   └── 06..17-*.sh           ← Wayland stack, desktop, pkg, novi-state,
-│                                installer
+│   └── 06..18-*.sh           ← Wayland stack, desktop, pkg, novi-state,
+│                                installer, networking
 ├── novi-shell/               ← the compositor (RFC 0001)
 ├── novi-panel/               ← top bar + taskbar
 ├── novi-launcher/            ← Alt+Space search / symbol picker
@@ -83,7 +85,9 @@ novi/
 │   │   └── stage2            ← start s6-rc, launch supervision tree
 │   └── services/
 │       ├── getty-tty1/run    ← supervised login terminal
-│       └── syslog/run        ← structured logging (s6-log)
+│       ├── network/run       ← DHCP client (RFC 0004)
+│       ├── syslog/run        ← syslogd: /dev/log + /var/log/messages
+│       └── klog/run          ← kernel ring buffer → syslog
 ├── kernel/
 │   └── config-x86_64         ← 280+ options, uname -r shows 6.x.x-novi
 ├── packages/
@@ -180,9 +184,10 @@ HOME_URL="https://novilinux.org"
 - [x] Settings is a front-end to the same file (System panel, live drift)
 - [x] Boot-time convergence — the machine boots into the declared state
 - [x] Installer + on-disk persistence (`novi-install`, RFC 0003)
-- [ ] Networking (DHCP/DNS, `network.*` state domain) ← next
-- [ ] More state domains: packages, users, keybindings
+- [x] Networking + real system logging (`network.*`, syslogd/klogd, RFC 0004)
+- [ ] Real users (`users.*` state domain) ← next
 - [ ] Package repository
+- [ ] More state domains: packages, keybindings, static IP, WiFi
 - [ ] UEFI/GPT install, journalled root
 - [ ] Boot splash
 

@@ -38,6 +38,9 @@ below for why `/build` is hardcoded and unrelated to the repo checkout path.
 - `bash scripts/mkvm.sh [--disk]` — boot the ISO in QEMU/KVM
 - `novi-install install --disk DEV` (on the booted live system) — install to
   disk (RFC 0003)
+- **`bash build/16-s6-rc-db.sh` after ANY change under `init/`** (see below),
+  then `bash scripts/mkinitramfs.sh --output build/initramfs.cpio.gz` and
+  `bash scripts/mkiso.sh` to get it into a bootable image
 
 Lint: `shellcheck build/*.sh scripts/*.sh packages/pkg packages/mkpkg`.
 Full verification sequence (from `CONTRIBUTING.md`): shellcheck clean →
@@ -159,6 +162,49 @@ Three things worth knowing before touching this:
 The installer sets the target's hostname with `novi-state set` (via
 `NOVI_STATE_FILE`), not `sed` — same reason as everything else: `state_set`
 is the one edit that preserves the document's comments and ordering.
+
+## Architecture: services, readiness, and the log
+
+RFC 0004 (`docs/rfcs/0004-networking-and-system-logging.md`). Three traps
+here, all of which cost real time and all of which generalize past the
+services that hit them:
+
+- **s6-rc's "up" for a longrun means "supervised and wanted up", not
+  "running".** A service that dies on every start still shows in
+  `s6-rc -a list`. That is how `syslog` crash-looped invisibly for as long
+  as it existed: its `run` passed `s6-log -d3` ("notify readiness on fd 3")
+  while the service declared no `notification-fd`, so fd 3 was closed and
+  s6-log could never notify. Never conclude a service works from
+  `s6-rc -a list`; check that it did its job.
+- **A longrun anything else observes needs `notification-fd`.**
+  `s6-rc change` returns as soon as a longrun is *started* otherwise, and
+  `rc.init` runs `novi-state boot` the moment it returns. `network` without
+  a readiness notification lost that race: convergence observed
+  `network.interface` as `unknown`, called it drift, and restarted the
+  service it had just started — **burning a generation on every boot**.
+  Generations must mean "the system actually changed here".
+- **`s6-log` is a per-service logger, not a system log daemon.** It reads
+  its *stdin*; as a standalone service with no producer it is a log file
+  with no writers (a zero-byte `current`, forever). `syslog` now runs
+  BusyBox `syslogd` (owns `/dev/log`, writes `/var/log/messages`) and
+  `klog` runs `klogd`.
+
+Two smaller ones:
+
+- **No `-C` on syslogd.** With `-C` BusyBox syslogd logs to a SysV shm ring
+  *instead of* the file, and this kernel has no `CONFIG_SYSVIPC` — so
+  logging silently goes nowhere. Verified: `logread` → "can't find syslogd
+  buffer: Function not implemented".
+- **`modprobe` the dependency modules by name before the drivers that need
+  them.** `modprobe virtio_net` alone left eight `Unknown symbol
+  net_dim / net_failover_create (err -2)` lines per boot from racing load
+  attempts, despite a correct `modules.dep` and a driver that ended up
+  working.
+
+The DHCP hook writes the resolver to `/run/novi/resolv.conf`
+(`/etc/resolv.conf` is a symlink to it) and never touches the hostname: a
+lease is runtime state, and the hostname has exactly one writer,
+`novi-state`.
 
 ## Architecture: cross-toolchain bootstrap order
 

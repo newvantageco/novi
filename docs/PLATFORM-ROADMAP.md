@@ -999,6 +999,63 @@ README tells people to run. And the generated boot menu ships the
 lock-you-out declared state is escapable from the bootloader is
 something you can select rather than something you have to know.
 
+## 14. Networking & System Logging
+
+RFC 0004. A Novi machine reaches the network, and tells you what
+happened to it. Neither was true before.
+
+Networking is one supervised `udhcpc` (`-f`, foreground, so s6
+supervises the real process) plus the lease hook BusyBox does not ship
+— without which the client negotiates a perfectly good lease and
+applies none of it. It is declared like everything else, through a
+`network.*` domain: `network.dhcp`, `network.interface`,
+`network.dns`. There is deliberately no `services.network` key; two
+keys governing one service is the split-brain §11 is about.
+
+The observer design there is worth copying elsewhere. The running
+service records the spec it was *started with* under `/run/novi`, and
+that is what `diff` observes — so changing `network.interface` shows up
+as real drift and `apply` restarts the service to make it true, instead
+of the change silently doing nothing until the next reboot.
+
+Two departures from what every other distro's DHCP hook does, both on
+purpose: it never sets the hostname from DHCP (the hostname has exactly
+one writer, and it is the document), and it writes the resolver to
+`/run`, not `/etc` (a lease is runtime state; `/etc/resolv.conf` is a
+symlink to it).
+
+Logging was the more embarrassing gap, because it existed on paper. The
+`syslog` service ran `s6-log -d3 … /var/log/syslog` and was broken two
+ways at once: `-d3` asks for readiness notification on fd 3 while the
+service declared no `notification-fd`, so it crash-looped invisibly —
+s6-rc's "up" for a longrun means "supervised and wanted up", not
+"running" — and even fixed, s6-log reads its *stdin*, so as a
+standalone service it was a log file with no writers. It is now
+BusyBox `syslogd` (owning `/dev/log` and `/var/log/messages`) plus a
+`klog` service feeding it the kernel ring buffer.
+
+Having a log immediately paid for itself twice:
+
+- It exposed a boot-time race that had been manufacturing a
+  `novi-state` generation on **every single boot** — `s6-rc change`
+  returns as soon as a longrun is *started*, `rc.init` runs boot
+  convergence the moment it returns, and convergence was observing a
+  service that had not finished recording its own state yet, calling it
+  drift, and restarting it. Fixed with a real readiness notification.
+  Generations have to mean "the system actually changed here" or their
+  history is worthless.
+- It exposed eight `virtio_net: Unknown symbol` lines per boot from
+  racing module loads — invisible before, because the driver did end up
+  loaded and working.
+
+Verified on both a live boot and an **installed** disk: address, route,
+resolver, `ping`, a real `nslookup` answer, `logger` round-tripping
+through `/dev/log`, kernel lines via klogd, `novi-state diff` clean with
+an empty generation history on a fresh boot, zero `Unknown symbol`
+lines, and `/var/log/messages` growing from 739 to 1106 lines across a
+reboot — logs that survive a power cycle, which is the difference
+between a log and a scrollback buffer.
+
 ## Status Summary
 
 | # | Area | State |
@@ -1016,25 +1073,25 @@ something you can select rather than something you have to know.
 | 11 | Differentiation | ✅ Articulated above |
 | 12 | Security tooling / pentest track | 🔴 Open — packaging work, blocked on §2/§8/§9 |
 | 13 | Installation & persistence | ✅ Installable and QEMU-verified end to end (install → cold boot from disk via GRUB in the MBR → marker file survives a power cycle → live ISO unregressed); BIOS/MBR + journal-less ext2 + root-only are the stated v1 limits, UEFI/GPT and e2fsprogs are next |
+| 14 | Networking & logging | ✅ DHCP + resolver as a supervised service with a `network.*` state domain, syslogd/klogd replacing a logger that had never once run; verified live and installed, including logs surviving a reboot. Static IP, WiFi and DHCPv6 are roadmap |
 
-**Next concrete step: networking.** With RFC 0003 landed, a Novi
-machine can be installed and keeps its state — and still has no way to
-reach a network. There is no DHCP client, no `network.*` state domain,
-and therefore nothing for `pkg` to install *from* even once a package
-repository exists. Everything downstream (package repo, real users,
-updates, the whole §2/§3 story) is behind it. That makes networking the
-single highest-leverage thing left, not one item among several.
+**Next concrete step: real users.** With RFC 0003 and RFC 0004 landed,
+a Novi machine installs, remembers, reaches the network and keeps a
+log. It still has exactly one account, `root`, on both the live image
+and every machine installed from it — there is no `adduser` path, no
+`users.*` state domain, and nothing in the installer that asks. That is
+the last thing between Novi and "an OS a person could be handed",
+and it is also a security position nobody should ship.
 
-Ordered honestly, what stands between here and "an OS someone could
-actually use":
+Ordered honestly, what is left:
 
-1. **Networking** — DHCP + DNS as an s6 service, surfaced as a
-   `network.*` `novi-state` domain so it is declared like everything
-   else rather than being the one thing configured out-of-band.
-2. **Real users** — `users.*` domain; today an installed machine is
-   root-only because it inherits the live session's `/etc/passwd`.
-3. **A package repository** — `pkg` works; there is nothing to point it
-   at.
+1. **Real users** — a `users.*` domain (account, shell, groups;
+   password hashes stay in `/etc/shadow` at 0600, never in the
+   world-readable document), plus the installer creating one.
+2. **A package repository** — `pkg` works and now has a transport;
+   there is still nothing to point it at.
+3. **More state domains** — `packages.*`, keybindings, static IP,
+   WiFi.
 4. **UEFI/GPT install and a journalled filesystem** — the two stated
    limits of RFC 0003's v1.
 

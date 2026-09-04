@@ -180,6 +180,43 @@ observe_service() {
     fi
 }
 
+# The network domain.
+#
+# `network.dhcp` maps to the `network` s6 service, and is deliberately
+# NOT also exposed as `services.network`: two keys governing one
+# service is precisely the split-brain this engine exists to prevent,
+# so the network domain owns it and the services domain never mentions
+# it.
+#
+# `network.interface` and `network.dns` are read by that service when
+# it starts, and it records what it was started with under /run/novi.
+# Observing the recorded spec rather than the declared one is what
+# makes changing either show up as real drift -- and gives `apply`
+# something to do about it -- instead of the change silently having no
+# effect until the next reboot.
+observe_network() {
+    local sub="$1"
+    case "$sub" in
+        dhcp) observe_service network ;;
+        interface|dns)
+            # With the service down there is no running configuration
+            # to be out of step with, so the declared value is the
+            # honest observation. Anything else would report permanent,
+            # unfixable drift on a machine that simply has DHCP off.
+            if [ "$(observe_service network)" != "on" ]; then
+                state_get "network.$sub"
+                return 0
+            fi
+            if [ -r "/run/novi/network.$sub" ]; then
+                cat "/run/novi/network.$sub"
+            else
+                printf 'unknown'
+            fi
+            ;;
+        *) printf 'unmanaged' ;;
+    esac
+}
+
 # Observed value for any declared key. An unrecognized key observes as
 # "unmanaged" rather than erroring: an unknown key in the document is a
 # forward-compatibility case (a newer novi-state, a hand-written note),
@@ -190,6 +227,7 @@ observe_key() {
     case "$key" in
         hostname)   observe_hostname ;;
         services.*) observe_service "${key#services.}" ;;
+        network.*)  observe_network "${key#network.}" ;;
         # `state.*` keys configure this engine itself (see cmd_boot),
         # not the machine -- there is no external fact to go and look
         # at, so the declared value IS the observation and they never
@@ -236,11 +274,36 @@ converge_service() {
     esac
 }
 
+converge_network() {
+    local sub="$1" want="$2"
+    case "$sub" in
+        dhcp) converge_service network "$want" ;;
+        interface|dns)
+            # The service reads these once, at start, so making the
+            # declaration true means restarting it. Only if it is
+            # actually up: bringing a stopped network service into
+            # existence is network.dhcp's job, not this key's.
+            #
+            # Asked live rather than through observe_service(), whose
+            # cache was primed before this apply began and may already
+            # be stale by the time convergence reaches this key.
+            if s6-rc -a list 2>/dev/null | grep -qx network; then
+                s6-rc -d change network || \
+                    die "failed to stop 'network' to apply network.$sub"
+                s6-rc -u change network || \
+                    die "failed to restart 'network' after setting network.$sub"
+            fi
+            ;;
+        *) warn "no converger for 'network.$sub' -- declared but not applied" ;;
+    esac
+}
+
 converge_key() {
     local key="$1" want="$2"
     case "$key" in
         hostname)   converge_hostname "$want" ;;
         services.*) converge_service "${key#services.}" "$want" ;;
+        network.*)  converge_network "${key#network.}" "$want" ;;
         # Nothing to converge: a state.* key is read by this engine when
         # it next runs, so declaring it is already the whole effect.
         state.*)    : ;;
@@ -529,6 +592,9 @@ Usage:
 Keys:
   hostname                        the system hostname
   services.<name>                 on | off  (an s6-rc service)
+  network.dhcp                    on | off  (the DHCP client service)
+  network.interface               auto | <name>  (which NIC to use)
+  network.dns                     auto | 1.1.1.1,9.9.9.9
   state.apply_on_boot             on | off  (converge on every boot)
 
 Recovery:

@@ -1,3 +1,5 @@
 syslog
+klog
 getty-tty1
 getty-ttyS0
+network

@@ -1,0 +1,113 @@
+#!/bin/sh
+# ============================================================
+# network service — run script
+#
+# DHCP on one interface, supervised by s6. udhcpc runs in the
+# foreground (-f) so s6 supervises the real process rather than a
+# daemonized orphan; the lease is applied by
+# /usr/share/udhcpc/default.script.
+#
+# What this service is declared by: `network.dhcp` in
+# /etc/novi/system.conf (RFC 0002), NOT a `services.network` key.
+# Two keys controlling one service is exactly the split-brain this
+# project exists to avoid, so the network domain owns it and the
+# services domain does not mention it.
+# ============================================================
+
+RUN_DIR=/run/novi
+mkdir -p "$RUN_DIR"
+
+# The declared interface. `auto` (the default) means "the first real
+# one", which is the right answer on every single-NIC machine and an
+# explicit name is how you say otherwise.
+#
+# The spec is recorded in /run so `novi-state diff` can tell that the
+# running service was started with a different one than the document
+# now declares -- that is what makes changing it show up as drift
+# instead of silently doing nothing until the next reboot.
+IFSPEC="$(novi-state get network.interface 2>/dev/null || printf 'auto')"
+[ -n "$IFSPEC" ] || IFSPEC=auto
+printf '%s\n' "$IFSPEC" > "$RUN_DIR/network.interface"
+
+DNSSPEC="$(novi-state get network.dns 2>/dev/null || printf 'auto')"
+[ -n "$DNSSPEC" ] || DNSSPEC=auto
+printf '%s\n' "$DNSSPEC" > "$RUN_DIR/network.dns"
+
+# Readiness, declared to s6 via ./notification-fd. Everything s6-rc
+# needs to consider this service usable -- the recorded spec that
+# `novi-state diff` reads -- exists as of this line, and everything
+# after it (driver probing, waiting for a NIC, the lease itself) can
+# take arbitrarily long.
+#
+# This is not a nicety. `s6-rc change` returns as soon as a longrun is
+# *started* unless the service declares readiness, and rc.init runs
+# boot convergence the moment it returns. Without this, boot
+# convergence raced the lines above, observed network.interface as
+# "unknown", called it drift, and restarted this very service --
+# burning a generation on every single boot for no reason. Confirmed
+# live: a fresh boot with nothing touched came up at generation 0001.
+echo >&3
+
+# NIC drivers this kernel builds as modules. The built-in ones
+# (e1000e, r8169 -- see kernel/config-x86_64) need no help; virtio_net
+# is =m and nothing else loads it, so a QEMU guest has no interface at
+# all without this. Same pattern, and same reason, as novi-shell's
+# `modprobe virtio_gpu`. Roadmap §4's hardware-detection oneshot is the
+# real long-term answer to "load whatever this machine needs".
+# Dependencies first, by name, before the drivers that need them.
+# `modprobe virtio_net` alone left eight "virtio_net: Unknown symbol
+# net_dim / net_failover_create (err -2)" lines in the kernel log on
+# every boot -- two racing attempts failing before a third succeeded --
+# even though modules.dep lists the dependencies correctly and the
+# driver did end up loaded and working. Loading them explicitly first
+# removes the race outright, and costs nothing when they are already in
+# (modprobe is a no-op then).
+for m in dimlib failover net_failover mdio; do
+    modprobe "$m" 2>/dev/null || true
+done
+for m in virtio_net e1000 e1000e r8169 igb ixgbe r8152 cdc_ether; do
+    modprobe "$m" 2>/dev/null || true
+done
+
+# Loopback. Nothing else brings it up, and plenty of software assumes
+# 127.0.0.1 resolves to something before any external network exists.
+ip link set lo up 2>/dev/null || true
+
+pick_interface() {
+    for d in /sys/class/net/*; do
+        [ -d "$d" ] || continue
+        n="${d##*/}"
+        [ "$n" = "lo" ] && continue
+        printf '%s\n' "$n"
+        return 0
+    done
+    return 1
+}
+
+# Wait rather than exit: a NIC driver can still be probing when s6
+# starts this, and a service that exits gets restarted by s6 in a tight
+# loop that fills the log without ever getting further. Waiting here is
+# quiet and ends the moment the interface appears.
+IFACE=""
+n=0
+while [ -z "$IFACE" ]; do
+    if [ "$IFSPEC" = "auto" ]; then
+        IFACE="$(pick_interface || true)"
+    elif [ -d "/sys/class/net/${IFSPEC}" ]; then
+        IFACE="$IFSPEC"
+    fi
+    [ -n "$IFACE" ] && break
+    n=$((n + 1))
+    [ $((n % 30)) -eq 1 ] && \
+        echo "network: waiting for interface (${IFSPEC}) ..." >&2
+    sleep 2
+done
+
+echo "network: using ${IFACE} (declared: ${IFSPEC}, dns: ${DNSSPEC})" >&2
+printf '%s\n' "$IFACE" > "$RUN_DIR/network.device"
+ip link set "$IFACE" up 2>/dev/null || true
+
+# -f: foreground, so s6 supervises udhcpc itself.
+# -b would background on lease failure -- exactly wrong under a
+# supervisor. -R releases the lease when the service is brought down.
+exec udhcpc -f -R -i "$IFACE" -s /usr/share/udhcpc/default.script
