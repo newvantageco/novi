@@ -1225,8 +1225,12 @@ counted as "needed by the base" and could never move. Eight libraries
 held in a console image by eight programs nobody would run on one. The
 split only became possible once those were named as desktop-side too.
 
-After it, `/usr/lib` in the base contains exactly one library:
-`libskarnet`, which s6 needs.
+After it, `/usr/lib` in the base contained exactly one library:
+`libskarnet`, which s6 needs. (Two milestones later it holds three --
+`libnl` arrived with the WiFi supplicant in §19 and `libasound` with
+audio in §21. That is the split working, not the split eroding: both
+belong to a console system, and the ELF-graph computation is re-run
+every build rather than frozen at a number someone was proud of.)
 
 **Console-only base does not mean network-only desktop.** The ISO
 carries the whole signed repository at `/novi-repo` and the shipped
@@ -1575,7 +1579,7 @@ would change that -- the next step is a USB stick and a laptop.
 | 14 | Networking & logging | ✅ DHCP + resolver as a supervised service with a `network.*` state domain, syslogd/klogd replacing a logger that had never once run; verified live and installed, including logs surviving a reboot. Static IP, WiFi and DHCPv6 are roadmap |
 | 15 | Users & accounts | ✅ `users.*` domain, a real group database, installer-created accounts with passwords; "configuration is declared, secrets are not" is now a stated platform rule. Non-root `novi-settings`, `users.*.home`/`.uid`, and undeclared-user removal are roadmap |
 | 16 | Package repository & signing | ✅ Signed index (Ed25519 via a hash-pinned TweetNaCl verifier on-target), SHA-256 per package, `pkg sync` + mirror fetch, `packages.*` state domain, first-party desktop repository; both tamper cases verified live. Desktop still also in the base image; release keys, index expiry and version constraints are roadmap |
-| 17 | Base/desktop split | ✅ Console-only base (one library left in /usr/lib), desktop is 25 packages on the medium, split computed from the ELF graph with a build-failing safety check; live-desktop boot, `pkg install novi-desktop` offline, and `novi-install --profile desktop` all verified. Separate console/desktop ISOs and finer-grained packages are roadmap |
+| 17 | Base/desktop split | ✅ Console-only base (three libraries left in /usr/lib: libskarnet, libnl for the supplicant, libasound for audio — the split is recomputed as the base grows, not frozen at one), desktop is 25 packages on the medium, split computed from the ELF graph with a build-failing safety check; live-desktop boot, `pkg install novi-desktop` offline, and `novi-install --profile desktop` all verified. Separate console/desktop ISOs and finer-grained packages are roadmap |
 | 18 | UEFI install & journalled root | ✅ Firmware detected from /sys/firmware/efi; GPT+ESP via a purpose-built `novi-gpt`, real ext4 via e2fsprogs, one menu written to two prefixes. Both paths verified end to end. Secure Boot, kernel updates to the ESP, swap//home/encryption are roadmap |
 | 19 | WiFi | ✅ wpa_supplicant with internal crypto (no OpenSSL), `network.wifi` declared with credentials in a 0600 store, wired-first interface selection; verified end to end against a real WPA2 AP on hwsim radios with no wired NIC present. WPA3 (needs mbedTLS), firmware packages, per-interface DHCP and a panel applet are roadmap |
 | 20 | Repository freshness & upgrades | ✅ `valid-until` inside the signature (replay closed, verified with a re-signed 40-day-old index), `pkg update` driven by the index with `sort -V` comparison and no silent downgrades. Index serial, cache pruning and version constraints are roadmap |

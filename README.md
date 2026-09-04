@@ -212,8 +212,10 @@ $ novi-state set packages.foot absent && novi-state apply
 $ novi-state rollback        # foot comes back, from the mirror
 ```
 
-**The base image is console-only.** `/usr/lib` in it contains exactly
-one library — `libskarnet`, for s6. The desktop (compositor, panel,
+**The base image is console-only.** `/usr/lib` in it holds three
+libraries and nothing else: `libskarnet` for s6, `libnl` for the WiFi
+supplicant, and `libasound` for audio — each one there because a
+console system genuinely needs it. The desktop (compositor, panel,
 launcher, terminal, fonts, and the whole Wayland/wlroots stack) is 25
 packages, and the installation medium carries the signed repository, so
 installing it needs no network at all:
