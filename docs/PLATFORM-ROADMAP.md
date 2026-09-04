@@ -1397,6 +1397,69 @@ image ships none. On a large fraction of real laptops the driver loads
 and the radio does not come up. That is a packaging and licensing
 question (§2, §10), not a code one.
 
+## 20. Repository Freshness & Real Upgrades
+
+RFC 0010. Two holes left open by §16, both on its roadmap since, and
+they are the same sentence from two directions: **the repository could
+not tell you what was current.**
+
+**A signature says "genuine", not "current".** `pkg sync` verified the
+index's Ed25519 signature and refused anything that failed -- and could
+not detect an index that was perfectly genuine and months old. Anyone
+able to serve one (a hostile mirror, a captive portal, a stale caching
+proxy) could hold a machine at a version with a known hole
+indefinitely, with every signature and every hash still checking out.
+The index now carries `valid-until` as a comment line, which puts it
+inside the signed blob where it cannot be edited off, and outside the
+row parser where it cannot confuse anything. Checked AFTER the
+signature, never before: an unverified header is a string an attacker
+chose, and refusing on it would hand them a free denial of service.
+`sync` refuses a stale index; `update` only warns, because a machine
+offline for a month should explain why it has nothing to offer rather
+than stop working. A failed `date` declines to judge rather than
+judging wrongly.
+
+**`pkg update` did not update.** It compared the installed version
+against whatever archive was lying around locally, using string
+inequality -- so it could not see the repository at all, and `!=` is
+not "newer", so a stale cached archive was a perfectly good reason to
+install it. Since §3's entire update model rests on this command, the
+update story was a description rather than a mechanism.
+
+The bug worth recording is the one whose symptom was a lie. After the
+first fix, `pkg update` printed:
+
+    ==> Upgrading novi-screenshot: 0.1.0 -> 0.2.0
+    ==> Installing novi-screenshot (0.1.0)
+
+It had decided correctly, then matched `novi-screenshot-*.pkg.tar.gz`
+against the cache, found the archive the previous install had left
+there, and installed that. The decision and the action disagreed and
+only the decision was printed. Fixing it in `locate_pkg` rather than in
+`cmd_update` means `pkg install` after a sync also stops handing back a
+stale cached archive -- the same bug reached by a different path.
+
+Version comparison is `sort -V`, the only one available here that knows
+1.10.0 is newer than 1.9.2. An older version in the index is refused
+loudly rather than silently installed: repositories do legitimately
+roll back a bad release, so `pkg install <name>` is named as the
+deliberate route.
+
+Verified against a live HTTP mirror **mutated between guest commands**
+while the machine ran: publishing 0.2.0 and watching the upgrade land;
+publishing an older 0.0.9 and watching it refused; and rewinding
+`valid-until` 40 days **and re-signing**, so the signature was
+genuinely valid -- `pkg sync` verified the signature, then refused the
+index as not current and left the previous one in place.
+
+**Deliberately not done: two ISOs.** It was next on §17's roadmap and
+it is not worth doing yet. The desktop is 2.8 MB of a 72 MB image;
+separate console and desktop images are a habit from distributions
+where the desktop is hundreds of megabytes, and building one here would
+be motion rather than progress. When the package set grows enough for
+the split to save something real it is half an hour's work in
+`mkiso.sh`.
+
 ## Status Summary
 
 | # | Area | State |
@@ -1420,31 +1483,31 @@ question (§2, §10), not a code one.
 | 17 | Base/desktop split | ✅ Console-only base (one library left in /usr/lib), desktop is 25 packages on the medium, split computed from the ELF graph with a build-failing safety check; live-desktop boot, `pkg install novi-desktop` offline, and `novi-install --profile desktop` all verified. Separate console/desktop ISOs and finer-grained packages are roadmap |
 | 18 | UEFI install & journalled root | ✅ Firmware detected from /sys/firmware/efi; GPT+ESP via a purpose-built `novi-gpt`, real ext4 via e2fsprogs, one menu written to two prefixes. Both paths verified end to end. Secure Boot, kernel updates to the ESP, swap//home/encryption are roadmap |
 | 19 | WiFi | ✅ wpa_supplicant with internal crypto (no OpenSSL), `network.wifi` declared with credentials in a 0600 store, wired-first interface selection; verified end to end against a real WPA2 AP on hwsim radios with no wired NIC present. WPA3 (needs mbedTLS), firmware packages, per-interface DHCP and a panel applet are roadmap |
+| 20 | Repository freshness & upgrades | ✅ `valid-until` inside the signature (replay closed, verified with a re-signed 40-day-old index), `pkg update` driven by the index with `sort -V` comparison and no silent downgrades. Index serial, cache pruning and version constraints are roadmap |
 
-**Next concrete step: two ISOs and a published repository.** Novi now
-installs on both firmware paths, keeps a journalled root, reaches the
-network over wire or WiFi, and delivers its desktop as signed packages.
-What it does not have is anywhere to point a second machine at: the
-repository exists only on whoever ran `build/20-repo.sh`, and one ISO
-carries both the console and desktop paths.
+**Next concrete step: a published repository and an offline release
+key.** Everything a package system needs now exists and is verified --
+signing, hashes, freshness, dependency resolution, upgrades, rollback
+through `packages.*` -- and it all points at a repository that exists
+only on whichever machine last ran `build/20-repo.sh`. The build
+generates a development key and the image trusts it, which is right
+when you built both halves and is not how a release works: a real
+release key lives offline, only its public half is ever in a tree like
+this one, and signing happens somewhere that is not the build host.
 
 Ordered honestly, what is left:
 
-1. **Two ISOs and a published repository** -- a console image and a
-   desktop image; an offline release key (the build currently generates
-   a development key and trusts it, which is right when you built both
-   and is not how a release works); something at a stable URL; and a
-   signed `valid-until` so a validly-signed *stale* index cannot be
-   replayed to hold a machine at a version with a known hole.
-2. **WPA3 and WiFi firmware** -- mbedTLS as the crypto backend, and a
-   firmware package for the chips that need blobs. Without the second,
-   WiFi does not come up on a large fraction of real laptops.
+1. **A published repository and an offline release key** -- something
+   at a stable URL, signed off the build host.
+2. **WiFi firmware, and WPA3** -- without firmware the radio does not
+   come up on a large fraction of real laptops; WPA3 needs mbedTLS as
+   the crypto backend.
 3. **Secure Boot** -- `BOOTX64.EFI` is unsigned, so a machine with
    Secure Boot on refuses it.
 4. **`novi-state diff` should notice a crash-looping longrun** -- three
    separate bugs have now hidden behind `s6-rc -a list` reporting
-   "wanted up". This needs its own design; the obvious fix reintroduces
-   a boot race.
+   "wanted up". Needs its own design; the obvious fix reintroduces a
+   boot race.
 
 ---
 

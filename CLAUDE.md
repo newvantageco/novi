@@ -300,6 +300,20 @@ Things not to undo:
   Different operations, different names, on purpose.
 - The index format forbids `|` in every field rather than escaping it. An
   escaping scheme in a format parsed by `read` is a bug waiting to happen.
+- **The index carries `valid-until` inside the signed blob, and it is checked
+  AFTER the signature** (RFC 0010). A signature says genuine, not current;
+  an unverified header is a string an attacker chose, so refusing on it
+  before verifying would be a free denial of service. `sync` refuses a stale
+  index, `update` only warns — sync is where a replayed index arrives.
+- **`locate_pkg` asks the index which version it wants.** Without that it
+  matched `<name>-*.pkg.tar.gz` against the cache, so `pkg update` printed
+  "Upgrading 0.1.0 -> 0.2.0" and then installed 0.1.0 again from the archive
+  the previous install had cached. The decision and the action disagreed and
+  only the decision was printed.
+- **Version comparison is `sort -V`, never `=`/`!=`.** A string comparison
+  says 1.9.2 is newer than 1.10.0, which is the kind of wrong that ships a
+  downgrade. An older version in the index is refused loudly, not silently:
+  repositories do legitimately roll back a release.
 
 ## Architecture: /dev/fd, and testing the image not the shell
 

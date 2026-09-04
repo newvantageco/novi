@@ -37,6 +37,7 @@ die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 POOL=""
 OUT=""
 KEY=""
+VALID_DAYS=30
 
 usage() {
     cat <<'USAGE'
@@ -49,6 +50,12 @@ Usage:
   --out DIR         where to write index/index.sig (default: <pool-dir>)
   --key FILE        Ed25519 private key (PEM) to sign the index with;
                     needs openssl, so this is a build-host operation
+  --valid-days N    how long this index stays acceptable (default 30).
+                    A signature says "this is genuine"; it does not say
+                    "this is current" -- without an expiry, an attacker
+                    who can serve you an old but validly-signed index
+                    can hold you at a version with a known hole,
+                    forever, and every check still passes.
 
 Publish the result by serving <pool-dir> over HTTP:
 
@@ -68,6 +75,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --out) OUT="${2:-}"; shift 2 ;;
         --key) KEY="${2:-}"; shift 2 ;;
+        --valid-days) VALID_DAYS="${2:-}"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) die "unknown option '$1'" ;;
     esac
@@ -146,12 +154,28 @@ done
 
 [ "$count" -gt 0 ] || warn "no packages found in $POOL -- writing an empty index"
 
+case "$VALID_DAYS" in
+    ''|*[!0-9]*) die "--valid-days must be a whole number of days" ;;
+esac
+[ "$VALID_DAYS" -ge 1 ] || die "--valid-days must be at least 1"
+
+NOW="$(date -u +%s)"
+UNTIL=$(( NOW + VALID_DAYS * 86400 ))
+
 {
     printf '# novi package index v1\n'
+    # Freshness, inside the signed blob so it cannot be edited off.
+    # Epoch seconds rather than a formatted date: `pkg` compares it
+    # with `date -u +%s` and there is no date parsing to get wrong, in
+    # either direction, on any locale.
+    printf '# generated: %s (%s)\n' "$NOW" "$(date -u -d "@$NOW" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    printf '# valid-until: %s (%s)\n' "$UNTIL" "$(date -u -d "@$UNTIL" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || printf 'unknown')"
     printf '# name|version|arch|size|sha256|file|depends|description\n'
-    # Sorted so the index is reproducible: the same pool must produce
-    # byte-identical bytes, or every rebuild is a new signature and a
-    # pointless download for every machine.
+    # Sorted so the package list is reproducible: the same pool must
+    # produce byte-identical rows, or every rebuild is a pointless
+    # download for every machine. (The timestamp header above changes
+    # every run by design -- that is what makes the index current, and
+    # it is the one part that is meant to move.)
     LC_ALL=C sort "$TMP.body"
 } > "$TMP"
 
@@ -161,7 +185,7 @@ mv "$TMP" "$OUT/index"
 # still fails every sync.
 chmod 644 "$OUT/index"
 trap 'rm -f "$TMP.body"' EXIT INT TERM
-msg "wrote $OUT/index ($count package(s))"
+msg "wrote $OUT/index ($count package(s), valid for ${VALID_DAYS} day(s))"
 
 if [ -n "$KEY" ]; then
     command -v openssl >/dev/null 2>&1 ||

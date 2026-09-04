@@ -51,6 +51,7 @@ PKG_INDEX="${PKG_INDEX:-/var/lib/pkg/index}"
 PKG_MIRROR=""
 PKG_KEY="/etc/novi/keys/novi-repo.pub"
 PKG_ALLOW_UNSIGNED="no"
+PKG_ALLOW_STALE="no"
 
 conf_value() {
     [ -r "$PKG_CONF" ] || { printf ''; return 0; }
@@ -63,6 +64,7 @@ load_conf() {
     v="$(conf_value mirror)";          [ -n "$v" ] && PKG_MIRROR="$v"
     v="$(conf_value key)";             [ -n "$v" ] && PKG_KEY="$v"
     v="$(conf_value allow_unsigned)";  [ -n "$v" ] && PKG_ALLOW_UNSIGNED="$v"
+    v="$(conf_value allow_stale)";     [ -n "$v" ] && PKG_ALLOW_STALE="$v"
     # The environment wins over the file, so a one-off
     # `PKG_MIRROR=... pkg sync` works without editing anything.
     [ -n "${PKG_MIRROR_ENV:-}" ] && PKG_MIRROR="$PKG_MIRROR_ENV"
@@ -149,6 +151,59 @@ index_field() {
 
 have_mirror() { [ -n "$PKG_MIRROR" ]; }
 
+# ---------------------------------------------------------------------------
+# Freshness
+# ---------------------------------------------------------------------------
+#
+# A signature says "this is genuine". It does not say "this is
+# current". Without an expiry, someone who can serve you an old but
+# validly-signed index -- a hostile mirror, a captive network, a stale
+# cache -- can hold you at a version with a known hole indefinitely,
+# and every signature and every hash still checks out. That is the
+# replay attack the `valid-until` header exists to close.
+#
+# The header is a comment line, so it is invisible to the row parser
+# and inside the signed blob, which means it cannot be edited off
+# without breaking the signature.
+
+index_header() {
+    sed -n "s/^# ${2}: \([0-9][0-9]*\).*/\1/p" "$1" 2>/dev/null | head -n1
+}
+
+# Prints nothing and returns 0 if fresh; prints why and returns 1 if not.
+index_freshness_problem() {
+    local file="$1" until now
+    until="$(index_header "$file" valid-until)"
+    if [ -z "$until" ]; then
+        printf 'it carries no valid-until header (built by an older mkrepo?)'
+        return 1
+    fi
+    now="$(date -u +%s 2>/dev/null || printf 0)"
+    # A clock of 0 means `date` failed, not that it is 1970. Refusing
+    # to judge is better than judging wrongly in either direction.
+    [ "$now" -gt 0 ] 2>/dev/null || return 0
+    if [ "$now" -gt "$until" ]; then
+        printf 'it expired %s day(s) ago' "$(( (now - until) / 86400 ))"
+        return 1
+    fi
+    return 0
+}
+
+check_index_freshness() {
+    local file="$1" what="$2" why
+    why="$(index_freshness_problem "$file")" && return 0
+
+    if [ "$PKG_ALLOW_STALE" = "yes" ]; then
+        warn "allow_stale=yes in $PKG_CONF -- accepting $what even though $why"
+        return 0
+    fi
+    die "$what is not current: $why.
+  A valid signature means genuine, not current -- an old index can hold this
+  machine at a version with a known hole. Refresh the mirror, or if this
+  machine's clock is wrong, fix that first. allow_stale=yes in $PKG_CONF
+  overrides this."
+}
+
 # A mirror can be a local directory as well as a URL. That is not a
 # convenience: the ISO carries the whole signed repository at
 # /run/live/novi-repo, which is what lets a live system install the
@@ -225,7 +280,7 @@ verify_signature() {
 # from the signed index, so this is what extends that one signature to
 # cover every package in the repository.
 fetch_from_mirror() {
-    local name="$1"
+    local name="$1" want_version="${2:-}"
     FOUND_PKG=""
 
     have_mirror || return 1
@@ -244,6 +299,14 @@ $line
 EOF
     [ -n "$i_file" ] || return 1
     : "$i_arch" "$i_size"
+
+    # The caller asked for a specific version and the index does not
+    # have it. Failing here is better than quietly handing back a
+    # different one, which is precisely the bug this argument exists to
+    # stop.
+    if [ -n "$want_version" ] && [ "$want_version" != "$i_ver" ]; then
+        return 1
+    fi
 
     mkdir -p "$PKG_CACHE"
     dest="$PKG_CACHE/$(basename "$i_file")"
@@ -272,7 +335,7 @@ EOF
 # Locate a package archive in the cache or repo.
 # Sets FOUND_PKG to the absolute path.
 locate_pkg() {
-    local name="$1"
+    local name="$1" want_version="${2:-}"
     FOUND_PKG=""
 
     # Exact filename supplied?
@@ -281,13 +344,28 @@ locate_pkg() {
         return 0
     fi
 
+    # When there is an index and it knows this package, ITS version is
+    # the one wanted -- not whatever happens to be lying in the cache.
+    #
+    # Without this, the local search below matches on the name prefix
+    # alone and returns the first `<name>-*.pkg.tar.gz` it finds. That
+    # made `pkg update` announce "Upgrading novi-screenshot: 0.1.0 ->
+    # 0.2.0" and then install 0.1.0 again, from the archive the
+    # previous install had cached. Confirmed live, exactly that way.
+    if [ -z "$want_version" ]; then
+        want_version="$(index_field "$name" 2 2>/dev/null || true)"
+    fi
+
+    local pattern="${name}-*.pkg.tar.gz"
+    [ -n "$want_version" ] && pattern="${name}-${want_version}-*.pkg.tar.gz"
+
     # Search in cache first, then repo
     local f
     for dir in "$PKG_CACHE" "$PKG_REPO"; do
         [ -d "$dir" ] || continue
         # Prefer highest version: sort -V descending then take first
         f=$(find "$dir" -maxdepth 2 \
-                \( -name "${name}-*.pkg.tar.gz" -o -name "${name}.pkg.tar.gz" \) \
+                \( -name "$pattern" -o -name "${name}.pkg.tar.gz" \) \
                 -type f 2>/dev/null \
             | sort -t'-' -k2 -V -r \
             | head -n1)
@@ -301,7 +379,7 @@ locate_pkg() {
     # here rather than in cmd_install means dependency resolution and
     # `pkg update` reach the network too, without either of them
     # growing its own copy of the fetch-and-verify logic.
-    fetch_from_mirror "$name" && return 0
+    fetch_from_mirror "$name" "$want_version" && return 0
 
     return 1
 }
@@ -615,12 +693,37 @@ cmd_remove() {
     done
 }
 
+# Is $1 a newer version than $2?
+#
+# `sort -V` is BusyBox's version sort, and it is the only version
+# comparison available here that understands that 1.10.0 is newer than
+# 1.9.2 -- which a string comparison gets backwards, and which is
+# exactly the kind of wrong that ships a downgrade.
+version_gt() {
+    [ "$1" = "$2" ] && return 1
+    [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" = "$1" ]
+}
+
 cmd_update() {
     need_root
     [ $# -ge 1 ] || die "Usage: pkg update <package|all> [...]"
 
+    if [ -f "$PKG_INDEX" ]; then
+        # A warning, not a refusal: `update` on a machine that has been
+        # offline for a month should say why it has nothing to offer,
+        # not stop working. `sync` is where staleness is fatal, because
+        # that is where the replayed index would arrive.
+        local why
+        if ! why="$(index_freshness_problem "$PKG_INDEX")"; then
+            [ "$PKG_ALLOW_STALE" = "yes" ] ||
+                warn "the local index is not current: $why -- run 'pkg sync'"
+        fi
+    else
+        warn "no package index -- run 'pkg sync' first, or this can only"
+        warn "see packages already sitting in $PKG_REPO / $PKG_CACHE"
+    fi
+
     if [ "$1" = "all" ]; then
-        # Build list of all installed packages
         set --
         for m in "$PKG_DB"/*/MANIFEST; do
             [ -f "$m" ] || continue
@@ -629,52 +732,71 @@ cmd_update() {
         [ $# -gt 0 ] || { info "No packages installed."; return 0; }
     fi
 
+    local upgraded=0 checked=0
     for name in "$@"; do
         is_installed "$name" || { warn "'$name' is not installed - use 'pkg install' instead."; continue; }
+        checked=$(( checked + 1 ))
 
-        local cur_ver
+        local cur_ver new_ver
         cur_ver="$(installed_version "$name")"
-        msg "Checking update for $name (installed: $cur_ver)"
 
-        if ! locate_pkg "$name" 2>/dev/null; then
-            warn "No package file found for '$name' in repo/cache - skipping."
+        # The INDEX decides what is available, not whatever archive
+        # happens to be lying around in the cache. Asking the cache
+        # first is how `update` ends up reinstalling what is already
+        # there, and -- because it compared with `!=` rather than
+        # "newer" -- how it ends up silently DOWNGRADING a package to
+        # whatever version an old archive contains.
+        new_ver="$(index_field "$name" 2 2>/dev/null || true)"
+        if [ -z "$new_ver" ]; then
+            warn "'$name' is not in the index -- skipping"
+            continue
+        fi
+
+        if [ "$new_ver" = "$cur_ver" ]; then
+            info "$name is already at $cur_ver"
+            continue
+        fi
+        if ! version_gt "$new_ver" "$cur_ver"; then
+            # Not an error: a repository legitimately rolls back a bad
+            # release. But it is never something to do silently.
+            warn "$name: the index offers $new_ver, older than the installed $cur_ver -- not downgrading"
+            warn "  (to force it: pkg install $name)"
+            continue
+        fi
+
+        msg "Upgrading $name: $cur_ver -> $new_ver"
+
+        # Only now is anything downloaded. The old code fetched the
+        # archive before it knew whether it wanted it.
+        if ! locate_pkg "$name" "$new_ver" 2>/dev/null; then
+            warn "could not obtain $name $new_ver -- skipping"
             continue
         fi
         local archive="$FOUND_PKG"
 
-        local new_ver
-        new_ver="$(tar -xzf "$archive" -O MANIFEST 2>/dev/null \
-                   | grep '^version=' | head -n1 | sed 's/^version=//')"
-
-        if [ "$new_ver" = "$cur_ver" ]; then
-            info "$name is already at the latest version ($cur_ver)."
-            continue
-        fi
-
-        info "Upgrading $name: $cur_ver -> $new_ver"
-
         DEP_QUEUE=""
         DEP_VISITED=""
-        local pkg_name
-        pkg_name="$(tar -xzf "$archive" -O MANIFEST 2>/dev/null \
-                    | grep '^name=' | head -n1 | sed 's/^name=//')"
-        [ -n "$pkg_name" ] || pkg_name="$name"
-        resolve_deps "$pkg_name" "$archive"
-
+        resolve_deps "$name" "$archive"
         if [ -n "$DEP_QUEUE" ]; then
             # shellcheck disable=SC2086
             # Deliberately unquoted: DEP_QUEUE is a space-separated
             # list of "name:path" tokens, and word-splitting it here is
             # what turns it into one token per line for the loop below
-            # to read -- quoting it would pass the whole string as a
-            # single line instead.
+            # to read.
             printf '%s\n' $DEP_QUEUE | while IFS=: read -r dep_name dep_archive; do
                 install_pkg_file "$dep_archive" force
             done
         fi
 
         install_pkg_file "$archive" force
+        upgraded=$(( upgraded + 1 ))
     done
+
+    if [ "$upgraded" -eq 0 ]; then
+        msg "nothing to upgrade ($checked package(s) checked)"
+    else
+        msg "upgraded $upgraded of $checked package(s)"
+    fi
 }
 
 cmd_sync() {
@@ -695,6 +817,10 @@ cmd_sync() {
     fetch_repo_file "index.sig" "$newsig" || true
 
     verify_signature "$new" "$newsig" "the repository index"
+    # After the signature, never before: an unverified header is just a
+    # string an attacker chose, and refusing on it would hand them a
+    # denial of service that costs them nothing.
+    check_index_freshness "$new" "the repository index"
 
     # Installed only after it verifies: a machine that already had a
     # good index must not be left with a worse one because a sync
@@ -852,6 +978,16 @@ cmd_info() {
     printf 'Depends     : %s\n'        "${depends:-(none)}"
     printf 'Status      : %s\n'        "$(is_installed "$name_f" && printf 'installed' || printf 'not installed')"
 
+    # An installed package's own MANIFEST cannot know what the
+    # repository is offering, and printing only the installed version
+    # after a `pkg sync` reads as "you are up to date" when you are
+    # not.
+    local avail
+    avail="$(index_field "$name_f" 2 2>/dev/null || true)"
+    if [ -n "$avail" ] && [ "$avail" != "$version" ]; then
+        printf 'Available   : %s  (pkg update %s)\n' "$avail" "$name_f"
+    fi
+
     # If installed, show file count
     if is_installed "$name_f"; then
         local fc=0
@@ -883,10 +1019,12 @@ Configuration (/etc/novi/pkg.conf):
   mirror          = https://example.org/novi/x86_64   (or a local directory)
   key             = /etc/novi/keys/novi-repo.pub
   allow_unsigned  = no
+  allow_stale     = no
 
 The index is signed and `pkg sync` verifies it with novi-verify before
 believing a line of it; every package's SHA-256 comes from that index,
-so one signature covers the whole repository.
+so one signature covers the whole repository. It also carries a
+valid-until, because a signature says "genuine", not "current".
 
 Environment:
   PKG_MIRROR Overrides `mirror` for one invocation

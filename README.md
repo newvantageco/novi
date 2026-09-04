@@ -154,8 +154,13 @@ $ pkg install foot
 ```
 
 A tampered package fails its hash and is discarded; a tampered index
-fails its signature and the previous one is kept. Both are verified,
-not asserted — see [RFC 0006](docs/rfcs/0006-package-repository-and-signing.md).
+fails its signature and the previous one is kept. The index also
+carries a `valid-until` **inside the signature**, because a signature
+says *genuine*, not *current* — without it, someone serving you an old
+but validly-signed index can hold you at a version with a known hole
+forever. All of that is verified, not asserted — see
+[RFC 0006](docs/rfcs/0006-package-repository-and-signing.md) and
+[RFC 0010](docs/rfcs/0010-repository-freshness-and-upgrades.md).
 
 WiFi works the same way — the network is declared, the passphrase is
 not:
@@ -287,8 +292,9 @@ HOME_URL="https://novilinux.org"
 - [x] Console-only base; the desktop is packages (RFC 0007)
 - [x] UEFI/GPT install + journalled ext4 root (RFC 0008)
 - [x] WiFi (`network.wifi`, `novi-wifi`, WPA2, RFC 0009)
-- [ ] Separate console and desktop ISOs ← next
-- [ ] More state domains: keybindings, static IP; WPA3
+- [x] Real upgrades + index freshness (`pkg update`, `valid-until`, RFC 0010)
+- [ ] A published repository + offline release key ← next
+- [ ] More state domains: keybindings, static IP; WPA3; WiFi firmware
 - [ ] UEFI/GPT install, journalled root
 - [ ] Boot splash
 
