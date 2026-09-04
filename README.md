@@ -136,7 +136,8 @@ $ novi-install list
   -> /dev/vda  75 MiB  [live media -- not a candidate]
   -> /dev/vdb  8192 MiB
 
-$ novi-install install --disk /dev/vdb --hostname my-machine
+$ novi-install install --disk /dev/vdb --hostname my-machine \
+      --user alice --set-root-password
 ```
 
 That gives you a partitioned disk, a real writable root filesystem, and
@@ -147,8 +148,15 @@ The installed boot menu includes a **"skip declared-state
 convergence"** entry (`novi.state=off`), so a `system.conf` that locks
 you out is one menu selection away from a normal boot.
 
-v1 is BIOS/MBR only, one journal-less ext2 partition, and inherits the
-live session's users (root-only). Those limits and the reasoning are in
+`--user` creates the account *while installing* — with a password, in
+`wheel`/`video`/`input`/`audio`/`seat` — and then declares it in the
+new machine's `system.conf`, so the account is part of the document
+that governs the machine rather than a fact about it nobody wrote down.
+Passwords are the one thing deliberately kept out of that document; see
+[RFC 0005](docs/rfcs/0005-users-and-accounts.md).
+
+v1 is BIOS/MBR only and one journal-less ext2 partition. Those limits
+and the reasoning are in
 [`docs/rfcs/0003-installation-and-persistence.md`](docs/rfcs/0003-installation-and-persistence.md).
 
 ## Stack
@@ -185,8 +193,8 @@ HOME_URL="https://novilinux.org"
 - [x] Boot-time convergence — the machine boots into the declared state
 - [x] Installer + on-disk persistence (`novi-install`, RFC 0003)
 - [x] Networking + real system logging (`network.*`, syslogd/klogd, RFC 0004)
-- [ ] Real users (`users.*` state domain) ← next
-- [ ] Package repository
+- [x] Real users (`users.*`, account database, installer accounts, RFC 0005)
+- [ ] Package repository ← next
 - [ ] More state domains: packages, keybindings, static IP, WiFi
 - [ ] UEFI/GPT install, journalled root
 - [ ] Boot splash

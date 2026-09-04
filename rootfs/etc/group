@@ -1,0 +1,38 @@
+# /etc/group — Novi Linux
+#
+# name:password:gid:members
+#
+# Fixed GIDs, not dynamically allocated ones: a Novi rootfs is built
+# reproducibly and squashed into an image, so a group's number has to
+# be the same on every machine or the file modes baked into that image
+# stop meaning what they meant at build time.
+#
+# The ones that are load-bearing rather than conventional:
+#   tty(5)    getty/login chown the terminal to it
+#   disk(6)   raw block device access; what novi-install needs
+#   wheel(10) `su` to root -- Novi's admin group
+#   audio(29) /dev/snd/*
+#   video(44) /dev/dri/* -- a desktop session needs it
+#   input(101) /dev/input/* -- keyboards and pointers
+#   render(102) /dev/dri/renderD* -- GPU compute without KMS
+#   seat(103) seatd's own group (RFC 0001)
+root:x:0:
+bin:x:1:
+daemon:x:2:
+sys:x:3:
+adm:x:4:
+tty:x:5:
+disk:x:6:
+lp:x:7:
+mem:x:8:
+kmem:x:9:
+wheel:x:10:
+cdrom:x:11:
+dialout:x:20:
+audio:x:29:
+video:x:44:
+users:x:100:
+input:x:101:
+render:x:102:
+seat:x:103:
+nogroup:x:65534:

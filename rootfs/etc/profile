@@ -1,0 +1,38 @@
+# /etc/profile — Novi Linux
+#
+# Read by every login shell (BusyBox ash sources it for `sh -l`, which
+# is what login(1) starts).
+
+# /sbin and /usr/sbin are on EVERY user's PATH, not just root's.
+#
+# The historical split exists because sbin held statically linked
+# rescue binaries and, later, "administrator" tools. Neither applies
+# here: the entire userland is one static BusyBox, so /sbin/ip and
+# /bin/ls are literally the same file, and the commands that need
+# privilege are stopped by the kernel, not by being hard to spell.
+#
+# Leaving them off was not a security boundary, just a papercut --
+# confirmed live: a normal user on a freshly installed machine typing
+# `ip addr` to see their own address got "ip: not found". Debian and
+# Arch have both since merged sbin into the default PATH for the same
+# reason.
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# Group-writable by default is a footgun on a multi-user machine and
+# buys nothing on a single-user one.
+umask 022
+
+export PAGER="${PAGER:-more}"
+export EDITOR="${EDITOR:-vi}"
+
+# BusyBox ash already ends the prompt with # for uid 0 and $ otherwise;
+# this adds the part that matters when you have more than one machine.
+PS1='\u@\h:\w\$ '
+export PS1
+
+# Anything dropped in /etc/profile.d is sourced too, so a package can
+# add to the login environment without editing this file.
+for _p in /etc/profile.d/*.sh; do
+    [ -r "$_p" ] && . "$_p"
+done
+unset _p

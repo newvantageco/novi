@@ -45,6 +45,23 @@ make CROSS_COMPILE="${TARGET_TRIPLE}-" oldconfig </dev/null
 make CROSS_COMPILE="${TARGET_TRIPLE}-" -j${NPROC}
 make CROSS_COMPILE="${TARGET_TRIPLE}-" CONFIG_PREFIX="${ROOTFS}" install
 
+# BusyBox's `make install` creates /sbin/init and /linuxrc symlinks to
+# itself. Novi's PID 1 is s6-linux-init, never BusyBox init -- which
+# looks for a sysvinit-style /etc/init.d/rcS this repo does not have
+# and does not want.
+#
+# 04-s6.sh already deletes /sbin/init before installing the real one,
+# so a clean 01..05 run has always been fine. The failure is on a
+# RE-RUN: running this stage again after 04 silently hands PID 1 back
+# to BusyBox, and the next boot dies immediately after switch_root with
+# "can't run '/etc/init.d/rcS': No such file or directory". Confirmed
+# live, twice -- once when 04-s6.sh was first written, and again here.
+#
+# Removing the symlinks at the source means no stage ordering can
+# reintroduce it. The `init` applet itself stays in the binary; only
+# the claim on /sbin/init goes.
+rm -f "${ROOTFS}/sbin/init" "${ROOTFS}/linuxrc"
+
 cd "${SOURCES}"
 
 # ── Base rootfs directory layout ─────────────────────────
@@ -53,33 +70,65 @@ mkdir -p "${ROOTFS}"/{boot,dev,etc,home,lib,mnt,opt,proc,root,run,srv,sys,tmp,us
 chmod 1777 "${ROOTFS}/tmp"
 chmod 700  "${ROOTFS}/root"
 
-# ── Minimal user/group database ──────────────────────────
+# ── User/group database ──────────────────────────────────
 # Nothing ever created /etc/passwd or /etc/group -- confirmed via a
 # live boot where s6-envuidgid (used by s6-rc's oneshot-runner and
 # fdholder service rules) crash-looped with "unknown user: root" and
 # s6-setuidgid (used by this repo's own getty run scripts) would hit
 # the same wall the moment boot got that far, since musl's NSS-less
 # getpwnam() only ever reads /etc/passwd -- there is no compiled-in
-# fallback. A minimal root entry is enough to unblock UID/GID
-# resolution; it deliberately says nothing about login/password
-# policy (locked vs. passwordless root, /etc/shadow) -- that is a
-# separate decision, not a boot-blocking one.
-cat > "${ROOTFS}/etc/passwd" <<-'EOF'
-	root:x:0:0:root:/root:/bin/sh
-EOF
-cat > "${ROOTFS}/etc/group" <<-'EOF'
-	root:x:0:
-EOF
-chmod 644 "${ROOTFS}/etc/passwd" "${ROOTFS}/etc/group"
+# fallback.
+#
+# These three files are repo content (rootfs/etc/) rather than
+# heredocs, because they are policy: fixed GIDs a squashed image's
+# baked-in file modes depend on, and a root entry whose password field
+# decides whether anyone can log into the shipped image at all. Policy
+# belongs somewhere a reviewer sees it in a diff.
+#
+# /etc/shadow in particular had never been created by ANY build stage
+# -- the one in /build/rootfs was a leftover from a hand-run command in
+# some earlier session, so a genuinely clean build produced an image
+# with no shadow file at all. It is generated from the repo now.
+#
+# The comment headers in them are safe: musl skips unparseable lines in
+# all three, verified by running a static musl getpwnam()/getgrnam()
+# binary against these exact files in a chroot, not assumed.
+install -D -m 644 "${REPO_ROOT}/rootfs/etc/passwd" "${ROOTFS}/etc/passwd"
+install -D -m 644 "${REPO_ROOT}/rootfs/etc/group"  "${ROOTFS}/etc/group"
+install -D -m 600 "${REPO_ROOT}/rootfs/etc/shadow" "${ROOTFS}/etc/shadow"
+
+# Login environment. Without this every login shell inherits whatever
+# PATH login(1) hands it, which does not include /sbin -- so a normal
+# user typing `ip addr` on an installed machine gets "ip: not found"
+# even though /sbin/ip is the same BusyBox binary as /bin/ls. See the
+# file's own comments.
+install -D -m 644 "${REPO_ROOT}/rootfs/etc/profile" "${ROOTFS}/etc/profile"
+mkdir -p "${ROOTFS}/etc/profile.d"
 
 # ── Copy musl libc into rootfs ────────────────────────────
 echo "==> Installing musl into rootfs"
 cp -a "${SYSROOT}/usr/lib/libc.so"               "${ROOTFS}/lib/libc.musl-x86_64.so.1"
 ln -sfn libc.musl-x86_64.so.1                    "${ROOTFS}/lib/ld-musl-x86_64.so.1"
 
-# ── Strip everything ──────────────────────────────────────
-echo "==> Stripping binaries"
-find "${ROOTFS}" -type f -print0 | xargs -0 -I{} sh -c \
+# ── Strip everything except kernel modules ────────────────
+# `--strip-all` on a .ko removes .symtab, which the module loader needs
+# for relocation -- the module survives as a file and becomes
+# permanently unloadable. That does not bite a clean build, because
+# this stage runs before 05-kernel.sh puts any modules in the rootfs.
+# It bites hard on a re-run: running 03-base.sh again after the kernel
+# stage silently destroys every module in the image.
+#
+# Confirmed live rather than reasoned about. After a re-run of this
+# stage, a boot that had worked minutes earlier failed with all 22 of
+# /init's `modprobe` calls returning non-zero -- including virtio_blk,
+# so there was no /dev/vda, no live medium, and a PANIC into the
+# emergency shell. `readelf -S` on virtio_blk.ko showed the symbol
+# table gone.
+#
+# The kernel's own INSTALL_MOD_STRIP uses --strip-debug for exactly
+# this reason; 05-kernel.sh owns module stripping, not this stage.
+echo "==> Stripping binaries (kernel modules excluded -- see comment)"
+find "${ROOTFS}" -type f -not -path "${ROOTFS}/lib/modules/*" -print0 | xargs -0 -I{} sh -c \
     'file "{}" | grep -q "ELF" && '"${STRIP}"' --strip-all "{}" 2>/dev/null || true'
 
 echo ""

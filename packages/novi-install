@@ -48,9 +48,15 @@ ROOT_LABEL="${NOVI_ROOT_LABEL:-NOVI_ROOT}"
 
 TARGET_DISK=""
 NEW_HOSTNAME=""
+NEW_USER=""
+NEW_USER_GROUPS="wheel,users,video,input,audio,seat"
+NEW_USER_SHELL="/bin/sh"
+NO_PASSWORD=0
+SET_ROOT_PASSWORD=0
 ASSUME_YES=0
 WITH_BOOTLOADER=1
 MOUNTED=0
+PASSWORD=""
 
 usage() {
     cat <<'USAGE'
@@ -63,6 +69,12 @@ Usage:
 Options:
   --disk DEV          target disk, e.g. /dev/sda or /dev/vda (REQUIRED)
   --hostname NAME     hostname for the installed system (default: keep)
+  --user NAME         create a login account (prompts for its password)
+  --user-groups LIST  its supplementary groups
+                      (default: wheel,users,video,input,audio,seat)
+  --user-shell PATH   its login shell (default: /bin/sh)
+  --no-password       create the account locked instead of prompting
+  --set-root-password prompt for a root password too
   --no-bootloader     partition, format and copy, but write no MBR
   -y, --yes           do not ask for confirmation (the disk IS erased)
   -h, --help          this text
@@ -441,6 +453,128 @@ install_bootloader() {
 }
 
 # ---------------------------------------------------------------------------
+# Accounts
+# ---------------------------------------------------------------------------
+
+# Read a password twice without echoing it. `stty -echo` rather than
+# `read -s`: both work under BusyBox ash, but the trap makes the
+# terminal recoverable if this is interrupted, which `read -s` alone
+# would not be -- a Ctrl-C mid-prompt otherwise leaves the console with
+# echo permanently off and no obvious way back.
+prompt_password() {
+    local label="$1" first="" second=""
+    PASSWORD=""
+    while : ; do
+        printf '  %s password: ' "$label" >&2
+        stty -echo 2>/dev/null || true
+        # shellcheck disable=SC2162
+        read first
+        stty echo 2>/dev/null || true
+        printf '\n' >&2
+
+        printf '  %s password (again): ' "$label" >&2
+        stty -echo 2>/dev/null || true
+        # shellcheck disable=SC2162
+        read second
+        stty echo 2>/dev/null || true
+        printf '\n' >&2
+
+        if [ -z "$first" ]; then
+            warn "empty password -- try again, or Ctrl-C to abort"
+            continue
+        fi
+        if [ "$first" != "$second" ]; then
+            warn "passwords did not match -- try again"
+            continue
+        fi
+        PASSWORD="$first"
+        return 0
+    done
+}
+
+set_target_password() {
+    local who="$1" pw="$2"
+    # chpasswd's own -R chroots for us, so this needs no working
+    # /proc or /dev inside the target -- and hashes with sha512
+    # rather than BusyBox's DES default, which truncates at 8
+    # characters and would silently make a long password weak.
+    printf '%s:%s\n' "$who" "$pw" | chpasswd -c sha512 -R "$MNT" ||
+        die "failed to set the password for '$who'"
+}
+
+create_user() {
+    [ -n "$NEW_USER" ] || return 0
+    local g
+
+    msg "Creating user '$NEW_USER' on the installed system"
+
+    # Created inside the target, not declared and left for first boot,
+    # so the machine is usable the moment it boots rather than after
+    # someone logs in as root to finish the job. The declaration below
+    # then matches what is already there, and `novi-state diff` on the
+    # installed system is clean rather than showing a user it is about
+    # to create.
+    chroot "$MNT" /bin/busybox adduser -D -s "$NEW_USER_SHELL" "$NEW_USER" ||
+        die "could not create user '$NEW_USER'"
+
+    for g in $(printf '%s' "$NEW_USER_GROUPS" | tr ',' ' '); do
+        if grep -q "^${g}:" "$MNT/etc/group"; then
+            chroot "$MNT" /bin/busybox addgroup "$NEW_USER" "$g" ||
+                warn "could not add '$NEW_USER' to group '$g'"
+        else
+            warn "group '$g' does not exist on the target -- skipped"
+        fi
+    done
+
+    if [ "$NO_PASSWORD" -eq 1 ]; then
+        warn "'$NEW_USER' has no password and cannot log in until one is set"
+    else
+        prompt_password "$NEW_USER"
+        set_target_password "$NEW_USER" "$PASSWORD"
+        PASSWORD=""
+    fi
+
+    # And declare it, so the account is part of the document that
+    # governs this machine rather than a fact about it nobody wrote
+    # down. The password is deliberately NOT declared -- system.conf is
+    # world-readable and meant to be committed to git.
+    if [ -x /usr/bin/novi-state ] && [ -f "$MNT/etc/novi/system.conf" ]; then
+        NOVI_STATE_FILE="$MNT/etc/novi/system.conf" \
+            /usr/bin/novi-state set "users.${NEW_USER}.shell" "$NEW_USER_SHELL" \
+            >/dev/null 2>&1 || warn "could not declare users.${NEW_USER}.shell"
+        NOVI_STATE_FILE="$MNT/etc/novi/system.conf" \
+            /usr/bin/novi-state set "users.${NEW_USER}.groups" \
+            "$(printf '%s' "$NEW_USER_GROUPS" | tr ',' '\n' | sort | tr '\n' ',' | sed 's/,$//')" \
+            >/dev/null 2>&1 || warn "could not declare users.${NEW_USER}.groups"
+    fi
+
+    info "user '$NEW_USER' created and declared"
+}
+
+set_root_password() {
+    [ "$SET_ROOT_PASSWORD" -eq 1 ] || return 0
+    msg "Setting the root password on the installed system"
+    prompt_password "root"
+    set_target_password root "$PASSWORD"
+    PASSWORD=""
+}
+
+# The shipped image has an empty root password on purpose -- an
+# installable live image nobody can log into is useless. An installed
+# machine is a different thing, and shipping one that way silently
+# would be indefensible.
+warn_if_root_passwordless() {
+    local field
+    field="$(awk -F: '$1 == "root" { print $2 }' "$MNT/etc/shadow" 2>/dev/null)"
+    [ -z "$field" ] || return 0
+    printf '\n' >&2
+    warn "root on the installed system has NO PASSWORD."
+    warn "Anyone at the console can log in as root. Fix it on first boot:"
+    warn "    passwd"
+    warn "or re-run this installer with --set-root-password."
+}
+
+# ---------------------------------------------------------------------------
 # Confirmation
 # ---------------------------------------------------------------------------
 
@@ -482,7 +616,7 @@ cmd_install() {
             die "$TARGET_DISK holds the live media this system is running from" ;;
     esac
 
-    for tool in fdisk mke2fs partprobe tar dd mount umount sync; do
+    for tool in fdisk mke2fs partprobe tar dd mount umount sync chroot chpasswd; do
         command -v "$tool" >/dev/null 2>&1 || die "missing required tool: $tool"
     done
 
@@ -493,12 +627,16 @@ cmd_install() {
     copy_system
     write_fstab
     set_hostname
+    create_user
+    set_root_password
     install_kernel
     if [ "$WITH_BOOTLOADER" -eq 1 ]; then
         install_bootloader "$TARGET_DISK"
     else
         info "--no-bootloader given, skipping the MBR"
     fi
+
+    warn_if_root_passwordless
 
     sync
     umount "$MNT" || warn "could not unmount $MNT cleanly"
@@ -526,6 +664,11 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --disk)      TARGET_DISK="${2:-}"; shift 2 ;;
         --hostname)  NEW_HOSTNAME="${2:-}"; shift 2 ;;
+        --user)          NEW_USER="${2:-}"; shift 2 ;;
+        --user-groups)   NEW_USER_GROUPS="${2:-}"; shift 2 ;;
+        --user-shell)    NEW_USER_SHELL="${2:-}"; shift 2 ;;
+        --no-password)   NO_PASSWORD=1; shift ;;
+        --set-root-password) SET_ROOT_PASSWORD=1; shift ;;
         --no-bootloader) WITH_BOOTLOADER=0; shift ;;
         -y|--yes)    ASSUME_YES=1; shift ;;
         -h|--help)   usage; exit 0 ;;

@@ -206,6 +206,58 @@ The DHCP hook writes the resolver to `/run/novi/resolv.conf`
 lease is runtime state, and the hostname has exactly one writer,
 `novi-state`.
 
+## Architecture: re-running a build stage must be safe
+
+RFC 0005 surfaced two bugs of the same shape, and the shape is the point:
+**a stage that is correct in `01..05` order can be destructive on a re-run,
+and both of these produced images that failed at boot with no build-time
+signal at all.**
+
+- `03-base.sh`'s "strip everything" pass ran `--strip-all` over every ELF in
+  the rootfs. On a `.ko` that removes `.symtab` and the module becomes
+  permanently unloadable. Harmless on a clean build (no modules exist yet);
+  on a re-run after `05-kernel.sh` it kills every module in the image — all
+  22 `modprobe` calls in `/init` failed, including `virtio_blk`, so no
+  `/dev/vda`, no live medium, PANIC. `/lib/modules` is now excluded.
+- BusyBox's `make install` creates `/sbin/init` → busybox. `04-s6.sh` deletes
+  it before installing s6-linux-init, so ordering saved a clean build; a
+  re-run of 03 handed PID 1 back to BusyBox and the next boot died with
+  "can't run '/etc/init.d/rcS'". Stage 03 now removes that symlink at the
+  source, and `16-s6-rc-db.sh` checks `/sbin/init` and repairs it.
+
+When touching any build stage, ask what it does to artifacts a *later* stage
+owns. `bash build.sh --from NN` exists and people will use it.
+
+## Architecture: users, and where secrets are not
+
+RFC 0005 (`docs/rfcs/0005-users-and-accounts.md`).
+
+`rootfs/etc/{passwd,group,shadow}` are repo content installed by
+`03-base.sh`, not heredocs: fixed GIDs (a squashed image's baked-in file
+modes depend on them) and the root password field are policy, and policy
+should show up in a diff. Their comment headers are safe — musl skips
+unparseable lines in all three, verified with a static musl
+`getpwnam()`/`getgrnam()` binary in a chroot.
+
+`users.<name>.shell` is the anchor key: declaring it creates the account,
+`absent` removes it. **Removing an account never deletes the home
+directory** — removing an account is a configuration change, deleting
+someone's files is not.
+
+**Configuration is declared; secrets are not.** No password hash goes into
+`system.conf`, which is world-readable and which this project tells people to
+commit to git. `/etc/shadow` (0600), `passwd`, `novi-settings`' Account
+panel and `novi-install --user` are the only writers. Accounts created by
+convergence start locked.
+
+`cmd_apply` converges in **passes** (bounded to 3), not one sweep, because
+keys are not independent: `users.X.groups` is not applicable until
+`users.X.shell` has created the account, and `state_keys` is sorted so
+`.groups` is visited first. One sweep left an account created with no
+groups and the next `diff` reporting drift the apply had just been asked to
+fix. Add a domain with an internal dependency and the passes handle it; do
+not encode ordering in the sort.
+
 ## Architecture: cross-toolchain bootstrap order
 
 `build/00-versions.sh` is sourced by every `build/*.sh` script and exports

@@ -66,6 +66,20 @@ run_target "${ROOTFS}/usr/bin/s6-linux-init-maker" \
 # left alone: they are the same binaries 04-s6.sh already installed,
 # and reinstalling PID 1 is not something a "re-read init/" stage
 # should be doing.
+#
+# It IS something this stage should check, though. A missing or
+# BusyBox-owned /sbin/init makes an image that dies immediately after
+# switch_root, and finding that out from a QEMU boot costs minutes;
+# finding it out here costs a `readlink`. Repairing it from the tree
+# just generated is then free, so do that rather than only complain.
+if [ ! -e "${ROOTFS}/sbin/init" ] || \
+   [ "$(readlink "${ROOTFS}/sbin/init" 2>/dev/null || true)" = "../bin/busybox" ]; then
+    echo "!!! /sbin/init is missing or is BusyBox's -- restoring s6-linux-init" >&2
+    for cmd in init halt poweroff reboot shutdown telinit; do
+        install -m 0755 "${BUILD_DIR}/s6-linux-init-gen/bin/${cmd}" \
+            "${ROOTFS}/sbin/${cmd}"
+    done
+fi
 rm -rf "${ROOTFS}/etc/s6-linux-init"
 mkdir -p "${ROOTFS}/etc/s6-linux-init"
 cp -a "${BUILD_DIR}/s6-linux-init-gen/env" \

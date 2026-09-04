@@ -1056,6 +1056,70 @@ lines, and `/var/log/messages` growing from 739 to 1106 lines across a
 reboot — logs that survive a power cycle, which is the difference
 between a log and a scrollback buffer.
 
+## 15. Users & Accounts
+
+RFC 0005. Novi had exactly one account -- `root`, with an empty
+password -- on the live image and on every machine installed from it.
+Defensible for a live ISO (an installable image nobody can log into is
+useless), indefensible for an installed machine.
+
+Three things were missing, not one: a group database (`/etc/group` held
+the single line `root:x:0:` -- no `tty` for getty to chown a terminal
+to, no `video`/`input` for a desktop session run as anyone but root, no
+`wheel`), a way to *declare* an account, and `/etc/shadow` in the build
+at all -- no stage had ever created it, so a genuinely clean build
+produced an image with no shadow file.
+
+`users.<name>.shell` is the anchor key: declaring it creates the
+account, `absent` removes it. Removing an account never deletes the
+home directory -- removing an account is a configuration change,
+deleting someone's files is not, and a declarative engine that quietly
+does the second while you asked for the first is one nobody should
+trust with root.
+
+**The rule this section establishes for the whole platform:
+configuration is declared; secrets are not.** No password hash goes
+into `system.conf` -- it is world-readable and §11 actively encourages
+committing it to git. NixOS permits `hashedPassword` in
+configuration.nix and warns about it; a project whose pitch is "commit
+your machine's configuration" cannot rely on a warning, the design has
+to not offer the footgun. Secrets keep their own 0600 store and their
+own tools, exactly as `novi-settings`' Account panel already did.
+
+`novi-install --user alice --set-root-password` creates the account
+*while installing* -- with a password (sha512, not BusyBox's DES
+default, which truncates at 8 characters and would silently make a long
+password weak), in `wheel,users,video,input,audio,seat` -- and then
+declares the same two keys in the new machine's `system.conf`. So the
+machine is usable on its first boot rather than after a root login,
+*and* the account is part of the document that governs it. If root is
+still passwordless when the install finishes, the installer says so
+loudly rather than shipping a machine anyone at the console owns.
+
+Adding this exposed a real flaw in the convergence engine: keys are not
+independent. `users.X.groups` is not applicable until `users.X.shell`
+has created the account, and `state_keys` is sorted, so `.groups` was
+visited first -- one sweep left the account created with no groups and
+the very next `diff` reported drift the `apply` had just been asked to
+fix. `apply` now converges in bounded passes, which generalizes to
+every future domain instead of encoding one special case in a sort
+order.
+
+It also exposed two build bugs of the same shape, both latent re-run
+hazards, both producing images that failed at boot with no build-time
+signal: `03-base.sh` stripped kernel modules with `--strip-all`
+(removing `.symtab`, leaving every module unloadable -- all 22 of
+`/init`'s `modprobe` calls failed, no `virtio_blk`, no `/dev/vda`,
+PANIC), and it handed PID 1 back to BusyBox init (`can't run
+/etc/init.d/rcS`). Clean `01..05` ordering hid both. `bash build.sh
+--from NN` exists and people will use it.
+
+Verified live: a declared account created with every group in one
+`apply`, created locked, `su - alice` into a real login shell after
+`passwd`, removal leaving `/home/alice` in place, `rollback` restoring
+account and groups, and a cold boot from an installed disk **logging in
+as alice** with the password the installer set.
+
 ## Status Summary
 
 | # | Area | State |
@@ -1074,25 +1138,29 @@ between a log and a scrollback buffer.
 | 12 | Security tooling / pentest track | 🔴 Open — packaging work, blocked on §2/§8/§9 |
 | 13 | Installation & persistence | ✅ Installable and QEMU-verified end to end (install → cold boot from disk via GRUB in the MBR → marker file survives a power cycle → live ISO unregressed); BIOS/MBR + journal-less ext2 + root-only are the stated v1 limits, UEFI/GPT and e2fsprogs are next |
 | 14 | Networking & logging | ✅ DHCP + resolver as a supervised service with a `network.*` state domain, syslogd/klogd replacing a logger that had never once run; verified live and installed, including logs surviving a reboot. Static IP, WiFi and DHCPv6 are roadmap |
+| 15 | Users & accounts | ✅ `users.*` domain, a real group database, installer-created accounts with passwords; "configuration is declared, secrets are not" is now a stated platform rule. Non-root `novi-settings`, `users.*.home`/`.uid`, and undeclared-user removal are roadmap |
 
-**Next concrete step: real users.** With RFC 0003 and RFC 0004 landed,
-a Novi machine installs, remembers, reaches the network and keeps a
-log. It still has exactly one account, `root`, on both the live image
-and every machine installed from it — there is no `adduser` path, no
-`users.*` state domain, and nothing in the installer that asks. That is
-the last thing between Novi and "an OS a person could be handed",
-and it is also a security position nobody should ship.
+**Next concrete step: a package repository.** Novi now installs,
+remembers, reaches the network, keeps a log, and has real users. `pkg`
+and `mkpkg` work and are live-verified against a real dependency chain
+-- and there is still nothing to point them at. Everything about §2 and
+§3 (the app model, two update tracks, on-device rollback of *software*
+rather than just configuration) is behind that one gap.
 
 Ordered honestly, what is left:
 
-1. **Real users** — a `users.*` domain (account, shell, groups;
-   password hashes stay in `/etc/shadow` at 0600, never in the
-   world-readable document), plus the installer creating one.
-2. **A package repository** — `pkg` works and now has a transport;
-   there is still nothing to point it at.
-3. **More state domains** — `packages.*`, keybindings, static IP,
-   WiFi.
-4. **UEFI/GPT install and a journalled filesystem** — the two stated
+1. **A package repository** -- somewhere to fetch from, an index `pkg
+   search` can query, and signing (§9 says signed-by-default is still
+   open).
+2. **`packages.*` state domain** -- installed software declared in the
+   same document as everything else. This is the piece that makes
+   §11's claim about the whole machine true rather than the machine's
+   configuration only. `novi-state`'s GUI calls block the Wayland
+   event loop, and a package install is the first converger slow enough
+   for that to matter -- see CLAUDE.md.
+3. **The remaining `network.*` work** -- static IPv4, WiFi (needs a
+   supplicant in the base image), DHCPv6.
+4. **UEFI/GPT install and a journalled filesystem** -- the two stated
    limits of RFC 0003's v1.
 
 ---

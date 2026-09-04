@@ -217,6 +217,89 @@ observe_network() {
     esac
 }
 
+# The users domain.
+#
+#   users.<name>.shell   = /bin/sh | absent
+#   users.<name>.groups  = wheel,video,input | none
+#
+# `shell` is the anchor: declaring one creates the account, and
+# `absent` removes it. Every account has exactly one shell, so there is
+# no separate "should this user exist" key to get out of step with it.
+#
+# What is NOT here is the password. /etc/novi/system.conf is
+# world-readable and this project actively encourages committing it to
+# git; a hash has no business in either. Secrets keep their own 0600
+# store (/etc/shadow) and their own tools (`passwd`, novi-settings'
+# Account panel) -- the same exception novi-settings already makes, for
+# the same reason. A new account is created locked; someone with root
+# sets its password out of band.
+#
+# Usernames may not contain a dot: the key format is dotted and there
+# is no escaping in this document. Checked rather than assumed to be
+# true, because the failure mode is silently managing the wrong user.
+user_name_of()  { local r="${1#users.}"; printf '%s' "${r%%.*}"; }
+user_attr_of()  { local r="${1#users.}"; case "$r" in *.*) printf '%s' "${r#*.}" ;; *) printf '' ;; esac; }
+
+user_name_valid() {
+    case "$1" in
+        ''|*[!a-z0-9_-]*) return 1 ;;
+        [!a-z_]*)         return 1 ;;
+    esac
+    return 0
+}
+
+# The shell field from /etc/passwd, or "absent". Read from the file
+# rather than through getent(1) -- musl has no NSS, so /etc/passwd IS
+# the database and nothing else can be hiding an account.
+observe_user_shell() {
+    local name="$1" line
+    line="$(grep "^${name}:" /etc/passwd 2>/dev/null | head -n 1)"
+    if [ -z "$line" ]; then
+        printf 'absent'
+        return 0
+    fi
+    printf '%s' "$line" | cut -d: -f7
+}
+
+# Supplementary groups, sorted and comma-joined, or "none". Sorted so
+# that declaring "video,wheel" and "wheel,video" are the same
+# declaration -- an ordering difference is not drift.
+observe_user_groups() {
+    local name="$1" out
+    out="$(awk -F: -v u="$name" '
+        {
+            n = split($4, m, ",")
+            for (i = 1; i <= n; i++) if (m[i] == u) print $1
+        }' /etc/group 2>/dev/null | sort | tr '\n' ',' | sed 's/,$//')"
+    if [ -z "$out" ]; then
+        printf 'none'
+    else
+        printf '%s' "$out"
+    fi
+}
+
+observe_user() {
+    local key="$1" name attr
+    name="$(user_name_of "$key")"
+    attr="$(user_attr_of "$key")"
+    user_name_valid "$name" || { printf 'invalid-username'; return 0; }
+    case "$attr" in
+        shell) observe_user_shell "$name" ;;
+        groups)
+            # With no account there is nothing to be out of step with,
+            # and users.<name>.shell already reports that as drift.
+            # Reporting it twice would make one missing user look like
+            # two problems.
+            if [ "$(observe_user_shell "$name")" = "absent" ]; then
+                state_get "$key"
+            else
+                observe_user_groups "$name"
+            fi
+            ;;
+        *) printf 'unmanaged' ;;
+    esac
+}
+
 # Observed value for any declared key. An unrecognized key observes as
 # "unmanaged" rather than erroring: an unknown key in the document is a
 # forward-compatibility case (a newer novi-state, a hand-written note),
@@ -228,6 +311,7 @@ observe_key() {
         hostname)   observe_hostname ;;
         services.*) observe_service "${key#services.}" ;;
         network.*)  observe_network "${key#network.}" ;;
+        users.*)    observe_user "$key" ;;
         # `state.*` keys configure this engine itself (see cmd_boot),
         # not the machine -- there is no external fact to go and look
         # at, so the declared value IS the observation and they never
@@ -298,12 +382,93 @@ converge_network() {
     esac
 }
 
+converge_user_shell() {
+    local name="$1" want="$2" have
+    have="$(observe_user_shell "$name")"
+
+    if [ "$want" = "absent" ]; then
+        [ "$have" = "absent" ] && return 0
+        command -v deluser >/dev/null 2>&1 || die "deluser not found"
+        # The home directory is deliberately left behind. Removing an
+        # account is a configuration change; deleting someone's files
+        # is not, and a declarative engine that quietly does the second
+        # while you asked for the first is one nobody should trust with
+        # root.
+        deluser "$name" || die "failed to remove user '$name'"
+        info "removed user '$name' (home directory left in place)"
+        return 0
+    fi
+
+    [ -x "$want" ] || warn "user '$name': shell '$want' is not executable here"
+
+    if [ "$have" = "absent" ]; then
+        command -v adduser >/dev/null 2>&1 || die "adduser not found"
+        # -D: do not prompt for a password. The account is created
+        # locked on purpose -- see the domain comment above.
+        adduser -D -s "$want" "$name" || die "failed to create user '$name'"
+        info "created user '$name' (locked -- set a password with: passwd $name)"
+        return 0
+    fi
+
+    # Change the shell in place. There is no chsh in BusyBox, and awk
+    # over the whole file is what keeps the comment header and every
+    # other line byte-identical; a temp file plus mv keeps it atomic,
+    # so an interrupted apply cannot leave the system with a truncated
+    # /etc/passwd and no way to resolve root.
+    awk -F: -v OFS=: -v u="$name" -v sh="$want" \
+        '$1 == u { $7 = sh } { print }' /etc/passwd > /etc/passwd.novi-new ||
+        die "failed to rewrite /etc/passwd"
+    chmod 644 /etc/passwd.novi-new
+    mv /etc/passwd.novi-new /etc/passwd || die "failed to install /etc/passwd"
+}
+
+converge_user_groups() {
+    local name="$1" want="$2" have g
+    if [ "$(observe_user_shell "$name")" = "absent" ]; then
+        warn "user '$name' does not exist -- not setting its groups"
+        return 0
+    fi
+    have="$(observe_user_groups "$name")"
+    [ "$want" = "none" ] && want=""
+    [ "$have" = "none" ] && have=""
+
+    for g in $(printf '%s' "$want" | tr ',' ' '); do
+        if ! printf '%s' ",$have," | grep -q ",$g,"; then
+            grep -q "^${g}:" /etc/group || {
+                warn "group '$g' does not exist -- not adding '$name' to it"
+                continue
+            }
+            addgroup "$name" "$g" || warn "could not add '$name' to '$g'"
+        fi
+    done
+
+    for g in $(printf '%s' "$have" | tr ',' ' '); do
+        if ! printf '%s' ",$want," | grep -q ",$g,"; then
+            delgroup "$name" "$g" || warn "could not remove '$name' from '$g'"
+        fi
+    done
+}
+
+converge_user() {
+    local key="$1" want="$2" name attr
+    name="$(user_name_of "$key")"
+    attr="$(user_attr_of "$key")"
+    user_name_valid "$name" ||
+        die "'$key': '$name' is not a usable user name (lowercase letters, digits, - and _; no dots)"
+    case "$attr" in
+        shell)  converge_user_shell  "$name" "$want" ;;
+        groups) converge_user_groups "$name" "$want" ;;
+        *)      warn "no converger for '$key' -- declared but not applied" ;;
+    esac
+}
+
 converge_key() {
     local key="$1" want="$2"
     case "$key" in
         hostname)   converge_hostname "$want" ;;
         services.*) converge_service "${key#services.}" "$want" ;;
         network.*)  converge_network "${key#network.}" "$want" ;;
+        users.*)    converge_user "$key" "$want" ;;
         # Nothing to converge: a state.* key is read by this engine when
         # it next runs, so declaring it is already the whole effect.
         state.*)    : ;;
@@ -475,22 +640,49 @@ cmd_apply() {
     gen="$(snapshot_generation)"
     msg "snapshot saved as generation $gen"
 
-    for key in $(state_keys); do
-        # Re-primed each iteration because the previous converge may
-        # have moved more than the one service it named: s6-rc brings
-        # up a service's declared dependencies with it (novi-shell
-        # pulls seatd), so a list cached before that is stale for
-        # every key after it.
-        service_cache_load
-        want="$(state_get "$key")"
-        have="$(observe_key "$key")"
-        [ "$want" = "$have" ] && continue
-        info "$key: $have -> $want"
-        converge_key "$key" "$want"
-        SERVICE_LIST_LOADED=0
-        changed=$((changed + 1))
+    # Converge in passes, not one sweep.
+    #
+    # Keys are not independent: some only become *applicable* once
+    # another key has been applied. `users.alice.groups` is the worked
+    # example -- with no account there is nothing to put in a group, so
+    # it reads as converged, and `state_keys` is sorted, so `.groups`
+    # is visited before the `.shell` key that creates the account. One
+    # sweep left the account created and its groups unset, and the very
+    # next `diff` reported drift the apply had just been asked to fix.
+    # Confirmed live before it was fixed.
+    #
+    # Re-running until nothing changes is the honest answer to that,
+    # and it generalizes to every future domain instead of encoding
+    # one special case in the sort order. Bounded, because a converger
+    # that never satisfies its own observer would otherwise spin
+    # forever, and saying so is more useful than hanging.
+    local pass=0 total=0
+    while [ "$pass" -lt 3 ]; do
+        pass=$((pass + 1))
+        changed=0
+        for key in $(state_keys); do
+            # Re-primed each iteration because the previous converge may
+            # have moved more than the one service it named: s6-rc brings
+            # up a service's declared dependencies with it (novi-shell
+            # pulls seatd), so a list cached before that is stale for
+            # every key after it.
+            service_cache_load
+            want="$(state_get "$key")"
+            have="$(observe_key "$key")"
+            [ "$want" = "$have" ] && continue
+            info "$key: $have -> $want"
+            converge_key "$key" "$want"
+            SERVICE_LIST_LOADED=0
+            changed=$((changed + 1))
+        done
+        total=$((total + changed))
+        [ "$changed" -eq 0 ] && break
     done
-    msg "applied $changed change(s)"
+
+    if [ "$changed" -ne 0 ]; then
+        warn "state did not settle after $pass passes -- 'novi-state diff' will show what is still drifting"
+    fi
+    msg "applied $total change(s)"
 }
 
 # Converge at boot, so the document is what the machine actually boots
@@ -595,6 +787,8 @@ Keys:
   network.dhcp                    on | off  (the DHCP client service)
   network.interface               auto | <name>  (which NIC to use)
   network.dns                     auto | 1.1.1.1,9.9.9.9
+  users.<name>.shell              /bin/sh | absent  (declares the account)
+  users.<name>.groups             wheel,video,input | none
   state.apply_on_boot             on | off  (converge on every boot)
 
 Recovery:
