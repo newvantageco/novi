@@ -159,6 +159,16 @@ bash build.sh --base-only     # stop after the kernel: bootable console, nothing
 bash build.sh --from 15       # resume; stages are discovered, so NN is just a number
 ```
 
+**Do the short build first.** `--base-only` stops after the kernel and
+gets you a bootable console ISO in a fraction of the time, which proves
+your host has every tool the pipeline needs before you commit hours to
+the full run. `mkiso.sh` warns that there is no package repository to
+put on the image and builds the ISO anyway, which is what you want here.
+
+```bash
+bash build.sh --base-only && bash scripts/mkiso.sh && bash scripts/mkvm.sh
+```
+
 **One gotcha worth knowing:** `mkiso.sh` reuses an existing
 `build/initramfs.cpio.gz` and only builds one when it is missing. After
 any change under `init/` you need both steps, or you will boot the old
@@ -204,8 +214,26 @@ is an absolute path, so it lands inside the Linux filesystem and wants
 ~13 GB.
 
 A Linux VM on Windows (VirtualBox, VMware, Hyper-V) works equally well
-and is more predictable if you would rather not deal with WSL — you are
-running a VM to test the result anyway.
+and is more predictable if you would rather not deal with WSL. Give it
+4+ vCPUs, 8 GB of RAM (GCC is the memory-hungry part) and a 60 GB
+thin-provisioned disk.
+
+If you build inside a VM and want to *test* inside the same VM, that is
+QEMU inside a VM. Three ways, in order of preference:
+
+1. **Copy the ISO out to the host and boot it as a second VM.** No
+   nesting, full speed, and it is closest to how the image will really
+   be used.
+2. **Enable nested virtualisation** on the build VM (VirtualBox: *Enable
+   Nested VT-x/AMD-V*; Hyper-V:
+   `Set-VMProcessor -ExposeVirtualizationExtensions $true`; VMware:
+   *Virtualize Intel VT-x/EPT*), and `mkvm.sh` will pick up `/dev/kvm`
+   and say so.
+3. **Do nothing.** `mkvm.sh` detects the missing `/dev/kvm`, warns, and
+   falls back to software emulation. It boots; it is just slow.
+
+On a headless VM use `--display none`, which puts the serial console on
+your terminal — every test in this project was run that way.
 
 ### Testing it
 
