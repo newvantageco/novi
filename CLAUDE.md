@@ -330,6 +330,15 @@ Novi, which compiles and runs its own C and C++.
   installed, 98 MB compressed). It ships in the repository on the ISO
   because until a repository is published that medium is the only
   mirror there is.
+- **Headers and `.pc` files are a package (`novi-headers`), not base
+  content.** The split had been moving libwayland/libinput/libwlroots
+  out and leaving 5.6 MB of their headers behind, describing an API the
+  console-only base could not link against even in principle. They now
+  go through `DATA_FILES` in `pkgsplit.py`, and `novi-devel` depends on
+  them — so a compiler and something to compile against arrive
+  together. One package rather than a `-dev` per library is deliberate
+  coarseness; doing it properly means deriving ownership from each
+  `.pc` file's `-lfoo`, not hand-maintaining a second table.
 - **"Novi can compile C" is not "Novi can rebuild itself."** That needs
   autotools, git, Python and a kernel build, none of which are packaged.
   Do not overstate this one.

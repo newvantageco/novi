@@ -166,10 +166,20 @@ And, still: none of this has run on physical hardware.
   libtool, m4, pkg-config, `git`, and Python. That turns "can compile a
   file" into "can build a package", and it is the shortest path to
   someone other than this project's authors being able to contribute.
-- **A `-dev` convention for the existing libraries.** `libinput`,
-  `wayland`, `pixman` and the rest ship their runtime `.so` and no
-  headers, so nothing can be compiled *against* them yet. That is a
-  change to `pkgsplit`, not new builds.
+- **Per-library `-dev` packages.** Headers and `.pc` files are now
+  packaged (`novi-headers`, 555 files, pulled in by `novi-devel`) and
+  removed from the base image, where 5.6 MB of them had been sitting
+  orphaned — the split moved the libraries out and left their headers
+  behind. Verified on a booted machine: `/usr/include` absent from the
+  base, present after `pkg install novi-devel`, musl's `stdio.h`, the
+  kernel's `linux/input.h` and alsa's `sys/asoundlib.h` coexisting, and
+  a program `#include <alsa/asoundlib.h>` compiled with `-lasound`
+  printing `alsa lib version: 1.2.12`. **Novi built a program against a
+  library Novi ships.** What is left is granularity: one package for
+  every library's headers, rather than a `-dev` per library. Doing that
+  properly means deriving ownership from each `.pc` file's `-lfoo`
+  (which the ELF graph already maps to a package) instead of
+  hand-maintaining a second table.
 - **`gdb`**, disabled here because it was not needed to prove the
   compiler works.
 - **Rebuilding the toolchain with itself**, which is the real

@@ -239,7 +239,7 @@ if [ "$ONLY" = "all" ] || [ "$ONLY" = "repo" ]; then
     # A meta-package, the same shape as novi-desktop: one name that
     # pulls the whole thing in, so "make this machine able to build
     # software" is one command rather than four.
-    files="$(stage_pkg novi-devel "${GCC_VERSION}" "musl-dev,binutils,gcc,make" "Everything needed to build software on Novi itself")"
+    files="$(stage_pkg novi-devel "${GCC_VERSION}" "musl-dev,binutils,gcc,make,novi-headers" "Everything needed to build software on Novi itself")"
     mkdir -p "${files}/usr/share/doc/novi-devel"
     cat > "${files}/usr/share/doc/novi-devel/README" <<'DOC'
 novi-devel — Novi can build its own software.

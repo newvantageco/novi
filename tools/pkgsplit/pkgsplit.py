@@ -137,6 +137,30 @@ PACKAGE_TABLE = [
 # Data directories that belong to a package but contain no ELF, so the
 # dependency graph cannot find them. Each is (package, rootfs path).
 DATA_FILES = [
+    # Development files for every library this system ships.
+    #
+    # These had been going nowhere: the split moved libwayland,
+    # libwlroots, libinput and the rest out of the base image and left
+    # 5.6 MB of their headers and pkg-config files behind, describing
+    # an API the console-only base could not link against even in
+    # principle. Orphaned weight, and the reason nothing could be
+    # compiled against any of these once RFC 0015 put a compiler on the
+    # machine.
+    #
+    # One package rather than a `-dev` per library, and that is a
+    # deliberate coarseness, not an oversight: splitting them properly
+    # means mapping each header directory and .pc file to its owning
+    # library, and the honest way to do that is to derive it (a .pc
+    # file's `-lfoo` names the library the ELF graph already assigns)
+    # rather than hand-maintain a second table. Worth doing; not worth
+    # doing badly first. §17's "finer-grained packages" roadmap item.
+    #
+    # Note this takes the alsa and libnl headers too, whose libraries
+    # DO stay in the base. That is correct: a header is useless without
+    # a compiler, the compiler is a package, and the base has neither.
+    ("novi-headers", "usr/include"),
+    ("novi-headers", "usr/lib/pkgconfig"),
+
     ("fontconfig", "etc/fonts"),
     ("fontconfig", "usr/share/fontconfig"),
     ("fonts-jetbrains-mono", "usr/share/fonts"),
@@ -153,6 +177,7 @@ META_PACKAGES = [
 
 EXTRA_PACKAGE_DESCRIPTIONS = {
     "fonts-jetbrains-mono": ("JETBRAINS_MONO", "JetBrains Mono, the default terminal font"),
+    "novi-headers": ("OS", "Headers and pkg-config files for the libraries Novi ships"),
 }
 
 
