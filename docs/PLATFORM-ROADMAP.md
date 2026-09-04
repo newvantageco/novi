@@ -1701,6 +1701,64 @@ path is beyond what this rig can settle, and real firmware re-arms the
 event on resume -- so a physical laptop *probably* does not have this,
 which is one more thing for the first real boot to check.
 
+## 24. Service health, separate from drift
+
+RFC 0014. `s6-rc -a list` saying a longrun is "up" means *supervised
+and wanted up*. It has now hidden four separate bugs in four different
+subsystems -- syslog crash-looping for its entire existence and the
+network readiness race (§14), wpa_supplicant exiting on an option it
+was not compiled with (§19), acpid delivering nothing after a resume
+(§23) -- and every one presented as a machine `novi-state diff` called
+fully converged. Three were found chasing a different symptom; the
+fourth only because a test happened to read the log.
+
+"diff should notice a crash-looping longrun" has sat on this roadmap
+since §14 with a note that the obvious implementation reintroduces the
+boot race. That note is right and it is not the whole objection. A
+longrun that has just started is indistinguishable from one that keeps
+dying, so putting this in `observe_service` would have boot convergence
+restart the service it had just started. But the deeper problem is
+shape: drift means "the machine does not match the document and `apply`
+can fix it", and a crash-looping service *matches the document
+perfectly* -- it is declared on, and the engine is keeping it up. What
+is broken is the service, and no amount of applying fixes a bug in a
+run script. Folding the two together would make `apply` promise what it
+cannot deliver and leave `diff` unable to reach zero on an affected
+machine, destroying the drift signal for everything else.
+
+So: two questions, two commands. `novi-state diff` still answers "does
+the machine match the document" and still exits 1 only on drift.
+`novi-state health` answers "are the services actually doing their
+jobs" and exits 1 when one is not. `diff` and boot convergence print a
+note without touching exit status, so a converged-but-broken machine
+stops being able to tell only the flattering half of the truth.
+
+The primitives are `s6-svstat -o up,wantedup,ready,updownfor` and
+`s6-svdt`, both of which shipped with s6 from the beginning and neither
+of which anything had ever called. The death tally alone is not the
+signal -- a service that died once last week and has been up since is
+fine -- it is the tally together with how long the current run has
+lasted: `DOWN` (wanted up, isn't), `CRASHLOOP` (deaths, and up under a
+minute), `NOTREADY` (up over a minute having never signalled the
+readiness it declares, which is the syslog bug as a category).
+
+Verified by reproducing the original bugs on purpose in a booted
+machine. Rewriting a live service's `run` to `exit 1`:
+`s6-rc -a list | grep -c klog` still returns 1 -- the same lie, in the
+same words -- while `novi-state health` reports `klog DOWN 13-deaths`
+and exits 1, and `diff` correctly still exits 0 with
+`WARN: converged, but a service is not doing its job`. The tally
+reading 13 on one call and 14 seconds later is the loop itself showing
+up in the output. A `run` of `sleep 6; exit 1` (the wpa_supplicant
+shape, where the service genuinely is up with a pid when you look)
+gives `CRASHLOOP 3-deaths-up-5s`; a service declaring
+`notification-fd 3` that never writes to it gives `NOTREADY up-75s`.
+
+**Nothing consumes this yet**, and that is the next piece: the panel
+could show a failing service, `novi-install` could refuse to call an
+install finished, and `/run/uncaught-logs/current` holds the *reason*
+that would turn "klog is down" into "klog is down because ...".
+
 ## Status Summary
 
 | # | Area | State |
@@ -1728,6 +1786,7 @@ which is one more thing for the first real boot to check.
 | 21 | Hardware enablement | ✅ Generic modalias-driven driver loading (`novi-hwdetect`, in the initramfs before the root search), 699 MB of curated firmware + `regulatory.db` + Intel SOF, ALSA with `alsactl init` at boot, `novi-power` and a `power.governor` state domain, a laptop-oriented kernel config, and a self-signed `bootx64.efi`. Verified in QEMU on drivers no list names (three virtio modules + an e1000 lease) — **but never once on physical hardware**, which is the whole subject. Firmware-as-packages, a real shim, hotplug, lid/hotkeys and Mesa are roadmap |
 | 22 | Hotplug | ✅ Supervised uevent listener (busybox `uevent`, 128 MB netlink buffer) + `novi-hotplug`: §21's modalias rule against the kernel's event stream, syslog notes, `alsactl init` for late-arriving sound cards. QMP-verified at runtime — a driver in no list loading on plug, a USB stick mounting and reading back, clean removal. Automount (needs policy), per-interface DHCP and a desktop that notices are roadmap |
 | 23 | Power events & shutdown | ✅ acpid wired to lid and power button, `power.lid`/`power.button` declared and read at event time (with invalid values surfacing as drift, since these keys cannot drift and so are never converged). Found and fixed a bug present since the beginning: **the machine could not shut down while anyone was logged in** — an interactive shell ignores SIGTERM and `timeout-down` was unset, so s6-rc waited forever and shutdownd's `wait_pid()` never returned. Suspend/resume now proven. Power-button-after-S3 is broken in QEMU, traced to a latched ACPI status bit below all of our code |
+| 24 | Service health | ✅ `novi-state health` — `DOWN`/`CRASHLOOP`/`NOTREADY` from `s6-svstat` + `s6-svdt`, closing a blind spot that had hidden four bugs across §14/§19/§23. Deliberately NOT folded into `diff`: a crash-looping service matches the document, and `apply` cannot fix a run script, so drift and health are separate questions with separate exit codes. All four states verified by reproducing the original bugs on a booted machine. Nothing consumes the signal yet (panel, installer, log excerpts) |
 
 **Next concrete step: write the ISO to a USB stick and boot a real
 machine.** This is no longer a development task, and that is the point.
@@ -1767,10 +1826,11 @@ Ordered honestly, what is left after that:
    laptop's decisions, and a desktop that can ask before suspending.
 7. **Mesa**, for GPU acceleration. The compositor renders in software,
    which will show on a high-resolution panel.
-8. **`novi-state diff` should notice a crash-looping longrun** -- three
-   separate bugs have now hidden behind `s6-rc -a list` reporting
-   "wanted up". Needs its own design; the obvious fix reintroduces a
-   boot race.
+8. **Something should consume `novi-state health`** -- the signal
+   exists now (§24) and nothing reads it. The panel showing a failing
+   service, the installer refusing to call an install finished, and
+   the failing service's own last log lines are what would make it
+   visible without someone thinking to ask.
 
 ---
 

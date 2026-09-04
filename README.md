@@ -235,6 +235,23 @@ because every test issued `poweroff` and then killed the VM ten
 seconds later without checking. See
 [RFC 0013](docs/rfcs/0013-power-events.md).
 
+And it can now tell you when a service is lying to it. `s6-rc` saying
+a service is "up" only means *supervised and wanted up* — a distinction
+that had hidden four separate bugs here, each on a machine that
+reported itself fully converged:
+
+```console
+$ novi-state health
+syslog  ok up-1403s
+klog    CRASHLOOP 3-deaths-up-5s
+network NOTREADY up-75s
+```
+
+That is deliberately a different question from `novi-state diff`, and
+a different exit code: a crash-looping service *matches* the declared
+state, and no amount of applying fixes a bug in a service's own
+script. See [RFC 0014](docs/rfcs/0014-service-health.md).
+
 **Stated plainly: none of it has been run on a physical machine yet.**
 Every claim in this repository is QEMU-verified, and §21 is exactly the
 part QEMU cannot answer. See
@@ -363,6 +380,7 @@ HOME_URL="https://novilinux.org"
 - [x] Hardware enablement (`novi-hwdetect`, firmware, ALSA, power, RFC 0011)
 - [x] Hotplug — devices that arrive after boot (`novi-hotplug`, RFC 0012)
 - [x] Lid, power button, and a shutdown that finishes (RFC 0013)
+- [x] `novi-state health` — "up" is not "working" (RFC 0014)
 - [ ] **Boot it on real hardware** ← next, and nothing here replaces it
 - [ ] A published repository + offline release key
 - [ ] A Microsoft-signed shim (real Secure Boot); WPA3 (needs mbedTLS)

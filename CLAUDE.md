@@ -261,6 +261,38 @@ RFC 0013 (`docs/rfcs/0013-power-events.md`).
   incrementing. Do not "fix" this by restarting acpid on resume — the
   event never reaches the input layer at all.
 
+## Architecture: "up" is not "working"
+
+RFC 0014 (`docs/rfcs/0014-service-health.md`). `s6-rc -a list` saying a
+longrun is up means *supervised and wanted up*, and that has now hidden
+four bugs (syslog and the network readiness race in RFC 0004,
+wpa_supplicant in RFC 0009, acpid after a resume in RFC 0013) — every
+one of them on a machine `novi-state diff` called converged.
+
+- **`novi-state health` answers this; `diff` deliberately does not.**
+  Two reasons, and the second is the important one. (1) A longrun that
+  has just started is indistinguishable from one that keeps dying, so
+  folding this into `observe_service` would make boot convergence
+  restart the service it just started — RFC 0004's race, from a new
+  direction. (2) A crash-looping service *matches the document*: it is
+  declared on and the engine is keeping it up. Drift means "apply can
+  fix it", and `apply` cannot fix a bug in a run script — so `diff`
+  would never reach zero on that machine and the drift signal would
+  become useless for everything else.
+- **`s6-svstat -o up,wantedup,ready,updownfor` and `s6-svdt` are the
+  primitives**, and both shipped with s6 from the start — nothing had
+  ever called them.
+- **The death tally alone is not the signal.** A service that died once
+  last week and has been up since is fine. It is the tally *together
+  with* the current run's length: `CRASHLOOP` is deaths > 0 and up for
+  under 60s.
+- **`NOTREADY` is the RFC 0004 syslog bug as a category**: up for over
+  60s having never signalled the readiness it declares.
+- `diff` and `boot` print a note without changing exit status. The boot
+  check is deliberately incomplete — it runs seconds after `s6-rc
+  change` returns, so a service about to crash-loop may not have died
+  yet. It reports what is already true, not what is about to be.
+
 ## Architecture: installation splits `grub-install` in half
 
 RFC 0003 (`docs/rfcs/0003-installation-and-persistence.md`). The installed

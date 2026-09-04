@@ -765,9 +765,31 @@ cmd_diff() {
     done
     if [ "$drift" -eq 0 ]; then
         msg "system matches declared state"
+        diff_health_note
         return 0
     fi
+    diff_health_note
     return 1
+}
+
+# "Converged" and "working" are different claims, and this engine used
+# to only ever make the first one while sounding like both. A machine
+# whose syslog has been crash-looping since boot matches its declared
+# state exactly -- so say so, and then say the other thing too.
+#
+# It does not touch the exit status: `apply` cannot fix a service that
+# is broken, so making drift-free-but-unhealthy exit 1 would mean
+# `apply && diff` could never succeed on such a machine. `novi-state
+# health` is the command with the failing exit code.
+diff_health_note() {
+    local problems
+    problems="$(health_problems)"
+    [ -n "$problems" ] || return 0
+    warn "converged, but a service is not doing its job:"
+    printf '%s\n' "$problems" | while IFS= read -r l; do
+        [ -n "$l" ] && printf '     %s\n' "$l" >&2
+    done
+    warn "run 'novi-state health' for the full picture"
 }
 
 cmd_apply() {
@@ -857,6 +879,7 @@ cmd_apply() {
 # `state.apply_on_boot = off` in the document turns it off the ordinary
 # way, for anyone who wants convergence to stay a manual act.
 cmd_boot() {
+    local problems
     if [ -r /proc/cmdline ] && grep -qw 'novi.state=off' /proc/cmdline; then
         msg "boot convergence disabled on the kernel command line"
         return 0
@@ -880,6 +903,24 @@ cmd_boot() {
     # failure becomes a visible warning on the console and in the log,
     # and boot carries on to a usable login prompt.
     ( cmd_apply ) || warn "boot convergence failed -- continuing boot anyway"
+
+    # A service that is supervised and failing is invisible in
+    # everything above -- it matches the declared state perfectly. Say
+    # it here, where a laptop that has just come up with a broken
+    # service can say so on its own console.
+    #
+    # This is an early look and an honest one: it runs seconds after
+    # `s6-rc change` returned, so a service that is going to crash-loop
+    # may not have died yet and will not be caught. It reports what is
+    # already true, not what is about to be. `novi-state health` at any
+    # later moment is the complete answer.
+    problems="$(health_problems 2>/dev/null || true)"
+    if [ -n "$problems" ]; then
+        warn "a service is supervised but not doing its job:"
+        printf '%s\n' "$problems" | while IFS= read -r l; do
+            [ -n "$l" ] && printf '     %s\n' "$l" >&2
+        done
+    fi
     return 0
 }
 
@@ -929,6 +970,10 @@ Usage:
   novi-state get <key>            print one declared value
   novi-state set <key> <value>    declare a value (does not apply it)
   novi-state diff                 declared vs. actual (exit 1 if drifted)
+  novi-state health               are the services actually running?
+                                  (exit 1 if one is supervised but failing;
+                                  a separate question from drift -- see
+                                  RFC 0004 and the comment above cmd_health)
   novi-state apply [--dry-run]    make actual match declared
   novi-state history              list saved generations
   novi-state rollback [gen]       restore a generation and apply it
@@ -955,6 +1000,124 @@ EOF
     exit 1
 }
 
+# ---------------------------------------------------------------------------
+# Service health -- deliberately NOT part of diff
+# ---------------------------------------------------------------------------
+#
+# `s6-rc -a list` reporting a longrun "up" means "supervised and wanted
+# up". It does not mean running, and it has now hidden four separate
+# bugs in this project: syslog crash-looping for its entire existence
+# (RFC 0004), the network readiness race (RFC 0004), wpa_supplicant
+# exiting on an option it was not compiled with (RFC 0009), and acpid
+# delivering nothing after a resume (RFC 0013). Every one of them
+# showed a converged machine in `novi-state diff`.
+#
+# The standing roadmap item said "diff should notice a crash-looping
+# longrun", and doing that literally is a trap: a service that has just
+# been started is momentarily indistinguishable from one that keeps
+# dying, so convergence at boot would call it drift and restart the
+# service it had just started -- the exact loop RFC 0004's
+# notification-fd fix was written to end, reintroduced from a new
+# direction.
+#
+# It is also the wrong shape. Drift means "the machine does not match
+# the document, and apply can fix it". A crash-looping service matches
+# the document perfectly: it IS declared on, and the engine IS keeping
+# it up. What is broken is the service, and no amount of applying fixes
+# a bug in a run script. Conflating the two would make `apply` promise
+# something it cannot deliver and `diff` never reach zero.
+#
+# So health is its own command with its own exit status, and `diff`
+# merely mentions it. Separate question, separate answer.
+
+SCANDIR="${NOVI_SCANDIR:-/run/service}"
+
+# One line per service: "<name> <state> <detail>".
+#
+# s6-svstat -o gives machine-readable fields; s6-svdt prints one line
+# per recorded death. A service that died once last week and has been
+# up since is not crash-looping, so the death tally alone is not the
+# signal -- it is the tally together with a short uptime.
+service_health() {
+    local name="$1" dir="${SCANDIR}/$1" up wanted ready secs deaths st
+
+    [ -d "$dir" ] || { printf '%s unknown no-servicedir\n' "$name"; return 0; }
+
+    st="$(s6-svstat -o up,wantedup,ready,updownfor "$dir" 2>/dev/null || true)"
+    [ -n "$st" ] || { printf '%s unknown s6-svstat-failed\n' "$name"; return 0; }
+    # shellcheck disable=SC2086
+    set -- $st
+    up="${1:-false}"; wanted="${2:-false}"; ready="${3:-false}"; secs="${4:-0}"
+
+    deaths="$(s6-svdt "$dir" 2>/dev/null | grep -c . || true)"
+    deaths=$(( ${deaths:-0} + 0 ))
+
+    if [ "$wanted" != "true" ]; then
+        printf '%s stopped -\n' "$name"
+    elif [ "$up" != "true" ]; then
+        # Wanted up and not up: either it cannot start at all, or we
+        # caught a crash loop between the death and the restart.
+        printf '%s DOWN %s-deaths\n' "$name" "$deaths"
+    elif [ "$deaths" -gt 0 ] && [ "$secs" -lt 60 ]; then
+        printf '%s CRASHLOOP %s-deaths-up-%ss\n' "$name" "$deaths" "$secs"
+    elif [ "$ready" != "true" ] && [ "$secs" -ge 60 ]; then
+        # Declares readiness (notification-fd) and never signalled it.
+        printf '%s NOTREADY up-%ss\n' "$name" "$secs"
+    elif [ "$deaths" -gt 0 ]; then
+        printf '%s ok restarted-%s-up-%ss\n' "$name" "$deaths" "$secs"
+    else
+        printf '%s ok up-%ss\n' "$name" "$secs"
+    fi
+}
+
+# Names of every service s6-svscan is currently supervising, minus s6's
+# own internal ones, which are not ours to judge.
+health_services() {
+    local d n
+    for d in "${SCANDIR}"/*; do
+        [ -d "$d" ] || continue
+        n="${d##*/}"
+        case "$n" in
+            .*|s6-svscan-log|s6-linux-init-*|s6rc-*) continue ;;
+        esac
+        printf '%s\n' "$n"
+    done
+}
+
+# Any service in a bad state, one per line. Used by cmd_health and by
+# the one-line note cmd_diff and cmd_boot print.
+health_problems() {
+    local n line
+    command -v s6-svstat >/dev/null 2>&1 || return 0
+    for n in $(health_services); do
+        line="$(service_health "$n")"
+        case "$line" in
+            *" DOWN "*|*" CRASHLOOP "*|*" NOTREADY "*) printf '%s\n' "$line" ;;
+        esac
+    done
+}
+
+# Exit 0 when every supervised service is doing its job, 1 when one is
+# not -- so this is the command a CI job or a health check runs, and
+# `diff` keeps meaning exactly "declared vs actual".
+cmd_health() {
+    local n bad=0 line
+    command -v s6-svstat >/dev/null 2>&1 || die "s6-svstat not found; cannot inspect services"
+    for n in $(health_services); do
+        line="$(service_health "$n")"
+        printf '%s\n' "$line"
+        case "$line" in
+            *" DOWN "*|*" CRASHLOOP "*|*" NOTREADY "*) bad=1 ;;
+        esac
+    done
+    if [ "$bad" -eq 0 ]; then
+        msg "every supervised service is running"
+        return 0
+    fi
+    warn "a service is supervised but not doing its job -- 's6-svstat' and /run/uncaught-logs/current have the detail"
+    return 1
+}
+
 case "${1:-}" in
     show)     shift; cmd_show "$@" ;;
     get)      shift; cmd_get "$@" ;;
@@ -964,5 +1127,6 @@ case "${1:-}" in
     history)  shift; cmd_history "$@" ;;
     rollback) shift; cmd_rollback "$@" ;;
     boot)     shift; cmd_boot "$@" ;;
+    health)   shift; cmd_health "$@" ;;
     *)        usage ;;
 esac
