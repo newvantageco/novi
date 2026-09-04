@@ -7,10 +7,16 @@
  * foot's render.c: fcft_glyph_rasterize() + pixman_image_composite32()
  * with the glyph as either a direct ARGB source, for pre-colored
  * glyphs like color emoji, or as a mask over a solid-color fill, for
- * the normal anti-aliased-coverage case). Both novi-shell UI clients
- * only ever render ASCII (digits, clock punctuation, calculator
- * operators), so the API below takes plain `const char *` and treats
- * each byte as its own codepoint -- not a general UTF-8 API.
+ * the normal anti-aliased-coverage case).
+ *
+ * Takes real UTF-8 `const char *`, not just ASCII: novi-launcher's
+ * symbol picker (--symbols) needs actual multi-byte codepoints (e.g.
+ * U+2192 "->", a real 3-byte UTF-8 sequence) rendered as one glyph
+ * each, not as mojibake from three separate byte-as-codepoint draws --
+ * confirmed live in QEMU as a real, visible bug before this was UTF-8
+ * aware. Every plain-ASCII caller (the panel clock, calculator
+ * operators) is unaffected: ASCII bytes are already valid one-byte
+ * UTF-8 sequences that decode to themselves.
  */
 #pragma once
 
@@ -23,14 +29,14 @@
  * Returns NULL on failure (logs via fcft's own logging if enabled). */
 struct fcft_font *novi_text_load_font(const char *fontname);
 
-/* Draws `ascii_text`'s baseline at (x, baseline_y) into `dest` (a
- * pixman image wrapping the caller's shm buffer) in `color`. Returns
- * the x position just past the last glyph, so callers can chain
- * multiple draws left-to-right. */
+/* Draws `text`'s (real UTF-8) baseline at (x, baseline_y) into `dest`
+ * (a pixman image wrapping the caller's shm buffer) in `color`.
+ * Returns the x position just past the last glyph, so callers can
+ * chain multiple draws left-to-right. */
 int novi_text_draw(pixman_image_t *dest, struct fcft_font *font,
-	int x, int baseline_y, const char *ascii_text, pixman_color_t color);
+	int x, int baseline_y, const char *text, pixman_color_t color);
 
-/* Width in pixels `ascii_text` would occupy if drawn -- for
+/* Width in pixels `text` (real UTF-8) would occupy if drawn -- for
  * right-aligning text (the panel clock) without actually drawing.
  * Does not touch `dest`. */
-int novi_text_width(struct fcft_font *font, const char *ascii_text);
+int novi_text_width(struct fcft_font *font, const char *text);

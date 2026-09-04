@@ -1,0 +1,1006 @@
+#!/bin/sh
+# novi-install — put the running Novi live system onto a disk.
+#
+# The live ISO runs entirely in RAM: a read-only squashfs with a tmpfs
+# overlay on top, so every change is gone at the next power cycle. This
+# turns that into a real machine -- a partitioned disk, a writable root
+# filesystem, a bootloader in the MBR, and a system that remembers.
+#
+# The design constraint that shapes this whole script: the installed
+# system has no build host to lean on. There is no grub-install here,
+# because GRUB's tooling is a build-time dependency and Novi's rootfs is
+# a static BusyBox. So `scripts/mkiso.sh` does the half of grub-install
+# that needs those tools -- generating boot.img and a core.img with the
+# prefix already baked in -- and stages the result in /novi-boot on the
+# ISO. What is left for install time is placement: two `dd`s and a
+# directory copy, all of which BusyBox can do. See
+# docs/rfcs/0003-installation-and-persistence.md.
+#
+# Both firmware paths are supported (RFC 0008). The machine's own
+# firmware decides which, and `--firmware` overrides it:
+#
+#   UEFI   GPT: a 512 MiB EFI System partition and an ext4 root.
+#          novi-gpt writes the table (BusyBox fdisk cannot create a
+#          GPT); a self-contained bootx64.efi goes on the ESP.
+#   BIOS   MBR: one ext4 partition starting at sector 2048, with
+#          boot.img in the MBR and core.img in the gap behind it.
+#
+# The root filesystem is real ext4 with a journal, made by e2fsprogs'
+# mke2fs rather than BusyBox's -- an unclean shutdown replays a log
+# instead of fscking the whole disk.
+#
+# Still true, and still worth stating: this wipes the target disk
+# completely. There is no partial install, no dual-boot layout, and no
+# undo.
+#
+# shellcheck disable=SC3043
+# `local` is outside strict POSIX sh, which is what shellcheck's `sh`
+# dialect checks -- but the real target is BusyBox ash, which supports
+# it, exactly as packages/pkg and packages/novi-state already document.
+set -eu
+
+msg()  { printf '==> %s\n'    "$*" >&2; }
+info() { printf '  -> %s\n'   "$*" >&2; }
+warn() { printf 'WARN: %s\n'  "$*" >&2; }
+die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+
+need_root() {
+    [ "$(id -u)" -eq 0 ] || die "This operation requires root."
+}
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+LIVE_DIR="${NOVI_LIVE_DIR:-/run/live}"       # ISO, bind-mounted by /init
+MNT="${NOVI_INSTALL_MNT:-/mnt/novi-target}"
+ROOT_LABEL="${NOVI_ROOT_LABEL:-NOVI_ROOT}"
+ESP_LABEL="${NOVI_ESP_LABEL:-NOVI_ESP}"
+ROOT_FSTYPE="ext4"
+
+TARGET_DISK=""
+NEW_HOSTNAME=""
+FIRMWARE=""
+ESP_MIB=512
+ROOT_PART=""
+ESP_PART=""
+ESP_MOUNTED=0
+PROFILE="desktop"
+TARGET_MIRROR=""
+NEW_USER=""
+NEW_USER_GROUPS="wheel,users,video,input,audio,seat"
+NEW_USER_SHELL="/bin/sh"
+NO_PASSWORD=0
+SET_ROOT_PASSWORD=0
+ASSUME_YES=0
+WITH_BOOTLOADER=1
+MOUNTED=0
+PASSWORD=""
+
+usage() {
+    cat <<'USAGE'
+novi-install — install Novi Linux onto a disk
+
+Usage:
+  novi-install list                     show candidate target disks
+  novi-install install --disk DEV [options]
+
+Options:
+  --disk DEV          target disk, e.g. /dev/sda or /dev/vda (REQUIRED)
+  --hostname NAME     hostname for the installed system (default: keep)
+  --firmware F        uefi or bios. Default: whatever this machine
+                      booted with, which is almost always what you want
+                      -- installing the other one produces a disk this
+                      machine cannot boot.
+  --esp-mib N         size of the EFI System partition (default 512)
+  --profile P         desktop (default) or console. `desktop` installs the
+                      desktop packages from the repository on this medium
+                      and declares them, so the installed machine boots
+                      into a graphical session with no network involved.
+  --mirror URL        package mirror for the installed system. Without
+                      one, the installed system has no mirror configured
+                      (this medium's repository will not be there after
+                      you remove it).
+  --user NAME         create a login account (prompts for its password)
+  --user-groups LIST  its supplementary groups
+                      (default: wheel,users,video,input,audio,seat)
+  --user-shell PATH   its login shell (default: /bin/sh)
+  --no-password       create the account locked instead of prompting
+  --set-root-password prompt for a root password too
+  --no-bootloader     partition, format and copy, but write no MBR
+  -y, --yes           do not ask for confirmation (the disk IS erased)
+  -h, --help          this text
+
+The target disk is erased completely. There is no partial install, no
+dual-boot layout, and no undo.
+USAGE
+}
+
+# ---------------------------------------------------------------------------
+# Cleanup
+# ---------------------------------------------------------------------------
+cleanup() {
+    if [ "$MOUNTED" -eq 1 ]; then
+        # The repository bind mount lives under $MNT, so it has to come
+        # off first or the unmount below fails with EBUSY and leaves the
+        # target filesystem mounted after a failed install.
+        umount "$MNT/mnt/novi-repo" 2>/dev/null || true
+        # The ESP is mounted inside the target, so it comes off before
+        # the root does or the unmount below fails with EBUSY.
+        umount "$MNT/boot/efi" 2>/dev/null || true
+        ESP_MOUNTED=0
+        umount "$MNT" 2>/dev/null || true
+        MOUNTED=0
+    fi
+}
+trap cleanup EXIT INT TERM
+
+# ---------------------------------------------------------------------------
+# Disk discovery
+# ---------------------------------------------------------------------------
+
+# The device the live media itself is on. Installing onto it would pull
+# the floor out from under the running system halfway through the copy,
+# so it is excluded from the candidate list and refused by name.
+live_device() {
+    local dev
+    dev="$(awk -v d="$LIVE_DIR" '$2 == d { print $1; exit }' /proc/mounts 2>/dev/null || true)"
+    [ -n "$dev" ] || return 0
+    # /run/live is a bind mount of the ISO mount, so /proc/mounts names
+    # the real backing device for it either way.
+    printf '%s\n' "$dev"
+}
+
+# Whole disks only. /sys/block also lists loop, ram, zram, device-mapper
+# and md nodes, none of which anyone means by "install to a disk", plus
+# sr* (the optical drive the ISO is likely in).
+list_disks() {
+    local d name
+    for d in /sys/block/*; do
+        [ -d "$d" ] || continue
+        name="${d##*/}"
+        case "$name" in
+            loop*|ram*|zram*|dm-*|md*|sr*|fd*) continue ;;
+        esac
+        printf '%s\n' "$name"
+    done
+}
+
+disk_size_human() {
+    local name="$1" sectors
+    sectors="$(cat "/sys/block/${name}/size" 2>/dev/null || echo 0)"
+    # /sys/block/*/size is always in 512-byte sectors regardless of the
+    # device's real logical block size. Integer MiB is plenty here.
+    printf '%s MiB\n' "$(( sectors / 2048 ))"
+}
+
+disk_model() {
+    local name="$1"
+    cat "/sys/block/${name}/device/model" 2>/dev/null || printf 'unknown'
+}
+
+cmd_list() {
+    local name live
+    live="$(live_device)"
+    msg "Candidate target disks"
+    for name in $(list_disks); do
+        case "$live" in
+            "/dev/${name}"*) info "/dev/${name}  $(disk_size_human "$name")  [live media -- not a candidate]"; continue ;;
+        esac
+        info "/dev/${name}  $(disk_size_human "$name")  $(disk_model "$name" | tr -d '\n')"
+    done
+}
+
+# ---------------------------------------------------------------------------
+# Partitioning
+# ---------------------------------------------------------------------------
+
+# nvme0n1 -> nvme0n1p1, but sda -> sda1. The `p` goes in exactly where
+# the base name already ends in a digit.
+partition_of() {
+    local disk="$1" n="$2"
+    case "$disk" in
+        *[0-9]) printf '%sp%s\n' "$disk" "$n" ;;
+        *)      printf '%s%s\n'  "$disk" "$n" ;;
+    esac
+}
+
+# What this machine booted with. /sys/firmware/efi exists if and only
+# if the kernel was started by UEFI firmware -- it is the kernel's own
+# record of how it got here, not a guess from hardware.
+#
+# Defaulting to it matters: installing the other one produces a disk
+# this machine cannot boot, and the person doing the install is
+# unlikely to find out until they remove the medium.
+detect_firmware() {
+    if [ -n "$FIRMWARE" ]; then
+        case "$FIRMWARE" in
+            uefi|bios) return 0 ;;
+            *) die "unknown firmware '$FIRMWARE' (expected: uefi, bios)" ;;
+        esac
+    fi
+    if [ -d /sys/firmware/efi ]; then
+        FIRMWARE=uefi
+    else
+        FIRMWARE=bios
+    fi
+}
+
+unmount_everything_on() {
+    local disk="$1" mp
+    # Reverse order so nested mounts (/mnt/x/y before /mnt/x) come off first.
+    for mp in $(awk -v d="$disk" 'index($1, d) == 1 { print $2 }' /proc/mounts | tac); do
+        warn "unmounting $mp (on $disk)"
+        umount "$mp" 2>/dev/null || umount -l "$mp" 2>/dev/null || true
+    done
+}
+
+wait_for_partition() {
+    local part="$1" disk="$2" tries=0
+    while [ ! -b "$part" ] && [ "$tries" -lt 10 ]; do
+        tries=$(( tries + 1 ))
+        sleep 1
+        partprobe "$disk" 2>/dev/null || true
+        if [ -x /sbin/mdev ]; then
+            mdev -s 2>/dev/null || true
+        fi
+    done
+    [ -b "$part" ] || die "partition $part never appeared after partitioning $disk"
+}
+
+wipe_disk_ends() {
+    local disk="$1" sectors
+
+    # Zero the first 1 MiB: any old partition table, any old bootloader,
+    # and the post-MBR gap. Also the last 1 MiB, so a leftover GPT
+    # backup header at the end of the disk cannot make the kernel
+    # prefer a GPT that no longer exists -- or, when we are the ones
+    # writing a GPT, so a stale one cannot be mistaken for ours.
+    dd if=/dev/zero of="$disk" bs=1M count=1 conv=notrunc 2>/dev/null ||
+        die "cannot write to $disk"
+    sectors="$(cat "/sys/block/$(basename "$disk")/size" 2>/dev/null || echo 0)"
+    if [ "$sectors" -gt 4096 ]; then
+        dd if=/dev/zero of="$disk" bs=512 count=2048 \
+           seek=$(( sectors - 2048 )) conv=notrunc 2>/dev/null || true
+    fi
+    sync
+}
+
+# ---------------------------------------------------------------------------
+# Partitioning
+# ---------------------------------------------------------------------------
+
+partition_uefi() {
+    local disk="$1"
+
+    msg "Partitioning $disk (GPT: EFI System + Linux)"
+    unmount_everything_on "$disk"
+    wipe_disk_ends "$disk"
+
+    command -v novi-gpt >/dev/null 2>&1 ||
+        die "novi-gpt not found; cannot write a GPT (BusyBox fdisk cannot)"
+    novi-gpt "$disk" --esp-mib "$ESP_MIB" >&2 ||
+        die "novi-gpt failed on $disk"
+
+    partprobe "$disk" 2>/dev/null || true
+    sync
+
+    ESP_PART="$(partition_of "$disk" 1)"
+    ROOT_PART="$(partition_of "$disk" 2)"
+    wait_for_partition "$ESP_PART" "$disk"
+    wait_for_partition "$ROOT_PART" "$disk"
+    info "ESP $ESP_PART, root $ROOT_PART"
+}
+
+partition_bios() {
+    local disk="$1"
+
+    msg "Partitioning $disk (MBR, one Linux partition)"
+    unmount_everything_on "$disk"
+    wipe_disk_ends "$disk"
+
+    # First sector 2048 is not cosmetic alignment here: it leaves the
+    # ~1 MiB post-MBR gap that core.img is written into further down.
+    # A partition starting at the old default of 63 would be overwritten
+    # by the bootloader, or vice versa.
+    #
+    # BusyBox fdisk has no sfdisk-style script mode, so it is driven by
+    # the keystrokes a person would type: new DOS label, new primary
+    # partition 1 from 2048 to the end of the disk, mark it bootable,
+    # write. Verified against this repo's own static BusyBox.
+    printf 'o\nn\np\n1\n2048\n\na\n1\nw\n' | fdisk -u "$disk" >/dev/null 2>&1 || true
+
+    # fdisk's own BLKRRPART often fails while anything on the disk is
+    # still open; partprobe afterwards is what actually makes the kernel
+    # publish the new partition node.
+    partprobe "$disk" 2>/dev/null || true
+    sync
+
+    ESP_PART=""
+    ROOT_PART="$(partition_of "$disk" 1)"
+    wait_for_partition "$ROOT_PART" "$disk"
+    info "root $ROOT_PART"
+}
+
+partition_disk() {
+    case "$FIRMWARE" in
+        uefi) partition_uefi "$1" ;;
+        *)    partition_bios "$1" ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# Filesystems
+# ---------------------------------------------------------------------------
+
+# e2fsprogs' mke2fs, installed as mke2fs.e2fsprogs so it sits beside
+# BusyBox's applet rather than on top of it (RFC 0008). BusyBox's makes
+# ext2 with no journal, which on real hardware turns an unclean
+# shutdown into a full fsck and a risk to data. If it is somehow
+# missing, fall back rather than refuse -- an ext2 root is worse than
+# ext4 and much better than no install -- but say so.
+make_root_fs() {
+    local part="$1"
+    if command -v mke2fs.e2fsprogs >/dev/null 2>&1; then
+        msg "Creating an ext4 filesystem on $part (label $ROOT_LABEL)"
+        mke2fs.e2fsprogs -q -t ext4 -L "$ROOT_LABEL" -F "$part" ||
+            die "mke2fs failed on $part"
+        ROOT_FSTYPE=ext4
+    else
+        warn "e2fsprogs mke2fs not found -- falling back to BusyBox ext2"
+        warn "the root filesystem will have NO JOURNAL"
+        mke2fs -F -L "$ROOT_LABEL" "$part" >/dev/null 2>&1 ||
+            die "mke2fs failed on $part"
+        ROOT_FSTYPE=ext2
+    fi
+    sync
+    info "root filesystem: $ROOT_FSTYPE"
+}
+
+make_esp() {
+    local part="$1"
+    msg "Creating a FAT32 EFI System partition on $part"
+    # BusyBox mkfs.vfat always makes FAT32, which is what an ESP must
+    # be. Mounting it needs codepage 437 in the kernel -- see
+    # kernel/config-x86_64, where that was missing.
+    mkfs.vfat -n "$ESP_LABEL" "$part" >/dev/null 2>&1 ||
+        die "mkfs.vfat failed on $part"
+    sync
+    info "ESP created"
+}
+
+format_partitions() {
+    make_root_fs "$ROOT_PART"
+    [ -n "$ESP_PART" ] && make_esp "$ESP_PART"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# Copying the system
+# ---------------------------------------------------------------------------
+
+copy_system() {
+    msg "Copying the running system to $MNT (this takes a while)"
+
+    mkdir -p "$MNT"
+    mount "$ROOT_PART" "$MNT" ||
+        die "could not mount the new filesystem at $MNT"
+    MOUNTED=1
+
+    # Copy from `/`, not from the squashfs: `/` is the overlay, so
+    # whatever the person changed in this live session (a password, a
+    # novi-state edit) is part of what gets installed. That is what a
+    # live installer is for.
+    #
+    # The exclusions are the kernel-owned mounts plus /mnt itself --
+    # which is where the target filesystem is mounted right now, and
+    # copying it into itself would not terminate.
+    ( cd / && tar -cf - \
+        --exclude=./proc \
+        --exclude=./sys \
+        --exclude=./dev \
+        --exclude=./run \
+        --exclude=./tmp \
+        --exclude=./mnt \
+        --exclude=./lost+found \
+        . ) | ( cd "$MNT" && tar -xf - ) || \
+        die "copying the system failed"
+
+    # Recreate the mount points the copy deliberately skipped.
+    mkdir -p "$MNT/proc" "$MNT/sys" "$MNT/dev" "$MNT/run" "$MNT/mnt" "$MNT/boot"
+    mkdir -p "$MNT/tmp" && chmod 1777 "$MNT/tmp"
+
+    # The ESP is mounted where it will live on the installed machine,
+    # so the bootloader step writes to the same path fstab names and
+    # nothing has to be moved afterwards.
+    if [ -n "$ESP_PART" ]; then
+        mkdir -p "$MNT/boot/efi"
+        mount -t vfat "$ESP_PART" "$MNT/boot/efi" ||
+            die "could not mount the EFI System partition at $MNT/boot/efi"
+        ESP_MOUNTED=1
+        info "ESP mounted at /boot/efi"
+    fi
+
+    sync
+    info "system copied"
+}
+
+# ---------------------------------------------------------------------------
+# Making the copy an installed system rather than a copy of a live one
+# ---------------------------------------------------------------------------
+
+write_fstab() {
+    msg "Writing /etc/fstab"
+    cat > "$MNT/etc/fstab" <<FSTAB
+# /etc/fstab — Novi Linux
+#
+# Filesystems are found by LABEL, not by device node: /dev/sda and
+# /dev/vda are the same disk under different controllers, and a label
+# survives being moved between them.
+LABEL=${ROOT_LABEL}   /       ${ROOT_FSTYPE}    rw,noatime      0 1
+FSTAB
+
+    if [ -n "$ESP_PART" ]; then
+        cat >> "$MNT/etc/fstab" <<FSTAB
+
+# The EFI System partition. Nothing at runtime needs it -- the firmware
+# reads it before Linux exists -- but a kernel update has to write
+# there, so it is mounted rather than left for someone to find.
+# nofail, so a machine whose ESP has been removed or corrupted still
+# boots to a prompt where that can be fixed.
+LABEL=${ESP_LABEL}    /boot/efi vfat  rw,noatime,nofail  0 2
+FSTAB
+    fi
+
+    cat >> "$MNT/etc/fstab" <<'FSTAB'
+
+# The kernel-owned filesystems are mounted by s6-linux-init's stage 1,
+# not from here. They are listed for the benefit of anything that reads
+# fstab to find out what the system looks like.
+proc                  /proc   proc    defaults        0 0
+sysfs                 /sys    sysfs   defaults        0 0
+devtmpfs              /dev    devtmpfs defaults       0 0
+tmpfs                 /tmp    tmpfs   mode=1777       0 0
+FSTAB
+}
+
+set_hostname() {
+    [ -n "$NEW_HOSTNAME" ] || return 0
+    msg "Setting hostname to '$NEW_HOSTNAME'"
+
+    # Through novi-state, not sed: /etc/novi/system.conf is the declared
+    # truth (RFC 0002), and `set` is the one edit that preserves the
+    # file's comments and ordering. NOVI_STATE_FILE points it at the
+    # target's copy instead of the live system's.
+    if [ -x /usr/bin/novi-state ] && [ -f "$MNT/etc/novi/system.conf" ]; then
+        NOVI_STATE_FILE="$MNT/etc/novi/system.conf" \
+            /usr/bin/novi-state set hostname "$NEW_HOSTNAME" >/dev/null 2>&1 || \
+            warn "could not update the declared hostname"
+    fi
+
+    # Also write /etc/hostname directly, so the first boot comes up with
+    # the right name before boot convergence has run at all.
+    printf '%s\n' "$NEW_HOSTNAME" > "$MNT/etc/hostname"
+}
+
+install_kernel() {
+    msg "Installing kernel and initramfs into $MNT/boot"
+
+    mkdir -p "$MNT/boot"
+
+    # The ISO carries the exact kernel/initramfs pair that just booted
+    # this session, under stable names. Prefer them; fall back to
+    # whatever versioned vmlinuz the rootfs itself shipped.
+    local kernel=""
+    if [ -f "$LIVE_DIR/boot/vmlinuz" ]; then
+        kernel="$LIVE_DIR/boot/vmlinuz"
+    else
+        # Fall back to the versioned image the rootfs itself shipped
+        # (/boot/vmlinuz-6.10.3, copied in with the rest of the system).
+        local candidate
+        for candidate in "$MNT"/boot/vmlinuz-*; do
+            [ -f "$candidate" ] || continue
+            kernel="$candidate"
+            break
+        done
+    fi
+    [ -n "$kernel" ] || \
+        die "no kernel image found to install (looked in $LIVE_DIR/boot and $MNT/boot)"
+    cp "$kernel" "$MNT/boot/vmlinuz.new" && mv "$MNT/boot/vmlinuz.new" "$MNT/boot/vmlinuz"
+
+    if [ -f "$LIVE_DIR/boot/initramfs.cpio.gz" ]; then
+        cp "$LIVE_DIR/boot/initramfs.cpio.gz" "$MNT/boot/initramfs.cpio.gz"
+    else
+        die "no initramfs found at $LIVE_DIR/boot/initramfs.cpio.gz"
+    fi
+
+    info "kernel and initramfs installed"
+}
+
+# ---------------------------------------------------------------------------
+# Bootloader
+# ---------------------------------------------------------------------------
+
+# The boot menu, written once and used by both firmware paths. Only
+# where it lands differs: /boot/grub/grub.cfg for BIOS (core.img's
+# baked-in prefix) or /boot/efi/EFI/BOOT/grub.cfg for UEFI (bootx64.efi's).
+write_grub_cfg() {
+    local dest="$1" search_line="$2"
+    mkdir -p "$(dirname "$dest")"
+    cat > "$dest" <<GRUBCFG
+# Novi Linux — installed system boot menu
+# Written by novi-install.
+
+set default=0
+set timeout=3
+set timeout_style=menu
+
+insmod part_gpt
+insmod part_msdos
+insmod fat
+insmod ext2
+insmod all_video
+insmod gzio
+
+# Serial as well as VGA, so a headless machine still shows the menu.
+insmod serial
+serial --unit=0 --speed=115200
+terminal_input console serial
+terminal_output console serial
+
+${search_line}
+
+menuentry "Novi Linux" --class linux {
+    linux  /boot/vmlinuz root=LABEL=${ROOT_LABEL} rw \\
+           quiet loglevel=3 \\
+           console=tty0 console=ttyS0,115200n8 \\
+           vt.global_cursor_default=0
+    initrd /boot/initramfs.cpio.gz
+}
+
+menuentry "Novi Linux (verbose)" --class linux {
+    linux  /boot/vmlinuz root=LABEL=${ROOT_LABEL} rw \\
+           loglevel=7 \\
+           console=tty0 console=ttyS0,115200n8
+    initrd /boot/initramfs.cpio.gz
+}
+
+# If a declared state ever locks you out -- every getty turned off, say
+# -- this entry boots without converging to it. See RFC 0002.
+menuentry "Novi Linux (skip declared-state convergence)" --class linux {
+    linux  /boot/vmlinuz root=LABEL=${ROOT_LABEL} rw \\
+           novi.state=off loglevel=7 \\
+           console=tty0 console=ttyS0,115200n8
+    initrd /boot/initramfs.cpio.gz
+}
+GRUBCFG
+}
+
+install_bootloader_uefi() {
+    local src="$LIVE_DIR/novi-boot"
+
+    msg "Installing the UEFI bootloader"
+
+    [ "$ESP_MOUNTED" -eq 1 ] || die "the ESP is not mounted"
+    [ -f "$src/bootx64.efi" ] || {
+        warn "no $src/bootx64.efi on this medium"
+        warn "the system is installed but NOT bootable on its own."
+        return 0
+    }
+
+    # /EFI/BOOT/BOOTX64.EFI is the removable-media path every UEFI
+    # implementation looks for without being told. Using it rather than
+    # a vendor directory plus an NVRAM boot entry means the install
+    # needs no efibootmgr, no writable EFI variables, and works on
+    # firmware that has forgotten its boot order -- which is most
+    # firmware, eventually.
+    mkdir -p "$MNT/boot/efi/EFI/BOOT"
+    cp "$src/bootx64.efi" "$MNT/boot/efi/EFI/BOOT/BOOTX64.EFI" ||
+        die "could not copy bootx64.efi to the ESP"
+
+    # bootx64.efi's prefix is /EFI/BOOT, so grub.cfg goes beside it on
+    # the ESP. The kernel and initramfs stay on the root filesystem,
+    # which is why the menu has to `search` for it by label.
+    write_grub_cfg "$MNT/boot/efi/EFI/BOOT/grub.cfg" \
+        "search --no-floppy --label ${ROOT_LABEL} --set=root"
+
+    sync
+    info "bootx64.efi and grub.cfg installed on the ESP"
+}
+
+install_bootloader_bios() {
+    local disk="$1" src="$LIVE_DIR/novi-boot" core_sectors
+
+    msg "Installing the BIOS bootloader on $disk"
+
+    # core.img's prefix is (hd0,msdos1)/boot/grub, and the kernel lives
+    # on that same partition, so no search is needed.
+    write_grub_cfg "$MNT/boot/grub/grub.cfg" ""
+
+    if [ ! -d "$src" ]; then
+        warn "no staged GRUB artifacts at $src"
+        warn "the system is installed but NOT bootable on its own --"
+        warn "boot the ISO and pass root=LABEL=${ROOT_LABEL} by hand."
+        return 0
+    fi
+
+    [ -f "$src/boot.img" ] || die "$src/boot.img missing"
+    [ -f "$src/core.img" ] || die "$src/core.img missing"
+
+    # GRUB's modules must be readable from the installed filesystem:
+    # core.img was built with prefix (hd0,msdos1)/boot/grub and loads
+    # the rest of GRUB from there at boot.
+    mkdir -p "$MNT/boot/grub/i386-pc"
+    cp "$src"/i386-pc/* "$MNT/boot/grub/i386-pc/" 2>/dev/null ||
+        warn "no GRUB modules staged -- boot may fail"
+    sync
+
+    # Stage 1: the first 446 bytes of the MBR. Exactly 446, never 512 --
+    # bytes 446..509 are the partition table that was just written, and
+    # a 512-byte dd would erase it.
+    dd if="$src/boot.img" of="$disk" bs=446 count=1 conv=notrunc 2>/dev/null ||
+        die "could not write boot.img to the MBR of $disk"
+
+    # Stage 1.5: core.img into the post-MBR gap, sector 1 onwards. The
+    # partition starts at sector 2048, so there is room for 2047
+    # sectors; refuse rather than write into the filesystem.
+    core_sectors="$(( ( $(wc -c < "$src/core.img") + 511 ) / 512 ))"
+    [ "$core_sectors" -lt 2047 ] ||
+        die "core.img is ${core_sectors} sectors -- too big for the 2047-sector gap"
+    dd if="$src/core.img" of="$disk" bs=512 seek=1 conv=notrunc 2>/dev/null ||
+        die "could not write core.img to the post-MBR gap of $disk"
+
+    sync
+    info "bootloader installed (${core_sectors} sectors of core.img in the gap)"
+}
+
+install_bootloader() {
+    case "$FIRMWARE" in
+        uefi) install_bootloader_uefi ;;
+        *)    install_bootloader_bios "$1" ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# Profile: what software the installed machine gets
+# ---------------------------------------------------------------------------
+
+# The desktop is not in the base image (RFC 0007) -- it is packages, and
+# this medium carries the whole signed repository. So installing a
+# desktop is a package install, run inside the target, against a mirror
+# that is a directory on the ISO. No network, and the same signature and
+# hash verification a network install would get.
+#
+# Done in a chroot rather than with pkg's PKG_ROOT: PKG_ROOT relocates
+# where FILES land but not the install database, so a PKG_ROOT install
+# would put the desktop on the target and record it in the live system's
+# database -- an installed machine that does not know what it has.
+install_profile() {
+    local repo="$LIVE_DIR/novi-repo"
+    local bind="$MNT/mnt/novi-repo"
+
+    case "$PROFILE" in
+        console)
+            msg "Console profile -- no desktop packages"
+            return 0 ;;
+        desktop) : ;;
+        *) die "unknown profile '$PROFILE' (expected: desktop, console)" ;;
+    esac
+
+    if [ ! -f "$repo/index" ]; then
+        warn "no package repository at $repo"
+        warn "installing a console system instead; add a mirror and run"
+        warn "'pkg install novi-desktop' on the installed machine."
+        PROFILE=console
+        return 0
+    fi
+
+    msg "Installing the desktop from the repository on this medium"
+
+    mkdir -p "$bind"
+    mount --bind "$repo" "$bind" ||
+        die "could not make the repository visible inside the target"
+
+    # Point the target's pkg at the bind mount for the duration. The
+    # real mirror is written once, at the end, by finalize_pkg_conf().
+    sed -i 's|^mirror = .*|mirror = /mnt/novi-repo|' "$MNT/etc/novi/pkg.conf"
+
+    if chroot "$MNT" /usr/bin/pkg sync &&
+       chroot "$MNT" /usr/bin/pkg install novi-desktop; then
+        info "desktop installed"
+    else
+        umount "$bind" 2>/dev/null || true
+        rmdir "$bind" 2>/dev/null || true
+        die "installing the desktop failed"
+    fi
+
+    umount "$bind" 2>/dev/null || warn "could not unmount $bind"
+    rmdir "$bind" 2>/dev/null || true
+
+    # Declare what was installed, and turn the session on. Without this
+    # the machine would have a desktop it never starts, and
+    # `novi-state diff` would report drift on a fresh install.
+    target_state_set packages.novi-desktop present
+    target_state_set services.seatd on
+    target_state_set services.novi-shell on
+}
+
+# `novi-state set` against the TARGET's document. Used for everything
+# the installer declares -- it is the one edit that preserves the
+# file's comments and ordering (RFC 0002), which matters most in the
+# document a person meets first.
+target_state_set() {
+    [ -x /usr/bin/novi-state ] || return 0
+    [ -f "$MNT/etc/novi/system.conf" ] || return 0
+    NOVI_STATE_FILE="$MNT/etc/novi/system.conf" \
+        /usr/bin/novi-state set "$1" "$2" >/dev/null 2>&1 ||
+        warn "could not declare $1 = $2"
+}
+
+# The shipped pkg.conf points at /run/live/novi-repo, which is this
+# medium. That path does not exist once the medium is removed, so
+# leaving it would give every installed machine a `pkg sync` that fails
+# with a confusing error about a directory nobody chose.
+finalize_pkg_conf() {
+    local conf="$MNT/etc/novi/pkg.conf"
+    [ -f "$conf" ] || return 0
+
+    if [ -n "$TARGET_MIRROR" ]; then
+        sed -i "s|^mirror = .*|mirror = ${TARGET_MIRROR}|" "$conf"
+        info "package mirror: $TARGET_MIRROR"
+    else
+        sed -i 's|^mirror = .*|# mirror =   (none configured -- see below)|' "$conf"
+        info "no package mirror configured (pass --mirror next time)"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Accounts
+# ---------------------------------------------------------------------------
+
+# Read a password twice without echoing it. `stty -echo` rather than
+# `read -s`: both work under BusyBox ash, but the trap makes the
+# terminal recoverable if this is interrupted, which `read -s` alone
+# would not be -- a Ctrl-C mid-prompt otherwise leaves the console with
+# echo permanently off and no obvious way back.
+prompt_password() {
+    local label="$1" first="" second=""
+    PASSWORD=""
+    while : ; do
+        printf '  %s password: ' "$label" >&2
+        stty -echo 2>/dev/null || true
+        # shellcheck disable=SC2162
+        read first
+        stty echo 2>/dev/null || true
+        printf '\n' >&2
+
+        printf '  %s password (again): ' "$label" >&2
+        stty -echo 2>/dev/null || true
+        # shellcheck disable=SC2162
+        read second
+        stty echo 2>/dev/null || true
+        printf '\n' >&2
+
+        if [ -z "$first" ]; then
+            warn "empty password -- try again, or Ctrl-C to abort"
+            continue
+        fi
+        if [ "$first" != "$second" ]; then
+            warn "passwords did not match -- try again"
+            continue
+        fi
+        PASSWORD="$first"
+        return 0
+    done
+}
+
+set_target_password() {
+    local who="$1" pw="$2"
+    # chpasswd's own -R chroots for us, so this needs no working
+    # /proc or /dev inside the target -- and hashes with sha512
+    # rather than BusyBox's DES default, which truncates at 8
+    # characters and would silently make a long password weak.
+    printf '%s:%s\n' "$who" "$pw" | chpasswd -c sha512 -R "$MNT" ||
+        die "failed to set the password for '$who'"
+}
+
+create_user() {
+    [ -n "$NEW_USER" ] || return 0
+    local g
+
+    msg "Creating user '$NEW_USER' on the installed system"
+
+    # Created inside the target, not declared and left for first boot,
+    # so the machine is usable the moment it boots rather than after
+    # someone logs in as root to finish the job. The declaration below
+    # then matches what is already there, and `novi-state diff` on the
+    # installed system is clean rather than showing a user it is about
+    # to create.
+    chroot "$MNT" /bin/busybox adduser -D -s "$NEW_USER_SHELL" "$NEW_USER" ||
+        die "could not create user '$NEW_USER'"
+
+    for g in $(printf '%s' "$NEW_USER_GROUPS" | tr ',' ' '); do
+        if grep -q "^${g}:" "$MNT/etc/group"; then
+            chroot "$MNT" /bin/busybox addgroup "$NEW_USER" "$g" ||
+                warn "could not add '$NEW_USER' to group '$g'"
+        else
+            warn "group '$g' does not exist on the target -- skipped"
+        fi
+    done
+
+    if [ "$NO_PASSWORD" -eq 1 ]; then
+        warn "'$NEW_USER' has no password and cannot log in until one is set"
+    else
+        prompt_password "$NEW_USER"
+        set_target_password "$NEW_USER" "$PASSWORD"
+        PASSWORD=""
+    fi
+
+    # And declare it, so the account is part of the document that
+    # governs this machine rather than a fact about it nobody wrote
+    # down. The password is deliberately NOT declared -- system.conf is
+    # world-readable and meant to be committed to git.
+    if [ -x /usr/bin/novi-state ] && [ -f "$MNT/etc/novi/system.conf" ]; then
+        NOVI_STATE_FILE="$MNT/etc/novi/system.conf" \
+            /usr/bin/novi-state set "users.${NEW_USER}.shell" "$NEW_USER_SHELL" \
+            >/dev/null 2>&1 || warn "could not declare users.${NEW_USER}.shell"
+        NOVI_STATE_FILE="$MNT/etc/novi/system.conf" \
+            /usr/bin/novi-state set "users.${NEW_USER}.groups" \
+            "$(printf '%s' "$NEW_USER_GROUPS" | tr ',' '\n' | sort | tr '\n' ',' | sed 's/,$//')" \
+            >/dev/null 2>&1 || warn "could not declare users.${NEW_USER}.groups"
+    fi
+
+    info "user '$NEW_USER' created and declared"
+}
+
+set_root_password() {
+    [ "$SET_ROOT_PASSWORD" -eq 1 ] || return 0
+    msg "Setting the root password on the installed system"
+    prompt_password "root"
+    set_target_password root "$PASSWORD"
+    PASSWORD=""
+}
+
+# The shipped image has an empty root password on purpose -- an
+# installable live image nobody can log into is useless. An installed
+# machine is a different thing, and shipping one that way silently
+# would be indefensible.
+warn_if_root_passwordless() {
+    local field
+    field="$(awk -F: '$1 == "root" { print $2 }' "$MNT/etc/shadow" 2>/dev/null)"
+    [ -z "$field" ] || return 0
+    printf '\n' >&2
+    warn "root on the installed system has NO PASSWORD."
+    warn "Anyone at the console can log in as root. Fix it on first boot:"
+    warn "    passwd"
+    warn "or re-run this installer with --set-root-password."
+}
+
+# ---------------------------------------------------------------------------
+# Confirmation
+# ---------------------------------------------------------------------------
+
+confirm_destruction() {
+    local disk="$1" name
+    name="$(basename "$disk")"
+
+    printf '\n' >&2
+    printf '  ABOUT TO ERASE %s (%s, %s)\n' \
+        "$disk" "$(disk_size_human "$name")" "$(disk_model "$name" | tr -d '\n')" >&2
+    printf '  Everything on that disk will be destroyed. There is no undo.\n\n' >&2
+
+    if [ "$ASSUME_YES" -eq 1 ]; then
+        info "--yes given, proceeding"
+        return 0
+    fi
+
+    printf "  Type 'yes' to continue: " >&2
+    local answer=""
+    read -r answer || answer=""
+    [ "$answer" = "yes" ] || die "aborted -- nothing was written"
+}
+
+# ---------------------------------------------------------------------------
+# install
+# ---------------------------------------------------------------------------
+
+cmd_install() {
+    need_root
+
+    [ -n "$TARGET_DISK" ] || die "no target disk given (try: novi-install list)"
+    [ -b "$TARGET_DISK" ] || die "$TARGET_DISK is not a block device"
+
+    local live
+    live="$(live_device)"
+    case "$live" in
+        "") : ;;
+        "${TARGET_DISK}"*)
+            die "$TARGET_DISK holds the live media this system is running from" ;;
+    esac
+
+    detect_firmware
+
+    for tool in partprobe tar dd mount umount sync chroot chpasswd sed; do
+        command -v "$tool" >/dev/null 2>&1 || die "missing required tool: $tool"
+    done
+    case "$FIRMWARE" in
+        uefi) for tool in novi-gpt mkfs.vfat; do
+                  command -v "$tool" >/dev/null 2>&1 ||
+                      die "missing required tool for a UEFI install: $tool"
+              done ;;
+        *)    command -v fdisk >/dev/null 2>&1 ||
+                  die "missing required tool for a BIOS install: fdisk" ;;
+    esac
+
+    msg "Firmware: ${FIRMWARE}"
+
+    confirm_destruction "$TARGET_DISK"
+
+    partition_disk "$TARGET_DISK"
+    format_partitions
+    copy_system
+    write_fstab
+    set_hostname
+    create_user
+    set_root_password
+    install_profile
+    finalize_pkg_conf
+    install_kernel
+    if [ "$WITH_BOOTLOADER" -eq 1 ]; then
+        install_bootloader "$TARGET_DISK"
+    else
+        info "--no-bootloader given, skipping the MBR"
+    fi
+
+    warn_if_root_passwordless
+
+    sync
+    if [ "$ESP_MOUNTED" -eq 1 ]; then
+        umount "$MNT/boot/efi" || warn "could not unmount the ESP cleanly"
+        ESP_MOUNTED=0
+    fi
+    umount "$MNT" || warn "could not unmount $MNT cleanly"
+    MOUNTED=0
+    sync
+
+    msg "Novi is installed on $TARGET_DISK (${FIRMWARE}, ${ROOT_FSTYPE}, ${PROFILE} profile)"
+    info "remove the installation media and reboot"
+}
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+
+[ $# -gt 0 ] || { usage; exit 1; }
+
+ACTION="$1"; shift
+case "$ACTION" in
+    list|-h|--help|help) : ;;
+    install) : ;;
+    *) die "unknown command '$ACTION' (try: novi-install --help)" ;;
+esac
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --disk)      TARGET_DISK="${2:-}"; shift 2 ;;
+        --hostname)  NEW_HOSTNAME="${2:-}"; shift 2 ;;
+        --firmware)  FIRMWARE="${2:-}"; shift 2 ;;
+        --esp-mib)   ESP_MIB="${2:-}"; shift 2 ;;
+        --profile)   PROFILE="${2:-}"; shift 2 ;;
+        --mirror)    TARGET_MIRROR="${2:-}"; shift 2 ;;
+        --user)          NEW_USER="${2:-}"; shift 2 ;;
+        --user-groups)   NEW_USER_GROUPS="${2:-}"; shift 2 ;;
+        --user-shell)    NEW_USER_SHELL="${2:-}"; shift 2 ;;
+        --no-password)   NO_PASSWORD=1; shift ;;
+        --set-root-password) SET_ROOT_PASSWORD=1; shift ;;
+        --no-bootloader) WITH_BOOTLOADER=0; shift ;;
+        -y|--yes)    ASSUME_YES=1; shift ;;
+        -h|--help)   usage; exit 0 ;;
+        *) die "unknown option '$1'" ;;
+    esac
+done
+
+case "$ACTION" in
+    list)              cmd_list ;;
+    -h|--help|help)    usage ;;
+    install)           cmd_install ;;
+esac

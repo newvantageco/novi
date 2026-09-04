@@ -1,0 +1,230 @@
+#!/bin/sh
+# novi-power — battery, AC, CPU frequency and suspend.
+#
+#   novi-power status      what the machine's power state is
+#   novi-power suspend     suspend to RAM
+#   novi-power governors   what CPU frequency governors are available
+#   novi-power event WHAT  act on a lid/button event (called by acpid)
+#
+# The kernel has had CONFIG_ACPI_BATTERY, CONFIG_ACPI_AC,
+# CONFIG_CPU_FREQ, CONFIG_SUSPEND and CONFIG_HIBERNATION compiled in
+# from the start, and nothing in userspace has ever read or written one
+# of them. On a desktop that is invisible. On a laptop it means the
+# machine cannot tell you it is about to die and cannot be told to go
+# to sleep.
+#
+# Everything here is sysfs. There is no daemon, nothing to keep
+# running, and no new dependency -- the interfaces are files, and the
+# only reason this did not exist already is that nobody had opened
+# them.
+#
+# shellcheck disable=SC3043
+set -u
+
+msg()  { printf '==> %s\n'    "$*" >&2; }
+info() { printf '  -> %s\n'   "$*" >&2; }
+warn() { printf 'WARN: %s\n'  "$*" >&2; }
+die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+
+usage() {
+    cat <<'USAGE'
+novi-power — battery, AC, CPU frequency and suspend
+
+Usage:
+  novi-power status      battery, AC, governor, temperature
+  novi-power suspend     suspend to RAM (s2idle or deep, whichever the
+                         firmware offers)
+  novi-power governors   list the CPU frequency governors this kernel has
+  novi-power event WHAT  act on a hardware event; WHAT is `lid` or
+                         `button`. Called by acpid from /etc/acpi/,
+                         not normally by a person.
+
+Policy is declared state, not a command here:
+
+  novi-state set power.governor powersave   # performance|powersave|...
+  novi-state set power.lid      ignore      # suspend|poweroff|ignore
+  novi-state set power.button   suspend     # poweroff|suspend|ignore
+  novi-state apply
+USAGE
+}
+
+read_or() { [ -r "$1" ] && cat "$1" 2>/dev/null || printf '%s' "$2"; }
+
+cmd_status() {
+    local found=0 d name cap status energy_now energy_full
+
+    for d in /sys/class/power_supply/*; do
+        [ -d "$d" ] || continue
+        found=1
+        name="${d##*/}"
+        case "$(read_or "$d/type" unknown)" in
+            Mains)
+                printf '%-10s %s\n' "$name" \
+                    "$([ "$(read_or "$d/online" 0)" = "1" ] && printf 'connected' || printf 'disconnected')"
+                ;;
+            Battery)
+                cap="$(read_or "$d/capacity" '')"
+                status="$(read_or "$d/status" unknown)"
+                # capacity is the easy path; some batteries only report
+                # energy or charge, so work it out rather than print
+                # nothing.
+                if [ -z "$cap" ]; then
+                    energy_now="$(read_or "$d/energy_now" "$(read_or "$d/charge_now" '')")"
+                    energy_full="$(read_or "$d/energy_full" "$(read_or "$d/charge_full" '')")"
+                    if [ -n "$energy_now" ] && [ -n "$energy_full" ] && [ "$energy_full" -gt 0 ] 2>/dev/null; then
+                        cap=$(( energy_now * 100 / energy_full ))
+                    fi
+                fi
+                printf '%-10s %s%%  %s\n' "$name" "${cap:-?}" "$status"
+                ;;
+        esac
+    done
+    [ "$found" -eq 1 ] || info "no battery or AC adapter (a desktop, or a VM)"
+
+    # CPU frequency
+    local cur gov
+    gov="$(read_or /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor '')"
+    if [ -n "$gov" ]; then
+        cur="$(read_or /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq '')"
+        if [ -n "$cur" ]; then
+            printf '%-10s %s  (cpu0 at %s MHz)\n' cpufreq "$gov" "$(( cur / 1000 ))"
+        else
+            printf '%-10s %s\n' cpufreq "$gov"
+        fi
+    else
+        info "no cpufreq driver (the CPU is not being scaled)"
+    fi
+
+    # Temperature: the first thermal zone that reports one.
+    local t z
+    for z in /sys/class/thermal/thermal_zone*/temp; do
+        [ -r "$z" ] || continue
+        t="$(cat "$z" 2>/dev/null)"
+        [ -n "$t" ] || continue
+        printf '%-10s %s C\n' thermal "$(( t / 1000 ))"
+        break
+    done
+
+    # What suspend states the firmware actually offers, which is not
+    # the same as what the kernel was built to support.
+    local states
+    states="$(read_or /sys/power/state '')"
+    [ -n "$states" ] && printf '%-10s %s\n' suspend "$states"
+    return 0
+}
+
+cmd_suspend() {
+    [ "$(id -u)" -eq 0 ] || die "suspending requires root."
+    [ -w /sys/power/state ] || die "this kernel has no suspend support"
+
+    local states target
+    states="$(cat /sys/power/state 2>/dev/null)"
+    # "mem" is suspend-to-RAM. On modern laptops that is often s2idle
+    # rather than the old S3, and the kernel decides which via
+    # /sys/power/mem_sleep -- not something to override from here.
+    case " $states " in
+        *" mem "*)      target=mem ;;
+        *" standby "*)  target=standby ;;
+        *" freeze "*)   target=freeze ;;
+        *) die "no usable suspend state (this kernel offers: ${states:-none})" ;;
+    esac
+
+    # The mixer is the one piece of state that does not come back by
+    # itself, and losing your volume settings across a suspend is the
+    # kind of small wrongness that makes a system feel unfinished.
+    if command -v alsactl >/dev/null 2>&1; then
+        alsactl store >/dev/null 2>&1 || true
+    fi
+    sync
+
+    msg "suspending ($target) -- press a key or the power button to wake"
+    printf '%s\n' "$target" > /sys/power/state || die "the kernel refused to suspend"
+    msg "resumed"
+    if command -v alsactl >/dev/null 2>&1; then
+        alsactl restore >/dev/null 2>&1 || true
+    fi
+    return 0
+}
+
+cmd_governors() {
+    local avail
+    avail="$(read_or /sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors '')"
+    if [ -z "$avail" ]; then
+        info "no cpufreq driver on this machine"
+        return 0
+    fi
+    printf '%s\n' "$avail" | tr ' ' '\n' | grep .
+    info "current: $(read_or /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor unknown)"
+}
+
+# ---------------------------------------------------------------------------
+# Hardware events
+# ---------------------------------------------------------------------------
+#
+# Called by acpid, via the two stub scripts in /etc/acpi/. Closing a
+# laptop lid and having nothing happen is not a cosmetic gap: the
+# machine goes in a bag at 80% and comes out flat, having run at full
+# tilt in an enclosed space the whole time. Pressing the power button
+# and having nothing happen teaches people to hold it for four seconds,
+# which is a hard power cut with a filesystem mounted.
+#
+# The policy is read HERE, at event time, from the declared state --
+# not cached anywhere, not written to /run by an apply. That is what
+# makes `power.lid` and `power.button` keys with no converger and no
+# observer: reading the document *is* the convergence, so there is
+# never a window in which the machine's behaviour and the declaration
+# disagree. Same shape as the `state.*` keys, and stated in
+# observe_key() for the same reason.
+cmd_event() {
+    local what="${1:-}" action
+
+    case "$what" in
+        lid)    action="$(policy power.lid suspend)" ;;
+        button) action="$(policy power.button poweroff)" ;;
+        *)      die "event: expected 'lid' or 'button', got '${what:-nothing}'" ;;
+    esac
+
+    logger -t novi-power -p daemon.info "${what}: ${action}" 2>/dev/null || true
+
+    case "$action" in
+        ignore)
+            ;;
+        suspend)
+            cmd_suspend
+            ;;
+        poweroff)
+            # /sbin/poweroff is s6-linux-init-hpr -p, which asks
+            # shutdownd to bring the machine down in order. Never
+            # `-f`, and never a direct reboot(2): the whole point of
+            # handling the button is to avoid the unclean stop that
+            # holding it for four seconds would have given anyway.
+            poweroff
+            ;;
+        *)
+            warn "power.${what} is '${action}', which is not one of suspend/poweroff/ignore -- doing nothing"
+            ;;
+    esac
+    return 0
+}
+
+# The declared value, or a default when novi-state is unavailable or
+# the key is absent. An event handler must never fail closed into
+# "nothing happens": a laptop whose lid does nothing because a config
+# read errored is the exact failure this exists to prevent.
+policy() {
+    local key="$1" fallback="$2" v=""
+    if command -v novi-state >/dev/null 2>&1; then
+        v="$(novi-state get "$key" 2>/dev/null || printf '')"
+    fi
+    [ -n "$v" ] || v="$fallback"
+    printf '%s' "$v"
+}
+
+case "${1:-}" in
+    status)     shift; cmd_status "$@" ;;
+    suspend)    shift; cmd_suspend "$@" ;;
+    governors)  shift; cmd_governors "$@" ;;
+    event)      shift; cmd_event "$@" ;;
+    -h|--help|help) usage ;;
+    *)          usage; exit 1 ;;
+esac

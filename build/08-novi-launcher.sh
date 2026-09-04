@@ -29,7 +29,18 @@ make \
     PKG_CONFIG="${TARGET_TRIPLE}-pkg-config" \
     WAYLAND_SCANNER=wayland-scanner \
     XDG_SHELL_XML="${XDG_SHELL_XML}"
-make DESTDIR="${ROOTFS}" PREFIX=/usr install
+# Repeats every var from the build invocation above -- see
+# 07-novi-shell.sh's identical comment: `install` depends on the
+# `novi-launcher` target, so make re-checks xdg-shell-protocol.c/.h's
+# own $(XDG_SHELL_XML) prerequisite here too, and without repeating it
+# this falls back to the Makefile's host-path default, which doesn't
+# exist on a from-scratch host.
+make \
+    CC="${TARGET_TRIPLE}-gcc" \
+    PKG_CONFIG="${TARGET_TRIPLE}-pkg-config" \
+    WAYLAND_SCANNER=wayland-scanner \
+    XDG_SHELL_XML="${XDG_SHELL_XML}" \
+    DESTDIR="${ROOTFS}" PREFIX=/usr install
 make clean
 
 echo ""

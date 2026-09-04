@@ -1,0 +1,31 @@
+#!/bin/sh
+# ============================================================
+# hotplug service — run script
+#
+# Everything this system knows about its hardware, it learned once:
+# novi-hwdetect walks /sys in the initramfs and again from rc.init,
+# and that is a complete answer to "what is in this machine" and no
+# answer at all to "what did someone just plug in". A USB WiFi
+# dongle, a dock's ethernet, a headset, a memory stick -- all of them
+# arrive after the walk is over, and until this service existed
+# nothing noticed.
+#
+# busybox `uevent` is the listener: it binds NETLINK_KOBJECT_UEVENT
+# and runs a program per notification with the kernel's variables in
+# its environment. It also forces a 128 MB receive buffer, which is
+# the property that matters -- events queue in the kernel while the
+# handler works, instead of being dropped on a burst.
+#
+# No notification-fd. Nothing observes this service's readiness (it
+# has no state anything reads, unlike `network`, whose recorded
+# interface boot convergence compares against), so declaring
+# readiness here would be ceremony. It is up when uevent is bound,
+# and uevent binds before it reads.
+#
+# Note what this is NOT: it is not a device-node creator. devtmpfs
+# (CONFIG_DEVTMPFS_MOUNT) makes the nodes, in the kernel, before any
+# of this runs. mdev exists in this busybox and is deliberately not
+# used -- it would be a second thing creating nodes devtmpfs already
+# created, with its own rule file to keep in sync.
+# ============================================================
+exec uevent /sbin/novi-hotplug

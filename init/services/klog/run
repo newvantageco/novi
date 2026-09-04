@@ -1,0 +1,13 @@
+#!/bin/sh
+# ============================================================
+# klog service — run script
+#
+# Kernel ring buffer -> syslog. Without this, everything the kernel
+# says after boot (a disk error, a NIC link change, an OOM kill) exists
+# only in `dmesg` and is lost at the next reboot.
+#
+# -n keeps it in the foreground so s6 supervises the real process.
+# Depends on syslog because it has nowhere to write until /dev/log
+# exists.
+# ============================================================
+exec klogd -n

@@ -1,7 +1,31 @@
 #!/bin/sh
 # ============================================================
 # syslog service — run script
-# Uses s6-log for structured, efficient logging.
-# Logs go to /var/log/syslog, rotated at 1MB, keep 10 files.
+#
+# BusyBox syslogd. It creates /dev/log (the AF_UNIX socket every
+# syslog(3) caller writes to) and appends to /var/log/messages,
+# rotating at 1 MB with 4 backups.
+#
+# Deliberately no `-C` (shared-memory ring, read with `logread`): with
+# -C, BusyBox syslogd logs to the ring INSTEAD of the file, and this
+# kernel has no CONFIG_SYSVIPC, so the ring cannot be created at all.
+# Confirmed live -- `logread` returned "can't find syslogd buffer:
+# Function not implemented" and /var/log/messages did not exist. A
+# flag that quietly redirects all logging into a facility the kernel
+# does not have is worse than no flag.
+#
+# This used to be `s6-log -d3 ... /var/log/syslog`, which was two
+# separate problems. `-d3` means "notify readiness on fd 3" and the
+# service declared no ./notification-fd, so fd 3 was closed and s6-log
+# crash-looped -- invisibly, because s6-rc's "up" for a longrun means
+# "supervised and wanted up", not "running". And even fixed, s6-log
+# reads its *stdin*: as a standalone service nothing was piped into it,
+# so it was a log file with no writers. Confirmed live both times:
+# /var/log/syslog did not exist at all, and then existed with a
+# zero-byte `current` forever.
+#
+# s6-log is the right tool for a per-service logger in a producer/
+# consumer pipeline. It is not a system log daemon, and this service
+# wanted the latter.
 # ============================================================
-exec s6-log -d3 n10 s1000000 /var/log/syslog
+exec syslogd -n -O /var/log/messages -s 1024 -b 4

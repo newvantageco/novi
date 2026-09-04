@@ -47,11 +47,51 @@ fetch_git() {
     rm -rf "${tmp}"
 }
 
+# Hash-pinned fetch. Every other source here is trusted because of
+# where it comes from (kernel.org, gnu.org, musl.libc.org over TLS);
+# that is the normal bargain and it is fine for a compiler. It is not
+# fine for the one file that becomes the trust root of package
+# verification -- if TweetNaCl arrives modified, `pkg` verifies
+# signatures with an implementation an attacker chose. Pin it.
+fetch_pinned() {
+    local url="$1" want="$2"
+    local file
+    file="$(basename "${url}")"
+    if [ ! -f "${file}" ]; then
+        echo "[fetch] ${file}"
+        curl -fL --retry 3 -o "${file}.part" "${url}"
+        mv "${file}.part" "${file}"
+    else
+        echo "[skip]  ${file} already exists"
+    fi
+    local got
+    got="$(sha256sum "${file}" | cut -d' ' -f1)"
+    if [ "${got}" != "${want}" ]; then
+        echo "ERROR: ${file} sha256 mismatch" >&2
+        echo "  expected ${want}" >&2
+        echo "  got      ${got}" >&2
+        exit 1
+    fi
+    echo "[ok]    ${file} sha256 verified"
+}
+
 # Kernel
 fetch "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${LINUX_VERSION}.tar.xz"
 
 # Toolchain
 fetch "https://ftp.gnu.org/gnu/binutils/binutils-${BINUTILS_VERSION}.tar.xz"
+
+# GNU make, for the native toolchain (RFC 0015). BusyBox has no make
+# applet, so without this a Novi machine can run a compiler and still
+# not build anything that ships a Makefile -- which is all of it.
+fetch "https://ftp.gnu.org/gnu/make/make-${MAKE_VERSION}.tar.gz"
+
+# pkgconf, for the native toolchain. Without a pkg-config on the target
+# every `./configure` fails to locate a single library, which makes the
+# difference between a compiler and a build environment. pkgconf rather
+# than freedesktop pkg-config: it is plain C with no dependencies,
+# where the original needs glib.
+fetch "https://distfiles.ariadne.space/pkgconf/pkgconf-${PKGCONF_VERSION}.tar.xz"
 fetch "https://ftp.gnu.org/gnu/gcc/gcc-${GCC_VERSION}/gcc-${GCC_VERSION}.tar.xz"
 fetch "https://musl.libc.org/releases/musl-${MUSL_VERSION}.tar.gz"
 
@@ -169,6 +209,69 @@ if [ ! -f "${JBMONO_ZIP}" ]; then
 else
     echo "[skip]  ${JBMONO_ZIP} already exists"
 fi
+
+# ALSA: the library, and the handful of tools that make a sound card
+# usable (amixer, alsactl, aplay, speaker-test).
+fetch "https://www.alsa-project.org/files/pub/lib/alsa-lib-${ALSA_VERSION}.tar.bz2"
+fetch "https://www.alsa-project.org/files/pub/utils/alsa-utils-${ALSA_VERSION}.tar.bz2"
+
+# The wireless regulatory database and Intel SOF audio firmware.
+# Neither is part of linux-firmware; both are separately versioned
+# projects, and both are the difference between hardware that works and
+# hardware that half-works in a way that looks like something else.
+fetch "https://www.kernel.org/pub/software/network/wireless-regdb/wireless-regdb-${WIRELESS_REGDB_VERSION}.tar.xz"
+
+SOF_TARBALL="sof-bin-${SOF_BIN_VERSION}.tar.gz"
+if [ ! -f "${SOF_TARBALL}" ]; then
+    echo "[fetch] ${SOF_TARBALL}"
+    curl -fL --retry 3 -o "${SOF_TARBALL}" \
+        "https://github.com/thesofproject/sof-bin/releases/download/v${SOF_BIN_VERSION}/${SOF_TARBALL}"
+else
+    echo "[skip]  ${SOF_TARBALL} already exists"
+fi
+
+# linux-firmware. Big (several hundred MB) and fetched whole because
+# kernel.org serves one tarball; build/26-firmware.sh extracts only the
+# curated subset that ends up in the image.
+fetch "https://cdn.kernel.org/pub/linux/kernel/firmware/linux-firmware-${LINUX_FIRMWARE_VERSION}.tar.xz"
+
+# WiFi: libnl (wpa_supplicant's nl80211 driver needs it), wpa_supplicant
+# and hostapd (same upstream tree; hostapd is test-only -- see
+# build/25-wifi.sh), and iw for diagnostics.
+#
+# libnl publishes tarballs as GitHub *release assets*, which this
+# environment can reach; its source-archive endpoints it cannot. Same
+# split this file already documents for JetBrains Mono.
+LIBNL_TARBALL="libnl-${LIBNL_VERSION}.tar.gz"
+if [ ! -f "${LIBNL_TARBALL}" ]; then
+    echo "[fetch] ${LIBNL_TARBALL}"
+    curl -fL --retry 3 -o "${LIBNL_TARBALL}" \
+        "https://github.com/thom311/libnl/releases/download/libnl$(echo "${LIBNL_VERSION}" | tr . _)/${LIBNL_TARBALL}"
+else
+    echo "[skip]  ${LIBNL_TARBALL} already exists"
+fi
+
+fetch "https://w1.fi/releases/wpa_supplicant-${WPA_SUPPLICANT_VERSION}.tar.gz"
+fetch "https://w1.fi/releases/hostapd-${WPA_SUPPLICANT_VERSION}.tar.gz"
+fetch "https://www.kernel.org/pub/software/network/iw/iw-${IW_VERSION}.tar.xz"
+
+# e2fsprogs — real mke2fs (journalled ext4) and e2fsck. From tytso's own
+# kernel.org directory, the upstream home of the project.
+fetch "https://www.kernel.org/pub/linux/kernel/people/tytso/e2fsprogs/v${E2FSPROGS_VERSION}/e2fsprogs-${E2FSPROGS_VERSION}.tar.xz"
+
+# TweetNaCl — the Ed25519 implementation novi-verify is built on, and
+# therefore the trust root for every package this system installs.
+# Public domain, by the NaCl authors (Bernstein, Janssen, Lange,
+# Schwabe, Van Assche). Two files, no build system, no configuration.
+# Fetched from the authors' own site and hash-pinned above.
+mkdir -p "${SOURCES}/tweetnacl-${TWEETNACL_VERSION}"
+(
+    cd "${SOURCES}/tweetnacl-${TWEETNACL_VERSION}"
+    fetch_pinned "https://tweetnacl.cr.yp.to/${TWEETNACL_VERSION}/tweetnacl.c" \
+        "02e65bc3013ff2168983365e55906bc783c4c7e0a60d8100f17bb303a17175c4"
+    fetch_pinned "https://tweetnacl.cr.yp.to/${TWEETNACL_VERSION}/tweetnacl.h" \
+        "43f29ad721d9927b747b0100ab4160c119e7bb180c7c98a66e4bf79d31244287"
+)
 
 echo ""
 echo "All sources downloaded to ${SOURCES}"

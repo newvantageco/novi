@@ -71,7 +71,13 @@ require gzip
 # ─── Build initramfs if not present ──────────────────────────────────────────
 if [[ ! -f "${INITRAMFS_IMAGE}" ]]; then
     echo ">>> Initramfs not found, building with mkinitramfs.sh..."
-    "${SCRIPT_DIR}/mkinitramfs.sh" --output "${INITRAMFS_IMAGE}"
+    # Invoked via `bash`, not executed directly: scripts/*.sh are tracked
+    # in git as mode 100644 (confirmed with `git ls-files -s`, true for
+    # most of this repo's scripts, not just this one), so a fresh clone
+    # has no execute bit on mkinitramfs.sh regardless of what's on any
+    # one contributor's working copy -- direct execution fails outright
+    # with "Permission denied" on a from-scratch checkout.
+    bash "${SCRIPT_DIR}/mkinitramfs.sh" --output "${INITRAMFS_IMAGE}"
 fi
 
 # ─── Prepare ISO tree ─────────────────────────────────────────────────────────
@@ -173,6 +179,28 @@ menuentry "Novi Linux ${ISO_VERSION} — Live" --class linux {
     initrd /boot/initramfs.cpio.gz
 }
 
+menuentry "Novi Linux ${ISO_VERSION} — Live Desktop" --class linux {
+    echo "Loading Novi (desktop)..."
+    linux  /boot/vmlinuz \
+           boot=live \
+           root=live:/dev/disk/by-label/${ISO_LABEL} \
+           live-media=/dev/disk/by-label/${ISO_LABEL} \
+           live-media-label=${ISO_LABEL} \
+           rd.live.image \
+           rd.live.squashimg=live/filesystem.squashfs \
+           novi.live.desktop \
+           quiet splash \
+           rw \
+           loglevel=3 \
+           console=tty0 \
+           console=ttyS0,115200n8 \
+           mitigations=auto \
+           iommu=pt \
+           vt.global_cursor_default=0
+    echo "Loading initramfs..."
+    initrd /boot/initramfs.cpio.gz
+}
+
 menuentry "Novi Linux ${ISO_VERSION} — Safe Mode" --class linux {
     echo "Loading Novi (safe mode)..."
     linux  /boot/vmlinuz \
@@ -219,6 +247,156 @@ for mt in "${MEMTEST_PATHS[@]}"; do
         break
     fi
 done
+
+# ─── Stage BIOS boot artifacts for the on-disk installer ─────────────────────
+#
+# RFC 0003. `novi-install` has to make a target disk bootable, but the
+# Novi rootfs contains no bootloader at all -- there is no grub-install
+# to run on the installed system, and building GRUB into the rootfs
+# just to install it once is a lot of weight for a one-shot job.
+#
+# Instead, split what grub-install does across build time and install
+# time: the two pieces it writes to disk are generated HERE, on a build
+# host that already has GRUB's tools (CONTRIBUTING.md lists
+# grub-common/grub-pc-bin as prerequisites), shipped inside the ISO,
+# and merely *placed* by the installer. The installer then needs no
+# GRUB tooling at all -- only `dd` and `cp`, both of which BusyBox has.
+#
+#   boot.img  512 bytes -> the MBR's boot code (first 446 bytes of it)
+#   core.img  ~30KB     -> the post-MBR gap; knows how to read ext2 and
+#                          find /boot/grub on the root partition
+#   i386-pc/  modules   -> what core.img loads once it can read the fs
+#
+# The prefix baked into core.img is where it looks for those modules
+# and grub.cfg, so it has to match the layout novi-install creates
+# (single ext2/4 partition, msdos table, /boot/grub on it).
+# ─── Stage the package repository onto the media ─────────────────────────────
+#
+# The ISO carries the whole signed repository (RFC 0007). That is what
+# makes the base image console-only without making the desktop
+# network-only: /etc/novi/pkg.conf points at /run/live/novi-repo, so a
+# live system can `pkg install novi-desktop` with no network, and
+# `novi-install --profile desktop` can put one on a target machine that
+# has never been online. Signature and hash verification are identical
+# either way -- only the transport differs.
+NOVI_REPO_DIR="${NOVI_REPO_DIR:-${BUILD_DIR}/repo}"
+if [[ -f "${NOVI_REPO_DIR}/index" ]]; then
+    echo ">>> Staging the package repository from ${NOVI_REPO_DIR} ..."
+    mkdir -p "${ISO_DIR}/novi-repo"
+    cp -a "${NOVI_REPO_DIR}"/. "${ISO_DIR}/novi-repo/"
+    # The private signing key lives in ${BUILD_DIR}/keys and never in
+    # the repo directory, but check anyway: shipping one on an ISO is
+    # the kind of mistake that cannot be taken back once published.
+    find "${ISO_DIR}/novi-repo" -name '*.key' -o -name '*.pem' | while read -r k; do
+        echo "REFUSING: private key material found in the repository: ${k}" >&2
+        exit 1
+    done
+    echo ">>> repository: $(ls "${ISO_DIR}/novi-repo"/*.pkg.tar.gz 2>/dev/null | wc -l) package(s), $(du -sh "${ISO_DIR}/novi-repo" | cut -f1)"
+else
+    echo ">>> WARNING: no package repository at ${NOVI_REPO_DIR} -- the ISO will" >&2
+    echo ">>>          have no desktop to install. Run build/20-repo.sh first." >&2
+fi
+
+echo ">>> Staging BIOS boot artifacts for the installer ..."
+GRUB_LIB_DIR="/usr/lib/grub/i386-pc"
+if [[ -d "${GRUB_LIB_DIR}" ]] && command -v grub-mkimage &>/dev/null; then
+    NOVI_BOOT_DIR="${ISO_DIR}/novi-boot"
+    mkdir -p "${NOVI_BOOT_DIR}"
+    cp "${GRUB_LIB_DIR}/boot.img" "${NOVI_BOOT_DIR}/boot.img"
+    # The module list is the minimum needed to get from the gap to a
+    # kernel: read an msdos partition table, read the ext2/4 filesystem
+    # on it, then run a normal menu and boot Linux.
+    grub-mkimage \
+        -O i386-pc \
+        -o "${NOVI_BOOT_DIR}/core.img" \
+        -p '(hd0,msdos1)/boot/grub' \
+        biosdisk part_msdos ext2 normal linux configfile search \
+        search_fs_uuid search_label echo test ls boot
+    mkdir -p "${NOVI_BOOT_DIR}/i386-pc"
+    cp "${GRUB_LIB_DIR}"/*.mod "${GRUB_LIB_DIR}"/*.lst "${NOVI_BOOT_DIR}/i386-pc/" 2>/dev/null || true
+    echo ">>> BIOS boot artifacts: boot.img $(stat -c%s "${NOVI_BOOT_DIR}/boot.img")B, core.img $(stat -c%s "${NOVI_BOOT_DIR}/core.img")B, $(ls "${NOVI_BOOT_DIR}/i386-pc" | wc -l) modules"
+
+    # ── UEFI ──────────────────────────────────────────────────────────────
+    #
+    # A SELF-CONTAINED bootx64.efi: every module it needs is embedded,
+    # so the installer copies exactly one file onto the ESP and there is
+    # no module directory to keep in sync. The BIOS half cannot do that
+    # -- core.img has to stay small enough for the post-MBR gap -- which
+    # is why the two differ.
+    #
+    # prefix /EFI/BOOT means GRUB looks for grub.cfg beside itself on
+    # the partition it was loaded from (the ESP), so it needs no search
+    # to find its own configuration.
+    #
+    # ext2 reads ext4 too; it is the kernel and initramfs on the root
+    # filesystem that this has to be able to load.
+    GRUB_EFI_DIR="/usr/lib/grub/x86_64-efi"
+    if [[ -d "${GRUB_EFI_DIR}" ]]; then
+        grub-mkimage \
+            -O x86_64-efi \
+            -o "${NOVI_BOOT_DIR}/bootx64.efi" \
+            -p '/EFI/BOOT' \
+            part_gpt part_msdos fat ext2 normal linux configfile \
+            search search_fs_uuid search_label search_fs_file \
+            echo test ls boot gzio all_video efi_gop efi_uga \
+            serial terminal minicmd reboot halt
+        echo ">>> UEFI boot artifact: bootx64.efi $(stat -c%s "${NOVI_BOOT_DIR}/bootx64.efi")B"
+
+        # ── Secure Boot ──────────────────────────────────────────────
+        #
+        # Sign bootx64.efi with a locally generated key, and ship the
+        # certificate beside it so a machine's owner can enrol it.
+        #
+        # BE CLEAR ABOUT WHAT THIS DOES AND DOES NOT DO. It does not
+        # make Novi boot on a stock Secure Boot machine: firmware
+        # trusts Microsoft's keys, and getting into that chain needs a
+        # signed shim, which needs an organisation to go through
+        # Microsoft's signing process. What it gives is the option --
+        # enrol novi-secureboot.der in your firmware's db and Secure
+        # Boot can stay ON. Without enrolling it, Secure Boot has to be
+        # turned off, exactly as before.
+        #
+        # An unsigned image would have been the easier thing to ship
+        # and would have left "turn off Secure Boot" as the only
+        # answer forever.
+        SB_KEY_DIR="${SB_KEY_DIR:-${BUILD_DIR}/keys}"
+        SB_KEY="${SB_KEY_DIR}/novi-secureboot.key"
+        SB_CRT="${SB_KEY_DIR}/novi-secureboot.crt"
+        if command -v sbsign &>/dev/null && command -v openssl &>/dev/null; then
+            mkdir -p "${SB_KEY_DIR}"; chmod 700 "${SB_KEY_DIR}"
+            if [[ ! -f "${SB_KEY}" ]]; then
+                echo ">>> Generating a Secure Boot signing key ..."
+                openssl req -new -x509 -newkey rsa:2048 -nodes -days 3650 \
+                    -subj "/CN=Novi Linux Secure Boot/" \
+                    -keyout "${SB_KEY}" -out "${SB_CRT}" 2>/dev/null
+                chmod 600 "${SB_KEY}"
+            fi
+            if sbsign --key "${SB_KEY}" --cert "${SB_CRT}" \
+                      --output "${NOVI_BOOT_DIR}/bootx64.efi.signed" \
+                      "${NOVI_BOOT_DIR}/bootx64.efi" &>/dev/null; then
+                mv "${NOVI_BOOT_DIR}/bootx64.efi.signed" "${NOVI_BOOT_DIR}/bootx64.efi"
+                # DER, because that is the format firmware setup
+                # utilities ask for when enrolling a key.
+                openssl x509 -in "${SB_CRT}" -outform DER \
+                    -out "${NOVI_BOOT_DIR}/novi-secureboot.der" 2>/dev/null
+                echo ">>> bootx64.efi signed; enrolment certificate: /novi-boot/novi-secureboot.der"
+            else
+                echo ">>> WARNING: sbsign failed -- shipping an unsigned bootx64.efi" >&2
+            fi
+        else
+            echo ">>> NOTE: sbsign not installed -- bootx64.efi is unsigned, so a" >&2
+            echo ">>>       machine with Secure Boot enabled will refuse it." >&2
+        fi
+    else
+        echo ">>> WARNING: ${GRUB_EFI_DIR} not found -- no UEFI install support" >&2
+    fi
+else
+    # Not fatal: the ISO still boots and runs live. Only `novi-install`
+    # is affected, and it checks for these and says so plainly rather
+    # than producing an unbootable disk.
+    echo ">>> WARNING: GRUB tools/modules not found -- ISO will boot live," >&2
+    echo ">>>          but novi-install will refuse to install from it." >&2
+fi
 
 # ─── Write filesystem manifest ────────────────────────────────────────────────
 echo ">>> Writing filesystem manifest ..."

@@ -1,5 +1,18 @@
 # Novi Linux — Branch Strategy
 
+> **Current reality, as of RFC 0015.** Of the branches below, only
+> `main` exists. There is no `develop`, no `stable/*` and no
+> `advanced/rolling` yet, and both pull requests to date have targeted
+> `main` directly. **Until `develop` is actually created, open pull
+> requests against `main`.**
+>
+> The layout below is the intended model for when there is enough
+> traffic to need it — a two-branch integration flow costs more than it
+> returns while the project has one open pull request at a time. It is
+> kept here as the plan, not described as the present, because
+> documentation that tells a contributor to target a branch that does
+> not exist is worse than no documentation.
+
 ## Branch Layout
 
 ```

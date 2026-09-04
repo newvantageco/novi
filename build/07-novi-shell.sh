@@ -28,7 +28,23 @@ make \
     PKG_CONFIG="${TARGET_TRIPLE}-pkg-config" \
     WAYLAND_SCANNER=wayland-scanner \
     XDG_SHELL_XML="${XDG_SHELL_XML}"
-make DESTDIR="${ROOTFS}" PREFIX=/usr install
+# Repeats every var from the build invocation above, not just
+# DESTDIR/PREFIX: `install` depends on the `novi-shell` target, so make
+# re-checks that target's own prerequisites (xdg-shell-protocol.c/.h
+# depend on $(XDG_SHELL_XML)) here too -- without CC/PKG_CONFIG/
+# WAYLAND_SCANNER/XDG_SHELL_XML repeated, make silently falls back to
+# the Makefile's plain-host defaults for this second invocation only,
+# and XDG_SHELL_XML's default (a host path wayland-protocols would
+# need installed at, which CONTRIBUTING.md's prerequisites don't
+# require) doesn't exist on a from-scratch host -- confirmed by hitting
+# "No rule to make target '/usr/share/wayland-protocols/.../xdg-shell.xml'"
+# for real, not guessed.
+make \
+    CC="${TARGET_TRIPLE}-gcc" \
+    PKG_CONFIG="${TARGET_TRIPLE}-pkg-config" \
+    WAYLAND_SCANNER=wayland-scanner \
+    XDG_SHELL_XML="${XDG_SHELL_XML}" \
+    DESTDIR="${ROOTFS}" PREFIX=/usr install
 make clean
 
 echo ""

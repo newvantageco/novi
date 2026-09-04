@@ -10,13 +10,14 @@
  * rather than reinvented.
  *
  * Default keybindings implement part of RFC 0001 decision 7: Alt+Tab /
- * Alt+Shift+Tab (window switching), Super+Return (spawn a terminal),
- * Super+Q (close focused window). Still not implemented: the panel and
- * app launcher themselves (this only provides the protocol they'd
- * anchor to, not the UI), Super+[1-9] workspaces, PrintScreen
- * screenshots, Super+L lock, Super+. emoji picker, and moving any of
- * this to the user-editable config file RFC 0001 calls for -- all
- * tracked follow-up work, not part of this milestone.
+ * Alt+Shift+Tab (window switching), Alt+Space (search/launcher overlay,
+ * novi-launcher/), Super+Return (spawn a terminal), Super+Q (close
+ * focused window), Super+. (symbol picker, novi-launcher --symbols --
+ * see that file for why "symbol" and not full emoji). Still not
+ * implemented: Super+[1-9] workspaces, PrintScreen screenshots, Super+L
+ * lock, and moving any of this to the user-editable config file RFC
+ * 0001 calls for -- all tracked follow-up work, not part of this
+ * milestone.
  */
 #include <assert.h>
 #include <getopt.h>
@@ -24,6 +25,7 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
 #include <time.h>
 #include <unistd.h>
 #include <wayland-server-core.h>
@@ -33,6 +35,7 @@
 #include <wlr/types/wlr_cursor.h>
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_data_device.h>
+#include <wlr/types/wlr_foreign_toplevel_management_v1.h>
 #include <wlr/types/wlr_input_device.h>
 #include <wlr/types/wlr_keyboard.h>
 #include <wlr/types/wlr_layer_shell_v1.h>
@@ -40,6 +43,7 @@
 #include <wlr/types/wlr_output_layout.h>
 #include <wlr/types/wlr_pointer.h>
 #include <wlr/types/wlr_scene.h>
+#include <wlr/types/wlr_screencopy_v1.h>
 #include <wlr/types/wlr_seat.h>
 #include <wlr/types/wlr_subcompositor.h>
 #include <wlr/types/wlr_xcursor_manager.h>
@@ -58,6 +62,49 @@
  * into the compositor -- same "novi-shell UI is a layer-shell client,
  * not compositor code" split as any future panel. */
 #define NOVI_DEFAULT_LAUNCHER "novi-launcher"
+/* RFC 0001 decision 7: Super+. symbol picker -- the same novi-launcher
+ * binary, re-invoked with --symbols (see novi-launcher/main.c's own
+ * header comment for why this is "symbol", not full emoji). */
+#define NOVI_DEFAULT_SYMBOL_PICKER "novi-launcher --symbols"
+/* RFC 0001 decision 7: bare PrintScreen (no modifier) captures the
+ * whole screen via novi-screenshot/ -- a separate client, same split
+ * as the launcher/symbol picker above. Unlike every other binding
+ * here, this one is dispatched with no Alt/Super requirement (see
+ * keyboard_handle_key()'s separate check below), matching what every
+ * PrintScreen key on real keyboards already means. */
+#define NOVI_DEFAULT_SCREENSHOT "novi-screenshot"
+/* RFC 0001 decision 7: Super+L session lock -- another separate
+ * client (novi-lockscreen/), not compositor code, same split as every
+ * other binding above. Unlike those, a lock is a real security
+ * boundary, not a convenience overlay: novi_server.locked and its
+ * guards in keyboard_handle_key()/focus_toplevel() are what actually
+ * make this safe, not just novi-lockscreen's own layer-shell surface
+ * existing (that alone is exactly what novi-launcher already does,
+ * and novi-launcher grabbing keyboard focus was never meant to
+ * withstand another keybinding stealing it back). */
+#define NOVI_DEFAULT_LOCK "novi-lockscreen"
+/* The zwlr_layer_surface_v1 namespace novi-lockscreen identifies itself
+ * with (its get_layer_surface() call's namespace argument) -- how
+ * layer_surface_map()/layer_surface_unmap() recognize "this is the
+ * lock surface, toggle novi_server.locked" among every other
+ * layer-shell client without a bespoke protocol extension just for
+ * that. Matched by exact string, so novi-lockscreen and novi-shell
+ * agree on this constant by both using it (novi-lockscreen's own
+ * main.c defines the identical string next to its own explanation). */
+#define NOVI_LOCK_NAMESPACE "novi-lockscreen"
+/* RFC 0001 decision 7: Super+[1-9] workspaces. The RFC frames this as
+ * per-output (the sway/i3 convention), but every other part of this
+ * compositor that deals with "which output" -- new-toplevel placement,
+ * layer-shell surfaces with no output requested -- already commits to
+ * "there is exactly one output, use it" (see server_new_layer_surface()
+ * and server_new_xdg_toplevel()'s own comments) rather than real
+ * multi-output logic nothing here has ever tested. Workspace state
+ * follows that same, honest scoping: one set of NOVI_WORKSPACE_COUNT
+ * workspaces on novi_server itself, not per-novi_output -- a real
+ * multi-output workspace model is future work alongside real
+ * multi-output placement generally, not something to half-build here
+ * against zero multi-monitor test coverage. */
+#define NOVI_WORKSPACE_COUNT 9
 /* The top bar (RFC 0001's "novi-shell" UI chrome) -- another
  * layer-shell client, auto-spawned once the compositor is up, rather
  * than left for the user to start manually or wired as a separate s6
@@ -93,30 +140,24 @@
  * clearance instead (16px center-to-center), the conventional reading
  * of "an 8px gap" between same-sized elements. */
 #define DECO_DOT_GAP 16
-/* bg-card (GUI-DESIGN-LANGUAGE.md's window-content-chrome token),
- * text-muted at full strength (close/maximize -- both real and
- * functional, so neither gets the doc's "dimmed" treatment, which
- * would misleadingly signal non-interactive), and text-muted at ~40%
- * opacity (minimize -- genuinely still just a placeholder, per the
- * doc's own spec for it), as wlr_scene_rect's normalized-float RGBA
- * rather than this codebase's usual packed 0xRRGGBB hex, since that's
- * the format the scene-graph rect API actually takes.
+/* bg-card (GUI-DESIGN-LANGUAGE.md's window-content-chrome token) and
+ * text-muted at full strength -- all three dots (close/maximize/
+ * minimize) are real and functional now, so none gets a "dimmed"
+ * treatment, which would misleadingly signal non-interactive. As
+ * wlr_scene_rect's normalized-float RGBA rather than this codebase's
+ * usual packed 0xRRGGBB hex, since that's the format the scene-graph
+ * rect API actually takes.
  *
- * The dimmed color's R/G/B are pre-multiplied by its 0.4 alpha, not
- * the plain text-muted values scaled down some other way -- struct
- * wlr_render_color (wlr/render/pass.h, what a wlr_scene_rect's color
- * eventually becomes) documents this explicitly: "the R, G, B channels
- * need to be pre-multiplied by A." Getting this wrong is silent, not a
- * crash: confirmed live, passing straight (non-premultiplied)
- * text-muted with alpha=0.4 rendered the dot BRIGHTER than the full-
- * strength dots next to it, the opposite of "dimmed" -- a pixel
- * sample read back (123,128,151) against the real dots' (107,111,128),
- * not the ~(59,61,74) blending toward the dark title bar would
- * actually produce. */
+ * Note for whoever adds the next translucent decoration element: a
+ * wlr_scene_rect's R/G/B must be pre-multiplied by its own alpha --
+ * struct wlr_render_color (wlr/render/pass.h) documents this
+ * explicitly. Getting it wrong is silent, not a crash: this file used
+ * to have a dimmed (40%-alpha) minimize dot, and passing straight
+ * (non-premultiplied) color with alpha=0.4 rendered it BRIGHTER than
+ * the full-strength dots next to it, confirmed via a pixel readback --
+ * the opposite of "dimmed". */
 static const float DECO_BG_COLOR[4] = {0x1B / 255.0f, 0x1C / 255.0f, 0x26 / 255.0f, 1.0f};
 static const float DECO_DOT_COLOR[4] = {0x6B / 255.0f, 0x6F / 255.0f, 0x80 / 255.0f, 1.0f};
-static const float DECO_DOT_COLOR_DIMMED[4] = {
-	(0x6B / 255.0f) * 0.4f, (0x6F / 255.0f) * 0.4f, (0x80 / 255.0f) * 0.4f, 0.4f};
 
 /* For brevity's sake, struct members are annotated where they are used. */
 enum novi_cursor_mode {
@@ -188,6 +229,36 @@ struct novi_server {
 	struct wlr_scene_tree *layer_tree_toplevels;
 	struct wlr_scene_tree *layer_tree_top;
 	struct wlr_scene_tree *layer_tree_overlay;
+
+	/* wlr-foreign-toplevel-management-unstable-v1: lets a separate
+	 * layer-shell client (novi-panel's taskbar) list open windows and
+	 * request activate/minimize/maximize/close on them, the standard
+	 * protocol real taskbars (waybar included) use for exactly this --
+	 * not a new bespoke IPC channel between novi-shell and novi-panel.
+	 * wlroots implements the protocol server internally (same shape as
+	 * wlr_data_device_manager_v1/wlr_layer_shell_v1 above); this is the
+	 * one manager object, created once. */
+	struct wlr_foreign_toplevel_manager_v1 *foreign_toplevel_manager;
+
+	/* RFC 0001 decision 7: Super+L session lock. True while
+	 * novi-lockscreen's fullscreen, keyboard-exclusive layer-shell
+	 * surface is mapped (see server_new_layer_surface()'s namespace
+	 * check). This flag is the compositor's own half of "locked" --
+	 * see keyboard_handle_key()'s and focus_toplevel()'s guards for why
+	 * a layer-shell surface grabbing keyboard focus on its own, the
+	 * mechanism every other overlay (launcher, symbol picker) already
+	 * uses, isn't a real lock by itself: nothing stops a *different*
+	 * global keybinding (Super+Q, Alt+Tab, another Alt+Space) from
+	 * moving focus away from it mid-lock, since handle_keybinding()
+	 * runs before seat-focus routing, not through it. */
+	bool locked;
+
+	/* RFC 0001 decision 7: Super+[1-9] workspaces. 1-indexed (matching
+	 * the keys themselves) so this can be compared directly against a
+	 * novi_toplevel.workspace with no off-by-one translation at either
+	 * end. See NOVI_WORKSPACE_COUNT's own comment for why this lives on
+	 * novi_server, not per-output. */
+	int active_workspace;
 };
 
 struct novi_output {
@@ -230,10 +301,9 @@ struct novi_toplevel {
 	 * toplevel()'s initial-placement comment for why the content itself
 	 * is now placed DECO_HEIGHT lower than before, to leave room). Kept
 	 * as direct pointers, not walked from the scene tree, so xdg_
-	 * toplevel_commit() can resize the bar and {close,maximize}_dot_
-	 * toplevel_at() can identify a hit without re-deriving them.
-	 * minimize_dot has no _toplevel_at() helper -- it stays a dimmed,
-	 * non-interactive placeholder (see its creation comment). */
+	 * toplevel_commit() can resize the bar and all three dots'
+	 * decoration_rect_toplevel_at() hit-test can identify a click
+	 * without re-deriving them. */
 	struct wlr_scene_rect *titlebar;
 	struct wlr_scene_rect *close_dot;
 	struct wlr_scene_rect *maximize_dot;
@@ -243,6 +313,22 @@ struct novi_toplevel {
 	 * (xdg_toplevel_request_maximize()) go through the same two
 	 * functions, so there's exactly one place that ever changes this. */
 	bool maximized;
+	/* Minimize state, toggled by minimize_toplevel()/unminimize_
+	 * toplevel() -- the (now-live, no longer dimmed) minimize dot, a
+	 * taskbar's request_minimize, and focus_toplevel() restoring a
+	 * minimized window (Alt+Tab or a taskbar's request_activate) all go
+	 * through this same pair. */
+	bool minimized;
+	/* RFC 0001 decision 7: which of NOVI_WORKSPACE_COUNT workspaces this
+	 * toplevel belongs to (1-indexed, see novi_server.active_workspace).
+	 * Set once at map time to whatever's active then -- new windows open
+	 * on the current workspace, matching every real i3/sway-family
+	 * compositor's behavior -- and changed only by an explicit
+	 * Super+Shift+[1-9] (move_focused_to_workspace()). Visibility is
+	 * `workspace == server->active_workspace && !minimized`: these two
+	 * hidden-reasons are independent (see switch_workspace()'s own
+	 * comment), not one flag doing double duty. */
+	int workspace;
 	struct wlr_box saved_geometry;
 	struct wl_listener map;
 	struct wl_listener unmap;
@@ -252,6 +338,18 @@ struct novi_toplevel {
 	struct wl_listener request_resize;
 	struct wl_listener request_maximize;
 	struct wl_listener request_fullscreen;
+	struct wl_listener set_title;
+	struct wl_listener set_app_id;
+
+	/* This toplevel's handle on the foreign-toplevel-management
+	 * protocol (see novi_server.foreign_toplevel_manager) -- created on
+	 * map, destroyed on unmap, so a taskbar only ever lists windows
+	 * that are actually currently mapped. */
+	struct wlr_foreign_toplevel_handle_v1 *foreign_handle;
+	struct wl_listener foreign_request_maximize;
+	struct wl_listener foreign_request_minimize;
+	struct wl_listener foreign_request_activate;
+	struct wl_listener foreign_request_close;
 };
 
 struct novi_popup {
@@ -276,11 +374,62 @@ struct novi_keyboard {
  * needs them earlier in the file than that. */
 static void maximize_toplevel(struct novi_toplevel *toplevel);
 static void unmaximize_toplevel(struct novi_toplevel *toplevel);
+/* Same reason: unminimize_toplevel() needs calling from focus_toplevel()
+ * itself (Alt+Tab or a taskbar "activate" request restoring a minimized
+ * window), defined near minimize_toplevel() below for the same "keep
+ * the state-owning pair together" reason as maximize/unmaximize. */
+static void minimize_toplevel(struct novi_toplevel *toplevel);
+static void unminimize_toplevel(struct novi_toplevel *toplevel);
+/* Forward-declared for the same reason: handle_keybinding() (below)
+ * needs to call these for Super+[1-9]/Super+Shift+[1-9], but they're
+ * defined next to minimize_toplevel() further down (same "state-owning
+ * pair stays together" grouping -- these two own novi_toplevel.workspace
+ * the same way minimize_toplevel()/unminimize_toplevel() own .minimized). */
+static void switch_workspace(struct novi_server *server, int workspace);
+static void move_focused_to_workspace(struct novi_server *server, int workspace);
 
 static void focus_toplevel(struct novi_toplevel *toplevel, struct wlr_surface *surface) {
 	/* Note: this function only deals with keyboard focus. */
 	if (toplevel == NULL) {
 		return;
+	}
+	if (toplevel->server->locked) {
+		/* Refuse every path that reaches this function while locked --
+		 * a pointer click hit-testing to a toplevel can't happen for
+		 * real (the lock surface is a full-output OVERLAY-layer surface
+		 * with exclusive_zone=-1, so it's hit before anything under it
+		 * ever could be), but a newly mapped toplevel's own
+		 * auto-focus-on-map call still reaches here, and this is the
+		 * one choke point all such callers share. See novi_server.locked's
+		 * comment for why the keyboard-shortcut path needs its own,
+		 * separate guard instead of relying on this alone. */
+		return;
+	}
+	if (toplevel->workspace != toplevel->server->active_workspace) {
+		/* Alt+Tab and a taskbar's "activate" request can both land on a
+		 * toplevel that lives on a workspace that isn't currently
+		 * visible (the taskbar shows every open window regardless of
+		 * workspace -- see novi-panel/main.c). Real desktops switch you
+		 * to wherever the window you're activating actually is, rather
+		 * than silently focusing something that stays hidden; this is
+		 * that switch. Done before the minimized check below on
+		 * purpose: switch_workspace() has to run first so
+		 * unminimize_toplevel()'s own visibility computation (workspace
+		 * == active_workspace) sees the workspace it's ABOUT to be
+		 * shown on, not the one being switched away from. switch_
+		 * workspace() may itself focus some other toplevel as part of
+		 * making the new workspace visible (its own default MRU pick)
+		 * -- harmless, since this function's own focus-setting code
+		 * below still runs afterward and re-focuses THIS toplevel
+		 * regardless of whatever it picked in the meantime. */
+		switch_workspace(toplevel->server, toplevel->workspace);
+	}
+	if (toplevel->minimized) {
+		/* Alt+Tab and a taskbar's "activate" request both just call this
+		 * function -- restoring a minimized window on either path,
+		 * rather than requiring callers to remember to unminimize first,
+		 * matches how every real desktop's taskbar/Alt+Tab behaves. */
+		unminimize_toplevel(toplevel);
 	}
 	struct novi_server *server = toplevel->server;
 	struct wlr_seat *seat = server->seat;
@@ -308,6 +457,19 @@ static void focus_toplevel(struct novi_toplevel *toplevel, struct wlr_surface *s
 	wl_list_insert(&server->toplevels, &toplevel->link);
 	/* Activate the new surface */
 	wlr_xdg_toplevel_set_activated(toplevel->xdg_toplevel, true);
+	/* Keep every toplevel's foreign-toplevel-management "activated" bit
+	 * (what a taskbar highlights as the current window) in sync -- a
+	 * plain iteration rather than tracking just the two that changed,
+	 * since the window count here is always small (an "everyday
+	 * desktop" workload, not hundreds of toplevels) and this only runs
+	 * on an actual focus change, not per-frame. */
+	struct novi_toplevel *activated_iter;
+	wl_list_for_each(activated_iter, &server->toplevels, link) {
+		if (activated_iter->foreign_handle != NULL) {
+			wlr_foreign_toplevel_handle_v1_set_activated(
+				activated_iter->foreign_handle, activated_iter == toplevel);
+		}
+	}
 	/*
 	 * Tell the seat to have the keyboard enter this surface. wlroots will keep
 	 * track of this and automatically send key events to the appropriate
@@ -394,15 +556,44 @@ static void close_focused_toplevel(struct novi_server *server) {
 	}
 }
 
-/* RFC 0001 decision 7's default keybindings. Alt+Tab/Shift+Tab (window
- * switching) and Super+Return/Super+Q (terminal/close) are implemented
- * here; Super+[1-9] workspaces, PrintScreen screenshots, Super+L lock,
- * and Super+. emoji picker are tracked follow-ups, not yet wired --
- * each needs state (workspaces) or a client-side helper (screenshot,
- * lock) this milestone doesn't build. All of this is compositor-
- * internal default behavior for now; RFC 0001 calls for these to move
- * to a user-editable config file, also a follow-up, not implemented
- * here yet. */
+/* Maps a keysym back to its Super+[1-9] workspace number (1-9), or 0 if
+ * it isn't one -- needed because xkb_state_key_get_syms() (what
+ * keyboard_handle_key() actually calls) returns the keysym AFTER
+ * applying the current modifier state, and on a standard US layout
+ * (the only one this compositor's hardcoded xkb_keymap_new_from_names()
+ * call ever produces -- see server_new_keyboard()) Shift+3 reports
+ * XKB_KEY_numbersign ('#'), never XKB_KEY_3. A plain `case XKB_KEY_3:`
+ * switch can never match Super+Shift+3's actual keysym, silently
+ * falling through to deliver "#" to the focused client instead --
+ * confirmed live: exactly that happened before this fix, typed
+ * straight into a focused foot window. This is the identical class of
+ * bug XKB_KEY_ISO_Left_Tab's own case (right below) already works
+ * around for Shift+Tab; digits just have nine shifted forms to cover
+ * instead of Tab's one. */
+static int workspace_digit_for_keysym(xkb_keysym_t sym) {
+	switch (sym) {
+	case XKB_KEY_1: case XKB_KEY_exclam: return 1;
+	case XKB_KEY_2: case XKB_KEY_at: return 2;
+	case XKB_KEY_3: case XKB_KEY_numbersign: return 3;
+	case XKB_KEY_4: case XKB_KEY_dollar: return 4;
+	case XKB_KEY_5: case XKB_KEY_percent: return 5;
+	case XKB_KEY_6: case XKB_KEY_asciicircum: return 6;
+	case XKB_KEY_7: case XKB_KEY_ampersand: return 7;
+	case XKB_KEY_8: case XKB_KEY_asterisk: return 8;
+	case XKB_KEY_9: case XKB_KEY_parenleft: return 9;
+	default: return 0;
+	}
+}
+
+/* RFC 0001 decision 7's default keybindings, all implemented:
+ * Alt+Tab/Shift+Tab (window switching), Super+Return/Super+Q (terminal/
+ * close), Super+[1-9]/Super+Shift+[1-9] (workspaces -- see
+ * NOVI_WORKSPACE_COUNT's own comment for the per-server, not per-output,
+ * scoping), Super+. (symbol picker), PrintScreen (screenshot, checked
+ * separately in keyboard_handle_key() since it takes no modifier), and
+ * Super+L (lock). All of this is compositor-internal default behavior
+ * for now; RFC 0001 calls for these to move to a user-editable config
+ * file, a follow-up, not implemented here yet. */
 static bool handle_keybinding(struct novi_server *server, uint32_t modifiers,
 		xkb_keysym_t sym) {
 	if (modifiers & WLR_MODIFIER_ALT) {
@@ -437,6 +628,22 @@ static bool handle_keybinding(struct novi_server *server, uint32_t modifiers,
 		}
 	}
 	if (modifiers & WLR_MODIFIER_LOGO) {
+		/* RFC 0001 decision 7: Super+[1-9] switch workspace,
+		 * Super+Shift+[1-9] move the focused window to one -- checked
+		 * here, before the switch below, rather than as switch cases:
+		 * workspace_digit_for_keysym() already covers both a digit's
+		 * shifted and unshifted keysym (see its own comment for why
+		 * that's required at all), so this one check replaces what
+		 * would otherwise need to be 18 separate case labels. */
+		int workspace_n = workspace_digit_for_keysym(sym);
+		if (workspace_n != 0) {
+			if (modifiers & WLR_MODIFIER_SHIFT) {
+				move_focused_to_workspace(server, workspace_n);
+			} else {
+				switch_workspace(server, workspace_n);
+			}
+			return true;
+		}
 		switch (sym) {
 		case XKB_KEY_Return:
 			spawn(getenv("NOVI_TERMINAL") ?
@@ -445,6 +652,25 @@ static bool handle_keybinding(struct novi_server *server, uint32_t modifiers,
 		case XKB_KEY_q:
 		case XKB_KEY_Q:
 			close_focused_toplevel(server);
+			return true;
+		case XKB_KEY_l:
+		case XKB_KEY_L:
+			/* RFC 0001 decision 7: session lock. novi-lockscreen sets
+			 * server->locked itself once its surface actually maps
+			 * (server_new_layer_surface()'s namespace check) rather
+			 * than this setting it directly -- if the client fails to
+			 * start, or refuses to lock because no password is set
+			 * (see novi-lockscreen/main.c), the compositor should never
+			 * believe it's locked when no real lock surface exists to
+			 * back that up. */
+			spawn(getenv("NOVI_LOCK") ? getenv("NOVI_LOCK") : NOVI_DEFAULT_LOCK);
+			return true;
+		case XKB_KEY_period:
+			/* RFC 0001 decision 7: symbol picker. Same spawn-fresh-
+			 * overlay pattern as Alt+Space above, just a different
+			 * argv -- novi-launcher decides what that means. */
+			spawn(getenv("NOVI_SYMBOL_PICKER") ?
+				getenv("NOVI_SYMBOL_PICKER") : NOVI_DEFAULT_SYMBOL_PICKER);
 			return true;
 		default:
 			break;
@@ -471,13 +697,38 @@ static void keyboard_handle_key(
 
 	bool handled = false;
 	uint32_t modifiers = wlr_keyboard_get_modifiers(keyboard->wlr_keyboard);
-	if ((modifiers & (WLR_MODIFIER_ALT | WLR_MODIFIER_LOGO)) &&
+	/* While locked, no compositor keybinding fires at all -- every key
+	 * just falls through to the final wlr_seat_keyboard_notify_key()
+	 * below, which delivers only to whatever holds seat keyboard focus.
+	 * That's always novi-lockscreen's own surface while locked (it
+	 * grabbed focus on map, and focus_toplevel()'s own guard stops
+	 * anything from stealing it back) -- so this is the other half of
+	 * making Super+L a real lock, not just an overlay: without this,
+	 * Super+Q or another Alt+Space while "locked" would still run,
+	 * since handle_keybinding() normally runs before any focus check at
+	 * all. See novi_server.locked's own comment for the full picture. */
+	if (!server->locked &&
+			(modifiers & (WLR_MODIFIER_ALT | WLR_MODIFIER_LOGO)) &&
 			event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
 		/* If Alt or Super (Logo) is held down and this key was
 		 * _pressed_, attempt to process it as a compositor keybinding
 		 * before ever considering passing it to the focused client. */
 		for (int i = 0; i < nsyms; i++) {
 			if (handle_keybinding(server, modifiers, syms[i])) {
+				handled = true;
+			}
+		}
+	}
+
+	if (!server->locked && !handled &&
+			event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
+		/* PrintScreen needs no modifier (see NOVI_DEFAULT_SCREENSHOT's
+		 * comment) so it can't live inside the Alt/Super-gated loop
+		 * above -- check it unconditionally instead. */
+		for (int i = 0; i < nsyms; i++) {
+			if (syms[i] == XKB_KEY_Print) {
+				spawn(getenv("NOVI_SCREENSHOT") ?
+					getenv("NOVI_SCREENSHOT") : NOVI_DEFAULT_SCREENSHOT);
 				handled = true;
 			}
 		}
@@ -863,6 +1114,8 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
 			} else {
 				maximize_toplevel(hit);
 			}
+		} else if (hit != NULL && hit_rect == hit->minimize_dot) {
+			minimize_toplevel(hit);
 		}
 	}
 
@@ -1103,6 +1356,19 @@ static void layer_surface_map(struct wl_listener *listener, void *data) {
 	 * guaranteed true, closes it. */
 	arrange_layers(surface->output);
 
+	/* This is the lock surface mapping: flip novi_server.locked so
+	 * keyboard_handle_key() and focus_toplevel() start refusing every
+	 * path that could steal focus or run a keybinding while locked.
+	 * Deliberately checked by namespace, not by anything novi-lockscreen
+	 * requests of the protocol itself (keyboard-interactivity=exclusive
+	 * alone is exactly what novi-launcher already uses for a plain
+	 * overlay) -- see novi_server.locked's own comment for why that
+	 * alone was never a real lock. */
+	if (surface->layer_surface->namespace != NULL &&
+			strcmp(surface->layer_surface->namespace, NOVI_LOCK_NAMESPACE) == 0) {
+		surface->output->server->locked = true;
+	}
+
 	/* "exclusive" keyboard-interactivity (the launcher overlay's case:
 	 * it needs to receive typed input the instant it appears) means
 	 * grab keyboard focus now. "on_demand" (click-to-focus layer
@@ -1122,6 +1388,17 @@ static void layer_surface_unmap(struct wl_listener *listener, void *data) {
 	struct novi_layer_surface *surface = wl_container_of(listener, surface, unmap);
 	struct novi_server *server = surface->output->server;
 	struct wlr_seat *seat = server->seat;
+
+	/* Clear the lock *before* the focus-restore logic below runs --
+	 * focus_toplevel() itself refuses to move focus while
+	 * server->locked is true (see its own guard), so leaving this set
+	 * past this point would make a successful unlock (novi-lockscreen
+	 * exiting after a correct password) restore no keyboard focus at
+	 * all instead of handing it back to the top toplevel. */
+	if (surface->layer_surface->namespace != NULL &&
+			strcmp(surface->layer_surface->namespace, NOVI_LOCK_NAMESPACE) == 0) {
+		server->locked = false;
+	}
 
 	/* Only act if this surface actually held keyboard focus (a
 	 * non-interactive layer surface unmapping shouldn't disturb
@@ -1276,11 +1553,90 @@ static void server_new_layer_surface(struct wl_listener *listener, void *data) {
 	 * on every commit, including the first real one. */
 }
 
+/* wlr-foreign-toplevel-management-unstable-v1: a taskbar client
+ * (novi-panel) requesting a state change on one of our toplevels via
+ * its handle. Each just calls the exact same function the
+ * compositor-native path (a decoration dot, a client's own xdg_
+ * toplevel request) already uses -- one place that ever changes each
+ * piece of state, regardless of which UI asked. */
+static void foreign_toplevel_handle_request_maximize(
+		struct wl_listener *listener, void *data) {
+	struct novi_toplevel *toplevel =
+		wl_container_of(listener, toplevel, foreign_request_maximize);
+	struct wlr_foreign_toplevel_handle_v1_maximized_event *event = data;
+	if (event->maximized) {
+		maximize_toplevel(toplevel);
+	} else {
+		unmaximize_toplevel(toplevel);
+	}
+}
+
+static void foreign_toplevel_handle_request_minimize(
+		struct wl_listener *listener, void *data) {
+	struct novi_toplevel *toplevel =
+		wl_container_of(listener, toplevel, foreign_request_minimize);
+	struct wlr_foreign_toplevel_handle_v1_minimized_event *event = data;
+	if (event->minimized) {
+		minimize_toplevel(toplevel);
+	} else {
+		unminimize_toplevel(toplevel);
+	}
+}
+
+static void foreign_toplevel_handle_request_activate(
+		struct wl_listener *listener, void *data) {
+	(void)data;
+	struct novi_toplevel *toplevel =
+		wl_container_of(listener, toplevel, foreign_request_activate);
+	/* focus_toplevel() itself unminimizes first if needed -- a taskbar
+	 * click on a minimized entry both restores and focuses it, same as
+	 * every real desktop. */
+	focus_toplevel(toplevel, toplevel->xdg_toplevel->base->surface);
+}
+
+static void foreign_toplevel_handle_request_close(
+		struct wl_listener *listener, void *data) {
+	(void)data;
+	struct novi_toplevel *toplevel =
+		wl_container_of(listener, toplevel, foreign_request_close);
+	wlr_xdg_toplevel_send_close(toplevel->xdg_toplevel);
+}
+
 static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 	/* Called when the surface is mapped, or ready to display on-screen. */
 	struct novi_toplevel *toplevel = wl_container_of(listener, toplevel, map);
 
+	/* New windows open on the current workspace -- every real i3/sway-
+	 * family compositor's behavior, and simplest for a user (a freshly
+	 * launched app appears where you are, not wherever workspace 1
+	 * happens to be). */
+	toplevel->workspace = toplevel->server->active_workspace;
+
 	wl_list_insert(&toplevel->server->toplevels, &toplevel->link);
+
+	/* Foreign-toplevel-management handle: created here (not in
+	 * server_new_xdg_toplevel(), where the surface isn't shown yet) and
+	 * destroyed in xdg_toplevel_unmap() below, so a taskbar only ever
+	 * lists windows that are actually currently mapped -- same map/
+	 * unmap-scoped lifetime as the surface's own on-screen presence. */
+	toplevel->foreign_handle = wlr_foreign_toplevel_handle_v1_create(
+		toplevel->server->foreign_toplevel_manager);
+	wlr_foreign_toplevel_handle_v1_set_title(toplevel->foreign_handle,
+		toplevel->xdg_toplevel->title ? toplevel->xdg_toplevel->title : "");
+	wlr_foreign_toplevel_handle_v1_set_app_id(toplevel->foreign_handle,
+		toplevel->xdg_toplevel->app_id ? toplevel->xdg_toplevel->app_id : "");
+	toplevel->foreign_request_maximize.notify = foreign_toplevel_handle_request_maximize;
+	wl_signal_add(&toplevel->foreign_handle->events.request_maximize,
+		&toplevel->foreign_request_maximize);
+	toplevel->foreign_request_minimize.notify = foreign_toplevel_handle_request_minimize;
+	wl_signal_add(&toplevel->foreign_handle->events.request_minimize,
+		&toplevel->foreign_request_minimize);
+	toplevel->foreign_request_activate.notify = foreign_toplevel_handle_request_activate;
+	wl_signal_add(&toplevel->foreign_handle->events.request_activate,
+		&toplevel->foreign_request_activate);
+	toplevel->foreign_request_close.notify = foreign_toplevel_handle_request_close;
+	wl_signal_add(&toplevel->foreign_handle->events.request_close,
+		&toplevel->foreign_request_close);
 
 	focus_toplevel(toplevel, toplevel->xdg_toplevel->base->surface);
 }
@@ -1295,6 +1651,15 @@ static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
 	}
 
 	wl_list_remove(&toplevel->link);
+
+	if (toplevel->foreign_handle != NULL) {
+		wl_list_remove(&toplevel->foreign_request_maximize.link);
+		wl_list_remove(&toplevel->foreign_request_minimize.link);
+		wl_list_remove(&toplevel->foreign_request_activate.link);
+		wl_list_remove(&toplevel->foreign_request_close.link);
+		wlr_foreign_toplevel_handle_v1_destroy(toplevel->foreign_handle);
+		toplevel->foreign_handle = NULL;
+	}
 }
 
 static void xdg_toplevel_commit(struct wl_listener *listener, void *data) {
@@ -1349,8 +1714,36 @@ static void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
 	wl_list_remove(&toplevel->request_resize.link);
 	wl_list_remove(&toplevel->request_maximize.link);
 	wl_list_remove(&toplevel->request_fullscreen.link);
+	wl_list_remove(&toplevel->set_title.link);
+	wl_list_remove(&toplevel->set_app_id.link);
 
 	free(toplevel);
+}
+
+/* Keeps a mapped toplevel's foreign-toplevel-management handle (its
+ * taskbar entry) showing the client's current title/app_id -- these
+ * can change any time after the initial commit (a browser tab switch,
+ * a terminal's shell prompt updating its title), not just once at
+ * creation. Guarded on foreign_handle != NULL since these listeners
+ * are wired for the toplevel's whole lifetime (server_new_xdg_
+ * toplevel()) but the handle itself only exists between map and
+ * unmap. */
+static void xdg_toplevel_set_title(struct wl_listener *listener, void *data) {
+	(void)data;
+	struct novi_toplevel *toplevel = wl_container_of(listener, toplevel, set_title);
+	if (toplevel->foreign_handle != NULL) {
+		wlr_foreign_toplevel_handle_v1_set_title(toplevel->foreign_handle,
+			toplevel->xdg_toplevel->title ? toplevel->xdg_toplevel->title : "");
+	}
+}
+
+static void xdg_toplevel_set_app_id(struct wl_listener *listener, void *data) {
+	(void)data;
+	struct novi_toplevel *toplevel = wl_container_of(listener, toplevel, set_app_id);
+	if (toplevel->foreign_handle != NULL) {
+		wlr_foreign_toplevel_handle_v1_set_app_id(toplevel->foreign_handle,
+			toplevel->xdg_toplevel->app_id ? toplevel->xdg_toplevel->app_id : "");
+	}
 }
 
 static void begin_interactive(struct novi_toplevel *toplevel,
@@ -1473,6 +1866,165 @@ static void unmaximize_toplevel(struct novi_toplevel *toplevel) {
 	toplevel->maximized = false;
 }
 
+/* Hides the toplevel by disabling its scene node -- the client's own
+ * wl_surface stays mapped throughout (no unmap/re-map round trip, no
+ * lost frame callbacks), only its on-screen visibility changes, the
+ * same technique sway and other wlroots compositors use for
+ * minimize/scratchpad-hide. Was previously a dimmed, non-interactive
+ * placeholder (see the minimize_dot creation comment) because there
+ * was no taskbar to ever bring a hidden window back from; now that
+ * novi-panel has one via wlr-foreign-toplevel-management, hiding is
+ * no longer a dead end. */
+static void minimize_toplevel(struct novi_toplevel *toplevel) {
+	if (toplevel->minimized) {
+		return;
+	}
+	toplevel->minimized = true;
+	wlr_scene_node_set_enabled(&toplevel->scene_tree->node, false);
+	if (toplevel->foreign_handle != NULL) {
+		wlr_foreign_toplevel_handle_v1_set_minimized(toplevel->foreign_handle, true);
+	}
+	struct novi_server *server = toplevel->server;
+	if (server->seat->keyboard_state.focused_surface ==
+			toplevel->xdg_toplevel->base->surface) {
+		/* Nothing useful stays focused on a surface that's no longer
+		 * visible -- hand focus to the next non-minimized window in MRU
+		 * order (the same list cycle_toplevel() walks for Alt+Tab), or
+		 * clear focus entirely if this was the only one open. */
+		wlr_xdg_toplevel_set_activated(toplevel->xdg_toplevel, false);
+		struct novi_toplevel *next = NULL;
+		struct novi_toplevel *t;
+		wl_list_for_each(t, &server->toplevels, link) {
+			if (t != toplevel && !t->minimized) {
+				next = t;
+				break;
+			}
+		}
+		if (next != NULL) {
+			focus_toplevel(next, next->xdg_toplevel->base->surface);
+		} else {
+			wlr_seat_keyboard_notify_clear_focus(server->seat);
+		}
+	}
+}
+
+static void unminimize_toplevel(struct novi_toplevel *toplevel) {
+	if (!toplevel->minimized) {
+		return;
+	}
+	toplevel->minimized = false;
+	/* Only actually show it if its own workspace is the visible one --
+	 * unminimizing (e.g. a taskbar click) doesn't imply "also switch
+	 * to wherever this window lives," that's what focus_toplevel()'s
+	 * own workspace guard is for (see its comment) when this runs on
+	 * the path that leads there. Called with the node left disabled
+	 * here is correct, not a bug: a minimized toplevel on a
+	 * currently-inactive workspace becoming "not minimized anymore"
+	 * should still need a workspace switch to actually see it, exactly
+	 * like a real desktop. */
+	struct novi_server *server = toplevel->server;
+	wlr_scene_node_set_enabled(&toplevel->scene_tree->node,
+		toplevel->workspace == server->active_workspace);
+	if (toplevel->foreign_handle != NULL) {
+		wlr_foreign_toplevel_handle_v1_set_minimized(toplevel->foreign_handle, false);
+	}
+}
+
+/* RFC 0001 decision 7: Super+[1-9]. Switches which workspace is visible
+ * on this (only) output -- see NOVI_WORKSPACE_COUNT's own comment for
+ * why this is per-server, not per-output. A toplevel's visibility is
+ * always `workspace == active_workspace && !minimized`: these are
+ * independent hidden-reasons (a minimized window on the active
+ * workspace stays hidden; a non-minimized window on another workspace
+ * is also hidden), so both minimize_toplevel()/unminimize_toplevel()
+ * above and this function each apply that same formula rather than one
+ * flag silently overriding the other. */
+static void switch_workspace(struct novi_server *server, int workspace) {
+	if (workspace == server->active_workspace) {
+		return;
+	}
+	server->active_workspace = workspace;
+
+	struct wlr_surface *prev_focus = server->seat->keyboard_state.focused_surface;
+	struct novi_toplevel *focus_candidate = NULL;
+	struct novi_toplevel *t;
+	wl_list_for_each(t, &server->toplevels, link) {
+		bool visible = t->workspace == workspace && !t->minimized;
+		wlr_scene_node_set_enabled(&t->scene_tree->node, visible);
+		/* server->toplevels is MRU-ordered (focus_toplevel() moves
+		 * whatever it focuses to the front) -- the first visible match
+		 * walking front-to-back is exactly "the most recently used
+		 * window on this workspace," the same convention
+		 * minimize_toplevel()'s own "next" pick and cycle_toplevel()
+		 * already use, not a new one invented here. */
+		if (visible && focus_candidate == NULL) {
+			focus_candidate = t;
+		}
+	}
+
+	if (focus_candidate != NULL) {
+		focus_toplevel(focus_candidate, focus_candidate->xdg_toplevel->base->surface);
+		return;
+	}
+	/* Nothing visible on the new workspace -- explicitly deactivate
+	 * whatever was focused before (it's about to be hidden, if it
+	 * wasn't already) and clear seat focus, the same cleanup
+	 * minimize_toplevel() does when hiding the last visible window. */
+	if (prev_focus != NULL) {
+		struct wlr_xdg_toplevel *prev_xdg_toplevel =
+			wlr_xdg_toplevel_try_from_wlr_surface(prev_focus);
+		if (prev_xdg_toplevel != NULL) {
+			wlr_xdg_toplevel_set_activated(prev_xdg_toplevel, false);
+		}
+	}
+	wlr_seat_keyboard_notify_clear_focus(server->seat);
+}
+
+/* RFC 0001 decision 7: Super+Shift+[1-9]. Moves whichever toplevel
+ * currently holds keyboard focus to a different workspace -- a no-op
+ * if nothing's focused (e.g. focus is on a layer-shell overlay, or
+ * nothing at all) or if it's already on that workspace. Unlike
+ * switch_workspace(), this never changes server->active_workspace
+ * itself: real i3/sway behavior is "the window leaves with you staying
+ * put," not "follow it to where it went." */
+static void move_focused_to_workspace(struct novi_server *server, int workspace) {
+	struct wlr_surface *focused = server->seat->keyboard_state.focused_surface;
+	if (focused == NULL) {
+		return;
+	}
+	struct novi_toplevel *toplevel = NULL;
+	struct novi_toplevel *t;
+	wl_list_for_each(t, &server->toplevels, link) {
+		if (t->xdg_toplevel->base->surface == focused) {
+			toplevel = t;
+			break;
+		}
+	}
+	if (toplevel == NULL || toplevel->workspace == workspace) {
+		return;
+	}
+	toplevel->workspace = workspace;
+
+	/* It just left the visible workspace -- hide it and hand focus to
+	 * whatever's next, the same "find the next visible MRU toplevel or
+	 * clear focus" pattern minimize_toplevel() uses when hiding
+	 * whatever currently holds focus. */
+	wlr_scene_node_set_enabled(&toplevel->scene_tree->node, false);
+	wlr_xdg_toplevel_set_activated(toplevel->xdg_toplevel, false);
+	struct novi_toplevel *next = NULL;
+	wl_list_for_each(t, &server->toplevels, link) {
+		if (t != toplevel && !t->minimized && t->workspace == server->active_workspace) {
+			next = t;
+			break;
+		}
+	}
+	if (next != NULL) {
+		focus_toplevel(next, next->xdg_toplevel->base->surface);
+	} else {
+		wlr_seat_keyboard_notify_clear_focus(server->seat);
+	}
+}
+
 static void xdg_toplevel_request_maximize(
 		struct wl_listener *listener, void *data) {
 	/* This event is raised when a client would like to maximize (or
@@ -1548,12 +2100,11 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
 		toplevel->scene_tree, DECO_DOT_SIZE, DECO_DOT_SIZE, DECO_DOT_COLOR);
 	toplevel->maximize_dot = wlr_scene_rect_create(
 		toplevel->scene_tree, DECO_DOT_SIZE, DECO_DOT_SIZE, DECO_DOT_COLOR);
-	/* Minimize has no taskbar/dock to restore from yet -- per GUI-
-	 * DESIGN-LANGUAGE.md, styled present-but-dimmed rather than either
-	 * wired to a dead end or omitted outright (omitting it would make
-	 * the remaining two look like the whole set, not two-thirds of one). */
+	/* Real now, not dimmed -- novi-panel's taskbar (wlr-foreign-toplevel-
+	 * management) is the restore path GUI-DESIGN-LANGUAGE.md's original
+	 * dimmed-placeholder reasoning was waiting on. */
 	toplevel->minimize_dot = wlr_scene_rect_create(
-		toplevel->scene_tree, DECO_DOT_SIZE, DECO_DOT_SIZE, DECO_DOT_COLOR_DIMMED);
+		toplevel->scene_tree, DECO_DOT_SIZE, DECO_DOT_SIZE, DECO_DOT_COLOR);
 	int dot_y = -DECO_HEIGHT + (DECO_HEIGHT - DECO_DOT_SIZE) / 2;
 	wlr_scene_node_set_position(&toplevel->close_dot->node, 0, dot_y);
 	wlr_scene_node_set_position(&toplevel->maximize_dot->node, 0, dot_y);
@@ -1609,6 +2160,10 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
 	wl_signal_add(&xdg_toplevel->events.request_maximize, &toplevel->request_maximize);
 	toplevel->request_fullscreen.notify = xdg_toplevel_request_fullscreen;
 	wl_signal_add(&xdg_toplevel->events.request_fullscreen, &toplevel->request_fullscreen);
+	toplevel->set_title.notify = xdg_toplevel_set_title;
+	wl_signal_add(&xdg_toplevel->events.set_title, &toplevel->set_title);
+	toplevel->set_app_id.notify = xdg_toplevel_set_app_id;
+	wl_signal_add(&xdg_toplevel->events.set_app_id, &toplevel->set_app_id);
 }
 
 static void server_new_xdg_decoration(struct wl_listener *listener, void *data) {
@@ -1696,6 +2251,13 @@ int main(int argc, char *argv[]) {
 	}
 
 	struct novi_server server = {0};
+	/* Matches every toplevel's own default (xdg_toplevel_map() sets
+	 * workspace = server->active_workspace at map time) -- 1, not the
+	 * calloc'd 0, since Super+[1-9] only ever produces 1-9. Leaving
+	 * this at 0 would make every window mapped before the first
+	 * workspace switch belong to a workspace number no keybinding can
+	 * ever reach again once one *is* pressed. */
+	server.active_workspace = 1;
 	/* The Wayland display is managed by libwayland. It handles accepting
 	 * clients from the Unix socket, manging Wayland globals, and so on. */
 	server.wl_display = wl_display_create();
@@ -1742,6 +2304,17 @@ int main(int argc, char *argv[]) {
 	wlr_compositor_create(server.wl_display, 5, server.renderer);
 	wlr_subcompositor_create(server.wl_display);
 	wlr_data_device_manager_create(server.wl_display);
+	/* wlr-foreign-toplevel-management-unstable-v1: lets novi-panel's
+	 * taskbar (a separate layer-shell client, not compositor code, same
+	 * split as everything else in this UI) list open windows and
+	 * request activate/minimize/maximize/close on them. */
+	server.foreign_toplevel_manager =
+		wlr_foreign_toplevel_manager_v1_create(server.wl_display);
+	/* wlr-screencopy-unstable-v1: lets novi-screenshot/ (PrintScreen,
+	 * RFC 0001 decision 7) capture an output's contents. wlroots
+	 * implements the whole server side; this is the one line needed to
+	 * turn it on, same as the two manager creates just above. */
+	wlr_screencopy_manager_v1_create(server.wl_display);
 
 	/* Creates an output layout, which a wlroots utility for working with an
 	 * arrangement of screens in a physical layout. */

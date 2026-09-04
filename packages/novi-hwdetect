@@ -1,0 +1,108 @@
+#!/bin/sh
+# novi-hwdetect — load the drivers this machine actually needs.
+#
+#   novi-hwdetect [--quiet] [--report]
+#
+# Every module load on this system was, until now, a hardcoded list:
+# /init names the storage drivers it hopes are enough, the network
+# service names some NICs, the wifi service names some radios. That
+# works in QEMU, where the hardware is known in advance and never
+# changes. It is close to useless on a real machine, where the whole
+# point is that you do not know what is in it.
+#
+# There is no udev here and no kernel hotplug helper, so nothing else
+# ever will. What the kernel does provide is a `modalias` file next to
+# every device it has enumerated -- a string describing the device
+# precisely enough for modprobe to match it against modules.alias,
+# which depmod generated at build time from every driver's declared
+# device table. Walking those and handing each to modprobe is exactly
+# what udev's builtin does, in about fifteen lines.
+#
+# Failures are expected and silent: most aliases have no driver in this
+# kernel, and that is not an error, it is the answer. --report shows
+# what was actually loaded.
+#
+# shellcheck disable=SC3043
+set -u
+
+QUIET=0
+REPORT=0
+for a in "$@"; do
+    case "$a" in
+        --quiet)  QUIET=1 ;;
+        --report) REPORT=1 ;;
+        -h|--help)
+            echo "usage: novi-hwdetect [--quiet] [--report]"
+            exit 0 ;;
+        *) echo "novi-hwdetect: unknown option '$a'" >&2; exit 2 ;;
+    esac
+done
+
+say() { [ "$QUIET" -eq 1 ] || printf 'novi-hwdetect: %s\n' "$*" >&2; }
+
+command -v modprobe >/dev/null 2>&1 || { say "no modprobe"; exit 0; }
+
+# Temp files, not process substitution. `< <(...)` needs /dev/fd, and
+# while this system has it now, CLAUDE.md's own note stands: a script
+# that runs during early boot should not depend on a shell extension
+# whose failure mode is silent.
+tmpd="/tmp/hwdetect.$$"
+mkdir -p "$tmpd" 2>/dev/null || tmpd="/tmp"
+before="${tmpd}/before"; after="${tmpd}/after"; aliases="${tmpd}/aliases"
+# shellcheck disable=SC2317  # invoked by the trap below
+cleanup() { rm -rf "$tmpd" 2>/dev/null || true; }
+trap cleanup EXIT INT TERM
+
+cut -d' ' -f1 /proc/modules 2>/dev/null | sort > "$before" || : > "$before"
+
+# -q so modprobe stays quiet about aliases with no driver, which is
+# most of them. `|| true` because an alias that matches nothing exits
+# non-zero and this script must not stop at the first one.
+#
+# A temp file rather than a pipe: the loop runs in this shell so the
+# counter survives it -- the same subshell trap documented all over
+# packages/pkg.
+find /sys/devices -name modalias -type f 2>/dev/null | sort -u > "$aliases"
+
+n=0
+while IFS= read -r f; do
+    [ -r "$f" ] || continue
+    alias="$(cat "$f" 2>/dev/null)"
+    [ -n "$alias" ] || continue
+    modprobe -q "$alias" 2>/dev/null || true
+    n=$((n + 1))
+done < "$aliases"
+
+cut -d' ' -f1 /proc/modules 2>/dev/null | sort > "$after" || : > "$after"
+
+# `comm -13` when it exists, `grep -Fxv -f` when it does not. The
+# reporting must never be what breaks this script: it ran in the
+# initramfs, where the applet set is whatever mkinitramfs.sh linked, and
+# an early boot that loaded every driver correctly should not end in an
+# error because a diff utility was missing.
+new_modules() {
+    if command -v comm >/dev/null 2>&1; then
+        comm -13 "$before" "$after" 2>/dev/null
+    else
+        grep -Fxv -f "$before" "$after" 2>/dev/null
+    fi
+}
+
+# wc -l, not `grep -c . || printf 0`: grep exits non-zero when it
+# counts nothing, so the fallback fired too and the count became "0\n0"
+# -- which the arithmetic below then rejected with "bad number". wc
+# always succeeds. Arithmetic rather than `tr -d ' '` strips the padding
+# coreutils wc adds and busybox wc does not, without needing tr.
+count="$(new_modules | wc -l)"
+count=$(( count + 0 ))
+
+if [ "$REPORT" -eq 1 ]; then
+    if [ "$count" -gt 0 ]; then
+        new_modules
+    else
+        say "nothing new was loaded (already up to date, or built in)"
+    fi
+fi
+
+say "probed $n device alias(es), loaded $count module(s)"
+exit 0

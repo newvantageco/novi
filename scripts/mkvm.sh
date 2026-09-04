@@ -22,10 +22,20 @@ RAM_MB="${RAM_MB:-4096}"
 VCPUS="${VCPUS:-4}"
 DISPLAY="${DISPLAY_MODE:-sdl}"   # sdl | gtk | spice | none
 
-# OVMF firmware search paths (Debian/Ubuntu/Arch/Fedora locations)
+# OVMF firmware search paths (Debian/Ubuntu/Arch/Fedora locations).
+# The plain OVMF_CODE.fd/OVMF_VARS.fd names are what older distro
+# packaging used; Ubuntu 24.04's `ovmf` package ships ONLY
+# `_4M`-suffixed variants now (confirmed by actually installing it and
+# listing /usr/share/OVMF -- no bare OVMF_CODE.fd/OVMF_VARS.fd exist at
+# all there, so the old-name-only list silently fell through to the
+# "OVMF UEFI firmware not found" error on a from-scratch install of the
+# exact package CONTRIBUTING.md tells you to install). Both name
+# families are kept since which one exists is genuinely
+# distro/version-dependent.
 OVMF_FIRMWARE_PATHS=(
     "/usr/share/ovmf/OVMF.fd"
     "/usr/share/OVMF/OVMF_CODE.fd"
+    "/usr/share/OVMF/OVMF_CODE_4M.fd"
     "/usr/share/edk2/ovmf/OVMF_CODE.fd"
     "/usr/share/edk2-ovmf/OVMF_CODE.fd"
     "/usr/lib/qemu/ovmf-x86_64.bin"
@@ -33,6 +43,7 @@ OVMF_FIRMWARE_PATHS=(
 )
 OVMF_VARS_PATHS=(
     "/usr/share/OVMF/OVMF_VARS.fd"
+    "/usr/share/OVMF/OVMF_VARS_4M.fd"
     "/usr/share/edk2/ovmf/OVMF_VARS.fd"
     "/usr/share/edk2-ovmf/OVMF_VARS.fd"
     "/usr/share/ovmf/OVMF_VARS.fd"

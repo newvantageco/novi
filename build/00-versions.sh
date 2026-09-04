@@ -15,6 +15,8 @@ LINUX_VERSION="6.10.3"
 MUSL_VERSION="1.2.5"
 BINUTILS_VERSION="2.43"
 GCC_VERSION="14.2.0"
+MAKE_VERSION="4.4.1"          # GNU make, for the native (self-hosting) toolchain
+PKGCONF_VERSION="2.3.0"       # pkg-config implementation in C (no perl, no glib)
 BUSYBOX_VERSION="1.36.1"
 
 # s6 ecosystem (skarnet.org)
@@ -59,6 +61,50 @@ TLLIST_VERSION="1.1.0"
 FCFT_VERSION="2.5.1"
 FOOT_VERSION="1.9.2"
 JETBRAINS_MONO_VERSION="2.304"
+
+# e2fsprogs: real mke2fs and e2fsck. BusyBox's mke2fs writes ext2 with
+# no journal, which on real hardware turns an unclean shutdown into a
+# full fsck and a risk to data rather than a journal replay. RFC 0008.
+E2FSPROGS_VERSION="1.47.1"
+
+# WiFi (RFC 0009). wpa_supplicant is built with its INTERNAL crypto, so
+# it pulls in no OpenSSL -- the base image deliberately has none, and
+# novi-verify exists precisely so that stays true. hostapd comes from
+# the same source tree and is built only to test against; it is not
+# installed into the image.
+LIBNL_VERSION="3.11.0"
+WPA_SUPPLICANT_VERSION="2.11"
+IW_VERSION="6.9"
+
+# linux-firmware (RFC 0011). Not the whole tree -- build/26-firmware.sh
+# extracts a curated subset. Without it the WiFi radio in most laptops
+# never comes up and an AMD GPU does not initialise at all, so this is
+# the difference between "boots on your machine" and "boots in QEMU".
+LINUX_FIRMWARE_VERSION="20260810"
+
+# The wireless regulatory database. NOT part of linux-firmware -- it is
+# its own project, and this kernel has
+# CONFIG_CFG80211_REQUIRE_SIGNED_REGDB=y, so without regulatory.db and
+# its .p7s signature the wireless stack falls back to the most
+# restrictive world-roaming rules. That looks like bad reception, not
+# like a missing file.
+WIRELESS_REGDB_VERSION="2026.09.03"
+
+# Intel SOF audio firmware, also NOT in linux-firmware (it moved to its
+# own project). Intel laptops from roughly 2019 on drive their audio
+# through SOF rather than legacy HDA; without this they have no sound
+# at all.
+SOF_BIN_VERSION="2025.01"
+
+# ALSA (RFC 0011). The kernel has had 57 sound options compiled in
+# since the beginning and nothing in userspace has ever touched one of
+# them.
+ALSA_VERSION="1.2.12"
+
+# TweetNaCl is versioned by release date, not a semver tag. This is the
+# only "version" its authors publish; the sha256 pins in 01-fetch.sh
+# are what actually fix the code.
+TWEETNACL_VERSION="20140427"
 
 # Build target
 TARGET_ARCH="x86_64"

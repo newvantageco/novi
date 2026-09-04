@@ -28,10 +28,131 @@ test -r /etc/hostname && hostname -F /etc/hostname
 mkdir -p /dev/shm
 mountpoint -q /dev/shm || mount -t tmpfs -o mode=1777,nosuid,nodev tmpfs /dev/shm
 
+# /dev/fd, /dev/stdin, /dev/stdout, /dev/stderr. Every Linux system has
+# these and devtmpfs does not create them -- they are symlinks into
+# /proc/self/fd, which only makes sense once /proc is mounted, so
+# nothing earlier in boot could have made them.
+#
+# Their absence is the kind of gap that produces confusing failures far
+# from the cause. Confirmed live: BusyBox ash implements `< <(process
+# substitution)` through /dev/fd/N, so every one of them in
+# `packages/pkg` failed with "can't open /dev/fd/64: no such file" --
+# and not fatally, which was worse. Dependency resolution printed the
+# error and carried on having resolved nothing, so `pkg install foot`
+# fetched foot and silently skipped fcft. Anything that redirects from
+# /dev/stdin, or hands a subprocess /dev/fd/N, would have hit the same
+# wall.
+ln -sfn /proc/self/fd /dev/fd
+ln -sfn /proc/self/fd/0 /dev/stdin
+ln -sfn /proc/self/fd/1 /dev/stdout
+ln -sfn /proc/self/fd/2 /dev/stderr
+
+### 1a. Load drivers for the hardware actually in this machine.
+###
+### There is no udev here and no kernel hotplug helper, so without this
+### the only modules ever loaded are the ones some script names by
+### hand. That is a QEMU-shaped assumption: it works where the hardware
+### is known in advance and fails on a real machine, where not knowing
+### is the entire point.
+###
+### The initramfs runs this too, for the drivers needed to find a root
+### filesystem at all. Running it again here catches everything that
+### was not boot-critical -- sound, the rest of the NICs, input
+### devices, the laptop's own oddities.
+if command -v novi-hwdetect >/dev/null 2>&1; then
+    novi-hwdetect --quiet || true
+fi
+
+### 1a2. Restore the sound mixer.
+###
+### A sound card comes up with everything muted and every level at
+### zero. That is the kernel being conservative, and it is why "the
+### drivers loaded and there is still no sound" is the usual first
+### experience of audio on a from-scratch system.
+###
+### `alsactl init` applies sane defaults for a card it recognises;
+### `restore` then layers on whatever this machine was last set to.
+### After hwdetect above, so the cards exist. Failures are ignored:
+### a machine with no sound card is not a broken machine.
+if command -v alsactl >/dev/null 2>&1; then
+    alsactl init >/dev/null 2>&1 || true
+    alsactl restore >/dev/null 2>&1 || true
+fi
+
+### 1b. Mount whatever /etc/fstab asks for.
+###
+### Nothing on this system had ever read /etc/fstab. s6-linux-init's
+### stage 1 mounts the kernel-owned filesystems and stops there, so the
+### file novi-install writes was documentation rather than
+### configuration -- confirmed live on a UEFI install, where
+### /boot/efi existed as an empty directory and the EFI System
+### partition named in fstab was simply not mounted. A kernel update
+### would have written the new image into the root filesystem and left
+### the firmware booting the old one.
+###
+### `mount -a` skips entries already mounted and honours `noauto`, so
+### the root and the pseudo-filesystems listed for documentation are
+### no-ops here. The guard is for the live image, which has no fstab at
+### all; `|| true` is because a machine must still boot when a data
+### partition someone added has gone missing.
+if [ -f /etc/fstab ]; then
+    mount -a || echo 'rc.init: some /etc/fstab entries could not be mounted' 1>&2
+fi
+
 ### 2. Start the s6-rc-managed services into the already-running
 ### scandir (/run/service, seeded by s6-linux-init from run-image).
 s6-rc-init -c /etc/s6-rc/compiled -l /run/s6-rc /run/service
 
 ### 3. Bring the compiled "default" bundle up (or whatever runlevel
 ### was requested on the kernel command line -- see scripts/runlevel).
-exec /etc/s6-linux-init/scripts/runlevel "$rl"
+###
+### Called rather than exec'd (it used to be exec'd) so that step 4 can
+### run after it. Nothing is lost by that: `s6-rc change` exits once
+### the transition finishes, so rc.init already returned here at the
+### end of boot -- the exec was only saving one process.
+/etc/s6-linux-init/scripts/runlevel "$rl" ||
+    echo 'rc.init: runlevel transition reported failure' 1>&2
+
+### 4. Converge the declared system state (RFC 0002).
+###
+### /etc/novi/system.conf is the system's declared truth; this is what
+### makes the machine BOOT INTO it rather than merely being pushable to
+### it after login.
+###
+### It has to be here, after the transition, and not as an s6-rc
+### oneshot inside the bundle -- which is where it was tried first and
+### does not work. A oneshot runs *during* the transition, and a nested
+### `s6-rc change` cannot proceed while that transition holds the live
+### state lock. Confirmed live rather than reasoned about: the oneshot
+### reported success, `novi-state-apply` showed up in `s6-rc -a list`,
+### and the declared desktop never started -- while the very same
+### `novi-state boot`, run by hand a moment later, brought it straight
+### up.
+###
+### `novi-state boot` is already unfailable by construction (it honours
+### novi.state=off on the kernel command line and always exits 0), but
+### the guard and `|| true` stay anyway: this script runs under `-e` as
+### PID 1's stage 2, and nothing about the system's *configuration*
+### should ever be able to turn into a failed boot.
+if command -v novi-state >/dev/null 2>&1; then
+    novi-state boot || true
+fi
+
+### 5. Live boot only: install the desktop from the medium (RFC 0007).
+###
+### The base image is console-only -- the desktop is packages, and the
+### ISO carries the signed repository. A live boot that wants a desktop
+### therefore installs one into the tmpfs overlay, which takes a couple
+### of seconds and demonstrates the package system rather than
+### describing it. The ISO's "Live Desktop" menu entry is what passes
+### the flag; nothing else ever does, so an installed machine never
+### takes this path.
+###
+### The helper is unfailable by construction (every error is a message
+### and exit 0), and the `|| true` stays anyway for the same reason it
+### does above: nothing about optional software should be able to turn
+### into a failed boot.
+if grep -qw 'novi.live.desktop' /proc/cmdline 2>/dev/null &&
+   command -v novi-live-desktop >/dev/null 2>&1; then
+    novi-live-desktop || true
+fi

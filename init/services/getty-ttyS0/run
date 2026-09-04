@@ -12,5 +12,25 @@
 # GRUB config already treat as the primary console for headless
 # boot verification (scripts/mkvm.sh --display none), so give it
 # its own getty rather than relying on a console nothing can see.
+#
+# down-signal / timeout-down are load-bearing, not tuning.
+#
+# getty execs login, which execs the shell, so the process s6
+# supervises IS the interactive shell -- and an interactive shell
+# ignores SIGTERM by definition. With timeout-down unset (which means
+# wait forever), `s6-rc -bDa change` sat on "service getty-ttyS0:
+# stopping" and never returned; s6-linux-init-shutdownd waits for that
+# script with a plain wait_pid() and no timeout of its own, so it never
+# reached the stage that SIGTERMs everything, SIGKILLs the remainder
+# and calls reboot(2). The machine could not shut down at all while
+# anyone was logged in -- which is always, since somebody has to type
+# `poweroff`.
+#
+# SIGHUP rather than a bigger hammer: a getty going away IS a hangup,
+# and that is the signal a shell is specified to die on. timeout-down
+# is the backstop for anything that ignores even that -- 4 seconds,
+# then s6-rc gives up, rc.shutdown exits non-zero, shutdownd warns and
+# carries on to the sweep that ends the machine. Losing a shell rudely
+# at that point is fine. Hanging forever was not.
 # ============================================================
 exec s6-setuidgid root /sbin/getty 115200 ttyS0

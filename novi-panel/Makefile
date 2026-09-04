@@ -18,6 +18,12 @@ PKG_CONFIG ?= pkg-config
 WAYLAND_SCANNER ?= wayland-scanner
 LAYER_SHELL_XML ?= ../protocol/wlr-layer-shell-unstable-v1.xml
 XDG_SHELL_XML ?= /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml
+# Taskbar (RFC 0001's minimize/restore): lists and controls novi-shell's
+# open toplevels. Vendored under ../protocol/ for the same reason as
+# LAYER_SHELL_XML -- wlroots implements the server side internally but
+# never installs this XML or a generated header anywhere for a CLIENT
+# to consume.
+FOREIGN_TOPLEVEL_XML ?= ../protocol/wlr-foreign-toplevel-management-unstable-v1.xml
 DESTDIR ?=
 PREFIX ?= /usr
 
@@ -42,13 +48,19 @@ wlr-layer-shell-unstable-v1-protocol.c: $(LAYER_SHELL_XML)
 xdg-shell-protocol.c: $(XDG_SHELL_XML)
 	$(WAYLAND_SCANNER) private-code $< $@
 
-novi-panel: main.c ../common/text.c wlr-layer-shell-unstable-v1-protocol.c wlr-layer-shell-unstable-v1-protocol.h xdg-shell-protocol.c
-	$(CC) $(CFLAGS) -o $@ main.c ../common/text.c wlr-layer-shell-unstable-v1-protocol.c xdg-shell-protocol.c $(LDLIBS)
+wlr-foreign-toplevel-management-unstable-v1-protocol.h: $(FOREIGN_TOPLEVEL_XML)
+	$(WAYLAND_SCANNER) client-header $< $@
+
+wlr-foreign-toplevel-management-unstable-v1-protocol.c: $(FOREIGN_TOPLEVEL_XML)
+	$(WAYLAND_SCANNER) private-code $< $@
+
+novi-panel: main.c ../common/text.c wlr-layer-shell-unstable-v1-protocol.c wlr-layer-shell-unstable-v1-protocol.h xdg-shell-protocol.c wlr-foreign-toplevel-management-unstable-v1-protocol.c wlr-foreign-toplevel-management-unstable-v1-protocol.h
+	$(CC) $(CFLAGS) -o $@ main.c ../common/text.c wlr-layer-shell-unstable-v1-protocol.c xdg-shell-protocol.c wlr-foreign-toplevel-management-unstable-v1-protocol.c $(LDLIBS)
 
 install: novi-panel
 	install -D -m 755 novi-panel "$(DESTDIR)$(PREFIX)/bin/novi-panel"
 
 clean:
-	rm -f novi-panel wlr-layer-shell-unstable-v1-protocol.h wlr-layer-shell-unstable-v1-protocol.c xdg-shell-protocol.c
+	rm -f novi-panel wlr-layer-shell-unstable-v1-protocol.h wlr-layer-shell-unstable-v1-protocol.c xdg-shell-protocol.c wlr-foreign-toplevel-management-unstable-v1-protocol.h wlr-foreign-toplevel-management-unstable-v1-protocol.c
 
 .PHONY: all install clean

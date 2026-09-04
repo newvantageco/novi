@@ -40,8 +40,35 @@ sudo apt install -y \
     bc libssl-dev python3 \
     libmpc-dev libmpfr-dev libgmp-dev \
     rsync cpio file mksquashfs xorriso grub-common grub-pc-bin grub-efi-amd64-bin mtools kmod \
-    shellcheck qemu-system-x86
+    shellcheck qemu-system-x86 \
+    meson ninja-build pkg-config libwayland-bin hwdata gperf
 ```
+
+`meson`/`ninja-build`/`pkg-config` are for `build/06-wayland.sh` onward (the
+wlroots stack, `foot`, and the three `novi-*` clients are all meson-built).
+`libwayland-bin` provides the *host's own* `wayland-scanner`, which
+`build/07-novi-shell.sh`/`08-novi-launcher.sh`/`10-novi-panel.sh` each
+require on the build host directly (their Makefiles generate protocol
+code with it) -- separate from the cross-compiled `wayland` package meson
+builds into the target rootfs. `hwdata` is needed because
+`libdisplay-info`'s own `meson.build` hard-requires
+`/usr/share/hwdata/pnp.ids` (a build-time PCI/USB ID data file) to exist
+on the host; confirmed by hitting `ERROR: File
+/usr/share/hwdata/pnp.ids does not exist.` with it missing, not guessed.
+`gperf` is needed by `fontconfig` (`build/09-foot.sh`): without it on
+the host, meson falls back to building fontconfig's vendored `gperf`
+subproject using the cross C++ compiler, which fails outright
+(`Executables created by cpp compiler ... are not runnable` -- a build
+tool has to run on the build machine, not the target).
+
+**Also note:** `meson` (>=1.3.2 from a stock Ubuntu 24.04 apt archive is
+not new enough) needs to actually support `c_std=c23` for
+`wlroots-0.18.0`, which checks `meson.version() >= '1.3.0'` to decide
+whether to request it -- a check that's true for 1.3.2 even though 1.3.2
+itself doesn't recognize `c23` as a valid value, failing with `Unknown C
+std ['c23']`. If `meson --version` shows 1.3.x and this happens, `pip
+install --break-system-packages --upgrade meson` (confirmed fixed by
+1.12.0) rather than trying to patch wlroots' version check.
 
 ### 2. Prerequisites (Arch Linux)
 
@@ -50,7 +77,8 @@ sudo pacman -Syu --needed \
     base-devel gcc make curl tar xz bzip2 \
     bison flex texinfo libelf bc openssl python \
     libmpc mpfr gmp rsync cpio file \
-    squashfs-tools libisoburn grub mtools kmod shellcheck qemu-system-x86
+    squashfs-tools libisoburn grub mtools kmod shellcheck qemu-system-x86 \
+    meson ninja pkgconf wayland hwdata
 ```
 
 ### 3. Cloning the Repository
@@ -87,10 +115,17 @@ Because Novi Linux is a lightweight, high-performance distribution, all code and
   #!/usr/bin/env bash
   set -euo pipefail
   ```
-- **ShellCheck Cleanliness**: Every script must pass ShellCheck without warnings or errors:
+- **ShellCheck Cleanliness**: Every script must pass the repository lint.
+  One command, and it is exactly what CI runs — so "it passes locally"
+  and "it passes in CI" are the same claim:
   ```bash
-  shellcheck build/*.sh scripts/*.sh packages/pkg packages/mkpkg
+  bash scripts/lint.sh          # add --list to see which files it checks
   ```
+  It discovers every `*.sh`, every s6 service `run` script, and every
+  executable whose first line is a shell shebang, then runs shellcheck
+  at `error` severity. Three codes are excluded with stated reasons in
+  the script itself; `SC2086` in particular is a documented repo-wide
+  baseline, not a regression to chase when you touch a file.
 - **Quoting Variables**: Always double-quote variable expansions (e.g., `"${VAR}"`, `"$@"`) to prevent word splitting and globbing hazards.
 - **Functions & Modularity**: Use lowercase snake_case for function names (`build_kernel()`, `fetch_source()`) and uppercase for environment/constant variables (`OUTPUT_DIR`, `TARGET_ARCH`).
 - **Meaningful Comments**: Explain *why* an operation is performed, especially compiler flags, kernel configuration options, or patch workarounds.
@@ -247,6 +282,20 @@ Every pull request must pass the following verification checks:
    # Verify QEMU boots to login prompt without kernel panic or service failure
    bash scripts/mkvm.sh
    ```
+   Then, in the booted machine, **shut it down and watch it finish**:
+   ```
+   poweroff        # must reach "reboot: Power down", not just return
+   ```
+   This is not ceremony. `poweroff` returning to a prompt looks like
+   success and is not: for the whole life of this project the shutdown
+   hung on the getty holding the login shell, every power-down was a
+   hard cut, and no test noticed because they all killed the VM ten
+   seconds after issuing the command (RFC 0013).
+
+   The general rule it stands for: **a test that issues a command must
+   observe the command's effect**, not its exit status and not the
+   absence of an error. `s6-rc -a list` saying a service is "up" has
+   hidden three crash-loops the same way (RFC 0004, RFC 0009).
 4. **Musl Compliance**:
    Ensure binaries do not link against glibc symbols or external shared library dependencies unexpectedly (`readelf -d <binary>` or `ldd`).
 

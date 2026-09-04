@@ -128,23 +128,54 @@ jobs:
             echo "Verifying GPG signature against SHA256SUMS..."
             gpg --batch --verify SHA256SUMS.asc SHA256SUMS
             echo "GPG signature verification succeeded."
+            echo "signed=true" >> "$GITHUB_OUTPUT"
           else
-            echo "GPG_SIGNING_KEY secret not found. Generating ephemeral release key for demonstration and verification..."
-            gpg --batch --passphrase "novilinux-release" --quick-generate-key "Novi Linux Release Bot <release@novilinux.org>" default default 1y
-            gpg --batch --yes --armor --detach-sign --output SHA256SUMS.asc SHA256SUMS
-            gpg --batch --verify SHA256SUMS.asc SHA256SUMS
-            echo "Ephemeral GPG signature generated and verified successfully."
+            # No key, no signature. This branch previously generated an
+            # ephemeral key, signed the release with it, verified the
+            # signature against the key it had just created, and
+            # reported "signature verification succeeded" -- producing a
+            # release that carried a SHA256SUMS.asc nobody on earth
+            # could check, presented exactly like a real one.
+            #
+            # RFC 0006 states the rule this violates: a missing
+            # signature is not weaker than a wrong one, and the decision
+            # lives in one place so that one of them cannot end up more
+            # permissive. A signature from a key that existed for nine
+            # seconds inside a CI runner is the wrong one.
+            echo "::warning::GPG_SIGNING_KEY is not set -- publishing an UNSIGNED release"
+            rm -f SHA256SUMS.asc
+            echo "signed=false" >> "$GITHUB_OUTPUT"
           fi
 
       # Step 5: Create and publish the GitHub Release with notes, checksums, and signature files
+      # `gh` is preinstalled on GitHub-hosted runners and authenticates
+      # from GITHUB_TOKEN, so this needs no third-party action. That is
+      # deliberate: every third-party action this repository referenced
+      # was pinned to a commit SHA that does not exist, which meant the
+      # entire CI suite failed at "unable to resolve action" and checked
+      # nothing while presenting as a passing gate. Fewer things in the
+      # supply chain is the same argument RFC 0006 makes about the
+      # package trust root.
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@c95fe1489396fe8a9eb872386ac52c0bfac54949 # v2.2.1
-        with:
-          name: "Novi Linux ${{ github.ref_name }}"
-          body_path: CHANGELOG_RELEASE.md
-          generate_release_notes: true
-          files: |
-            SHA256SUMS
-            SHA256SUMS.asc
-            *.iso
-            *.pkg.tar.gz
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          assets=(SHA256SUMS)
+          [ -f SHA256SUMS.asc ] && assets+=(SHA256SUMS.asc)
+          for f in *.iso *.pkg.tar.gz; do [ -e "$f" ] && assets+=("$f"); done
+
+          if [ "${{ steps.gpg.outputs.signed }}" != "true" ]; then
+            {
+              echo ""
+              echo "> **This release is unsigned.** No GPG signing key was"
+              echo "> configured, so no \`SHA256SUMS.asc\` is attached."
+              echo "> Verify \`SHA256SUMS\` by another route before trusting it."
+            } >> CHANGELOG_RELEASE.md
+          fi
+
+          gh release create "${{ github.ref_name }}" \
+            --title "Novi Linux ${{ github.ref_name }}" \
+            --notes-file CHANGELOG_RELEASE.md \
+            --generate-notes \
+            "${assets[@]}"

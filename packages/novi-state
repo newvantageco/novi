@@ -1,0 +1,1142 @@
+#!/bin/sh
+# novi-state — Novi's declarative system state engine (RFC 0002)
+#
+# The one idea: /etc/novi/system.conf IS the system's configuration.
+# Not a cache of it, not a hint to it, not one of several places it
+# might live -- the single declared truth, in a plain text file a
+# person can read, a `git diff` can show, and a GUI can write. Every
+# other OS keeps two unreconciled copies of this: what the GUI wrote
+# (dconf/registry/plists -- invisible, unversioned, undiffable) and
+# what the config files say. Novi keeps one.
+#
+# Four verbs make that real, and the split between them is the point:
+#
+#   show      what the system is DECLARED to be
+#   diff      declared vs. what it ACTUALLY is right now (drift)
+#   apply     make actual match declared (snapshots a generation first)
+#   rollback  restore a previous generation and re-apply it
+#
+# Declaring and applying are deliberately separate steps. `set` only
+# edits the document; nothing touches the running system until `apply`.
+# That's what makes "review the diff before it happens" possible at
+# all, and it's why a GUI toggle and a text edit can be the same
+# operation -- both just write the document.
+#
+# Busybox-compatible (this repo's /bin/sh is a static BusyBox ash).
+#
+# shellcheck disable=SC3043
+# `local` is outside strict POSIX sh, which is what shellcheck's `sh`
+# dialect checks -- but the real target is BusyBox ash, which supports
+# it, exactly as packages/pkg already documents and relies on.
+set -eu
+
+STATE_FILE="${NOVI_STATE_FILE:-/etc/novi/system.conf}"
+GEN_DIR="${NOVI_STATE_GENERATIONS:-/var/lib/novi-state/generations}"
+
+msg()  { printf '==> %s\n'    "$*" >&2; }
+info() { printf '  -> %s\n'   "$*" >&2; }
+warn() { printf 'WARN: %s\n'  "$*" >&2; }
+die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+
+need_root() {
+    [ "$(id -u)" -eq 0 ] || die "This operation requires root."
+}
+
+# ---------------------------------------------------------------------------
+# The document
+# ---------------------------------------------------------------------------
+#
+# Format: `key = value`, one per line. `#` starts a comment. Blank
+# lines and indentation are allowed and preserved. Keys are dotted
+# paths (`services.novi-shell`), values are bare words.
+#
+# Deliberately NOT TOML/JSON/YAML: this file has to be parsed by a
+# BusyBox shell script AND by a C GUI (novi-settings) with no parser
+# library on either side, stay greppable (`grep services. system.conf`),
+# stay diffable line-by-line in git, and stay comfortable to hand-edit
+# with comments. A flat dotted-key format is the only one of those that
+# is all five at once. Nesting buys nothing here and costs a parser.
+
+# Emit the declared state as normalized `key=value` lines, sorted.
+# Comments, blank lines, and incidental whitespace are stripped -- this
+# is the machine-readable projection of the document, not the document.
+state_normalize() {
+    local file="$1"
+    [ -f "$file" ] || return 0
+    sed -e 's/#.*$//' -e 's/[[:space:]]*$//' -e 's/^[[:space:]]*//' "$file" \
+        | grep -E '^[a-zA-Z0-9._-]+[[:space:]]*=' \
+        | sed -e 's/[[:space:]]*=[[:space:]]*/=/' \
+        | sort
+}
+
+# Every key currently declared, one per line.
+state_keys() {
+    state_normalize "$STATE_FILE" | cut -d= -f1
+}
+
+# The declared value for one key, or empty if undeclared.
+state_get() {
+    local key="$1"
+    state_normalize "$STATE_FILE" | grep "^${key}=" | head -n1 | cut -d= -f2- || true
+}
+
+# Escape a key for safe use inside a POSIX basic regular expression --
+# dotted keys (`services.novi-shell`) would otherwise let `.` match any
+# character, so `services.novi-shell` would also match a hypothetical
+# `servicesXnovi-shell` line.
+key_regex() {
+    printf '%s' "$1" | sed 's/[].[^$*\\/]/\\&/g'
+}
+
+# Set a key in the document IN PLACE, preserving every comment, blank
+# line, and the existing ordering -- a surgical value replacement, not
+# a regenerate-from-scratch. This is what keeps the file genuinely
+# two-way: a GUI writing a key must not destroy the comments a person
+# wrote around it, or the file stops being something anyone wants to
+# hand-edit and the whole single-source-of-truth claim collapses.
+state_set() {
+    local key="$1" value="$2"
+    local key_re tmp
+    key_re="$(key_regex "$key")"
+    mkdir -p "$(dirname "$STATE_FILE")"
+    [ -f "$STATE_FILE" ] || : > "$STATE_FILE"
+    tmp="${STATE_FILE}.tmp.$$"
+
+    awk -v key="$key" -v value="$value" -v key_re="^[ \t]*${key_re}[ \t]*=" '
+        BEGIN { done = 0 }
+        {
+            if (!done && $0 ~ key_re) {
+                match($0, /^[ \t]*/)
+                print substr($0, 1, RLENGTH) key " = " value
+                done = 1
+                next
+            }
+            print
+        }
+        END { if (!done) print key " = " value }
+    ' "$STATE_FILE" > "$tmp"
+
+    # Atomic replace: a crash mid-write can never leave the system's
+    # single source of truth half-written.
+    mv "$tmp" "$STATE_FILE"
+}
+
+# ---------------------------------------------------------------------------
+# Observation: what the system ACTUALLY is, right now
+# ---------------------------------------------------------------------------
+#
+# One observer per key, each reading the real live system -- never a
+# cache, never the state file itself. `diff` is only meaningful if
+# these genuinely go and look.
+
+observe_hostname() {
+    if [ -r /proc/sys/kernel/hostname ]; then
+        cat /proc/sys/kernel/hostname
+    else
+        hostname 2>/dev/null || printf 'unknown'
+    fi
+}
+
+# s6-rc's own live view of which services are up. `-a list` is the
+# authoritative answer (it reads the live state, not the compiled db),
+# and is what the compositor bring-up path already uses elsewhere in
+# this repo.
+#
+# Cached per run, because the naive version forked `s6-rc -a list` once
+# per declared service and `diff` is the hot path -- novi-settings' own
+# System panel calls it on every refresh, and the cost was visible
+# there (a redraw lagging behind the keystroke that asked for it).
+#
+# The cache MUST be primed from the parent shell via
+# service_cache_load(), never lazily inside observe_service(): every
+# caller reads it as `have="$(observe_key ...)"`, and a command
+# substitution is a subshell, so an assignment made in there is
+# discarded the moment it returns. That is the same subshell trap
+# `packages/pkg` already hit for real (its dependency resolution
+# silently did nothing because the collecting loop was the last stage
+# of a pipeline). Priming in the parent works because subshells
+# *inherit* variables -- they just cannot hand changes back.
+SERVICE_LIST_CACHE=""
+SERVICE_LIST_LOADED=0
+
+service_cache_load() {
+    [ "$SERVICE_LIST_LOADED" -eq 1 ] && return 0
+    if command -v s6-rc >/dev/null 2>&1; then
+        SERVICE_LIST_CACHE="$(s6-rc -a list 2>/dev/null || true)"
+    fi
+    SERVICE_LIST_LOADED=1
+}
+
+observe_service() {
+    local name="$1"
+    if ! command -v s6-rc >/dev/null 2>&1; then
+        printf 'unknown'
+        return 0
+    fi
+    if printf '%s\n' "$SERVICE_LIST_CACHE" | grep -qx "$name"; then
+        printf 'on'
+    else
+        printf 'off'
+    fi
+}
+
+# The network domain.
+#
+# `network.dhcp` maps to the `network` s6 service, and is deliberately
+# NOT also exposed as `services.network`: two keys governing one
+# service is precisely the split-brain this engine exists to prevent,
+# so the network domain owns it and the services domain never mentions
+# it.
+#
+# `network.interface` and `network.dns` are read by that service when
+# it starts, and it records what it was started with under /run/novi.
+# Observing the recorded spec rather than the declared one is what
+# makes changing either show up as real drift -- and gives `apply`
+# something to do about it -- instead of the change silently having no
+# effect until the next reboot.
+observe_network() {
+    local sub="$1"
+    case "$sub" in
+        dhcp) observe_service network ;;
+        # `network.wifi` maps to the wifi service (wpa_supplicant), and
+        # `network.wifi.interface` to the spec that service recorded --
+        # the same shape as `network.dhcp` / `network.interface`, and
+        # for the same reasons. There is deliberately no
+        # `services.wifi` key.
+        #
+        # What is NOT here is any credential. A WiFi passphrase is a
+        # secret and system.conf is world-readable; /etc/novi/wifi.conf
+        # at 0600 holds them, and novi-wifi manages it. Configuration
+        # is declared; secrets are not (RFC 0005).
+        wifi) observe_service wifi ;;
+        wifi.interface)
+            if [ "$(observe_service wifi)" != "on" ]; then
+                state_get "network.$sub"
+            elif [ -r "/run/novi/network.wifi.interface" ]; then
+                cat "/run/novi/network.wifi.interface"
+            else
+                printf 'unknown'
+            fi
+            ;;
+        interface|dns)
+            # With the service down there is no running configuration
+            # to be out of step with, so the declared value is the
+            # honest observation. Anything else would report permanent,
+            # unfixable drift on a machine that simply has DHCP off.
+            if [ "$(observe_service network)" != "on" ]; then
+                state_get "network.$sub"
+                return 0
+            fi
+            if [ -r "/run/novi/network.$sub" ]; then
+                cat "/run/novi/network.$sub"
+            else
+                printf 'unknown'
+            fi
+            ;;
+        *) printf 'unmanaged' ;;
+    esac
+}
+
+# The users domain.
+#
+#   users.<name>.shell   = /bin/sh | absent
+#   users.<name>.groups  = wheel,video,input | none
+#
+# `shell` is the anchor: declaring one creates the account, and
+# `absent` removes it. Every account has exactly one shell, so there is
+# no separate "should this user exist" key to get out of step with it.
+#
+# What is NOT here is the password. /etc/novi/system.conf is
+# world-readable and this project actively encourages committing it to
+# git; a hash has no business in either. Secrets keep their own 0600
+# store (/etc/shadow) and their own tools (`passwd`, novi-settings'
+# Account panel) -- the same exception novi-settings already makes, for
+# the same reason. A new account is created locked; someone with root
+# sets its password out of band.
+#
+# Usernames may not contain a dot: the key format is dotted and there
+# is no escaping in this document. Checked rather than assumed to be
+# true, because the failure mode is silently managing the wrong user.
+user_name_of()  { local r="${1#users.}"; printf '%s' "${r%%.*}"; }
+user_attr_of()  { local r="${1#users.}"; case "$r" in *.*) printf '%s' "${r#*.}" ;; *) printf '' ;; esac; }
+
+user_name_valid() {
+    case "$1" in
+        ''|*[!a-z0-9_-]*) return 1 ;;
+        [!a-z_]*)         return 1 ;;
+    esac
+    return 0
+}
+
+# The shell field from /etc/passwd, or "absent". Read from the file
+# rather than through getent(1) -- musl has no NSS, so /etc/passwd IS
+# the database and nothing else can be hiding an account.
+observe_user_shell() {
+    local name="$1" line
+    line="$(grep "^${name}:" /etc/passwd 2>/dev/null | head -n 1)"
+    if [ -z "$line" ]; then
+        printf 'absent'
+        return 0
+    fi
+    printf '%s' "$line" | cut -d: -f7
+}
+
+# Supplementary groups, sorted and comma-joined, or "none". Sorted so
+# that declaring "video,wheel" and "wheel,video" are the same
+# declaration -- an ordering difference is not drift.
+observe_user_groups() {
+    local name="$1" out
+    out="$(awk -F: -v u="$name" '
+        {
+            n = split($4, m, ",")
+            for (i = 1; i <= n; i++) if (m[i] == u) print $1
+        }' /etc/group 2>/dev/null | sort | tr '\n' ',' | sed 's/,$//')"
+    if [ -z "$out" ]; then
+        printf 'none'
+    else
+        printf '%s' "$out"
+    fi
+}
+
+observe_user() {
+    local key="$1" name attr
+    name="$(user_name_of "$key")"
+    attr="$(user_attr_of "$key")"
+    user_name_valid "$name" || { printf 'invalid-username'; return 0; }
+    case "$attr" in
+        shell) observe_user_shell "$name" ;;
+        groups)
+            # With no account there is nothing to be out of step with,
+            # and users.<name>.shell already reports that as drift.
+            # Reporting it twice would make one missing user look like
+            # two problems.
+            if [ "$(observe_user_shell "$name")" = "absent" ]; then
+                state_get "$key"
+            else
+                observe_user_groups "$name"
+            fi
+            ;;
+        *) printf 'unmanaged' ;;
+    esac
+}
+
+# The packages domain (RFC 0006).
+#
+#   packages.<name> = present | absent
+#
+# This is the piece that makes the claim in the README true of the
+# whole machine rather than only of its configuration: what software
+# is installed becomes part of the same document, with the same diff,
+# the same generations and the same rollback.
+#
+# The observer reads `pkg`'s install database directly rather than
+# shelling out to `pkg list`. /var/lib/pkg/installed/<name>/MANIFEST is
+# the database -- one stat() per key instead of one fork, and `diff`
+# runs this over every declared key on every refresh of the Settings
+# app's System panel.
+#
+# WORTH KNOWING BEFORE ADDING MORE OF THESE: converging a package
+# means a download and an unpack, which is the first converger in this
+# engine slow enough for the GUI's blocking novi-state calls to matter
+# (see CLAUDE.md). A `set` is still one awk pass; an `apply` that
+# installs something is not, and novi-settings will sit there.
+observe_package() {
+    local name="$1"
+    if [ -f "/var/lib/pkg/installed/${name}/MANIFEST" ]; then
+        printf 'present'
+    else
+        printf 'absent'
+    fi
+}
+
+# The power domain (RFC 0011).
+#
+#   power.governor = performance | powersave | schedutil | ...
+#
+# The CPU frequency governor is a real, persistent policy decision --
+# how this machine trades battery life against speed -- and it is
+# exactly the sort of thing that otherwise lives in someone's
+# half-remembered shell history. Declared, it survives a reboot and
+# shows up in a diff.
+#
+# `none` is what a machine with no cpufreq driver reports, which is
+# most VMs. Declaring a governor there is not an error, it just cannot
+# be satisfied, and diff says so.
+observe_governor() {
+    local f=/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor
+    if [ -r "$f" ]; then
+        cat "$f"
+    else
+        printf 'none'
+    fi
+}
+
+converge_governor() {
+    local want="$1" c avail
+    avail="$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors 2>/dev/null || true)"
+    [ -n "$avail" ] || die "this machine has no cpufreq driver; cannot set a governor"
+    case " $avail " in
+        *" $want "*) : ;;
+        *) die "governor '$want' is not one this kernel offers: $avail" ;;
+    esac
+    # Every CPU, not just cpu0: they are set independently, and half a
+    # machine on powersave is a performance bug nobody would find.
+    for c in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+        [ -w "$c" ] || continue
+        printf '%s\n' "$want" > "$c" || warn "could not set $(dirname "$c")"
+    done
+}
+
+# Observed value for any declared key. An unrecognized key observes as
+# "unmanaged" rather than erroring: an unknown key in the document is a
+# forward-compatibility case (a newer novi-state, a hand-written note),
+# not corruption, and `diff` should say so plainly instead of refusing
+# to run at all.
+observe_key() {
+    local key="$1"
+    case "$key" in
+        hostname)   observe_hostname ;;
+        services.*) observe_service "${key#services.}" ;;
+        network.*)  observe_network "${key#network.}" ;;
+        users.*)    observe_user "$key" ;;
+        packages.*) observe_package "${key#packages.}" ;;
+        power.governor) observe_governor ;;
+        # power.lid / power.button are policy with no live counterpart:
+        # novi-power reads the declared value at event time, so the
+        # machine's behaviour and the document can never disagree and
+        # there is nothing to converge. Inventing a /run cache purely so
+        # `diff` had something to look at would be the "observers read
+        # real live state, never a cache" rule turned inside out. Same
+        # reasoning as state.* below.
+        #
+        # But only a value novi-power can act on counts as observed.
+        # These keys cannot drift, so converge_key never runs for them
+        # and never gets to reject a typo -- `power.lid = suspned` would
+        # otherwise sit in the document reading as converged while the
+        # lid did nothing at all. Reporting an unusable value as drift
+        # is the truth: the machine is not doing what was declared, and
+        # no apply can make it.
+        power.lid|power.button)
+            case "$(state_get "$key")" in
+                suspend|poweroff|ignore) state_get "$key" ;;
+                *) printf 'unsupported' ;;
+            esac
+            ;;
+        # `state.*` keys configure this engine itself (see cmd_boot),
+        # not the machine -- there is no external fact to go and look
+        # at, so the declared value IS the observation and they never
+        # register as drift. Stated explicitly rather than left to fall
+        # through to "unmanaged", which would make `diff` report
+        # permanent, unfixable drift on a key that is working fine.
+        state.*)    state_get "$key" ;;
+        *)          printf 'unmanaged' ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# Convergence: make actual match declared
+# ---------------------------------------------------------------------------
+
+converge_hostname() {
+    local want="$1"
+    hostname "$want" || die "failed to set hostname to '$want'"
+    # Persist so the next boot agrees with the document too -- an
+    # apply that only changed the running system would silently drift
+    # back on reboot, which is exactly the split-brain this whole tool
+    # exists to prevent.
+    printf '%s\n' "$want" > /etc/hostname
+}
+
+converge_service() {
+    local name="$1" want="$2"
+    command -v s6-rc >/dev/null 2>&1 || die "s6-rc not found; cannot manage services"
+    case "$want" in
+        on)
+            # -u (up), never -up: `-p` prunes to exactly the named
+            # selection, which would stop everything outside it --
+            # including the console getty issuing the command. That
+            # exact trap is already documented in this repo's own
+            # PLATFORM-ROADMAP (§5) after it hung a live session.
+            s6-rc -u change "$name" || die "failed to start service '$name'"
+            ;;
+        off)
+            s6-rc -d change "$name" || die "failed to stop service '$name'"
+            ;;
+        *)
+            die "service '$name': value must be 'on' or 'off', got '$want'"
+            ;;
+    esac
+}
+
+converge_network() {
+    local sub="$1" want="$2"
+    case "$sub" in
+        dhcp) converge_service network "$want" ;;
+        wifi) converge_service wifi "$want" ;;
+        wifi.interface)
+            if s6-rc -a list 2>/dev/null | grep -qx wifi; then
+                s6-rc -d change wifi ||
+                    die "failed to stop 'wifi' to apply network.$sub"
+                s6-rc -u change wifi ||
+                    die "failed to restart 'wifi' after setting network.$sub"
+            fi
+            ;;
+        interface|dns)
+            # The service reads these once, at start, so making the
+            # declaration true means restarting it. Only if it is
+            # actually up: bringing a stopped network service into
+            # existence is network.dhcp's job, not this key's.
+            #
+            # Asked live rather than through observe_service(), whose
+            # cache was primed before this apply began and may already
+            # be stale by the time convergence reaches this key.
+            if s6-rc -a list 2>/dev/null | grep -qx network; then
+                s6-rc -d change network || \
+                    die "failed to stop 'network' to apply network.$sub"
+                s6-rc -u change network || \
+                    die "failed to restart 'network' after setting network.$sub"
+            fi
+            ;;
+        *) warn "no converger for 'network.$sub' -- declared but not applied" ;;
+    esac
+}
+
+converge_user_shell() {
+    local name="$1" want="$2" have
+    have="$(observe_user_shell "$name")"
+
+    if [ "$want" = "absent" ]; then
+        [ "$have" = "absent" ] && return 0
+        command -v deluser >/dev/null 2>&1 || die "deluser not found"
+        # The home directory is deliberately left behind. Removing an
+        # account is a configuration change; deleting someone's files
+        # is not, and a declarative engine that quietly does the second
+        # while you asked for the first is one nobody should trust with
+        # root.
+        deluser "$name" || die "failed to remove user '$name'"
+        info "removed user '$name' (home directory left in place)"
+        return 0
+    fi
+
+    [ -x "$want" ] || warn "user '$name': shell '$want' is not executable here"
+
+    if [ "$have" = "absent" ]; then
+        command -v adduser >/dev/null 2>&1 || die "adduser not found"
+        # -D: do not prompt for a password. The account is created
+        # locked on purpose -- see the domain comment above.
+        adduser -D -s "$want" "$name" || die "failed to create user '$name'"
+        info "created user '$name' (locked -- set a password with: passwd $name)"
+        return 0
+    fi
+
+    # Change the shell in place. There is no chsh in BusyBox, and awk
+    # over the whole file is what keeps the comment header and every
+    # other line byte-identical; a temp file plus mv keeps it atomic,
+    # so an interrupted apply cannot leave the system with a truncated
+    # /etc/passwd and no way to resolve root.
+    awk -F: -v OFS=: -v u="$name" -v sh="$want" \
+        '$1 == u { $7 = sh } { print }' /etc/passwd > /etc/passwd.novi-new ||
+        die "failed to rewrite /etc/passwd"
+    chmod 644 /etc/passwd.novi-new
+    mv /etc/passwd.novi-new /etc/passwd || die "failed to install /etc/passwd"
+}
+
+converge_user_groups() {
+    local name="$1" want="$2" have g
+    if [ "$(observe_user_shell "$name")" = "absent" ]; then
+        warn "user '$name' does not exist -- not setting its groups"
+        return 0
+    fi
+    have="$(observe_user_groups "$name")"
+    [ "$want" = "none" ] && want=""
+    [ "$have" = "none" ] && have=""
+
+    for g in $(printf '%s' "$want" | tr ',' ' '); do
+        if ! printf '%s' ",$have," | grep -q ",$g,"; then
+            grep -q "^${g}:" /etc/group || {
+                warn "group '$g' does not exist -- not adding '$name' to it"
+                continue
+            }
+            addgroup "$name" "$g" || warn "could not add '$name' to '$g'"
+        fi
+    done
+
+    for g in $(printf '%s' "$have" | tr ',' ' '); do
+        if ! printf '%s' ",$want," | grep -q ",$g,"; then
+            delgroup "$name" "$g" || warn "could not remove '$name' from '$g'"
+        fi
+    done
+}
+
+converge_user() {
+    local key="$1" want="$2" name attr
+    name="$(user_name_of "$key")"
+    attr="$(user_attr_of "$key")"
+    user_name_valid "$name" ||
+        die "'$key': '$name' is not a usable user name (lowercase letters, digits, - and _; no dots)"
+    case "$attr" in
+        shell)  converge_user_shell  "$name" "$want" ;;
+        groups) converge_user_groups "$name" "$want" ;;
+        *)      warn "no converger for '$key' -- declared but not applied" ;;
+    esac
+}
+
+converge_package() {
+    local name="$1" want="$2"
+    command -v pkg >/dev/null 2>&1 || die "pkg not found; cannot manage packages"
+    case "$want" in
+        present)
+            # `pkg install` resolves dependencies, fetches from the
+            # configured mirror, verifies each archive's SHA-256
+            # against the signed index, and unpacks. All of that is
+            # pkg's job, not this engine's -- reimplementing any of it
+            # here would give the system two package managers that
+            # disagree.
+            pkg install "$name" ||
+                die "failed to install '$name' (is the index synced? try: pkg sync)"
+            ;;
+        absent)
+            pkg remove "$name" || die "failed to remove '$name'"
+            ;;
+        *)
+            die "packages.$name: value must be 'present' or 'absent', got '$want'"
+            ;;
+    esac
+}
+
+converge_key() {
+    local key="$1" want="$2"
+    case "$key" in
+        hostname)   converge_hostname "$want" ;;
+        services.*) converge_service "${key#services.}" "$want" ;;
+        network.*)  converge_network "${key#network.}" "$want" ;;
+        users.*)    converge_user "$key" "$want" ;;
+        packages.*) converge_package "${key#packages.}" "$want" ;;
+        power.governor) converge_governor "$want" ;;
+        # Nothing to do -- novi-power reads these at event time -- but
+        # the value is checked here so that `apply` is where a typo is
+        # reported, with the same wording every other domain uses.
+        power.lid|power.button)
+            case "$want" in
+                suspend|poweroff|ignore) : ;;
+                *) die "$key: must be 'suspend', 'poweroff' or 'ignore', got '$want'" ;;
+            esac
+            ;;
+        # Nothing to converge: a state.* key is read by this engine when
+        # it next runs, so declaring it is already the whole effect.
+        state.*)    : ;;
+        *)          warn "no converger for '$key' -- declared but not applied" ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# Generations
+# ---------------------------------------------------------------------------
+#
+# Every apply snapshots the document it applied, numbered and
+# immutable. Rollback restores one and re-applies it. This is what
+# turns "I changed something and now it's broken" into a bounded,
+# reversible event rather than an archaeology problem.
+
+# Keep the most recent GEN_KEEP snapshots and drop older ones.
+#
+# Needed once convergence runs at every boot (cmd_boot): a machine
+# whose declared state differs from what the `default` bundle starts --
+# which is the normal case for anyone who declared a desktop -- would
+# otherwise write one generation per boot, forever. Pruning the oldest
+# is right rather than skipping the snapshot: the recent ones are the
+# ones anybody rolls back to, and a boot that really did change the
+# system deserves the same record as any other apply.
+GEN_KEEP="${NOVI_STATE_KEEP:-20}"
+
+prune_generations() {
+    local count g
+    [ -d "$GEN_DIR" ] || return 0
+    count=0
+    for g in "$GEN_DIR"/*.conf; do
+        [ -e "$g" ] || continue
+        count=$((count + 1))
+    done
+    [ "$count" -le "$GEN_KEEP" ] && return 0
+    # Names are zero-padded and therefore sort oldest-first, so the
+    # excess to remove is simply the front of the list.
+    for g in "$GEN_DIR"/*.conf; do
+        [ -e "$g" ] || continue
+        [ "$count" -le "$GEN_KEEP" ] && break
+        rm -f "$g"
+        count=$((count - 1))
+    done
+}
+
+next_generation() {
+    local n=1 g
+    mkdir -p "$GEN_DIR"
+    for g in "$GEN_DIR"/*.conf; do
+        [ -e "$g" ] || continue
+        g="$(basename "$g" .conf)"
+        # Strip leading zeros so arithmetic doesn't read them as octal.
+        g="$(printf '%s' "$g" | sed 's/^0*//')"
+        [ -n "$g" ] || g=0
+        [ "$g" -lt "$n" ] || n=$((g + 1))
+    done
+    printf '%04d' "$n"
+}
+
+# Snapshot what the system ACTUALLY IS right now -- not what the state
+# file currently says. The distinction is the whole value of a
+# generation: by the time `apply` runs, the document has already been
+# edited to the new desired state, so copying it would save the change
+# rather than what the change replaced, and `rollback` would restore
+# the very thing it was meant to undo. (Caught exactly that way: a live
+# rollback answered "already converged -- nothing to apply".)
+#
+# Snapshotting observation instead also makes generations ground truth
+# rather than a second-hand copy -- if the running system had drifted
+# from the document before this apply, the generation records where the
+# machine really was, which is what someone rolling back actually wants
+# to get back to.
+snapshot_generation() {
+    local gen key want have
+    gen="$(next_generation)"
+    mkdir -p "$GEN_DIR"
+    service_cache_load
+    {
+        printf '# Novi generation %s -- the system as observed before this apply.\n' "$gen"
+        printf '# Restore with: novi-state rollback %s\n\n' "$gen"
+        for key in $(state_keys); do
+            have="$(observe_key "$key")"
+            # A key we cannot observe (no converger, or a tool missing)
+            # would otherwise be recorded as the literal word "unknown"
+            # and then fail to converge if this generation were ever
+            # restored. Record what was declared instead: it is the
+            # best available answer and it always applies cleanly.
+            case "$have" in
+                unknown|unmanaged) want="$(state_get "$key")"; have="$want" ;;
+            esac
+            printf '%s = %s\n' "$key" "$have"
+        done
+    } > "$GEN_DIR/${gen}.conf"
+    prune_generations
+    printf '%s' "$gen"
+}
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+cmd_show() {
+    [ -f "$STATE_FILE" ] || die "no state file at $STATE_FILE"
+    cat "$STATE_FILE"
+}
+
+cmd_get() {
+    local key="${1:-}"
+    [ -n "$key" ] || die "usage: novi-state get <key>"
+    state_get "$key"
+}
+
+cmd_set() {
+    local key="${1:-}" value="${2:-}"
+    [ -n "$key" ] || die "usage: novi-state set <key> <value>"
+    [ -n "$value" ] || die "usage: novi-state set <key> <value>"
+    need_root
+    state_set "$key" "$value"
+    info "declared: $key = $value"
+    info "run 'novi-state apply' to make it so"
+}
+
+# Declared vs. actual. Exit status is deliberately meaningful:
+# 0 = converged (no drift), 1 = drift found. That makes it usable as a
+# check in a script or a CI job, not just something a human reads.
+cmd_diff() {
+    local key want have drift=0
+    [ -f "$STATE_FILE" ] || die "no state file at $STATE_FILE"
+    # Nothing changes during a diff, so one snapshot of the live
+    # service list serves every key.
+    service_cache_load
+    for key in $(state_keys); do
+        want="$(state_get "$key")"
+        have="$(observe_key "$key")"
+        if [ "$want" != "$have" ]; then
+            drift=1
+            printf -- '- %s = %s   (actual)\n' "$key" "$have"
+            printf -- '+ %s = %s   (declared)\n' "$key" "$want"
+        fi
+    done
+    if [ "$drift" -eq 0 ]; then
+        msg "system matches declared state"
+        diff_health_note
+        return 0
+    fi
+    diff_health_note
+    return 1
+}
+
+# "Converged" and "working" are different claims, and this engine used
+# to only ever make the first one while sounding like both. A machine
+# whose syslog has been crash-looping since boot matches its declared
+# state exactly -- so say so, and then say the other thing too.
+#
+# It does not touch the exit status: `apply` cannot fix a service that
+# is broken, so making drift-free-but-unhealthy exit 1 would mean
+# `apply && diff` could never succeed on such a machine. `novi-state
+# health` is the command with the failing exit code.
+diff_health_note() {
+    local problems
+    problems="$(health_problems)"
+    [ -n "$problems" ] || return 0
+    warn "converged, but a service is not doing its job:"
+    printf '%s\n' "$problems" | while IFS= read -r l; do
+        [ -n "$l" ] && printf '     %s\n' "$l" >&2
+    done
+    warn "run 'novi-state health' for the full picture"
+}
+
+cmd_apply() {
+    local dry=0 key want have gen changed=0
+    [ "${1:-}" = "--dry-run" ] && dry=1
+    [ -f "$STATE_FILE" ] || die "no state file at $STATE_FILE"
+
+    # Nothing to do is worth saying plainly, and worth NOT burning a
+    # generation on -- generations should mean "the system actually
+    # changed here," not "someone ran apply."
+    if cmd_diff >/dev/null 2>&1; then
+        msg "already converged -- nothing to apply"
+        return 0
+    fi
+
+    if [ "$dry" -eq 1 ]; then
+        msg "would apply (dry run):"
+        cmd_diff || true
+        return 0
+    fi
+
+    need_root
+    gen="$(snapshot_generation)"
+    msg "snapshot saved as generation $gen"
+
+    # Converge in passes, not one sweep.
+    #
+    # Keys are not independent: some only become *applicable* once
+    # another key has been applied. `users.alice.groups` is the worked
+    # example -- with no account there is nothing to put in a group, so
+    # it reads as converged, and `state_keys` is sorted, so `.groups`
+    # is visited before the `.shell` key that creates the account. One
+    # sweep left the account created and its groups unset, and the very
+    # next `diff` reported drift the apply had just been asked to fix.
+    # Confirmed live before it was fixed.
+    #
+    # Re-running until nothing changes is the honest answer to that,
+    # and it generalizes to every future domain instead of encoding
+    # one special case in the sort order. Bounded, because a converger
+    # that never satisfies its own observer would otherwise spin
+    # forever, and saying so is more useful than hanging.
+    local pass=0 total=0
+    while [ "$pass" -lt 3 ]; do
+        pass=$((pass + 1))
+        changed=0
+        for key in $(state_keys); do
+            # Re-primed each iteration because the previous converge may
+            # have moved more than the one service it named: s6-rc brings
+            # up a service's declared dependencies with it (novi-shell
+            # pulls seatd), so a list cached before that is stale for
+            # every key after it.
+            service_cache_load
+            want="$(state_get "$key")"
+            have="$(observe_key "$key")"
+            [ "$want" = "$have" ] && continue
+            info "$key: $have -> $want"
+            converge_key "$key" "$want"
+            SERVICE_LIST_LOADED=0
+            changed=$((changed + 1))
+        done
+        total=$((total + changed))
+        [ "$changed" -eq 0 ] && break
+    done
+
+    if [ "$changed" -ne 0 ]; then
+        warn "state did not settle after $pass passes -- 'novi-state diff' will show what is still drifting"
+    fi
+    msg "applied $total change(s)"
+}
+
+# Converge at boot, so the document is what the machine actually boots
+# into rather than merely what it can be pushed to. Run as an s6-rc
+# oneshot in the `default` bundle (init/services/novi-state-apply).
+#
+# Two things make this safe enough to enable by default, and both
+# matter -- a state engine that can brick a boot is worse than none:
+#
+#   1. It ALWAYS exits 0. A failed converge must never stop a machine
+#      from finishing boot and giving you a login prompt to fix it
+#      from.
+#   2. `novi.state=off` on the kernel command line skips it entirely.
+#      That is the recovery path when the declared state itself is what
+#      is wrong (say, someone declared every getty off) -- the same
+#      shape as `single` or `init=/bin/sh`, reachable from the
+#      bootloader without needing the machine to boot first.
+#
+# `state.apply_on_boot = off` in the document turns it off the ordinary
+# way, for anyone who wants convergence to stay a manual act.
+cmd_boot() {
+    local problems
+    if [ -r /proc/cmdline ] && grep -qw 'novi.state=off' /proc/cmdline; then
+        msg "boot convergence disabled on the kernel command line"
+        return 0
+    fi
+    if [ ! -f "$STATE_FILE" ]; then
+        msg "no state file at $STATE_FILE -- nothing to converge"
+        return 0
+    fi
+    if [ "$(state_get state.apply_on_boot)" = "off" ]; then
+        msg "boot convergence disabled by state.apply_on_boot"
+        return 0
+    fi
+    # In a SUBSHELL, deliberately, and this is load-bearing rather than
+    # stylistic: die() ends with `exit 1`, and cmd_apply runs in this
+    # same shell, so a converge failure (s6-rc missing, a service that
+    # won't start) would tear down the whole script before `|| warn`
+    # could ever run -- exiting 1 and marking the boot oneshot failed,
+    # which is precisely the outcome guarantee (1) above promises can't
+    # happen. Verified before the fix: `novi-state boot` exited 1 when
+    # a converge failed. The subshell confines that exit, so the
+    # failure becomes a visible warning on the console and in the log,
+    # and boot carries on to a usable login prompt.
+    ( cmd_apply ) || warn "boot convergence failed -- continuing boot anyway"
+
+    # A service that is supervised and failing is invisible in
+    # everything above -- it matches the declared state perfectly. Say
+    # it here, where a laptop that has just come up with a broken
+    # service can say so on its own console.
+    #
+    # This is an early look and an honest one: it runs seconds after
+    # `s6-rc change` returned, so a service that is going to crash-loop
+    # may not have died yet and will not be caught. It reports what is
+    # already true, not what is about to be. `novi-state health` at any
+    # later moment is the complete answer.
+    problems="$(health_problems 2>/dev/null || true)"
+    if [ -n "$problems" ]; then
+        warn "a service is supervised but not doing its job:"
+        printf '%s\n' "$problems" | while IFS= read -r l; do
+            [ -n "$l" ] && printf '     %s\n' "$l" >&2
+        done
+    fi
+    return 0
+}
+
+cmd_history() {
+    local g gen
+    [ -d "$GEN_DIR" ] || { msg "no generations yet"; return 0; }
+    for g in "$GEN_DIR"/*.conf; do
+        [ -e "$g" ] || { msg "no generations yet"; return 0; }
+        gen="$(basename "$g" .conf)"
+        printf '%s  %s\n' "$gen" "$(state_normalize "$g" | tr '\n' ' ')"
+    done
+}
+
+cmd_rollback() {
+    local gen="${1:-}" src
+    [ -d "$GEN_DIR" ] || die "no generations to roll back to"
+    if [ -z "$gen" ]; then
+        # Default: the most recent snapshot, which is the state as it
+        # was BEFORE the latest apply -- "undo the last apply". A glob
+        # loop rather than parsing `ls`: generation names are
+        # zero-padded and sort lexically, so the last iteration is the
+        # newest, with no filename parsing to get wrong.
+        local g
+        for g in "$GEN_DIR"/*.conf; do
+            [ -e "$g" ] || continue
+            gen="$(basename "$g" .conf)"
+        done
+        [ -n "$gen" ] || die "no generations to roll back to"
+    fi
+    src="$GEN_DIR/${gen}.conf"
+    [ -f "$src" ] || die "no such generation: $gen"
+    need_root
+    msg "rolling back to generation $gen"
+    cp "$src" "$STATE_FILE"
+    cmd_apply
+}
+
+usage() {
+    cat >&2 <<'EOF'
+novi-state — Novi's declarative system state (RFC 0002)
+
+  /etc/novi/system.conf is the system's single source of truth.
+  Edit it by hand or through Settings -- both write the same file.
+
+Usage:
+  novi-state show                 print the declared state
+  novi-state get <key>            print one declared value
+  novi-state set <key> <value>    declare a value (does not apply it)
+  novi-state diff                 declared vs. actual (exit 1 if drifted)
+  novi-state health               are the services actually running?
+                                  (exit 1 if one is supervised but failing;
+                                  a separate question from drift -- see
+                                  RFC 0004 and the comment above cmd_health)
+  novi-state apply [--dry-run]    make actual match declared
+  novi-state history              list saved generations
+  novi-state rollback [gen]       restore a generation and apply it
+  novi-state boot                 converge at boot (s6-rc oneshot; never fails)
+
+Keys:
+  hostname                        the system hostname
+  services.<name>                 on | off  (an s6-rc service)
+  network.dhcp                    on | off  (the DHCP client service)
+  network.interface               auto | <name>  (which NIC to use)
+  network.dns                     auto | 1.1.1.1,9.9.9.9
+  network.wifi                    on | off  (the supplicant; see novi-wifi)
+  network.wifi.interface          auto | <name>
+  users.<name>.shell              /bin/sh | absent  (declares the account)
+  users.<name>.groups             wheel,video,input | none
+  packages.<name>                 present | absent
+  power.governor                  performance | powersave | schedutil | ...
+  state.apply_on_boot             on | off  (converge on every boot)
+
+Recovery:
+  Add novi.state=off to the kernel command line to skip boot
+  convergence entirely -- for when the declared state is the problem.
+EOF
+    exit 1
+}
+
+# ---------------------------------------------------------------------------
+# Service health -- deliberately NOT part of diff
+# ---------------------------------------------------------------------------
+#
+# `s6-rc -a list` reporting a longrun "up" means "supervised and wanted
+# up". It does not mean running, and it has now hidden four separate
+# bugs in this project: syslog crash-looping for its entire existence
+# (RFC 0004), the network readiness race (RFC 0004), wpa_supplicant
+# exiting on an option it was not compiled with (RFC 0009), and acpid
+# delivering nothing after a resume (RFC 0013). Every one of them
+# showed a converged machine in `novi-state diff`.
+#
+# The standing roadmap item said "diff should notice a crash-looping
+# longrun", and doing that literally is a trap: a service that has just
+# been started is momentarily indistinguishable from one that keeps
+# dying, so convergence at boot would call it drift and restart the
+# service it had just started -- the exact loop RFC 0004's
+# notification-fd fix was written to end, reintroduced from a new
+# direction.
+#
+# It is also the wrong shape. Drift means "the machine does not match
+# the document, and apply can fix it". A crash-looping service matches
+# the document perfectly: it IS declared on, and the engine IS keeping
+# it up. What is broken is the service, and no amount of applying fixes
+# a bug in a run script. Conflating the two would make `apply` promise
+# something it cannot deliver and `diff` never reach zero.
+#
+# So health is its own command with its own exit status, and `diff`
+# merely mentions it. Separate question, separate answer.
+
+SCANDIR="${NOVI_SCANDIR:-/run/service}"
+
+# One line per service: "<name> <state> <detail>".
+#
+# s6-svstat -o gives machine-readable fields; s6-svdt prints one line
+# per recorded death. A service that died once last week and has been
+# up since is not crash-looping, so the death tally alone is not the
+# signal -- it is the tally together with a short uptime.
+service_health() {
+    local name="$1" dir="${SCANDIR}/$1" up wanted ready secs deaths st
+
+    [ -d "$dir" ] || { printf '%s unknown no-servicedir\n' "$name"; return 0; }
+
+    st="$(s6-svstat -o up,wantedup,ready,updownfor "$dir" 2>/dev/null || true)"
+    [ -n "$st" ] || { printf '%s unknown s6-svstat-failed\n' "$name"; return 0; }
+    # shellcheck disable=SC2086
+    set -- $st
+    up="${1:-false}"; wanted="${2:-false}"; ready="${3:-false}"; secs="${4:-0}"
+
+    deaths="$(s6-svdt "$dir" 2>/dev/null | grep -c . || true)"
+    deaths=$(( ${deaths:-0} + 0 ))
+
+    if [ "$wanted" != "true" ]; then
+        printf '%s stopped -\n' "$name"
+    elif [ "$up" != "true" ]; then
+        # Wanted up and not up: either it cannot start at all, or we
+        # caught a crash loop between the death and the restart.
+        printf '%s DOWN %s-deaths\n' "$name" "$deaths"
+    elif [ "$deaths" -gt 0 ] && [ "$secs" -lt 60 ]; then
+        printf '%s CRASHLOOP %s-deaths-up-%ss\n' "$name" "$deaths" "$secs"
+    elif [ -f "${dir}/notification-fd" ] && [ "$ready" != "true" ] && [ "$secs" -ge 60 ]; then
+        # Declares readiness and never signalled it -- the RFC 0004
+        # syslog shape.
+        #
+        # The notification-fd test is the whole rule, not a detail. A
+        # service that does not declare readiness never reports ready,
+        # by definition, so without this check every getty, syslog,
+        # klog, acpid and hotplug on the machine turned NOTREADY the
+        # moment it had been up for a minute. That shipped: the test
+        # that was supposed to catch it read the services at up-3s and
+        # saw them all healthy, so a check written to end warning
+        # fatigue would have caused it on every machine that stayed on.
+        printf '%s NOTREADY up-%ss\n' "$name" "$secs"
+    elif [ "$deaths" -gt 0 ]; then
+        printf '%s ok restarted-%s-up-%ss\n' "$name" "$deaths" "$secs"
+    else
+        printf '%s ok up-%ss\n' "$name" "$secs"
+    fi
+}
+
+# Names of every service s6-svscan is currently supervising, minus s6's
+# own internal ones, which are not ours to judge.
+health_services() {
+    local d n
+    for d in "${SCANDIR}"/*; do
+        [ -d "$d" ] || continue
+        n="${d##*/}"
+        case "$n" in
+            .*|s6-svscan-log|s6-linux-init-*|s6rc-*) continue ;;
+        esac
+        printf '%s\n' "$n"
+    done
+}
+
+# Any service in a bad state, one per line. Used by cmd_health and by
+# the one-line note cmd_diff and cmd_boot print.
+health_problems() {
+    local n line
+    command -v s6-svstat >/dev/null 2>&1 || return 0
+    for n in $(health_services); do
+        line="$(service_health "$n")"
+        case "$line" in
+            *" DOWN "*|*" CRASHLOOP "*|*" NOTREADY "*) printf '%s\n' "$line" ;;
+        esac
+    done
+}
+
+# Exit 0 when every supervised service is doing its job, 1 when one is
+# not -- so this is the command a CI job or a health check runs, and
+# `diff` keeps meaning exactly "declared vs actual".
+cmd_health() {
+    local n bad=0 line
+    command -v s6-svstat >/dev/null 2>&1 || die "s6-svstat not found; cannot inspect services"
+    for n in $(health_services); do
+        line="$(service_health "$n")"
+        printf '%s\n' "$line"
+        case "$line" in
+            *" DOWN "*|*" CRASHLOOP "*|*" NOTREADY "*) bad=1 ;;
+        esac
+    done
+    if [ "$bad" -eq 0 ]; then
+        msg "every supervised service is running"
+        return 0
+    fi
+    warn "a service is supervised but not doing its job -- 's6-svstat' and /run/uncaught-logs/current have the detail"
+    return 1
+}
+
+case "${1:-}" in
+    show)     shift; cmd_show "$@" ;;
+    get)      shift; cmd_get "$@" ;;
+    set)      shift; cmd_set "$@" ;;
+    diff)     shift; cmd_diff "$@" ;;
+    apply)    shift; cmd_apply "$@" ;;
+    history)  shift; cmd_history "$@" ;;
+    rollback) shift; cmd_rollback "$@" ;;
+    boot)     shift; cmd_boot "$@" ;;
+    health)   shift; cmd_health "$@" ;;
+    *)        usage ;;
+esac

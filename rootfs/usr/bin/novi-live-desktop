@@ -1,0 +1,68 @@
+#!/bin/sh
+# novi-live-desktop — bring up the desktop on a LIVE boot.
+#
+# The base image is console-only (RFC 0007): the desktop is packages,
+# and this medium carries the whole signed repository. A live boot that
+# wants a desktop therefore installs one -- into the tmpfs overlay,
+# from a directory on the ISO, with the same signature and hash checks
+# a network install gets. It takes a couple of seconds and it is the
+# architecture demonstrating itself rather than being described.
+#
+# Run from init/skel/rc.init when `novi.live.desktop` is on the kernel
+# command line; the ISO's "Live Desktop" menu entry passes it.
+#
+# Everything here is best-effort. This runs during boot, and a live
+# session that could not fetch a desktop should still get a login
+# prompt -- so every failure is a message and an exit 0, never a boot
+# that stops.
+#
+# shellcheck disable=SC3043
+set -u
+
+# To the console as well as to stderr. stderr here is the s6 catch-all
+# logger, which is right for a record and wrong for a person: rc.init
+# runs this AFTER the gettys are up, so a live user is already looking
+# at a login prompt while this works, and a few seconds later the
+# screen would flip to a compositor with no explanation. Say what is
+# happening where they can see it.
+msg() {
+    printf 'novi-live-desktop: %s\n' "$*" >&2
+    printf 'novi-live-desktop: %s\n' "$*" > /dev/console 2>/dev/null || true
+}
+
+REPO="${NOVI_LIVE_REPO:-/run/live/novi-repo}"
+
+if [ ! -f "$REPO/index" ]; then
+    msg "no package repository at $REPO -- staying on the console"
+    exit 0
+fi
+
+if ! command -v pkg >/dev/null 2>&1; then
+    msg "pkg not found -- staying on the console"
+    exit 0
+fi
+
+msg "installing the desktop from $REPO"
+if ! PKG_MIRROR="$REPO" pkg sync >/dev/null 2>&1; then
+    msg "could not sync the repository index -- staying on the console"
+    exit 0
+fi
+if ! PKG_MIRROR="$REPO" pkg install novi-desktop >/dev/null 2>&1; then
+    msg "could not install novi-desktop -- staying on the console"
+    exit 0
+fi
+
+# Declared, not just started: `novi-state diff` on the live session
+# should say the machine matches its document, and the document should
+# say a desktop is what this boot is.
+if command -v novi-state >/dev/null 2>&1; then
+    novi-state set packages.novi-desktop present >/dev/null 2>&1 || true
+    novi-state set services.seatd on             >/dev/null 2>&1 || true
+    novi-state set services.novi-shell on        >/dev/null 2>&1 || true
+    # `boot` rather than `apply`: it is the unfailable entry point, and
+    # it is what the rest of boot already uses.
+    novi-state boot || true
+fi
+
+msg "desktop ready"
+exit 0

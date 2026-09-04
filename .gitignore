@@ -16,6 +16,15 @@ build/initramfs-work/
 build/initramfs*.cpio.gz
 build/novi.iso
 
+# scripts/mkvm.sh's own runtime scratch (its BUILD_DIR defaults to
+# <repo>/build, separate from build/00-versions.sh's hardcoded /build,
+# so these land inside the checkout on a from-scratch run)
+build/OVMF_VARS_runtime.fd
+build/qemu-monitor.sock
+build/qemu-qmp.sock
+build/novi-disk.qcow2
+build/vm_stdin.fifo
+
 # Disk images, ISOs, and virtual machine drives
 *.iso
 *.img

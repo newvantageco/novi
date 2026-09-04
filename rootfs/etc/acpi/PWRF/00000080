@@ -1,0 +1,8 @@
+#!/bin/sh
+# Power button pressed.
+#
+# The path is not ours to choose: busybox acpid maps EV_KEY/KEY_POWER
+# to the action key PWRF and runs $confdir/PWRF/00000080, from a table
+# compiled into the binary. Renaming this file means acpid runs
+# nothing and the button goes back to doing nothing at all.
+exec novi-power event button

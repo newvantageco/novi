@@ -158,6 +158,20 @@ CONFIG_OVERLAY_FS_INDEX=y
 CONFIG_OVERLAY_FS_XINO_AUTO=y
 CONFIG_VFAT_FS=y
 CONFIG_FAT_DEFAULT_UTF8=y
+# Native Language Support, which on a FAT filesystem is not about
+# language at all -- it is the character-set translation the driver
+# needs before it can read a single long filename.
+#
+# CONFIG_FAT_DEFAULT_CODEPAGE is 437 whether or not anything provides
+# codepage 437, and nothing here did: every NLS_* symbol was unset, so
+# `mount -t vfat` failed with "Unable to load NLS charset cp437" and
+# the EFI System Partition could not be mounted at all. That makes a
+# UEFI install impossible (RFC 0008), and it had also been quietly
+# breaking the initramfs's vfat fallback for live media.
+CONFIG_NLS=y
+CONFIG_NLS_CODEPAGE_437=y
+CONFIG_NLS_ISO8859_1=y
+CONFIG_NLS_UTF8=y
 CONFIG_PROC_FS=y
 CONFIG_PROC_SYSCTL=y
 CONFIG_SYSFS=y
@@ -382,6 +396,79 @@ CONFIG_WIRELESS=y
 CONFIG_CFG80211=y
 CONFIG_MAC80211=y
 CONFIG_MAC80211_MESH=n
+# A simulated 802.11 radio. QEMU has no WiFi hardware of any kind, so
+# without this there is no way to test the supplicant, the service, the
+# state domain or the association at all -- and shipping WiFi support
+# that has never associated with anything would be a claim, not a
+# feature. Two hwsim radios talk to each other over the kernel's own
+# virtual medium: one runs hostapd, one runs wpa_supplicant, and the
+# WPA2 four-way handshake between them is real.
+#
+# A module, not built in: it is a test facility, and a machine with
+# real hardware should not have a phantom radio unless somebody asks
+# for one.
+CONFIG_MAC80211_HWSIM=m
+
+# ── Hardware a laptop actually has (RFC 0011) ───────────────────────
+#
+# Everything below was found by asking a plain question of the existing
+# config -- "what is in the machine someone would test this on?" -- and
+# noticing what was not there. None of it shows up in QEMU, which is
+# exactly why none of it was there.
+
+# I2C-HID over ACPI. CONFIG_I2C_HID was already set and is useless on
+# its own: modern laptop touchpads and keyboards are enumerated through
+# ACPI, and without this glue layer the driver never binds to them. A
+# laptop with no working trackpad is the first thing anyone notices.
+CONFIG_I2C_HID_ACPI=y
+CONFIG_HID_MULTITOUCH=m
+
+# Common laptop HID quirk drivers. Without the right one a trackpad
+# reports as a plain mouse, or a keyboard's Fn row does nothing.
+CONFIG_HID_APPLE=m
+CONFIG_HID_ELAN=m
+CONFIG_HID_ELECOM=m
+CONFIG_HID_LOGITECH=m
+CONFIG_HID_LOGITECH_HIDPP=m
+CONFIG_HID_MICROSOFT=m
+CONFIG_HID_SENSOR_HUB=m
+
+# Laptop platform drivers: brightness keys, rfkill switches, fan and
+# battery-threshold controls. One of these is the difference between
+# the brightness keys working and not.
+CONFIG_THINKPAD_ACPI=m
+CONFIG_ASUS_WMI=m
+CONFIG_ASUS_NB_WMI=m
+CONFIG_DELL_LAPTOP=m
+CONFIG_DELL_WMI=m
+CONFIG_HP_WMI=m
+CONFIG_IDEAPAD_LAPTOP=m
+CONFIG_ACER_WMI=m
+
+# USB Ethernet. A modern laptop's only wired port is often on a USB-C
+# dock, and these are the chips in essentially all of them.
+CONFIG_USB_USBNET=m
+CONFIG_USB_NET_CDCETHER=m
+CONFIG_USB_NET_CDC_NCM=m
+CONFIG_USB_NET_AX88179_178A=m
+CONFIG_USB_RTL8152=m
+
+# The classic Intel gigabit NIC (82540EM and friends). CONFIG_E1000E
+# was set, which is the PCIe driver and a DIFFERENT one -- so VMware,
+# VirtualBox and QEMU's default emulated NIC had no driver at all.
+# Confirmed live: a QEMU guest given `-device e1000` came up with
+# loopback only.
+CONFIG_E1000=y
+CONFIG_ATL1C=m
+
+# SD card readers, which is how a lot of people move a file.
+CONFIG_MMC=y
+CONFIG_MMC_BLOCK=y
+CONFIG_MMC_SDHCI=m
+CONFIG_MMC_SDHCI_PCI=m
+CONFIG_MISC_RTSX_PCI=m
+CONFIG_MFD_RTSX_PCI=m
+CONFIG_RTSX_PCI_SDMMC=m
 CONFIG_IWLWIFI=m
 CONFIG_IWLDVM=m
 CONFIG_IWLMVM=m

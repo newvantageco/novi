@@ -148,6 +148,7 @@ mkdir -p "${APPS_DIR}"
 cat > "${APPS_DIR}/foot.app" <<'EOF'
 name=Terminal
 exec=/usr/bin/foot
+icon=terminal
 description=foot terminal emulator
 EOF
 echo "   done: ${APPS_DIR}/foot.app"

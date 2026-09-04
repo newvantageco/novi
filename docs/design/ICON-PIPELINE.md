@@ -275,6 +275,98 @@ larger icon sets still needed (app-grid icons, status-bar wifi/battery/
 power) — those have real curves and multiple strokes that don't qualify
 for hand-coding, and remain blocked on standing up `tools/svg2icon/`.
 
+### Stage 1 built: `tools/svg2icon/`
+
+The offline pipeline this doc recommends is no longer just a proposal —
+`shared/icons/tools/svg2icon/` exists and works. It vendors
+[nanosvg](https://github.com/memononen/nanosvg) + `nanosvgrast`
+(single-header, zlib-licensed — the license file was fetched and read
+directly from upstream before vendoring, the same discipline Lucide's
+license got) as a host-only native build (never cross-compiled, never
+packaged — see `tools/svg2icon/third_party/nanosvg/NOTICE.md`), reads
+real vendored Lucide SVG sources under `tools/svg2icon/svg/` (provenance
+in that directory's `MANIFEST.md`, each file fetched directly from
+Lucide's upstream repo, not transcribed), and rasterizes them to 8-bit
+alpha-coverage bitmaps at the fixed sizes this doc calls for (24×24 for
+app-grid icons, 16×16 for status-bar/disclosure glyphs).
+
+The first real icon set is generated and committed as
+`shared/icons/icons_generated.c`: `terminal`, `folder`, `globe`,
+`pencil`, `package`, `settings`, `shield` (app-grid, 24×24) and `wifi`,
+`battery`, `power`, `chevron-right`, `chevron-down` (status/disclosure,
+16×16) — every named glyph this doc's "Icon set decision" section listed
+except `layout-grid`, which correctly stays out of this pipeline (see
+"First icon shipped" above). Each was visually verified via the tool's
+own ASCII-art preview output (its substitute, for a host-only tool with
+no compositor to boot, for the QEMU screendump pixel-checks the rest of
+this repo's UI work uses) — recognizable terminal prompt, folder,
+meridian-lined globe, pencil, package box, gear, wifi arcs, battery
+outline, power glyph, and both chevrons, not just "the tool ran without
+crashing."
+
+`shared/icons/icon_blit.c`/`icon_blit.h` (Stage 2's `draw_icon()`) is
+also built: a real premultiplied "over" compositing loop, the same
+convention `novi-launcher`'s drop-shadow/rounded-corner code already
+established for this buffer format, not a raw overwrite. Verified with a
+native host-side test harness against the real generated icon data
+(not synthetic/placeholder bitmaps): a fully-opaque draw matches a
+reference buffer pixel-for-pixel at every coordinate including clipped
+edges (an off-buffer draw is a true no-op; a partially-off-buffer draw
+produces exactly the shifted-window result, verified column-by-column
+and row-by-row, not just "didn't crash"), and a real antialiased edge
+pixel from `chevron-right`'s own coverage data blends strictly between
+source and destination color rather than snapping to either — genuine
+"over" blending, not coverage-gated overwrite.
+
+### Wired in and QEMU-live-verified: `novi-launcher` search results
+
+The first real consumer now exists: `packages/pkg-format.md`'s `.app`
+descriptor format gained an optional `icon=` field (one of the app-grid
+names above), `novi-launcher/main.c` resolves it to a `novi_icon_id` and
+calls `draw_icon()` next to a matched search result's `-> Name` text
+(`RESULT_ICON_SIZE`/`RESULT_ICON_GAP` in `novi-launcher/main.c`), and
+`novi-launcher/Makefile` compiles `shared/icons/icon_blit.c` and
+`icons_generated.c` straight into the binary — source-level inclusion,
+same as `../common/text.c`, no new library. `build/09-foot.sh`'s
+self-registered descriptor sets `icon=terminal`, so `foot` — the one
+real launchable app in this rootfs — exercises it.
+
+This cross-compiled cleanly (`build/08-novi-launcher.sh`, no changes
+needed to the fix already described in Stage 1/2 above) and was
+**live-verified in QEMU**, not just "compiles": booted the ISO, switched
+to the `graphical` bundle, Alt+Space, typed "foot", and a real
+screendump (pixel-cropped and zoomed, not eyeballed at full scale) shows
+the exact `ICON_TERMINAL` chevron-and-underscore shape rendered
+immediately left of "-> Terminal" in the same accent-blue as the result
+text — the actual generated bitmap, actually composited by `draw_icon()`
+onto the actual launcher card buffer, actually inside the actual
+compositor. Enter afterward still opened a real interactive `foot`
+window with server-side decorations, confirming the icon addition
+caused no regression to the existing search/launch path.
+
+Two independent, unrelated bugs were found and fixed while getting this
+boot to work at all (not icon-specific, but discovered by this
+verification pass): `scripts/mkinitramfs.sh` never mounted anything at
+`/tmp` even though `scripts/mkiso.sh` excludes it from the squashed
+image the same way it excludes `/dev`/`/run` (which *are* mounted) —
+fixed the same way, a 1777 tmpfs alongside the existing `/dev`/`/run`
+mounts. And the documented `s6-rc -up change graphical` command itself
+hung indefinitely when actually run from `ttyS0` — root-caused, not just
+worked around: `-p` (prune) tells s6-rc to bring the live state to
+*exactly* the target selection's closure, stopping everything outside it
+first, and "graphical"'s closure (`novi-shell`+`seatd`) doesn't include
+`getty-ttyS0` — so `-p` tried to stop the very console issuing the
+command. Confirmed two ways: `s6-svc -u /run/service/seatd` then
+`/run/service/novi-shell` (bypassing s6-rc's orchestration entirely)
+brought both up in seconds, and dropping just the `p` —
+`s6-rc -u change graphical` — returned immediately and produced the
+identical live compositor+panel. Fixed by correcting the documented
+command (`PLATFORM-ROADMAP.md` §5, `novi-shell/run`'s own comment), not
+by touching `init/skel/runlevel`'s generic `-up`, which is correct
+full-prune runlevel-switch semantics for its own real use (called once
+at boot for "default") — this was specifically "graphical" being layered
+on additively, which was never actually a runlevel switch.
+
 ## Summary
 
 | | Runtime cost | Authoring cost | Dependency footprint |

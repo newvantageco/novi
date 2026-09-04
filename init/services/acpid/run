@@ -1,0 +1,26 @@
+#!/bin/sh
+# ============================================================
+# acpid service — run script
+#
+# `novi-power suspend` has existed since RFC 0011 and nothing has ever
+# called it. Closing a laptop lid did nothing; pressing the power
+# button did nothing. Both are worse than they sound: a machine that
+# does not sleep when the lid shuts goes into a bag at 80% and comes
+# out flat, having run at full tilt in an enclosed space, and a power
+# button that does nothing teaches people to hold it for four seconds,
+# which is a hard cut with filesystems mounted.
+#
+# busybox acpid reads every /dev/input/event* when given no -e, maps
+# EV_KEY/KEY_POWER and EV_SW/SW_LID against a table compiled into it,
+# and runs $confdir/<action>. The two handlers in /etc/acpi/ are stubs
+# whose paths that table dictates; the policy they reach is declared
+# state (power.lid, power.button), read at event time.
+#
+# -f: foreground, so s6 supervises the real process rather than a
+# daemonized orphan. Same reason as every other longrun here.
+#
+# No notification-fd: nothing observes this service's readiness, and
+# unlike `network` it records no state for convergence to compare
+# against. It is up when acpid has its event files open.
+# ============================================================
+exec acpid -f
