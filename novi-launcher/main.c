@@ -491,6 +491,20 @@ static void launch_app(const struct app_entry *app) {
 		return;
 	}
 	if (pid == 0) {
+		/* Start in the user's home. The launcher inherits novi-shell's
+		 * cwd, which s6 sets to the compositor's own service directory,
+		 * so an app launched from here came up sitting in
+		 * /run/s6-rc:s6-rc-init:XXXXXX/servicedirs/novi-shell -- and a
+		 * terminal put that entire path in its prompt. Same fix as
+		 * novi-shell's spawn(); both paths can start an app, so both
+		 * need it. */
+		const char *home = getenv("HOME");
+		if (home == NULL || *home == '\0') {
+			home = "/root";
+		}
+		if (chdir(home) != 0) {
+			(void)chdir("/");
+		}
 		execvp(argv[0], argv);
 		fprintf(stderr, "novi-launcher: exec %s failed: %s\n", argv[0],
 			strerror(errno));

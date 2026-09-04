@@ -130,6 +130,21 @@
  * drawing an actual circle would mean the compositor rendering its own
  * pixel buffer (the same technique novi-panel/novi-launcher use
  * client-side), a materially bigger step not taken in this pass. */
+/* Floor for the size a new window is asked to take, so the 70%-of-
+ * usable-area rule below cannot produce something unusably small on a
+ * tiny output. On any output big enough these never bind. */
+#define TOPLEVEL_MIN_WIDTH 480
+#define TOPLEVEL_MIN_HEIGHT 320
+
+/* The desktop behind everything. There was no background node at all,
+ * so an empty desktop showed the scene's clear colour -- pure black,
+ * indistinguishable from a display that is not being driven. This is
+ * the panel's own BG_COLOR lifted a little, so the two read as one
+ * palette with the panel sitting slightly darker on top of it. */
+#define DESKTOP_BG_COLOR_R (0x1eu / 255.0f)
+#define DESKTOP_BG_COLOR_G (0x1eu / 255.0f)
+#define DESKTOP_BG_COLOR_B (0x28u / 255.0f)
+
 #define DECO_HEIGHT 32
 #define DECO_DOT_SIZE 8
 #define DECO_DOT_PADDING 12
@@ -270,6 +285,12 @@ struct novi_output {
 	struct wl_listener destroy;
 	/* layer-shell clients (novi_layer_surface.link) mapped on this output */
 	struct wl_list layer_surfaces;
+	/* Flat desktop background, sized to the whole output (not the
+	 * usable area -- it belongs *behind* the panel, not beside it) and
+	 * resized by arrange_layers() whenever the output geometry changes.
+	 * Lives in layer_tree_background, so a real background layer-shell
+	 * client (a wallpaper program) still draws over it. */
+	struct wlr_scene_rect *background;
 	/* Output-local box left over after layer-shell exclusive zones (the
 	 * top bar's reserved 32px) are subtracted -- set by arrange_layers(),
 	 * read by server_new_xdg_toplevel() so a new window's initial
@@ -513,6 +534,20 @@ static void spawn(const char *cmd) {
 		 * lifetime isn't tied to being a direct child novi-shell has
 		 * to reap. */
 		setsid();
+		/* Start in the user's home, not wherever novi-shell happens to
+		 * be running from. s6 starts this compositor with its cwd set
+		 * to its own service directory, and a child inherits that -- so
+		 * every terminal opened from the desktop came up sitting in
+		 * /run/s6-rc:s6-rc-init:XXXXXX/servicedirs/novi-shell, with
+		 * that whole path in the prompt. Visible in a screenshot the
+		 * moment anyone looked. */
+		const char *home = getenv("HOME");
+		if (home == NULL || *home == '\0') {
+			home = "/root";
+		}
+		if (chdir(home) != 0) {
+			(void)chdir("/");
+		}
 		execl("/bin/sh", "/bin/sh", "-c", cmd, (void *)NULL);
 		/* execl only returns on failure. */
 		_exit(127);
@@ -1301,6 +1336,22 @@ static void arrange_layers(struct novi_output *output) {
 		&full_area.width, &full_area.height);
 	struct wlr_box usable_area = full_area;
 
+	/* Keep the desktop background covering the whole output. Created
+	 * lazily here rather than in server_new_output() because this is
+	 * the one place that already knows the output's effective
+	 * resolution and is already called whenever it changes. */
+	if (output->background == NULL) {
+		float bg[4] = {DESKTOP_BG_COLOR_R, DESKTOP_BG_COLOR_G,
+			DESKTOP_BG_COLOR_B, 1.0f};
+		output->background = wlr_scene_rect_create(
+			output->server->layer_tree_background,
+			full_area.width, full_area.height, bg);
+		wlr_scene_node_lower_to_bottom(&output->background->node);
+	} else {
+		wlr_scene_rect_set_size(output->background,
+			full_area.width, full_area.height);
+	}
+
 	/* wlroots' own scene helper (types/scene/layer_shell_v1.c) already
 	 * implements the protocol's anchor/margin/exclusive-zone math
 	 * correctly -- we just have to call it once per mapped surface on
@@ -1662,16 +1713,66 @@ static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
 	}
 }
 
+/* The size a new window should open at: 70% of the output's usable area
+ * (the space left after the panel's exclusive zone), floored so a tiny
+ * output cannot produce something unusable. Returns false when there is
+ * no output yet, in which case the caller leaves the client to choose.
+ *
+ * Used from two places that must agree: xdg_toplevel_commit()'s
+ * initial_commit branch, which is the point in the xdg-shell handshake
+ * where a compositor's size preference actually reaches the client, and
+ * server_new_xdg_toplevel(), which centres the window on that same
+ * size. They were briefly out of step -- the size was requested at
+ * creation and then overwritten with (0,0) at initial_commit -- which
+ * produced a window at the client's own size sitting off-centre by the
+ * difference. One function, called twice, cannot drift like that. */
+static bool default_toplevel_size(struct novi_server *server, int *out_w,
+		int *out_h) {
+	if (wl_list_empty(&server->outputs)) {
+		return false;
+	}
+	struct novi_output *output =
+		wl_container_of(server->outputs.next, output, link);
+	int avail_w = output->usable_area.width;
+	int avail_h = output->usable_area.height - DECO_HEIGHT;
+	if (avail_w <= 0 || avail_h <= 0) {
+		return false;
+	}
+	int w = avail_w * 7 / 10;
+	int h = avail_h * 7 / 10;
+	if (w < TOPLEVEL_MIN_WIDTH) {
+		w = avail_w < TOPLEVEL_MIN_WIDTH ? avail_w : TOPLEVEL_MIN_WIDTH;
+	}
+	if (h < TOPLEVEL_MIN_HEIGHT) {
+		h = avail_h < TOPLEVEL_MIN_HEIGHT ? avail_h : TOPLEVEL_MIN_HEIGHT;
+	}
+	*out_w = w;
+	*out_h = h;
+	return true;
+}
+
 static void xdg_toplevel_commit(struct wl_listener *listener, void *data) {
 	/* Called when a new surface state is committed. */
 	struct novi_toplevel *toplevel = wl_container_of(listener, toplevel, commit);
 
 	if (toplevel->xdg_toplevel->base->initial_commit) {
-		/* When an xdg_surface performs an initial commit, the compositor must
-		 * reply with a configure so the client can map the surface. novi-shell
-		 * configures the xdg_toplevel with 0,0 size to let the client pick the
-		 * dimensions itself. */
-		wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, 0, 0);
+		/* When an xdg_surface performs an initial commit, the compositor
+		 * must reply with a configure so the client can map the surface.
+		 * This is also the only moment a size preference reaches the
+		 * client, so it is where the default goes.
+		 *
+		 * It used to send (0,0) -- "pick your own size" -- and foot
+		 * duly picked its built-in 700x565, which on a 1280x800 screen
+		 * is a small box with two thirds of the desktop empty next to
+		 * it. A compositor that expresses no opinion about window size
+		 * is not being neutral, it is making every application's
+		 * hardcoded default into the desktop's layout policy. */
+		int w = 0, h = 0;
+		if (default_toplevel_size(toplevel->server, &w, &h)) {
+			wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, w, h);
+		} else {
+			wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, 0, 0);
+		}
 	}
 
 	/* Keep the title bar/dots in sync with the content's current width
@@ -2135,9 +2236,31 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
 		struct wlr_box layout_box = {0};
 		wlr_output_layout_get_box(server->output_layout,
 			output->wlr_output, &layout_box);
-		wlr_scene_node_set_position(&toplevel->scene_tree->node,
-			layout_box.x + output->usable_area.x,
-			layout_box.y + output->usable_area.y + DECO_HEIGHT);
+
+		/* Suggest a size, and centre the window on it.
+		 *
+		 * Nothing used to ask for one, so a new window got whatever
+		 * the client picked on its own -- foot's built-in default is
+		 * around 700x565 -- and landed hard against the top-left
+		 * corner of the usable area. On a 1280x800 screen that is a
+		 * small box in the corner with two thirds of the desktop empty
+		 * beside it, which reads as broken rather than as a choice.
+		 *
+		 * Setting the size here, before the client's first commit, is
+		 * the point in the xdg-shell handshake where a compositor is
+		 * meant to express a preference: it goes out in the initial
+		 * configure and the client acks it. A client that insists on
+		 * its own size still wins, and it will simply be off-centre by
+		 * the difference -- which is why the position is computed from
+		 * the size we asked for rather than assumed to be exact. */
+		int want_w = 0, want_h = 0;
+		int x = layout_box.x + output->usable_area.x;
+		int y = layout_box.y + output->usable_area.y + DECO_HEIGHT;
+		if (default_toplevel_size(server, &want_w, &want_h)) {
+			x += (output->usable_area.width - want_w) / 2;
+			y += (output->usable_area.height - DECO_HEIGHT - want_h) / 2;
+		}
+		wlr_scene_node_set_position(&toplevel->scene_tree->node, x, y);
 	}
 
 	/* Listen to the various events it can emit */
