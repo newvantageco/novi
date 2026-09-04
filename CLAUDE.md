@@ -49,6 +49,10 @@ below for why `/build` is hardcoded and unrelated to the repo checkout path.
 - `bash build/21-desktop-split.sh` — **destructive**: removes the packaged
   desktop from `/build/rootfs`, leaving a console-only base (RFC 0007).
   Must run after 20; re-running 06..14 puts the files back
+- `bash build/26-firmware.sh` — curated linux-firmware + `wireless-regdb`
+  + Intel SOF into `${ROOTFS}/lib/firmware` (~699 MB)
+- `bash build/27-audio.sh` — alsa-lib + alsa-utils (`amixer`, `alsactl`,
+  `aplay`, `speaker-test`)
 - **`bash build/16-s6-rc-db.sh` after ANY change under `init/`** (see below),
   then `bash scripts/mkinitramfs.sh --output build/initramfs.cpio.gz` and
   `bash scripts/mkiso.sh` to get it into a bootable image
@@ -129,6 +133,60 @@ Three smaller things worth knowing before extending this:
   unregenerated change simply doesn't exist at boot. That stage is the
   two generation steps from `04-s6.sh` on their own — seconds instead
   of rebuilding the whole skarnet stack.
+
+## Architecture: hardware you have never seen
+
+RFC 0011 (`docs/rfcs/0011-hardware-enablement.md`). The traps here are
+all the same shape — **something worked while the thing reporting on it
+failed** — which is exactly how three of them survived earlier reviews.
+
+- **`packages/novi-hwdetect` is the only generic driver loader.** Every
+  other module load in this system is a hardcoded list: `/init`'s
+  storage guesses, the network service's NICs, the WiFi service's
+  radios. All three were written against QEMU. `novi-hwdetect` walks
+  `/sys/devices/**/modalias` and hands each string to `modprobe`, which
+  matches it against the `modules.alias` `depmod` generated at build
+  time — udev's builtin, in fifteen lines. It runs **in the initramfs
+  before the root search**, which is the placement that matters: a
+  storage controller nobody listed otherwise ends in an emergency
+  shell.
+- **A script that runs in the initramfs may only use applets
+  `mkinitramfs.sh` links.** That list is hand-written. `novi-hwdetect`
+  loaded every driver correctly and then died on `tr: not found`; the
+  fix was both adding `tr` *and* removing the dependency (`comm` falls
+  back to `grep -Fxv -f`; arithmetic replaces `tr -d ' '`). Adding the
+  applet alone leaves the next script to rediscover the trap.
+- **`echo x > /proc/... 2>/dev/null` does not suppress the redirection's
+  own failure.** Redirections apply left to right, so `>` fails while
+  stderr is still the console. Test `[ -w ... ]` instead.
+- **A builtin and a missing module are indistinguishable to
+  `modprobe`.** `/init` printed `WARNING: Could not load module` for ten
+  filesystems that were compiled in and working — twenty-two warnings a
+  boot, all meaningless, which trains people to ignore warnings.
+  `/sys/module/<name>` exists for a builtin; check it before believing
+  the exit status.
+- **ALSA's default state on a fresh card is muted.** `rc.init` runs
+  `alsactl init` then `alsactl restore`. Without the first, a completely
+  correct audio path produces silence and the card looks unsupported.
+- **`regulatory.db` and Intel SOF firmware are not in linux-firmware.**
+  They are separate upstreams (`wireless-regdb`, `sof-bin`), and this
+  kernel sets `CONFIG_CFG80211_REQUIRE_SIGNED_REGDB`, so a missing
+  `regulatory.db` leaves every radio crippled rather than absent.
+- **A tar wildcard that matches nothing is silent.** The first firmware
+  extraction shipped 393 MB with zero iwlwifi files and looked like a
+  success — linux-firmware had reorganised into per-vendor directories.
+  `26-firmware.sh` distinguishes "Not found in archive" from a real tar
+  failure rather than discarding stderr.
+- **`bootx64.efi` is signed by a self-generated key**, which no stock
+  machine trusts. It is useful to someone who enrolls their own keys or
+  has Secure Boot off, and to nobody else; the certificate ships as
+  `/novi-boot/novi-secureboot.der` so the first case is possible. Do not
+  describe this as Secure Boot support.
+
+**None of this has run on physical hardware.** Keep that qualifier
+wherever this work is described. `novi-hwdetect` is verified on three
+virtio devices — the easiest case there is — and the firmware has never
+been requested by a device.
 
 ## Architecture: installation splits `grub-install` in half
 

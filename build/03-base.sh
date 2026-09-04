@@ -103,6 +103,17 @@ install -D -m 600 "${REPO_ROOT}/rootfs/etc/shadow" "${ROOTFS}/etc/shadow"
 # even though /sbin/ip is the same BusyBox binary as /bin/ls. See the
 # file's own comments.
 install -D -m 644 "${REPO_ROOT}/rootfs/etc/profile" "${ROOTFS}/etc/profile"
+
+# The generic driver loader (RFC 0011). Base image, not a package: a
+# machine that cannot load the driver for its own disk or NIC cannot
+# install a package to fix that.
+install -D -m 755 "${REPO_ROOT}/packages/novi-hwdetect" "${ROOTFS}/sbin/novi-hwdetect"
+
+# Battery, AC, CPU frequency and suspend. Base image for the same
+# reason: a laptop that cannot tell you it is about to die, and cannot
+# be told to sleep, is not usable enough to go install something that
+# fixes that.
+install -D -m 755 "${REPO_ROOT}/packages/novi-power" "${ROOTFS}/usr/bin/novi-power"
 mkdir -p "${ROOTFS}/etc/profile.d"
 
 # ── Copy musl libc into rootfs ────────────────────────────

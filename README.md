@@ -117,7 +117,8 @@ sudo apt install -y \
     bison flex texinfo libelf-dev \
     bc libssl-dev python3 \
     libmpc-dev libmpfr-dev libgmp-dev \
-    rsync cpio file mksquashfs xorriso grub-common grub-pc-bin grub-efi-amd64-bin mtools kmod
+    rsync cpio file mksquashfs xorriso grub-common grub-pc-bin grub-efi-amd64-bin mtools kmod \
+    sbsigntool openssl
 ```
 
 ## Build
@@ -174,6 +175,34 @@ $ novi-state set network.wifi on && novi-state apply
 says *which* networks, at mode 0600. `novi-state diff` can tell you the
 supplicant should be running; it cannot tell anyone your passphrase.
 WPA2 only for now — see [RFC 0009](docs/rfcs/0009-wifi.md).
+
+**It tries to work on hardware it has never seen.** Nothing in this
+system used to load a driver it had not been told about in advance —
+three hardcoded `modprobe` lists, all written against QEMU, which is a
+fine way to boot a VM and close to useless on a laptop.
+`novi-hwdetect` does what udev's builtin does instead: the kernel
+publishes a `modalias` string next to every device it enumerated, and
+handing each one to `modprobe` matches devices to drivers with no list
+to maintain. It runs in the initramfs *before* the root device is
+searched for, because the alternative is an emergency shell on any
+machine with a storage controller nobody anticipated.
+
+```console
+$ novi-hwdetect --report
+novi-hwdetect: probed 70 device alias(es), loaded 3 module(s)
+```
+
+The image also carries 699 MB of curated firmware (Intel/AMD GPUs,
+Intel/Atheros/MediaTek/Realtek/Broadcom WiFi, `regulatory.db`, Intel
+SOF audio, AMD microcode), ALSA with `alsactl init` at boot — the
+default state of a fresh sound card is *muted*, so without it a working
+audio path is silence — and `novi-power` for battery, AC and cpufreq,
+with `power.governor` declared like everything else.
+
+**Stated plainly: none of it has been run on a physical machine yet.**
+Every claim in this repository is QEMU-verified, and §21 is exactly the
+part QEMU cannot answer. See
+[RFC 0011](docs/rfcs/0011-hardware-enablement.md).
 
 And because installed software is just another declared key, it rolls
 back like everything else:
@@ -293,9 +322,12 @@ HOME_URL="https://novilinux.org"
 - [x] UEFI/GPT install + journalled ext4 root (RFC 0008)
 - [x] WiFi (`network.wifi`, `novi-wifi`, WPA2, RFC 0009)
 - [x] Real upgrades + index freshness (`pkg update`, `valid-until`, RFC 0010)
-- [ ] A published repository + offline release key ← next
-- [ ] More state domains: keybindings, static IP; WPA3; WiFi firmware
-- [ ] UEFI/GPT install, journalled root
+- [x] Hardware enablement (`novi-hwdetect`, firmware, ALSA, power, RFC 0011)
+- [ ] **Boot it on real hardware** ← next, and nothing here replaces it
+- [ ] A published repository + offline release key
+- [ ] A Microsoft-signed shim (real Secure Boot); WPA3 (needs mbedTLS)
+- [ ] Hotplug; lid/power-button/hotkeys; Mesa
+- [ ] More state domains: keybindings, static IP
 - [ ] Boot splash
 
 See [`docs/PLATFORM-ROADMAP.md`](docs/PLATFORM-ROADMAP.md) for the full

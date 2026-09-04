@@ -198,6 +198,31 @@ else
     echo "[skip]  ${JBMONO_ZIP} already exists"
 fi
 
+# ALSA: the library, and the handful of tools that make a sound card
+# usable (amixer, alsactl, aplay, speaker-test).
+fetch "https://www.alsa-project.org/files/pub/lib/alsa-lib-${ALSA_VERSION}.tar.bz2"
+fetch "https://www.alsa-project.org/files/pub/utils/alsa-utils-${ALSA_VERSION}.tar.bz2"
+
+# The wireless regulatory database and Intel SOF audio firmware.
+# Neither is part of linux-firmware; both are separately versioned
+# projects, and both are the difference between hardware that works and
+# hardware that half-works in a way that looks like something else.
+fetch "https://www.kernel.org/pub/software/network/wireless-regdb/wireless-regdb-${WIRELESS_REGDB_VERSION}.tar.xz"
+
+SOF_TARBALL="sof-bin-${SOF_BIN_VERSION}.tar.gz"
+if [ ! -f "${SOF_TARBALL}" ]; then
+    echo "[fetch] ${SOF_TARBALL}"
+    curl -fL --retry 3 -o "${SOF_TARBALL}" \
+        "https://github.com/thesofproject/sof-bin/releases/download/v${SOF_BIN_VERSION}/${SOF_TARBALL}"
+else
+    echo "[skip]  ${SOF_TARBALL} already exists"
+fi
+
+# linux-firmware. Big (several hundred MB) and fetched whole because
+# kernel.org serves one tarball; build/26-firmware.sh extracts only the
+# curated subset that ends up in the image.
+fetch "https://cdn.kernel.org/pub/linux/kernel/firmware/linux-firmware-${LINUX_FIRMWARE_VERSION}.tar.xz"
+
 # WiFi: libnl (wpa_supplicant's nl80211 driver needs it), wpa_supplicant
 # and hostapd (same upstream tree; hostapd is test-only -- see
 # build/25-wifi.sh), and iw for diagnostics.

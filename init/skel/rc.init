@@ -47,6 +47,38 @@ ln -sfn /proc/self/fd/0 /dev/stdin
 ln -sfn /proc/self/fd/1 /dev/stdout
 ln -sfn /proc/self/fd/2 /dev/stderr
 
+### 1a. Load drivers for the hardware actually in this machine.
+###
+### There is no udev here and no kernel hotplug helper, so without this
+### the only modules ever loaded are the ones some script names by
+### hand. That is a QEMU-shaped assumption: it works where the hardware
+### is known in advance and fails on a real machine, where not knowing
+### is the entire point.
+###
+### The initramfs runs this too, for the drivers needed to find a root
+### filesystem at all. Running it again here catches everything that
+### was not boot-critical -- sound, the rest of the NICs, input
+### devices, the laptop's own oddities.
+if command -v novi-hwdetect >/dev/null 2>&1; then
+    novi-hwdetect --quiet || true
+fi
+
+### 1a2. Restore the sound mixer.
+###
+### A sound card comes up with everything muted and every level at
+### zero. That is the kernel being conservative, and it is why "the
+### drivers loaded and there is still no sound" is the usual first
+### experience of audio on a from-scratch system.
+###
+### `alsactl init` applies sane defaults for a card it recognises;
+### `restore` then layers on whatever this machine was last set to.
+### After hwdetect above, so the cards exist. Failures are ignored:
+### a machine with no sound card is not a broken machine.
+if command -v alsactl >/dev/null 2>&1; then
+    alsactl init >/dev/null 2>&1 || true
+    alsactl restore >/dev/null 2>&1 || true
+fi
+
 ### 1b. Mount whatever /etc/fstab asks for.
 ###
 ### Nothing on this system had ever read /etc/fstab. s6-linux-init's

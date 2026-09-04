@@ -115,8 +115,8 @@ APPLETS=(
     sh ash bash echo cat ls mkdir mknod mount umount sleep
     switch_root pivot_root chroot
     ln cp mv rm rmdir chmod chown
-    grep sed awk cut sort uniq head tail wc
-    find xargs
+    grep sed awk cut sort uniq head tail wc tr comm
+    find xargs mktemp basename dirname readlink
     insmod modprobe lsmod rmmod
     dmesg sysctl
     blkid udevadm
@@ -135,7 +135,7 @@ for applet in "${APPLETS[@]}"; do
     ln -sf busybox "${WORK_DIR}/bin/${applet}" 2>/dev/null || true
 done
 # Also put critical ones in /sbin
-for applet in modprobe insmod mount umount switch_root pivot_root blkid; do
+for applet in modprobe insmod mount umount switch_root pivot_root blkid mdev; do
     ln -sf ../bin/busybox "${WORK_DIR}/sbin/${applet}" 2>/dev/null || true
 done
 
@@ -294,8 +294,20 @@ finalize_and_switch() {
 # ── Load kernel modules ───────────────────────────────────────────────────────
 info "Loading essential kernel modules ..."
 
+# A module that is built into this kernel, and a module that does not
+# exist in it at all, both make busybox modprobe exit non-zero -- so the
+# old `|| warn` printed a WARNING line for each of the two dozen names
+# below on every single boot, most of them for filesystems that were
+# working fine because they are compiled in. That is noise that trains
+# people to ignore warnings, which is worse than printing none.
+#
+# /sys/module/<name> exists for a builtin, so check it before believing
+# the exit status; collect the genuinely-absent ones and say them once.
+MISSING_MODULES=""
 load_module() {
-    modprobe "$1" 2>/dev/null || warn "Could not load module: $1"
+    [ -d "/sys/module/$1" ] && return 0
+    modprobe "$1" 2>/dev/null && return 0
+    MISSING_MODULES="${MISSING_MODULES} $1"
 }
 
 # Block & storage
@@ -328,13 +340,39 @@ load_module ehci_pci
 load_module hid_generic
 load_module usbhid
 
+if [ -n "${MISSING_MODULES}" ]; then
+    info "Not in this kernel (harmless unless the root device needs one):${MISSING_MODULES}"
+fi
+
+# ── Load drivers for whatever hardware is actually here ───────────────────────
+#
+# The load_module calls above are a hardcoded guess. It is a good guess
+# for QEMU, where the hardware is known in advance, and close to
+# useless on a real machine -- an unusual SATA controller, an NVMe
+# behind a bridge, a USB-C dock, a Realtek NIC nobody listed.
+#
+# novi-hwdetect walks every modalias the kernel published and hands it
+# to modprobe, which is what udev's builtin does. Doing it HERE, before
+# the root device is searched for, is the difference between finding a
+# disk and dropping to an emergency shell on hardware nobody
+# anticipated.
+if [ -x /sbin/novi-hwdetect ]; then
+    info "Probing hardware ..."
+    /sbin/novi-hwdetect --quiet || true
+fi
+
 # ── Populate /dev with uevents ────────────────────────────────────────────────
 info "Triggering uevents ..."
 if [ -x /sbin/udevadm ]; then
     udevadm trigger --action=add 2>/dev/null || true
 else
-    # Busybox mdev fallback
-    echo /sbin/mdev > /proc/sys/kernel/hotplug 2>/dev/null || true
+    # Busybox mdev fallback. The hotplug helper only exists when the kernel was
+    # built with CONFIG_UEVENT_HELPER; guard the write rather than redirecting
+    # stderr, because a failed '>' redirection is reported by the shell before
+    # the '2>/dev/null' on the same line has taken effect.
+    if [ -w /proc/sys/kernel/hotplug ]; then
+        echo /sbin/mdev > /proc/sys/kernel/hotplug
+    fi
     mdev -s 2>/dev/null || true
 fi
 
@@ -538,6 +576,17 @@ INIT_SCRIPT
 
 chmod 0755 "${WORK_DIR}/init"
 echo ">>> /init written ($(wc -l < "${WORK_DIR}/init") lines)"
+
+# ─── novi-hwdetect ───────────────────────────────────────────────────────────
+# The generic driver loader (see /init above). A shell script, so it
+# costs nothing to carry and works with the busybox already here.
+HWDETECT="${HWDETECT:-${REPO_ROOT}/packages/novi-hwdetect}"
+if [[ -f "${HWDETECT}" ]]; then
+    install -D -m 755 "${HWDETECT}" "${WORK_DIR}/sbin/novi-hwdetect"
+else
+    echo "WARNING: ${HWDETECT} not found -- the initramfs will only load the" >&2
+    echo "         drivers /init names by hand, which is a QEMU-shaped guess." >&2
+fi
 
 # ─── /etc/mdev.conf (for mdev-based hotplug) ─────────────────────────────────
 mkdir -p "${WORK_DIR}/etc"

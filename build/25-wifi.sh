@@ -71,6 +71,15 @@ tar -xf "${SOURCES}/libnl-${LIBNL_VERSION}.tar.gz" -C "${WORK}"
 # link failures later.
 rm -f "${ROOTFS}"/usr/lib/libnl*.la
 
+# libnl builds six libraries; wpa_supplicant and iw link two of them.
+# The other four -- route, nf, xfrm, idiag -- are 3 MB of netlink
+# families nothing in this image speaks. --disable-cli already dropped
+# the tools that would have used them.
+rm -f "${ROOTFS}"/usr/lib/libnl-route-3.so* \
+      "${ROOTFS}"/usr/lib/libnl-nf-3.so* \
+      "${ROOTFS}"/usr/lib/libnl-xfrm-3.so* \
+      "${ROOTFS}"/usr/lib/libnl-idiag-3.so*
+
 # ── wpa_supplicant configuration ──────────────────────────────────────────
 #
 # Written out here rather than shipped as a file, because it is the

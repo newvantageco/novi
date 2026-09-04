@@ -341,6 +341,52 @@ if [[ -d "${GRUB_LIB_DIR}" ]] && command -v grub-mkimage &>/dev/null; then
             echo test ls boot gzio all_video efi_gop efi_uga \
             serial terminal minicmd reboot halt
         echo ">>> UEFI boot artifact: bootx64.efi $(stat -c%s "${NOVI_BOOT_DIR}/bootx64.efi")B"
+
+        # ── Secure Boot ──────────────────────────────────────────────
+        #
+        # Sign bootx64.efi with a locally generated key, and ship the
+        # certificate beside it so a machine's owner can enrol it.
+        #
+        # BE CLEAR ABOUT WHAT THIS DOES AND DOES NOT DO. It does not
+        # make Novi boot on a stock Secure Boot machine: firmware
+        # trusts Microsoft's keys, and getting into that chain needs a
+        # signed shim, which needs an organisation to go through
+        # Microsoft's signing process. What it gives is the option --
+        # enrol novi-secureboot.der in your firmware's db and Secure
+        # Boot can stay ON. Without enrolling it, Secure Boot has to be
+        # turned off, exactly as before.
+        #
+        # An unsigned image would have been the easier thing to ship
+        # and would have left "turn off Secure Boot" as the only
+        # answer forever.
+        SB_KEY_DIR="${SB_KEY_DIR:-${BUILD_DIR}/keys}"
+        SB_KEY="${SB_KEY_DIR}/novi-secureboot.key"
+        SB_CRT="${SB_KEY_DIR}/novi-secureboot.crt"
+        if command -v sbsign &>/dev/null && command -v openssl &>/dev/null; then
+            mkdir -p "${SB_KEY_DIR}"; chmod 700 "${SB_KEY_DIR}"
+            if [[ ! -f "${SB_KEY}" ]]; then
+                echo ">>> Generating a Secure Boot signing key ..."
+                openssl req -new -x509 -newkey rsa:2048 -nodes -days 3650 \
+                    -subj "/CN=Novi Linux Secure Boot/" \
+                    -keyout "${SB_KEY}" -out "${SB_CRT}" 2>/dev/null
+                chmod 600 "${SB_KEY}"
+            fi
+            if sbsign --key "${SB_KEY}" --cert "${SB_CRT}" \
+                      --output "${NOVI_BOOT_DIR}/bootx64.efi.signed" \
+                      "${NOVI_BOOT_DIR}/bootx64.efi" &>/dev/null; then
+                mv "${NOVI_BOOT_DIR}/bootx64.efi.signed" "${NOVI_BOOT_DIR}/bootx64.efi"
+                # DER, because that is the format firmware setup
+                # utilities ask for when enrolling a key.
+                openssl x509 -in "${SB_CRT}" -outform DER \
+                    -out "${NOVI_BOOT_DIR}/novi-secureboot.der" 2>/dev/null
+                echo ">>> bootx64.efi signed; enrolment certificate: /novi-boot/novi-secureboot.der"
+            else
+                echo ">>> WARNING: sbsign failed -- shipping an unsigned bootx64.efi" >&2
+            fi
+        else
+            echo ">>> NOTE: sbsign not installed -- bootx64.efi is unsigned, so a" >&2
+            echo ">>>       machine with Secure Boot enabled will refuse it." >&2
+        fi
     else
         echo ">>> WARNING: ${GRUB_EFI_DIR} not found -- no UEFI install support" >&2
     fi

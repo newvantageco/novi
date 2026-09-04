@@ -349,6 +349,44 @@ observe_package() {
     fi
 }
 
+# The power domain (RFC 0011).
+#
+#   power.governor = performance | powersave | schedutil | ...
+#
+# The CPU frequency governor is a real, persistent policy decision --
+# how this machine trades battery life against speed -- and it is
+# exactly the sort of thing that otherwise lives in someone's
+# half-remembered shell history. Declared, it survives a reboot and
+# shows up in a diff.
+#
+# `none` is what a machine with no cpufreq driver reports, which is
+# most VMs. Declaring a governor there is not an error, it just cannot
+# be satisfied, and diff says so.
+observe_governor() {
+    local f=/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor
+    if [ -r "$f" ]; then
+        cat "$f"
+    else
+        printf 'none'
+    fi
+}
+
+converge_governor() {
+    local want="$1" c avail
+    avail="$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors 2>/dev/null || true)"
+    [ -n "$avail" ] || die "this machine has no cpufreq driver; cannot set a governor"
+    case " $avail " in
+        *" $want "*) : ;;
+        *) die "governor '$want' is not one this kernel offers: $avail" ;;
+    esac
+    # Every CPU, not just cpu0: they are set independently, and half a
+    # machine on powersave is a performance bug nobody would find.
+    for c in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+        [ -w "$c" ] || continue
+        printf '%s\n' "$want" > "$c" || warn "could not set $(dirname "$c")"
+    done
+}
+
 # Observed value for any declared key. An unrecognized key observes as
 # "unmanaged" rather than erroring: an unknown key in the document is a
 # forward-compatibility case (a newer novi-state, a hand-written note),
@@ -362,6 +400,7 @@ observe_key() {
         network.*)  observe_network "${key#network.}" ;;
         users.*)    observe_user "$key" ;;
         packages.*) observe_package "${key#packages.}" ;;
+        power.governor) observe_governor ;;
         # `state.*` keys configure this engine itself (see cmd_boot),
         # not the machine -- there is no external fact to go and look
         # at, so the declared value IS the observation and they never
@@ -552,6 +591,7 @@ converge_key() {
         network.*)  converge_network "${key#network.}" "$want" ;;
         users.*)    converge_user "$key" "$want" ;;
         packages.*) converge_package "${key#packages.}" "$want" ;;
+        power.governor) converge_governor "$want" ;;
         # Nothing to converge: a state.* key is read by this engine when
         # it next runs, so declaring it is already the whole effect.
         state.*)    : ;;
@@ -875,6 +915,7 @@ Keys:
   users.<name>.shell              /bin/sh | absent  (declares the account)
   users.<name>.groups             wheel,video,input | none
   packages.<name>                 present | absent
+  power.governor                  performance | powersave | schedutil | ...
   state.apply_on_boot             on | off  (converge on every boot)
 
 Recovery:

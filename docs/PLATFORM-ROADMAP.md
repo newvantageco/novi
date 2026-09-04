@@ -1460,6 +1460,101 @@ be motion rather than progress. When the package set grows enough for
 the split to save something real it is half an hour's work in
 `mkiso.sh`.
 
+## 21. Hardware Enablement
+
+RFC 0011. Everything before this point was verified in QEMU, which is
+the honest way to develop a distro and a dishonest way to describe one:
+QEMU hands the guest a handful of devices whose drivers are already
+known, so a system can be complete by every test it has and still not
+reach a login prompt on a laptop. Four things were missing, and each of
+them is the difference between "boots" and "does not".
+
+**Nothing loaded a driver it had not been told about in advance.** The
+initramfs named the storage modules it hoped were enough, the network
+service named some NICs, the WiFi service named some radios. Three
+hardcoded lists, all written against QEMU. `packages/novi-hwdetect`
+replaces the guessing with the mechanism udev uses: the kernel
+publishes a `modalias` string next to every device it enumerated, and
+`depmod` built `modules.alias` from every driver's declared device
+table at build time, so walking the first and handing each entry to
+`modprobe` matches devices to drivers with no list to maintain. It runs
+in the initramfs *before* the root device is searched for -- which is
+where it matters, because the alternative is an emergency shell on any
+machine with a storage controller nobody anticipated -- and again from
+`rc.init` once the real root is up.
+
+**No firmware existed at all.** `build/26-firmware.sh` installs a
+curated 699 MB of linux-firmware: Intel and AMD GPUs, Intel/Atheros/
+MediaTek/Realtek/Broadcom WiFi, Realtek NICs, AMD microcode. Curated,
+not complete -- the full tree is 1.4 GB and half of it is Qualcomm ARM
+SoC firmware and NVIDIA blobs that this x86_64 image will never load.
+Two things real hardware needs are not in linux-firmware and are
+fetched separately: `wireless-regdb` (this kernel sets
+`CONFIG_CFG80211_REQUIRE_SIGNED_REGDB`, so without `regulatory.db` and
+its signature a radio comes up crippled) and Intel SOF firmware, which
+almost every laptop made since about 2019 needs for sound.
+
+**There was no sound.** `build/27-audio.sh` cross-builds alsa-lib and
+alsa-utils, and `rc.init` runs `alsactl init` then `alsactl restore` --
+the first because ALSA's default state on a fresh card is *muted*, so
+without it a working sound path produces silence and the user concludes
+the card is unsupported.
+
+**Power was untouched.** `packages/novi-power` is `status` / `suspend`
+/ `governors` over sysfs -- battery percentage, AC state, cpufreq
+governor, suspend to idle or RAM -- with no daemon, and
+`power.governor` joins the `novi-state` domains so a laptop can declare
+`powersave` and a workstation `performance` in the same file everything
+else is declared in.
+
+The kernel config grew accordingly: I2C-HID (every modern laptop
+touchpad), HID multitouch, the ThinkPad/Dell/HP/ASUS/Lenovo/Acer
+platform drivers that own the function keys and the battery
+thresholds, USB ethernet and dongles, MMC/SD, and NLS charsets without
+which a FAT32 ESP does not mount. Still curated -- §4's answer stands,
+build against open device-class standards rather than chase vendor
+paths -- but curated for laptops instead of for QEMU.
+
+`bootx64.efi` is now signed, with a caveat stated plainly rather than
+buried: it is signed by a *self-generated* key, which does nothing on a
+stock machine, because Secure Boot trusts Microsoft's key and not
+ours. It helps exactly two people -- someone enrolling their own keys,
+and someone with Secure Boot off -- and the certificate ships on the
+medium so the first can. Real Secure Boot needs a Microsoft-signed
+shim, which is a paperwork problem before it is a technical one.
+
+**Verified in QEMU, including the part that was previously unprovable.**
+Booting under UEFI with `virtio-balloon-pci`, `virtio-rng-pci` and
+`virtio-keyboard-pci` -- three devices whose drivers are modules and
+which no list anywhere in this system names -- `lsmod` shows all three
+loaded. An `e1000` NIC, equally unlisted, gets a DHCP lease.
+`amixer sget Master` reports 73% and `[on]`, which only happens because
+`alsactl init` ran. Firmware present on the booted image, `regulatory.db`
+included.
+
+Three bugs found by reading the boot log rather than the test output,
+all of the same shape -- **code that worked while its reporting
+failed**. `novi-hwdetect` loaded every driver correctly in the
+initramfs and then died on `tr: not found`, because the initramfs
+applet list is hand-written and `tr` was not on it; the fix is both
+adding it *and* removing the dependency, since a script whose job is
+early boot must not fail on its own bookkeeping. `echo x > /proc/... 2>/dev/null`
+does not suppress the redirection's own failure, because redirections
+apply left to right. And a module built into the kernel is
+indistinguishable from a missing one to `modprobe`, so `/init` printed
+`WARNING: Could not load module` for ten filesystems that were compiled
+in and working -- twenty-two lines of meaningless warning on every
+boot, which is how people learn to ignore warnings.
+
+**What none of this shows is that a real machine boots.** Not one line
+of this has run on physical hardware. `novi-hwdetect` is proven on
+three virtio devices, which is the easiest case there is; the firmware
+is present but nothing has ever requested a byte of it; the platform
+and I2C-HID drivers cannot be exercised here at all; suspend has never
+been entered. This work makes a real machine much more likely to work,
+and demonstrates nothing about whether one does. No further QEMU work
+would change that -- the next step is a USB stick and a laptop.
+
 ## Status Summary
 
 | # | Area | State |
@@ -1467,7 +1562,7 @@ the split to save something real it is half an hour's work in
 | 1 | Base architecture | ✅ Decided |
 | 2 | Package/application model | 🟡 Native `pkg`/`mkpkg` now installed, wired into the build, and live-verified end-to-end (real dependency chain, install/remove/search/info) after fixing several real bugs found by first actually running it; sandbox tier still proposed (RFC needed) |
 | 3 | Update/rollback model | 🟡 Track split decided, on-device rollback open |
-| 4 | Hardware strategy | 🟡 x86_64 kernel exists, coverage + aarch64 open |
+| 4 | Hardware strategy | 🟡 x86_64 kernel now carries laptop hardware (I2C-HID, HID multitouch, vendor platform drivers, USB ethernet, MMC/SD, NLS) and the image carries firmware and a generic driver loader (§21); aarch64 and real-metal validation still open |
 | 5 | Desktop strategy | 🟡 Compositor + layer-shell + launcher + foot terminal + top-bar panel, real anti-aliased text rendering (fcft/pixman), a clickable apps button routing pointer input to a layer-shell surface, new windows placed below the panel's exclusive zone, real alpha compositing + rounded corners + a drop shadow on the launcher, server-side window decorations with working close + maximize buttons, all live-verified in QEMU together; design docs' rendering sequence now started on icons too — Lucide's license verified from upstream, apps-button icon shipped and live-verified; the `tools/svg2icon/` offline pipeline is built and its icons are now wired into `novi-launcher`'s search results (`icon=` in `.app` descriptors) and QEMU-live-verified — a real generated terminal icon renders next to a matched result, pixel-confirmed via screendump; status-bar icons are generated but unwired, blocked on real wifi/battery data; real app search too — `pkg-format.md`'s GUI-app-registration convention, foot registered and launchable by typed name, fork+execvp on Enter, live-verified end-to-end; file search still doesn't exist; Super+. symbol picker (not full emoji — no emoji-capable font exists) now wired too, `novi-launcher --symbols` copying to the clipboard via novi-shell's existing `wl_data_device_manager`, QEMU-live-verified down to the exact pasted UTF-8 bytes; found and fixed a real, previously-invisible `common/text.c` bug along the way (byte-per-codepoint rendering silently mojibake'd any multi-byte UTF-8 glyph); two more unrelated bugs found and fixed live-testing all this: a missing `/tmp` mount, and the documented `s6-rc -up change graphical` command itself (root-caused: `-p`/prune tries to stop the console's own getty; corrected to plain `-u`); a real taskbar now too — `novi-panel` is a `wlr-foreign-toplevel-management-unstable-v1` client (the standard taskbar protocol, XML vendored under `protocol/`), minimize is a real function instead of a dimmed placeholder, QEMU-live-verified end to end (minimize, restore via taskbar click, close removing the entry, all pixel-confirmed); PrintScreen screenshots also wired — `novi-screenshot/` is a `wlr-screencopy-unstable-v1` client writing an uncompressed 24-bit BMP, `novi-shell`'s key dispatch gained its first no-modifier binding to reach it, QEMU-live-verified with the actual BMP bytes read back (correct header, exact expected file size, correct bottom-up pixel orientation against a screendump of the same frame); Super+L session lock also real now — `novi-lockscreen` checks a typed password against `/etc/shadow` via musl's real `crypt(3)`, and `novi-shell` gained a `locked` flag that actually disables every keybinding and blocks focus-stealing while active (not just a visual overlay), QEMU-live-verified including the bypass attempt itself (Super+Q/Alt+Space confirmed inert while locked via `ps`, wrong password rejected, correct password unlocked and restored normal keybindings); RFC 0001 decision 7's default keybinding set is now fully wired — Super+[1-9]/Shift+[1-9] workspaces landed last, per-server not per-output (no multi-output support exists anywhere else in this compositor either), and surfaced a real bug along the way: Shift+digit reports a different keysym entirely on this compositor's hardcoded US layout (Shift+3 is `XKB_KEY_numbersign`, never `XKB_KEY_3`), the same class of bug the existing Shift+Tab handling already worked around for one key, just needing nine shifted forms covered instead of one; confirmed both broken (stray `@`/`#` typed into a focused terminal) and fixed (window actually moves, workspace becomes genuinely empty) via QEMU screendumps; first first-party app now exists too — `novi-settings` (Account/change-password), this repo's first plain `xdg-shell` window app rather than a layer-shell overlay, real SHA-512 `crypt(3)` + atomic `/etc/shadow` rewrite, QEMU-live-verified via the actual round trip (password set through the GUI successfully unlocked `novi-lockscreen`, not just "a message appeared") |
 | 6 | Gaming strategy | 🔴 Open — blocked on #5 |
 | 7 | Developer strategy | 🟡 Native toolchain exists, container tier proposed |
@@ -1484,27 +1579,46 @@ the split to save something real it is half an hour's work in
 | 18 | UEFI install & journalled root | ✅ Firmware detected from /sys/firmware/efi; GPT+ESP via a purpose-built `novi-gpt`, real ext4 via e2fsprogs, one menu written to two prefixes. Both paths verified end to end. Secure Boot, kernel updates to the ESP, swap//home/encryption are roadmap |
 | 19 | WiFi | ✅ wpa_supplicant with internal crypto (no OpenSSL), `network.wifi` declared with credentials in a 0600 store, wired-first interface selection; verified end to end against a real WPA2 AP on hwsim radios with no wired NIC present. WPA3 (needs mbedTLS), firmware packages, per-interface DHCP and a panel applet are roadmap |
 | 20 | Repository freshness & upgrades | ✅ `valid-until` inside the signature (replay closed, verified with a re-signed 40-day-old index), `pkg update` driven by the index with `sort -V` comparison and no silent downgrades. Index serial, cache pruning and version constraints are roadmap |
+| 21 | Hardware enablement | ✅ Generic modalias-driven driver loading (`novi-hwdetect`, in the initramfs before the root search), 699 MB of curated firmware + `regulatory.db` + Intel SOF, ALSA with `alsactl init` at boot, `novi-power` and a `power.governor` state domain, a laptop-oriented kernel config, and a self-signed `bootx64.efi`. Verified in QEMU on drivers no list names (three virtio modules + an e1000 lease) — **but never once on physical hardware**, which is the whole subject. Firmware-as-packages, a real shim, hotplug, lid/hotkeys and Mesa are roadmap |
 
-**Next concrete step: a published repository and an offline release
-key.** Everything a package system needs now exists and is verified --
-signing, hashes, freshness, dependency resolution, upgrades, rollback
-through `packages.*` -- and it all points at a repository that exists
-only on whichever machine last ran `build/20-repo.sh`. The build
-generates a development key and the image trusts it, which is right
-when you built both halves and is not how a release works: a real
-release key lives offline, only its public half is ever in a tree like
-this one, and signing happens somewhere that is not the build host.
+**Next concrete step: write the ISO to a USB stick and boot a real
+machine.** This is no longer a development task, and that is the point.
+Twenty-one milestones were each verified the same honest way -- boot it
+in QEMU and prove the behaviour end to end -- and §21 is where that
+method runs out of information. Everything it added exists precisely
+because QEMU does not have the problem: unknown devices, missing
+firmware, muted codecs, batteries. The code is written, cross-compiled
+and QEMU-verified as far as QEMU can go, and the only remaining
+question is one no VM can answer.
 
-Ordered honestly, what is left:
+What a first real boot would actually tell us, in order of how likely
+it is to be what breaks: whether `novi-hwdetect` finds the storage
+controller before `/init` gives up; whether the WiFi radio comes up now
+that firmware and `regulatory.db` are present; whether the touchpad
+works through I2C-HID; whether sound reaches a speaker; whether the
+battery reads.
 
-1. **A published repository and an offline release key** -- something
-   at a stable URL, signed off the build host.
-2. **WiFi firmware, and WPA3** -- without firmware the radio does not
-   come up on a large fraction of real laptops; WPA3 needs mbedTLS as
-   the crypto backend.
-3. **Secure Boot** -- `BOOTX64.EFI` is unsigned, so a machine with
-   Secure Boot on refuses it.
-4. **`novi-state diff` should notice a crash-looping longrun** -- three
+Ordered honestly, what is left after that:
+
+1. **Real-metal validation** -- the above, and the fixes it produces.
+   Nothing else on this list is worth much until a machine boots.
+2. **A published repository and an offline release key** -- something
+   at a stable URL, signed off the build host. Everything a package
+   system needs exists and is verified; it all points at a repository
+   that lives only on whichever machine last ran `build/20-repo.sh`,
+   with a development key the image trusts. A real release key lives
+   offline and signs somewhere that is not the build host.
+3. **A Microsoft-signed shim** -- `bootx64.efi` is signed now, but by a
+   key nothing trusts. This is an organisational step before a
+   technical one.
+4. **WPA3**, which needs mbedTLS as wpa_supplicant's crypto backend.
+5. **Hotplug** -- `novi-hwdetect` runs at boot; plug something in
+   afterwards and nothing notices. Wants a real uevent listener.
+6. **Lid, power button and hotkeys** -- `novi-power suspend` works;
+   nothing calls it.
+7. **Mesa**, for GPU acceleration. The compositor renders in software,
+   which will show on a high-resolution panel.
+8. **`novi-state diff` should notice a crash-looping longrun** -- three
    separate bugs have now hidden behind `s6-rc -a list` reporting
    "wanted up". Needs its own design; the obvious fix reintroduces a
    boot race.
