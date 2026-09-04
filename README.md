@@ -170,6 +170,43 @@ bash scripts/mkinitramfs.sh --output build/initramfs.cpio.gz
 bash scripts/mkiso.sh
 ```
 
+### Building from Windows
+
+There is no Windows build — this cross-compiles a Linux toolchain, a
+libc and a kernel, and it needs a Linux kernel to do it. **WSL2 works**,
+and was checked against what the build actually requires: no loop
+devices anywhere (the usual WSL blocker), but it does need `chroot`
+into the target rootfs (`09-foot.sh` runs `fc-cache` inside it) and
+`mknod` for the initramfs device nodes. Both are fine in WSL2 as root.
+
+```powershell
+wsl --install -d Ubuntu          # then reboot, set up your user
+```
+
+Then, inside the Ubuntu shell:
+
+```bash
+sudo -i                          # the build needs root: chroot and mknod
+git clone <your-repo-url> /root/novi && cd /root/novi
+# ... the apt install line from above ...
+bash build.sh && bash scripts/mkiso.sh
+cp build/novi.iso /mnt/c/Users/<you>/Downloads/
+```
+
+**Clone and build inside the WSL filesystem, never under `/mnt/c`.**
+`/mnt/c` is DrvFs: `mknod` fails there, permissions and case-sensitivity
+do not behave, and it is slow enough to turn a long build into an
+unbearable one. Copying the finished ISO out to `/mnt/c` at the end is
+fine — that is one file.
+
+Budget the disk in WSL's virtual drive, not your repo folder: `/build`
+is an absolute path, so it lands inside the Linux filesystem and wants
+~13 GB.
+
+A Linux VM on Windows (VirtualBox, VMware, Hyper-V) works equally well
+and is more predictable if you would rather not deal with WSL — you are
+running a VM to test the result anyway.
+
 ### Testing it
 
 ```bash
@@ -190,6 +227,29 @@ pkg install novi-desktop          # the Wayland desktop, offline from the ISO
 pkg install novi-devel            # gcc, make, pkg-config, headers
 novi-install install --disk /dev/vda   # install to the qcow2 (with --disk)
 ```
+
+#### From Windows, with the ISO you copied out
+
+Any of VirtualBox, VMware Workstation Player or Hyper-V will boot it —
+the image is a hybrid ISO and supports both BIOS and UEFI. Give it
+**4 GB of RAM**: the live system unpacks a squashfs into an overlay in
+memory.
+
+- **Hyper-V**: use Generation 2 for UEFI, and **turn Secure Boot off**
+  (Settings → Security). `bootx64.efi` is signed with a key this
+  project generated itself, which no firmware trusts — that is stated
+  plainly in RFC 0011 and it is not a bug you are hitting.
+- **VirtualBox**: works as-is for BIOS boot; tick *Settings → System →
+  Enable EFI* to exercise the UEFI path instead.
+
+Writing the USB stick: use **Rufus in DD mode**, or balenaEtcher (which
+does DD by default). This is a hybrid ISO — an "ISO mode" write that
+repacks the filesystem will not produce a bootable stick.
+
+One thing worth separating: booting a *physical USB stick* inside a VM
+is possible but fiddly on every hypervisor. Test the ISO file in the VM,
+and keep the USB stick for real hardware — which is the test that
+actually tells us something new.
 
 Output: `/build/rootfs/` · ISO: `build/novi.iso` (~424 MB)
 
