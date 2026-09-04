@@ -218,6 +218,23 @@ real decision (read-write risks a corrupted stick on an unclean pull,
 read-only makes it useless), and a half-made choice there loses
 someone's files.
 
+The lid and the power button do something now, and what they do is
+declared like everything else:
+
+```console
+$ novi-state set power.lid ignore     # suspend | poweroff | ignore
+```
+
+Wiring that up turned up a bug that had been there since the very
+first milestone: **this system could not shut down while anyone was
+logged in.** `getty` execs `login` execs the shell, so the process s6
+supervises is the interactive shell — which ignores SIGTERM by
+definition — and with no `timeout-down` the shutdown waited for it
+forever. Every `poweroff` had been a hard power cut. Nothing caught it
+because every test issued `poweroff` and then killed the VM ten
+seconds later without checking. See
+[RFC 0013](docs/rfcs/0013-power-events.md).
+
 **Stated plainly: none of it has been run on a physical machine yet.**
 Every claim in this repository is QEMU-verified, and §21 is exactly the
 part QEMU cannot answer. See
@@ -345,10 +362,11 @@ HOME_URL="https://novilinux.org"
 - [x] Real upgrades + index freshness (`pkg update`, `valid-until`, RFC 0010)
 - [x] Hardware enablement (`novi-hwdetect`, firmware, ALSA, power, RFC 0011)
 - [x] Hotplug — devices that arrive after boot (`novi-hotplug`, RFC 0012)
+- [x] Lid, power button, and a shutdown that finishes (RFC 0013)
 - [ ] **Boot it on real hardware** ← next, and nothing here replaces it
 - [ ] A published repository + offline release key
 - [ ] A Microsoft-signed shim (real Secure Boot); WPA3 (needs mbedTLS)
-- [ ] Automount + `novi-eject`; lid/power-button/hotkeys; Mesa
+- [ ] Automount + `novi-eject`; idle-suspend and low-battery; Mesa
 - [ ] More state domains: keybindings, static IP
 - [ ] Boot splash
 

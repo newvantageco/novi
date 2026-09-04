@@ -1621,6 +1621,86 @@ read-only makes a USB stick useless for what people use USB sticks for.
 That wants a `hotplug.automount` key, a `novi-eject`, and a decision,
 not a quick `mount` bolted into a uevent handler.
 
+## 23. Power events, and a shutdown that finishes
+
+RFC 0013. §21 gave the machine a way to suspend and a way to read its
+battery, and nothing a way to *decide* to suspend. On a laptop that is
+most of the feature: close the lid and it goes in a bag at 80%, runs at
+full tilt in an enclosed space and comes out flat; press the power
+button and nothing happens, so people hold it for four seconds, which
+is the hard power cut with filesystems mounted that handling the button
+exists to prevent.
+
+busybox `acpid` is the listener, supervised like everything else. Its
+event-to-path table is compiled into the binary, so
+`/etc/acpi/PWRF/00000080` and `/etc/acpi/LID/00000080` are named *by
+acpid*, not chosen -- rename either and acpid silently runs nothing.
+Each is three lines and execs `novi-power event`, so policy lives with
+suspend and `/etc/acpi/` stays pure wiring. `power.lid` and
+`power.button` are declared (`suspend` / `poweroff` / `ignore`; `ignore`
+is for the laptop used as a small server).
+
+Those two are the first keys with **no converger and no observer**:
+novi-power reads the declared value at the instant the event arrives,
+so behaviour and document cannot disagree and `apply` has nothing to
+do. Which creates a new hole -- `converge_key` is where every other
+domain rejects a bad value and it never runs for these, so
+`power.lid = suspned` would read as converged while the lid did
+nothing. The *observer* closes it: an unusable value reports as
+`unsupported`, permanent drift the machine cannot fix, which is exactly
+the truth.
+
+**And wiring the button found something much worse underneath.** With
+`power.button = poweroff` the machine logged the event, stopped most of
+its services, and stayed up at a prompt forever. Removing acpid from
+the picture reproduced it exactly: `poweroff` typed at a shell had
+never worked, in any milestone, ever.
+
+getty execs login execs the shell, so the process s6 supervises IS the
+interactive shell -- and an interactive shell ignores SIGTERM by
+definition. `timeout-down` was unset, which in s6-rc means wait
+forever, so `s6-rc -bDa change` stopped at "service getty-ttyS0:
+stopping" and never returned (every other service stopped cleanly,
+`getty-tty1` included -- the one nobody was logged into).
+`s6-linux-init-shutdownd` waits on that script with a plain
+`wait_pid()` and no timeout of its own, verified in its source, so it
+never reached the stage that SIGTERMs everything, SIGKILLs the
+remainder and calls `reboot(2)`. **A Novi machine could not shut down
+while anyone was logged in** -- which is always, since somebody has to
+type the command. Every power-down was a hard cut, and on an installed
+ext4 root that is a journal replay on every boot.
+
+Nothing caught it because nothing looked: every QEMU test in this repo
+ended `vm.line("poweroff"); time.sleep(10); vm.kill()`, issuing the
+command and killing the machine before observing whether it did
+anything. That is the same lesson as `s6-rc -a list` reporting "up",
+arriving from a new direction -- a test that issues a command has to
+observe the command's effect.
+
+Fixed with `down-signal = SIGHUP` and `timeout-down = 4000` on both
+gettys. SIGHUP because it is correct rather than merely bigger: a getty
+going away is a hangup, and hangup is what a shell is specified to die
+on. `poweroff` now reaches `reboot: Power down` in under a second,
+without even reaching the backstop.
+
+**Suspend to RAM is now proven too.** §21 had to say it was never
+entered; `PM: suspend entry (deep)` / `PM: suspend exit` says otherwise,
+resumed over QMP with the shell alive on the other side.
+
+**One thing does not work and is not ours: after an S3 resume the power
+button stops being delivered, in QEMU.** Chased down rather than papered
+over, because the tempting one-line fix would have been wrong -- acpid
+keeps the same PID and the same three evdev fds, but reading the evdev
+node directly during a press returns 24 bytes before the suspend and
+**0 after**, and `/sys/firmware/acpi/interrupts/ff_pwr_btn` shows the
+counter not incrementing with the status bit latched (`EN` -> `EN STS`).
+The ACPI fixed event fires and is never cleared, so the kernel never
+dispatches it to the input layer. Restarting acpid would have fixed
+nothing. Whether that is QEMU's S3 emulation or this kernel's resume
+path is beyond what this rig can settle, and real firmware re-arms the
+event on resume -- so a physical laptop *probably* does not have this,
+which is one more thing for the first real boot to check.
+
 ## Status Summary
 
 | # | Area | State |
@@ -1647,6 +1727,7 @@ not a quick `mount` bolted into a uevent handler.
 | 20 | Repository freshness & upgrades | ✅ `valid-until` inside the signature (replay closed, verified with a re-signed 40-day-old index), `pkg update` driven by the index with `sort -V` comparison and no silent downgrades. Index serial, cache pruning and version constraints are roadmap |
 | 21 | Hardware enablement | ✅ Generic modalias-driven driver loading (`novi-hwdetect`, in the initramfs before the root search), 699 MB of curated firmware + `regulatory.db` + Intel SOF, ALSA with `alsactl init` at boot, `novi-power` and a `power.governor` state domain, a laptop-oriented kernel config, and a self-signed `bootx64.efi`. Verified in QEMU on drivers no list names (three virtio modules + an e1000 lease) — **but never once on physical hardware**, which is the whole subject. Firmware-as-packages, a real shim, hotplug, lid/hotkeys and Mesa are roadmap |
 | 22 | Hotplug | ✅ Supervised uevent listener (busybox `uevent`, 128 MB netlink buffer) + `novi-hotplug`: §21's modalias rule against the kernel's event stream, syslog notes, `alsactl init` for late-arriving sound cards. QMP-verified at runtime — a driver in no list loading on plug, a USB stick mounting and reading back, clean removal. Automount (needs policy), per-interface DHCP and a desktop that notices are roadmap |
+| 23 | Power events & shutdown | ✅ acpid wired to lid and power button, `power.lid`/`power.button` declared and read at event time (with invalid values surfacing as drift, since these keys cannot drift and so are never converged). Found and fixed a bug present since the beginning: **the machine could not shut down while anyone was logged in** — an interactive shell ignores SIGTERM and `timeout-down` was unset, so s6-rc waited forever and shutdownd's `wait_pid()` never returned. Suspend/resume now proven. Power-button-after-S3 is broken in QEMU, traced to a latched ACPI status bit below all of our code |
 
 **Next concrete step: write the ISO to a USB stick and boot a real
 machine.** This is no longer a development task, and that is the point.
@@ -1681,8 +1762,9 @@ Ordered honestly, what is left after that:
 4. **WPA3**, which needs mbedTLS as wpa_supplicant's crypto backend.
 5. **Automount for removable media** -- hotplug itself is done (§22);
    what is left is policy, and `novi-eject` to go with it.
-6. **Lid, power button and hotkeys** -- `novi-power suspend` works;
-   nothing calls it.
+6. **Hotkeys, idle-suspend and low-battery actions** -- the lid and
+   power button are done (§23); what is left is the rest of the
+   laptop's decisions, and a desktop that can ask before suspending.
 7. **Mesa**, for GPU acceleration. The compositor renders in software,
    which will show on a high-resolution panel.
 8. **`novi-state diff` should notice a crash-looping longrun** -- three

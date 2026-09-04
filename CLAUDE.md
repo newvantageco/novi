@@ -221,6 +221,46 @@ RFC 0012 (`docs/rfcs/0012-hotplug.md`).
   interface at start. Per-interface DHCP is RFC 0009's work; reaching
   into the network service from a uevent handler is split-brain.
 
+## Architecture: shutdown, and why it used to hang
+
+RFC 0013 (`docs/rfcs/0013-power-events.md`).
+
+- **`down-signal = SIGHUP` and `timeout-down` on the gettys are
+  load-bearing, not tuning.** `getty` execs `login` execs the shell, so
+  the process s6 supervises IS the interactive shell — and an
+  interactive shell ignores SIGTERM by definition. With `timeout-down`
+  unset (= wait forever), `s6-rc -bDa change` stopped at
+  `service getty-ttyS0: stopping` and never returned, and
+  `s6-linux-init-shutdownd` waits on that script with a plain
+  `wait_pid()` and no timeout of its own — so it never reached the
+  SIGTERM/SIGKILL sweep or `reboot(2)`. **The machine could not shut
+  down while anyone was logged in**, which is always. SIGHUP is the
+  correct signal (a getty going away is a hangup); the timeout is the
+  backstop.
+- **Nothing caught that for the entire life of the project** because
+  every QEMU test ran `poweroff` and then killed the VM ten seconds
+  later. When a test issues a command, it has to observe the command's
+  *effect* — the same lesson as `s6-rc -a list` reporting "up".
+- **A new longrun that could outlive SIGTERM needs `timeout-down`.**
+  Anything holding a tty, a login session, or a shell child is in that
+  category. Nothing else may be allowed to hang stage 3.
+- **`/etc/acpi/PWRF/00000080` and `/etc/acpi/LID/00000080` are named by
+  busybox acpid's compiled-in table**, not by us. Rename either and
+  acpid runs nothing — silently, with the button back to doing nothing.
+- **`power.lid` / `power.button` have no converger and no observer.**
+  `novi-power` reads them at event time, so they cannot drift and
+  `apply` has nothing to do. But that also means `converge_key` never
+  runs to reject a typo, so the *observer* reports an unusable value as
+  `unsupported` — permanent drift the machine cannot fix, which is the
+  truth. Any future read-at-use-time key needs the same treatment.
+- **The power button stops being delivered after an S3 resume in
+  QEMU**, and it is not ours: acpid keeps the same PID and fds, reading
+  the evdev node directly returns 24 bytes before the suspend and 0
+  after, and `/sys/firmware/acpi/interrupts/ff_pwr_btn` shows the
+  status bit latched (`EN` → `EN STS`) with the counter not
+  incrementing. Do not "fix" this by restarting acpid on resume — the
+  event never reaches the input layer at all.
+
 ## Architecture: installation splits `grub-install` in half
 
 RFC 0003 (`docs/rfcs/0003-installation-and-persistence.md`). The installed

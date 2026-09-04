@@ -275,6 +275,20 @@ Every pull request must pass the following verification checks:
    # Verify QEMU boots to login prompt without kernel panic or service failure
    bash scripts/mkvm.sh
    ```
+   Then, in the booted machine, **shut it down and watch it finish**:
+   ```
+   poweroff        # must reach "reboot: Power down", not just return
+   ```
+   This is not ceremony. `poweroff` returning to a prompt looks like
+   success and is not: for the whole life of this project the shutdown
+   hung on the getty holding the login shell, every power-down was a
+   hard cut, and no test noticed because they all killed the VM ten
+   seconds after issuing the command (RFC 0013).
+
+   The general rule it stands for: **a test that issues a command must
+   observe the command's effect**, not its exit status and not the
+   absence of an error. `s6-rc -a list` saying a service is "up" has
+   hidden three crash-loops the same way (RFC 0004, RFC 0009).
 4. **Musl Compliance**:
    Ensure binaries do not link against glibc symbols or external shared library dependencies unexpectedly (`readelf -d <binary>` or `ldd`).
 

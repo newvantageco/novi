@@ -401,6 +401,27 @@ observe_key() {
         users.*)    observe_user "$key" ;;
         packages.*) observe_package "${key#packages.}" ;;
         power.governor) observe_governor ;;
+        # power.lid / power.button are policy with no live counterpart:
+        # novi-power reads the declared value at event time, so the
+        # machine's behaviour and the document can never disagree and
+        # there is nothing to converge. Inventing a /run cache purely so
+        # `diff` had something to look at would be the "observers read
+        # real live state, never a cache" rule turned inside out. Same
+        # reasoning as state.* below.
+        #
+        # But only a value novi-power can act on counts as observed.
+        # These keys cannot drift, so converge_key never runs for them
+        # and never gets to reject a typo -- `power.lid = suspned` would
+        # otherwise sit in the document reading as converged while the
+        # lid did nothing at all. Reporting an unusable value as drift
+        # is the truth: the machine is not doing what was declared, and
+        # no apply can make it.
+        power.lid|power.button)
+            case "$(state_get "$key")" in
+                suspend|poweroff|ignore) state_get "$key" ;;
+                *) printf 'unsupported' ;;
+            esac
+            ;;
         # `state.*` keys configure this engine itself (see cmd_boot),
         # not the machine -- there is no external fact to go and look
         # at, so the declared value IS the observation and they never
@@ -592,6 +613,15 @@ converge_key() {
         users.*)    converge_user "$key" "$want" ;;
         packages.*) converge_package "${key#packages.}" "$want" ;;
         power.governor) converge_governor "$want" ;;
+        # Nothing to do -- novi-power reads these at event time -- but
+        # the value is checked here so that `apply` is where a typo is
+        # reported, with the same wording every other domain uses.
+        power.lid|power.button)
+            case "$want" in
+                suspend|poweroff|ignore) : ;;
+                *) die "$key: must be 'suspend', 'poweroff' or 'ignore', got '$want'" ;;
+            esac
+            ;;
         # Nothing to converge: a state.* key is read by this engine when
         # it next runs, so declaring it is already the whole effect.
         state.*)    : ;;

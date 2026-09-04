@@ -1,6 +1,7 @@
 syslog
 klog
 hotplug
+acpid
 getty-tty1
 getty-ttyS0
 network

@@ -110,6 +110,12 @@ install -D -m 644 "${REPO_ROOT}/rootfs/etc/profile" "${ROOTFS}/etc/profile"
 install -D -m 755 "${REPO_ROOT}/packages/novi-hwdetect" "${ROOTFS}/sbin/novi-hwdetect"
 install -D -m 755 "${REPO_ROOT}/packages/novi-hotplug" "${ROOTFS}/sbin/novi-hotplug"
 
+# ACPI event handlers. The two path names are dictated by busybox
+# acpid's compiled-in action table (PWRF -> power button, LID -> lid),
+# not chosen here; renaming either means acpid runs nothing.
+install -D -m 755 "${REPO_ROOT}/rootfs/etc/acpi/PWRF/00000080" "${ROOTFS}/etc/acpi/PWRF/00000080"
+install -D -m 755 "${REPO_ROOT}/rootfs/etc/acpi/LID/00000080"  "${ROOTFS}/etc/acpi/LID/00000080"
+
 # Battery, AC, CPU frequency and suspend. Base image for the same
 # reason: a laptop that cannot tell you it is about to die, and cannot
 # be told to sleep, is not usable enough to go install something that

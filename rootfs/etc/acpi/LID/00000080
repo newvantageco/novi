@@ -1,0 +1,7 @@
+#!/bin/sh
+# Lid closed. (Only closed: busybox acpid's table maps SW_LID with
+# value 1 and has no entry for the lid opening again -- which needs no
+# handler anyway, since the kernel resumes on its own.)
+#
+# The path is fixed by acpid's built-in table, same as PWRF above.
+exec novi-power event lid
