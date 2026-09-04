@@ -330,6 +330,13 @@ Novi, which compiles and runs its own C and C++.
   installed, 98 MB compressed). It ships in the repository on the ISO
   because until a repository is published that medium is the only
   mirror there is.
+- **`pkgconf`, not freedesktop pkg-config**, and installed under both
+  names — every `configure` script looks for `pkg-config`. pkgconf is
+  plain C where the original wants glib. Its `--with-pkg-config-dir` /
+  `--with-system-libdir` must be set to the TARGET's paths at configure
+  time, or it bakes in the build host's prefix and finds nothing on the
+  machine that runs it — the same class of mistake as binutils'
+  `--with-sysroot`.
 - **Headers and `.pc` files are a package (`novi-headers`), not base
   content.** The split had been moving libwayland/libinput/libwlroots
   out and leaving 5.6 MB of their headers behind, describing an API the

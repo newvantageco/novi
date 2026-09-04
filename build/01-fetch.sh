@@ -85,6 +85,13 @@ fetch "https://ftp.gnu.org/gnu/binutils/binutils-${BINUTILS_VERSION}.tar.xz"
 # applet, so without this a Novi machine can run a compiler and still
 # not build anything that ships a Makefile -- which is all of it.
 fetch "https://ftp.gnu.org/gnu/make/make-${MAKE_VERSION}.tar.gz"
+
+# pkgconf, for the native toolchain. Without a pkg-config on the target
+# every `./configure` fails to locate a single library, which makes the
+# difference between a compiler and a build environment. pkgconf rather
+# than freedesktop pkg-config: it is plain C with no dependencies,
+# where the original needs glib.
+fetch "https://distfiles.ariadne.space/pkgconf/pkgconf-${PKGCONF_VERSION}.tar.xz"
 fetch "https://ftp.gnu.org/gnu/gcc/gcc-${GCC_VERSION}/gcc-${GCC_VERSION}.tar.xz"
 fetch "https://musl.libc.org/releases/musl-${MUSL_VERSION}.tar.gz"
 

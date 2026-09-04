@@ -39,6 +39,8 @@ Four packages plus a meta-package, built by `build/28-native-toolchain.sh`:
 | `binutils` | 40 MB | `as`, `ld`, `ar` — what gcc shells out to |
 | `gcc` | 215 MB | the compiler, C and C++ |
 | `make` | 284 KB | BusyBox has no `make` applet |
+| `pkgconf` | 596 KB | `pkg-config`, without which no `configure` finds a library |
+| `novi-headers` | 5.6 MB | headers + `.pc` files for every library Novi ships |
 | `novi-devel` | — | meta-package pulling in all four |
 
 They are packages, never the base image: ~270 MB that a console system
@@ -163,9 +165,17 @@ And, still: none of this has run on physical hardware.
 ## Roadmap
 
 - **The rest of the build-from-source stack**: autoconf, automake,
-  libtool, m4, pkg-config, `git`, and Python. That turns "can compile a
-  file" into "can build a package", and it is the shortest path to
-  someone other than this project's authors being able to contribute.
+  libtool, m4, `git`, and Python. `pkg-config` is done — `pkgconf`
+  (plain C, no glib, installed under both names because every
+  `configure` script looks for the second) resolves flags for all 33
+  `.pc` files the system ships. Verified on target: `pkg-config
+  --modversion alsa` → `1.2.12`, a program built from
+  `$(pkg-config --cflags --libs alsa)` rather than flags typed by hand,
+  and a Makefile shelling out to `pkg-config` the way real projects do.
+  What is left of this item is mostly for *regenerating* build systems
+  rather than using them — a released tarball ships a `configure`
+  already, so a compiler, make and pkg-config is the set that builds
+  one.
 - **Per-library `-dev` packages.** Headers and `.pc` files are now
   packaged (`novi-headers`, 555 files, pulled in by `novi-devel`) and
   removed from the base image, where 5.6 MB of them had been sitting

@@ -211,6 +211,43 @@ if [ "$ONLY" = "all" ] || [ "$ONLY" = "gcc" ]; then
     echo "    $(du -sh "${files}" | cut -f1)"
 fi
 
+# ── pkgconf ───────────────────────────────────────────────────────────────
+#
+# A compiler is not a build environment. Every autotools and meson
+# project asks pkg-config where a library's headers and link flags are,
+# and without one on the target `./configure` finds nothing at all --
+# the toolchain from the sections above can build a single-file program
+# and cannot build a tarball.
+#
+# pkgconf rather than freedesktop's pkg-config: plain C, no
+# dependencies, where the original wants glib. It installs as BOTH
+# `pkgconf` and `pkg-config`, because every configure script on earth
+# looks for the second name.
+if [ "$ONLY" = "all" ] || [ "$ONLY" = "pkgconf" ]; then
+    echo ">>> Building pkgconf ${PKGCONF_VERSION} ..."
+    rm -rf "${WORK}/pkgconf-${PKGCONF_VERSION}"
+    tar -xf "${SOURCES}/pkgconf-${PKGCONF_VERSION}.tar.xz" -C "${WORK}"
+    (
+        cd "${WORK}/pkgconf-${PKGCONF_VERSION}"
+        # --with-pkg-config-dir: where pkgconf looks for .pc files ON
+        # THE TARGET. Left at the default it bakes in this build host's
+        # prefix and finds nothing on the machine that runs it -- the
+        # same class of mistake as binutils' --with-sysroot below.
+        ./configure --build="${BUILD_TRIPLE}" --host="${TARGET_TRIPLE}" \
+            --prefix=/usr \
+            --with-pkg-config-dir=/usr/lib/pkgconfig \
+            --with-system-libdir=/usr/lib:/lib \
+            --with-system-includedir=/usr/include >/dev/null
+        make -j"${JOBS}" >/dev/null
+    )
+    files="$(stage_pkg pkgconf "${PKGCONF_VERSION}" "musl-dev" "pkg-config implementation in C")"
+    make -C "${WORK}/pkgconf-${PKGCONF_VERSION}" DESTDIR="${files}" install >/dev/null
+    rm -rf "${files}/usr/share/man" "${files}/usr/share/doc"
+    ln -sf pkgconf "${files}/usr/bin/pkg-config"
+    find "${files}" -type f -perm -u+x -exec "${CROSS}-strip" --strip-unneeded {} \; 2>/dev/null || true
+    echo "    $(du -sh "${files}" | cut -f1)"
+fi
+
 # ── Into the repository ───────────────────────────────────────────────────
 #
 # 20-repo.sh builds packages by running pkgsplit over the rootfs, which
@@ -239,7 +276,7 @@ if [ "$ONLY" = "all" ] || [ "$ONLY" = "repo" ]; then
     # A meta-package, the same shape as novi-desktop: one name that
     # pulls the whole thing in, so "make this machine able to build
     # software" is one command rather than four.
-    files="$(stage_pkg novi-devel "${GCC_VERSION}" "musl-dev,binutils,gcc,make,novi-headers" "Everything needed to build software on Novi itself")"
+    files="$(stage_pkg novi-devel "${GCC_VERSION}" "musl-dev,binutils,gcc,make,pkgconf,novi-headers" "Everything needed to build software on Novi itself")"
     mkdir -p "${files}/usr/share/doc/novi-devel"
     cat > "${files}/usr/share/doc/novi-devel/README" <<'DOC'
 novi-devel — Novi can build its own software.
