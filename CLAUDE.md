@@ -38,6 +38,9 @@ below for why `/build` is hardcoded and unrelated to the repo checkout path.
 - `bash scripts/mkvm.sh [--disk]` — boot the ISO in QEMU/KVM
 - `novi-install install --disk DEV` (on the booted live system) — install to
   disk (RFC 0003)
+- `bash build/20-repo.sh` — build and sign the first-party package
+  repository into `/build/repo` (RFC 0006); serve that directory over HTTP
+  and point a machine at it with `mirror =` in `/etc/novi/pkg.conf`
 - **`bash build/16-s6-rc-db.sh` after ANY change under `init/`** (see below),
   then `bash scripts/mkinitramfs.sh --output build/initramfs.cpio.gz` and
   `bash scripts/mkiso.sh` to get it into a bootable image
@@ -257,6 +260,59 @@ keys are not independent: `users.X.groups` is not applicable until
 groups and the next `diff` reporting drift the apply had just been asked to
 fix. Add a domain with an internal dependency and the passes handle it; do
 not encode ordering in the sort.
+
+## Architecture: the package trust root
+
+RFC 0006 (`docs/rfcs/0006-package-repository-and-signing.md`).
+
+`pkg` downloads code and runs it as root, so the chain has to hold end to
+end: **one Ed25519 signature over the index, and every package's SHA-256
+inside that index.** `pkg sync` verifies the signature with `novi-verify`
+before believing a line of it; `pkg install` re-checks each archive's hash
+before unpacking — cached archives included, because "we downloaded this
+once" says nothing about what is in the file now.
+
+Things not to undo:
+
+- **`novi-verify` is static, and TweetNaCl is hash-pinned in
+  `build/01-fetch.sh`.** It is the only pinned source in the project. Every
+  other dependency is trusted for where it comes from; this one *is* the
+  trust root, so a modified TweetNaCl means signatures verified by an
+  implementation an attacker chose.
+- **A missing signature is not weaker than a wrong one.** Both fail, and the
+  decision lives in exactly one function (`verify_signature`). Two places
+  that decide it is how one of them ends up more permissive.
+- **The mirror fetch hooks into `locate_pkg()`, not `cmd_install`** — so
+  dependency resolution and `pkg update` reach the network through the same
+  verified path instead of growing their own copies.
+- **`/etc/novi/pkg.conf` is deliberately not `system.conf`.** A mirror is a
+  bootstrap parameter; `novi-state` cannot fetch a package from a setting it
+  is in the middle of applying.
+- **`pkg sync` refreshes the index; `pkg update` upgrades packages.**
+  Different operations, different names, on purpose.
+- The index format forbids `|` in every field rather than escaping it. An
+  escaping scheme in a format parsed by `read` is a bug waiting to happen.
+
+## Architecture: /dev/fd, and testing the image not the shell
+
+`/dev/fd` did not exist on the shipped image — devtmpfs does not create it
+and nothing else did. BusyBox ash implements `< <(process substitution)`
+through `/dev/fd/N`, so every one in `packages/pkg` failed with
+`can't open /dev/fd/64: no such file`, and **not fatally**: dependency
+resolution printed the error and carried on having resolved nothing, so
+`pkg install foot` fetched foot and silently skipped `fcft`.
+
+`pkg`'s own comment said process substitution was "verified working against
+the real busybox binary this repo builds" — and it was, on a *host* that has
+a `/dev/fd`. **Testing the shell answered a different question than testing
+the image.** When a construct depends on the runtime environment, the
+verification has to happen inside a booted Novi.
+
+`rc.init` now creates `/dev/fd`, `/dev/stdin`, `/dev/stdout` and
+`/dev/stderr` (so does the initramfs, so its emergency shell behaves like
+the real system), *and* `pkg` no longer uses process substitution anywhere:
+the loops that must run in the parent shell write a temp file and read it
+back. The trust-critical path should not depend on a shell extension.
 
 ## Architecture: cross-toolchain bootstrap order
 

@@ -1,0 +1,189 @@
+#!/bin/sh
+# mkrepo — build (and sign) a Novi package repository index.
+#
+#   mkrepo <pool-dir> [--out DIR] [--key private.pem]
+#
+# Scans <pool-dir> for *.pkg.tar.gz, reads each archive's MANIFEST, and
+# writes an `index` next to the packages. With --key it also writes
+# `index.sig`, a detached 64-byte Ed25519 signature that `pkg sync`
+# verifies with novi-verify before believing a single line of it.
+#
+# The index is the trust root. Every package's SHA-256 lives in it, so a
+# signed index makes every package in the repository authenticated --
+# one signature instead of one per package, and no need for the target
+# to parse a certificate chain or speak TLS.
+#
+# INDEX FORMAT (v1) -- one line per package, pipe-separated:
+#
+#     name|version|arch|size|sha256|file|depends|description
+#
+# Line-based rather than stanza-based on purpose. `pkg` is BusyBox ash;
+# finding a package is `grep "^name|"` and parsing it is one `IFS=|
+# read`, with no state machine and no awk program to get subtly wrong.
+# It stays greppable and diffable, which is the property this project
+# cares about. `|` is forbidden in every field (checked below) rather
+# than escaped -- an escaping scheme in a format parsed by `read` is a
+# bug waiting to happen.
+#
+# shellcheck disable=SC3043
+# `local` is BusyBox ash, as in packages/pkg and packages/novi-state.
+set -eu
+
+msg()  { printf '==> %s\n'    "$*" >&2; }
+info() { printf '  -> %s\n'   "$*" >&2; }
+warn() { printf 'WARN: %s\n'  "$*" >&2; }
+die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+
+POOL=""
+OUT=""
+KEY=""
+
+usage() {
+    cat <<'USAGE'
+mkrepo — build a Novi package repository index
+
+Usage:
+  mkrepo <pool-dir> [--out DIR] [--key private.pem]
+
+  <pool-dir>        directory containing *.pkg.tar.gz
+  --out DIR         where to write index/index.sig (default: <pool-dir>)
+  --key FILE        Ed25519 private key (PEM) to sign the index with;
+                    needs openssl, so this is a build-host operation
+
+Publish the result by serving <pool-dir> over HTTP:
+
+  index                              the signed index
+  index.sig                          its detached signature
+  <name>-<version>-<arch>.pkg.tar.gz the packages themselves
+
+and point a machine at it with `mirror=` in /etc/novi/pkg.conf.
+USAGE
+}
+
+[ $# -ge 1 ] || { usage; exit 1; }
+POOL="$1"; shift
+case "$POOL" in -h|--help) usage; exit 0 ;; esac
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --out) OUT="${2:-}"; shift 2 ;;
+        --key) KEY="${2:-}"; shift 2 ;;
+        -h|--help) usage; exit 0 ;;
+        *) die "unknown option '$1'" ;;
+    esac
+done
+
+[ -d "$POOL" ] || die "$POOL is not a directory"
+OUT="${OUT:-$POOL}"
+mkdir -p "$OUT"
+
+manifest_field() {
+    grep "^${2}=" "$1" 2>/dev/null | head -n1 | sed "s/^${2}=//" || true
+}
+
+# `|` is the field separator and there is no escaping, so a value
+# carrying one would silently shift every field after it -- a
+# description with a pipe in it would turn into a bogus `depends`.
+# Refuse rather than mangle.
+check_clean() {
+    case "$2" in
+        *"|"*) die "package '$3': $1 contains a '|', which the index format forbids" ;;
+    esac
+    # NOT `case "$2" in *"$(printf '\n')"*)`: command substitution
+    # strips trailing newlines, so that pattern is *""* -- which matches
+    # every string, and rejected the first package it ever saw. Count
+    # the newlines instead.
+    if [ "$(printf '%s' "$2" | wc -l | tr -d ' ')" != "0" ]; then
+        die "package '$3': $1 contains a newline"
+    fi
+}
+
+TMP="$(mktemp)"
+trap 'rm -f "$TMP" "$TMP.body"' EXIT INT TERM
+
+msg "Indexing $POOL"
+
+count=0
+: > "$TMP.body"
+for archive in "$POOL"/*.pkg.tar.gz; do
+    [ -f "$archive" ] || continue
+    base="$(basename "$archive")"
+
+    mf="$(mktemp)"
+    if ! tar -xzf "$archive" -O MANIFEST > "$mf" 2>/dev/null; then
+        warn "$base has no MANIFEST -- skipped"
+        rm -f "$mf"
+        continue
+    fi
+
+    name="$(manifest_field "$mf" name)"
+    version="$(manifest_field "$mf" version)"
+    arch="$(manifest_field "$mf" arch)"
+    depends="$(manifest_field "$mf" depends)"
+    description="$(manifest_field "$mf" description)"
+    rm -f "$mf"
+
+    [ -n "$name" ]    || { warn "$base: MANIFEST has no name -- skipped";    continue; }
+    [ -n "$version" ] || { warn "$base: MANIFEST has no version -- skipped"; continue; }
+    arch="${arch:-any}"
+
+    check_clean name        "$name"        "$base"
+    check_clean version     "$version"     "$base"
+    check_clean arch        "$arch"        "$base"
+    check_clean depends     "$depends"     "$base"
+    check_clean description "$description" "$base"
+
+    size="$(wc -c < "$archive" | tr -d ' ')"
+    sha="$(sha256sum "$archive" | cut -d' ' -f1)"
+
+    printf '%s|%s|%s|%s|%s|%s|%s|%s\n' \
+        "$name" "$version" "$arch" "$size" "$sha" "$base" \
+        "$depends" "$description" >> "$TMP.body"
+
+    info "$name $version ($arch, $size bytes)"
+    count=$((count + 1))
+done
+
+[ "$count" -gt 0 ] || warn "no packages found in $POOL -- writing an empty index"
+
+{
+    printf '# novi package index v1\n'
+    printf '# name|version|arch|size|sha256|file|depends|description\n'
+    # Sorted so the index is reproducible: the same pool must produce
+    # byte-identical bytes, or every rebuild is a new signature and a
+    # pointless download for every machine.
+    LC_ALL=C sort "$TMP.body"
+} > "$TMP"
+
+mv "$TMP" "$OUT/index"
+# mktemp creates 0600. The index is meant to be served to the world;
+# leaving it unreadable produces a repository that 404s nothing and
+# still fails every sync.
+chmod 644 "$OUT/index"
+trap 'rm -f "$TMP.body"' EXIT INT TERM
+msg "wrote $OUT/index ($count package(s))"
+
+if [ -n "$KEY" ]; then
+    command -v openssl >/dev/null 2>&1 ||
+        die "openssl is needed to sign (this is a build-host operation)"
+    [ -f "$KEY" ] || die "key file '$KEY' not found"
+    # -rawin: Ed25519 signs the message itself, not a pre-computed
+    # digest. The output is the bare 64-byte signature novi-verify
+    # expects -- no PEM, no ASN.1, nothing to parse in the one program
+    # that must not have anything to parse.
+    openssl pkeyutl -sign -inkey "$KEY" -rawin -in "$OUT/index" \
+        -out "$OUT/index.sig" || die "signing failed"
+    msg "wrote $OUT/index.sig ($(wc -c < "$OUT/index.sig" | tr -d ' ') bytes)"
+
+    # Publish the matching public key next to it as a convenience for
+    # whoever is setting a machine up. It is NOT a trust root when
+    # fetched from the same server as the index -- the key has to reach
+    # the machine some other way, and pkg.conf says so.
+    openssl pkey -in "$KEY" -pubout -outform DER 2>/dev/null \
+        | tail -c 32 > "$OUT/index.pub"
+    msg "wrote $OUT/index.pub (32-byte raw public key, for convenience only)"
+else
+    rm -f "$OUT/index.sig"
+    warn "index is UNSIGNED -- 'pkg sync' will refuse it unless the"
+    warn "machine is configured with allow_unsigned=yes"
+fi

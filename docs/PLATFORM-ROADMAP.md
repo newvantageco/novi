@@ -1120,6 +1120,67 @@ Verified live: a declared account created with every group in one
 account and groups, and a cold boot from an installed disk **logging in
 as alice** with the password the installer set.
 
+## 16. Package Repository & Signing
+
+RFC 0006. `pkg` and `mkpkg` had worked for a while and there had never
+been anything to point them at. There is now: a signed repository, a
+network fetch path, a cryptographic trust root on the target, and
+`packages.*` in the declared state.
+
+The design decision that matters: **a package manager downloads code
+and runs it as root**, so "the transport handed it to me" cannot be the
+trust root. Novi's base image deliberately has no OpenSSL, no GnuPG and
+no libsodium, and BusyBox's built-in TLS does not validate
+certificates -- so "just use HTTPS" was not available even as a weak
+answer. The base image gets a ~60 KB Ed25519 verifier instead of a TLS
+stack: `novi-verify`, built on TweetNaCl (public domain, by the NaCl
+authors), vendored unmodified and **hash-pinned** -- the only pinned
+source in the project, because it is the only one that is itself the
+trust root.
+
+One signature over the index; every package's SHA-256 inside it. That
+authenticates the whole repository with one signature, survives
+mirroring and offline media in a way TLS does not, and means
+`pkg install` re-checking a hash extends that signature to each
+archive. A missing signature is not weaker than a wrong one -- both
+fail, and the decision lives in exactly one function.
+
+The index is one line per package, pipe-separated. `pkg` is BusyBox
+ash: finding a package is `grep "^name|"` and parsing it is one
+`IFS=| read`, with no state machine to get subtly wrong. It stays
+greppable and diffable, which is the property this project keeps
+choosing.
+
+`packages.<name> = present | absent` puts installed software into the
+same document as everything else -- same diff, same generations, same
+rollback. That is what makes §11's claim true of the whole machine
+rather than only of its configuration. It also makes the GUI's blocking
+`novi-state` calls matter for the first time: a package install is the
+first converger slow enough to be felt.
+
+The repository's first content is the desktop -- `foot`, `fcft`, and
+Novi's own shell/panel/launcher/settings/lockscreen/screenshot -- built
+from exactly the binaries the earlier stages produced, so image and
+repository cannot drift. They are still in the base image too;
+splitting them out is the next step and what makes §2's "small native
+base" real rather than described.
+
+This surfaced three bugs, one of them a lesson worth keeping: **`/dev/fd`
+did not exist on the shipped image**, so every `< <(process
+substitution)` in `pkg` failed -- and not fatally, so dependency
+resolution printed an error and carried on having resolved nothing.
+`pkg`'s own comment said the construct was "verified working against
+the real busybox binary this repo builds", and it was, on a *host* that
+has a `/dev/fd`. Testing the shell answered a different question than
+testing the image. (The others: `mkpkg` exited 141 after succeeding,
+because `tar | head -5` plus `pipefail`; and `mkrepo`'s newline check
+was `*"$(printf '\n')"*`, which is `*""*`, which matches everything.)
+
+Verified live against a repository served over HTTP, including both
+tamper cases: a package with one flipped byte failed its SHA-256 and
+was discarded, and an index with an appended package line failed its
+signature and left the previous index in place.
+
 ## Status Summary
 
 | # | Area | State |
@@ -1139,25 +1200,27 @@ as alice** with the password the installer set.
 | 13 | Installation & persistence | ✅ Installable and QEMU-verified end to end (install → cold boot from disk via GRUB in the MBR → marker file survives a power cycle → live ISO unregressed); BIOS/MBR + journal-less ext2 + root-only are the stated v1 limits, UEFI/GPT and e2fsprogs are next |
 | 14 | Networking & logging | ✅ DHCP + resolver as a supervised service with a `network.*` state domain, syslogd/klogd replacing a logger that had never once run; verified live and installed, including logs surviving a reboot. Static IP, WiFi and DHCPv6 are roadmap |
 | 15 | Users & accounts | ✅ `users.*` domain, a real group database, installer-created accounts with passwords; "configuration is declared, secrets are not" is now a stated platform rule. Non-root `novi-settings`, `users.*.home`/`.uid`, and undeclared-user removal are roadmap |
+| 16 | Package repository & signing | ✅ Signed index (Ed25519 via a hash-pinned TweetNaCl verifier on-target), SHA-256 per package, `pkg sync` + mirror fetch, `packages.*` state domain, first-party desktop repository; both tamper cases verified live. Desktop still also in the base image; release keys, index expiry and version constraints are roadmap |
 
-**Next concrete step: a package repository.** Novi now installs,
-remembers, reaches the network, keeps a log, and has real users. `pkg`
-and `mkpkg` work and are live-verified against a real dependency chain
--- and there is still nothing to point them at. Everything about §2 and
-§3 (the app model, two update tracks, on-device rollback of *software*
-rather than just configuration) is behind that one gap.
+**Next concrete step: split the desktop out of the base image.** §2's
+whole architecture is a small native base with everything else
+delivered as packages. Every piece of that now exists -- a package
+format, a package manager, a signed repository, a fetch path, and
+`packages.*` in the declared state -- and the desktop is still baked
+into the base image *as well as* being in the repository. Doing the
+split is what turns §2 from a described architecture into the one this
+distro actually has, and it is the first change where the console ISO
+and the desktop ISO become genuinely different images.
 
 Ordered honestly, what is left:
 
-1. **A package repository** -- somewhere to fetch from, an index `pkg
-   search` can query, and signing (§9 says signed-by-default is still
-   open).
-2. **`packages.*` state domain** -- installed software declared in the
-   same document as everything else. This is the piece that makes
-   §11's claim about the whole machine true rather than the machine's
-   configuration only. `novi-state`'s GUI calls block the Wayland
-   event loop, and a package install is the first converger slow enough
-   for that to matter -- see CLAUDE.md.
+1. **Split the desktop out of the base** -- the base image becomes
+   console-only; `novi-install` grows a "desktop" profile that declares
+   the desktop packages and lets convergence install them.
+2. **A published repository and a real release key** -- offline key,
+   signing off the build host, something at a stable URL, and a signed
+   `valid-until` so a validly-signed *stale* index cannot be replayed
+   to hold a machine at a version with a known hole.
 3. **The remaining `network.*` work** -- static IPv4, WiFi (needs a
    supplicant in the base image), DHCPv6.
 4. **UEFI/GPT install and a journalled filesystem** -- the two stated

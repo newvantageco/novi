@@ -2,14 +2,27 @@
 # pkg - minimal package manager for a from-scratch Linux distro
 # Busybox-compatible. Requires: tar, gzip, grep, sed, awk, find, sort, mkdir, rm, cp, ln
 #
-# shellcheck disable=SC3043,SC3040,SC3001
-# `local`, `set -o pipefail`, and `< <(process substitution)` are all
-# outside strict POSIX sh, which is what shellcheck's default `sh`
-# dialect checks against for a `#!/bin/sh` shebang -- but this script's
-# actual target is BusyBox ash (this repo's own /bin/sh, statically
-# linked, no bash anywhere in the base image), and all three are
-# verified working there directly against the real busybox binary this
-# repo builds (`build/rootfs/bin/busybox sh -c '...'`), not assumed.
+# shellcheck disable=SC3043,SC3040
+# `local` and `set -o pipefail` are outside strict POSIX sh, which is
+# what shellcheck's default `sh` dialect checks against for a
+# `#!/bin/sh` shebang -- but this script's actual target is BusyBox ash
+# (this repo's own /bin/sh, statically linked, no bash anywhere in the
+# base image), and both are verified working there directly against the
+# real busybox binary this repo builds
+# (`build/rootfs/bin/busybox sh -c '...'`), not assumed.
+#
+# `< <(process substitution)` used to be on that list and is gone now.
+# BusyBox ash implements it through /dev/fd/N, and testing "does the
+# shell support it" against a busybox on a normal Linux host answers a
+# different question than "does it work on the shipped image" -- the
+# image had no /dev/fd at all, so every one of them failed at runtime
+# with "can't open /dev/fd/64: no such file". Confirmed live, and not
+# fatally, which is worse: dependency resolution printed the error and
+# carried on having resolved nothing, so `pkg install foot` fetched
+# foot and silently skipped fcft. /dev/fd exists now (rc.init creates
+# it), but the fix here is not to rely on it: the loops that needed to
+# run in the parent shell write to a temp file and read it back, which
+# is plain POSIX and cannot fail this way on any shell or any image.
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
@@ -20,6 +33,43 @@ PKG_REPO="${PKG_REPO:-/var/cache/pkg/repo}"
 PKG_CACHE="/var/cache/pkg/archives"
 PKG_ROOT="${PKG_ROOT:-}"          # install root, empty = /
 PKG_TMP="/tmp/pkg.$$"
+
+# ---------------------------------------------------------------------------
+# Remote repository (RFC 0006)
+# ---------------------------------------------------------------------------
+#
+# /etc/novi/pkg.conf is `key = value`, the same shape as
+# /etc/novi/system.conf, for the same reason: one format a person can
+# read, grep and hand-edit. It is NOT part of system.conf, because
+# system.conf is the declared state of the machine and this is where
+# that machine gets its software from -- a bootstrap parameter, not a
+# converged one. novi-state cannot install a package from a mirror it
+# had to read out of a file it is in the middle of applying.
+PKG_CONF="${PKG_CONF:-/etc/novi/pkg.conf}"
+PKG_INDEX="${PKG_INDEX:-/var/lib/pkg/index}"
+
+PKG_MIRROR=""
+PKG_KEY="/etc/novi/keys/novi-repo.pub"
+PKG_ALLOW_UNSIGNED="no"
+
+conf_value() {
+    [ -r "$PKG_CONF" ] || { printf ''; return 0; }
+    sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\\(.*\\)/\\1/p" "$PKG_CONF" \
+        | sed 's/[[:space:]]*$//' | tail -n1
+}
+
+load_conf() {
+    local v
+    v="$(conf_value mirror)";          [ -n "$v" ] && PKG_MIRROR="$v"
+    v="$(conf_value key)";             [ -n "$v" ] && PKG_KEY="$v"
+    v="$(conf_value allow_unsigned)";  [ -n "$v" ] && PKG_ALLOW_UNSIGNED="$v"
+    # The environment wins over the file, so a one-off
+    # `PKG_MIRROR=... pkg sync` works without editing anything.
+    [ -n "${PKG_MIRROR_ENV:-}" ] && PKG_MIRROR="$PKG_MIRROR_ENV"
+    return 0
+}
+PKG_MIRROR_ENV="${PKG_MIRROR:-}"
+load_conf
 
 # ---------------------------------------------------------------------------
 # Utilities
@@ -70,6 +120,124 @@ installed_version() {
     [ -f "$m" ] && manifest_field "$m" "version" || printf ''
 }
 
+# ---------------------------------------------------------------------------
+# The repository index
+# ---------------------------------------------------------------------------
+#
+# One line per package (see packages/mkrepo for the format):
+#
+#     name|version|arch|size|sha256|file|depends|description
+#
+# Line-based so that finding a package is a `grep` and parsing it is one
+# `IFS=| read`. Every package's SHA-256 is in here, so a signed index
+# authenticates the whole repository with one signature -- which is why
+# `pkg sync` refuses an index it cannot verify rather than treating the
+# transport as the trust root.
+
+index_line() {
+    [ -f "$PKG_INDEX" ] || return 1
+    grep "^${1}|" "$PKG_INDEX" 2>/dev/null | head -n1
+}
+
+# index_field <name> <field-number>
+index_field() {
+    local line
+    line="$(index_line "$1")" || return 1
+    [ -n "$line" ] || return 1
+    printf '%s' "$line" | cut -d'|' -f"$2"
+}
+
+have_mirror() { [ -n "$PKG_MIRROR" ]; }
+
+# Download a URL to a path. wget rather than curl: BusyBox has wget and
+# does not have curl, and this has to work on the shipped image.
+fetch_url() {
+    local url="$1" dest="$2"
+    command -v wget >/dev/null 2>&1 || die "wget not found; cannot fetch $url"
+    rm -f "$dest.part"
+    if ! wget -q -O "$dest.part" "$url"; then
+        rm -f "$dest.part"
+        return 1
+    fi
+    mv "$dest.part" "$dest"
+}
+
+# Verify a detached Ed25519 signature over a file.
+#
+# The failure modes are deliberately NOT interchangeable: a bad
+# signature is an attack until proven otherwise and always fails; a
+# missing signature or a machine with no configured key is a
+# configuration problem, and fails too unless the machine has
+# explicitly opted out with allow_unsigned=yes. "No signature" must
+# never be quietly weaker than "wrong signature".
+verify_signature() {
+    local file="$1" sig="$2" what="$3"
+
+    if [ "$PKG_ALLOW_UNSIGNED" = "yes" ]; then
+        warn "allow_unsigned=yes in $PKG_CONF -- not verifying $what"
+        return 0
+    fi
+    command -v novi-verify >/dev/null 2>&1 ||
+        die "novi-verify not found; cannot check the signature on $what"
+    [ -f "$PKG_KEY" ] ||
+        die "no repository public key at $PKG_KEY -- install one, or set allow_unsigned=yes in $PKG_CONF"
+    [ -f "$sig" ] ||
+        die "$what has no signature -- refusing it"
+
+    novi-verify "$PKG_KEY" "$sig" "$file" ||
+        die "SIGNATURE CHECK FAILED on $what -- refusing it"
+    info "signature on $what verified"
+}
+
+# Fetch a package named in the index into the cache, and check its
+# SHA-256 before it is ever handed to the installer. The hash comes
+# from the signed index, so this is what extends that one signature to
+# cover every package in the repository.
+fetch_from_mirror() {
+    local name="$1"
+    FOUND_PKG=""
+
+    have_mirror || return 1
+    [ -f "$PKG_INDEX" ] || return 1
+
+    local line
+    line="$(index_line "$name")" || return 1
+    [ -n "$line" ] || return 1
+
+    # arch and size are read but unused here: the fields have to be
+    # consumed positionally to reach sha256 and file, and naming them
+    # documents the format at the point it is parsed.
+    local i_name i_ver i_arch i_size i_sha i_file dest
+    IFS='|' read -r i_name i_ver i_arch i_size i_sha i_file _ _ <<EOF
+$line
+EOF
+    [ -n "$i_file" ] || return 1
+    : "$i_arch" "$i_size"
+
+    mkdir -p "$PKG_CACHE"
+    dest="$PKG_CACHE/$(basename "$i_file")"
+
+    # A cached copy still gets hashed. The cache is a directory anything
+    # with root can write to, and "we downloaded it once" is not a
+    # statement about what is in it now.
+    if [ ! -f "$dest" ]; then
+        msg "Fetching $i_name $i_ver from $PKG_MIRROR"
+        fetch_url "${PKG_MIRROR%/}/$i_file" "$dest" ||
+            die "could not download $i_file from $PKG_MIRROR"
+    fi
+
+    local got
+    got="$(sha256sum "$dest" | cut -d' ' -f1)"
+    if [ "$got" != "$i_sha" ]; then
+        rm -f "$dest"
+        die "$i_file failed its SHA-256 check (index says $i_sha, file is $got) -- discarded"
+    fi
+    info "sha256 verified: $i_name $i_ver"
+
+    FOUND_PKG="$dest"
+    return 0
+}
+
 # Locate a package archive in the cache or repo.
 # Sets FOUND_PKG to the absolute path.
 locate_pkg() {
@@ -97,6 +265,13 @@ locate_pkg() {
             return 0
         fi
     done
+
+    # Nothing local: try the configured mirror. Putting the fallback
+    # here rather than in cmd_install means dependency resolution and
+    # `pkg update` reach the network too, without either of them
+    # growing its own copy of the fetch-and-verify logic.
+    fetch_from_mirror "$name" && return 0
+
     return 1
 }
 
@@ -141,19 +316,27 @@ resolve_deps() {
 
     # depends is comma-separated list of package names (optionally with versions)
     if [ -n "$depends" ]; then
-        local dep dep_name dep_archive
-        # Process substitution (< <(...)), not a pipe into `while read` --
-        # this loop body mutates DEP_QUEUE/DEP_VISITED, which the caller
-        # needs to see. Piping into `while read` makes it the last stage
-        # of a pipeline, which ash (like most POSIX shells, absent bash's
-        # non-default `lastpipe`) runs in a subshell -- every mutation
-        # inside would vanish the moment the loop ends, silently: no
-        # error, DEP_QUEUE just stays empty and dependencies never get
-        # installed. Confirmed live: `hello` (depends=libfoo) installed
-        # with libfoo never even attempted, no error printed anywhere.
-        # `< <(...)` runs the loop directly in this function's shell, so
-        # the mutations stick -- the same pattern cmd_remove() already
-        # uses below for its own directory-cleanup loop.
+        local dep dep_name dep_archive dep_list_tmp
+        # A temp file, NOT a pipe into `while read`: this loop body
+        # mutates DEP_QUEUE/DEP_VISITED, which the caller needs to see,
+        # and piping makes the loop the last stage of a pipeline, which
+        # ash (like most POSIX shells, absent bash's non-default
+        # `lastpipe`) runs in a subshell -- every mutation would vanish
+        # the moment the loop ends, silently. Confirmed live: `hello`
+        # (depends=libfoo) installed with libfoo never even attempted
+        # and no error printed anywhere.
+        #
+        # This was `< <(...)` for a while, which has the same
+        # parent-shell property. It also needs /dev/fd, which the
+        # shipped image did not have -- so it failed at runtime with
+        # "can't open /dev/fd/64: no such file" and, worse, not
+        # fatally: dependency resolution printed the error and carried
+        # on having resolved nothing, so `pkg install foot` fetched
+        # foot and skipped fcft entirely. A temp file is plain POSIX
+        # and cannot fail that way on any shell or any image.
+        mkdir -p "$PKG_TMP"
+        dep_list_tmp="$PKG_TMP/deps_${name}"
+        printf '%s\n' "$depends" | tr ',' '\n' > "$dep_list_tmp"
         while IFS= read -r dep; do
             dep="$(printf '%s' "$dep" | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//')"
             [ -z "$dep" ] && continue
@@ -181,7 +364,8 @@ resolve_deps() {
 
             resolve_deps "$dep_name" "$dep_archive"
             DEP_QUEUE="$DEP_QUEUE $dep_name:$dep_archive"
-        done < <(printf '%s\n' "$depends" | tr ',' '\n')
+        done < "$dep_list_tmp"
+        rm -f "$dep_list_tmp"
     fi
 }
 
@@ -371,12 +555,20 @@ cmd_remove() {
             done < "$files_list"
 
             # Remove empty directories left behind
+            # Reverse-sorted through a temp file so the loop runs in
+            # this shell (see resolve_deps() above for why that
+            # matters, and why not `< <(...)`).
+            local files_list_sorted
+            mkdir -p "$PKG_TMP"
+            files_list_sorted="$PKG_TMP/files_sorted"
+            sort -r "$files_list" > "$files_list_sorted"
             while IFS= read -r f; do
                 [ -z "$f" ] && continue
                 local dir
                 dir="$(dirname "${PKG_ROOT:-}/${f}")"
                 rmdir --ignore-fail-on-non-empty "$dir" 2>/dev/null || true
-            done < <(sort -r "$files_list")
+            done < "$files_list_sorted"
+            rm -f "$files_list_sorted"
         fi
 
         # Run post-remove script
@@ -454,6 +646,36 @@ cmd_update() {
     done
 }
 
+cmd_sync() {
+    need_root
+    have_mirror ||
+        die "no mirror configured -- set 'mirror = <url>' in $PKG_CONF"
+
+    msg "Syncing index from $PKG_MIRROR"
+    mkdir -p "$(dirname "$PKG_INDEX")" "$PKG_TMP"
+
+    local new="$PKG_TMP/index" newsig="$PKG_TMP/index.sig"
+    fetch_url "${PKG_MIRROR%/}/index" "$new" ||
+        die "could not download the index from $PKG_MIRROR"
+    # A missing signature is not fatal here -- verify_signature() is
+    # what decides, and it is the single place that knows whether this
+    # machine has opted out. Deciding it in two places is how one of
+    # them ends up more permissive than the other.
+    fetch_url "${PKG_MIRROR%/}/index.sig" "$newsig" || true
+
+    verify_signature "$new" "$newsig" "the repository index"
+
+    # Installed only after it verifies: a machine that already had a
+    # good index must not be left with a worse one because a sync
+    # failed halfway.
+    mv "$new" "$PKG_INDEX"
+    [ -f "$newsig" ] && mv "$newsig" "$PKG_INDEX.sig"
+
+    local n
+    n="$(grep -vc '^#' "$PKG_INDEX" 2>/dev/null || printf 0)"
+    msg "index updated: $n package(s) available"
+}
+
 cmd_search() {
     [ $# -ge 1 ] || die "Usage: pkg search <pattern>"
     local pattern="$1"
@@ -468,14 +690,17 @@ cmd_search() {
     # Search repo and cache
     for dir in "$PKG_REPO" "$PKG_CACHE"; do
         [ -d "$dir" ] || continue
-        # < <(...), not `find | while read` -- the loop body sets
-        # `found`, which the caller reads after the loop; piping into
-        # `while read` runs it as the last stage of a pipeline, which
-        # ash runs in a subshell, silently discarding that assignment
-        # (same class of bug fixed in resolve_deps() above -- confirmed
-        # live here too: a real match printed correctly, immediately
-        # followed by "No packages found" anyway, because `found=1`
-        # never escaped the subshell).
+        # A temp file, not `find | while read` -- the loop body sets
+        # `found`, which the caller reads after the loop; piping runs
+        # it as the last stage of a pipeline, which ash runs in a
+        # subshell, silently discarding that assignment (confirmed live
+        # here too: a real match printed correctly, immediately
+        # followed by "No packages found" anyway). Not `< <(...)`
+        # either -- see resolve_deps().
+        local archive_list
+        mkdir -p "$PKG_TMP"
+        archive_list="$PKG_TMP/archives"
+        find "$dir" -maxdepth 2 -name "*.pkg.tar.gz" -type f > "$archive_list" 2>/dev/null || true
         while read -r archive; do
             local m
             m="$(tar -xzf "$archive" -O MANIFEST 2>/dev/null)" || continue
@@ -490,8 +715,24 @@ cmd_search() {
             printf '%-30s %-12s %s%s\n' "$n" "$v" "$d" "$inst"
             found=1
             shown="$shown $n"
-        done < <(find "$dir" -maxdepth 2 -name "*.pkg.tar.gz" -type f 2>/dev/null)
+        done < "$archive_list"
     done
+
+    # The index: packages that are available but not downloaded. This is
+    # the only source that can answer "what could I install", which is
+    # what someone typing `pkg search` almost always means.
+    if [ -f "$PKG_INDEX" ]; then
+        while IFS='|' read -r n v _ _ _ _ _ d; do
+            case "$n" in ''|'#'*) continue ;; esac
+            case " $shown " in *" $n "*) continue ;; esac
+            printf '%s %s' "$n" "$d" | grep -qi "$pattern" || continue
+            local inst=""
+            is_installed "$n" && inst=" [installed]"
+            printf '%-30s %-12s %s%s\n' "$n" "$v" "$d" "$inst"
+            found=1
+            shown="$shown $n"
+        done < "$PKG_INDEX"
+    fi
 
     # Also search installed packages not necessarily in the cache
     for m in "$PKG_DB"/*/MANIFEST; do
@@ -543,8 +784,25 @@ cmd_info() {
         m="$PKG_TMP/info_manifest"
         tar -xzf "$FOUND_PKG" -O MANIFEST > "$m" 2>/dev/null \
             || die "Could not read MANIFEST from archive."
+    elif [ -n "$(index_line "$name" || true)" ]; then
+        # Known to the repository but not downloaded. Answer from the
+        # index rather than pulling the archive down just to print six
+        # lines about it.
+        local i_ver i_arch i_dep i_desc
+        i_ver="$(index_field "$name" 2)"
+        i_arch="$(index_field "$name" 3)"
+        i_dep="$(index_field "$name" 7)"
+        i_desc="$(index_field "$name" 8)"
+        printf 'Name        : %s\n' "$name"
+        printf 'Version     : %s\n' "$i_ver"
+        printf 'Architecture: %s\n' "${i_arch:-any}"
+        printf 'Description : %s\n' "$i_desc"
+        printf 'Size        : %s\n' "$(index_field "$name" 4)"
+        printf 'Depends     : %s\n' "${i_dep:-(none)}"
+        printf 'Status      : available (not installed)\n'
+        return 0
     else
-        die "Package '$name' is not installed and not found in repo/cache."
+        die "Package '$name' is not installed and not found in repo, cache or index."
     fi
 
     local name_f version arch desc size depends
@@ -579,6 +837,7 @@ usage() {
 pkg -- minimal Linux package manager
 
 Usage:
+  pkg sync                             Refresh the repository index
   pkg install <package|archive> [...]  Install one or more packages
   pkg remove  <package> [...]          Remove installed packages
   pkg update  <package|all> [...]      Update installed packages
@@ -586,7 +845,20 @@ Usage:
   pkg list    [filter]                 List installed packages
   pkg info    <package>                Show package information
 
+`sync` refreshes the index; `update` upgrades installed packages. They
+are different operations and have different names on purpose.
+
+Configuration (/etc/novi/pkg.conf):
+  mirror          = https://example.org/novi/x86_64
+  key             = /etc/novi/keys/novi-repo.pub
+  allow_unsigned  = no
+
+The index is signed and `pkg sync` verifies it with novi-verify before
+believing a line of it; every package's SHA-256 comes from that index,
+so one signature covers the whole repository.
+
 Environment:
+  PKG_MIRROR Overrides `mirror` for one invocation
   PKG_REPO   Directory of available .pkg.tar.gz files  [/var/cache/pkg/repo]
   PKG_ROOT   Alternate install root                    [/]
 EOF
@@ -596,6 +868,7 @@ EOF
 [ $# -ge 1 ] || usage
 cmd="$1"; shift
 case "$cmd" in
+    sync)    cmd_sync    "$@";;
     install) cmd_install "$@";;
     remove)  cmd_remove  "$@";;
     update)  cmd_update  "$@";;

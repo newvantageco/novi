@@ -60,6 +60,11 @@ FCFT_VERSION="2.5.1"
 FOOT_VERSION="1.9.2"
 JETBRAINS_MONO_VERSION="2.304"
 
+# TweetNaCl is versioned by release date, not a semver tag. This is the
+# only "version" its authors publish; the sha256 pins in 01-fetch.sh
+# are what actually fix the code.
+TWEETNACL_VERSION="20140427"
+
 # Build target
 TARGET_ARCH="x86_64"
 TARGET_TRIPLE="${TARGET_ARCH}-linux-musl"

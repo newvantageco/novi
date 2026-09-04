@@ -300,6 +300,35 @@ observe_user() {
     esac
 }
 
+# The packages domain (RFC 0006).
+#
+#   packages.<name> = present | absent
+#
+# This is the piece that makes the claim in the README true of the
+# whole machine rather than only of its configuration: what software
+# is installed becomes part of the same document, with the same diff,
+# the same generations and the same rollback.
+#
+# The observer reads `pkg`'s install database directly rather than
+# shelling out to `pkg list`. /var/lib/pkg/installed/<name>/MANIFEST is
+# the database -- one stat() per key instead of one fork, and `diff`
+# runs this over every declared key on every refresh of the Settings
+# app's System panel.
+#
+# WORTH KNOWING BEFORE ADDING MORE OF THESE: converging a package
+# means a download and an unpack, which is the first converger in this
+# engine slow enough for the GUI's blocking novi-state calls to matter
+# (see CLAUDE.md). A `set` is still one awk pass; an `apply` that
+# installs something is not, and novi-settings will sit there.
+observe_package() {
+    local name="$1"
+    if [ -f "/var/lib/pkg/installed/${name}/MANIFEST" ]; then
+        printf 'present'
+    else
+        printf 'absent'
+    fi
+}
+
 # Observed value for any declared key. An unrecognized key observes as
 # "unmanaged" rather than erroring: an unknown key in the document is a
 # forward-compatibility case (a newer novi-state, a hand-written note),
@@ -312,6 +341,7 @@ observe_key() {
         services.*) observe_service "${key#services.}" ;;
         network.*)  observe_network "${key#network.}" ;;
         users.*)    observe_user "$key" ;;
+        packages.*) observe_package "${key#packages.}" ;;
         # `state.*` keys configure this engine itself (see cmd_boot),
         # not the machine -- there is no external fact to go and look
         # at, so the declared value IS the observation and they never
@@ -462,6 +492,29 @@ converge_user() {
     esac
 }
 
+converge_package() {
+    local name="$1" want="$2"
+    command -v pkg >/dev/null 2>&1 || die "pkg not found; cannot manage packages"
+    case "$want" in
+        present)
+            # `pkg install` resolves dependencies, fetches from the
+            # configured mirror, verifies each archive's SHA-256
+            # against the signed index, and unpacks. All of that is
+            # pkg's job, not this engine's -- reimplementing any of it
+            # here would give the system two package managers that
+            # disagree.
+            pkg install "$name" ||
+                die "failed to install '$name' (is the index synced? try: pkg sync)"
+            ;;
+        absent)
+            pkg remove "$name" || die "failed to remove '$name'"
+            ;;
+        *)
+            die "packages.$name: value must be 'present' or 'absent', got '$want'"
+            ;;
+    esac
+}
+
 converge_key() {
     local key="$1" want="$2"
     case "$key" in
@@ -469,6 +522,7 @@ converge_key() {
         services.*) converge_service "${key#services.}" "$want" ;;
         network.*)  converge_network "${key#network.}" "$want" ;;
         users.*)    converge_user "$key" "$want" ;;
+        packages.*) converge_package "${key#packages.}" "$want" ;;
         # Nothing to converge: a state.* key is read by this engine when
         # it next runs, so declaring it is already the whole effect.
         state.*)    : ;;
@@ -789,6 +843,7 @@ Keys:
   network.dns                     auto | 1.1.1.1,9.9.9.9
   users.<name>.shell              /bin/sh | absent  (declares the account)
   users.<name>.groups             wheel,video,input | none
+  packages.<name>                 present | absent
   state.apply_on_boot             on | off  (converge on every boot)
 
 Recovery:

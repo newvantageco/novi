@@ -47,6 +47,34 @@ fetch_git() {
     rm -rf "${tmp}"
 }
 
+# Hash-pinned fetch. Every other source here is trusted because of
+# where it comes from (kernel.org, gnu.org, musl.libc.org over TLS);
+# that is the normal bargain and it is fine for a compiler. It is not
+# fine for the one file that becomes the trust root of package
+# verification -- if TweetNaCl arrives modified, `pkg` verifies
+# signatures with an implementation an attacker chose. Pin it.
+fetch_pinned() {
+    local url="$1" want="$2"
+    local file
+    file="$(basename "${url}")"
+    if [ ! -f "${file}" ]; then
+        echo "[fetch] ${file}"
+        curl -fL --retry 3 -o "${file}.part" "${url}"
+        mv "${file}.part" "${file}"
+    else
+        echo "[skip]  ${file} already exists"
+    fi
+    local got
+    got="$(sha256sum "${file}" | cut -d' ' -f1)"
+    if [ "${got}" != "${want}" ]; then
+        echo "ERROR: ${file} sha256 mismatch" >&2
+        echo "  expected ${want}" >&2
+        echo "  got      ${got}" >&2
+        exit 1
+    fi
+    echo "[ok]    ${file} sha256 verified"
+}
+
 # Kernel
 fetch "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${LINUX_VERSION}.tar.xz"
 
@@ -169,6 +197,20 @@ if [ ! -f "${JBMONO_ZIP}" ]; then
 else
     echo "[skip]  ${JBMONO_ZIP} already exists"
 fi
+
+# TweetNaCl — the Ed25519 implementation novi-verify is built on, and
+# therefore the trust root for every package this system installs.
+# Public domain, by the NaCl authors (Bernstein, Janssen, Lange,
+# Schwabe, Van Assche). Two files, no build system, no configuration.
+# Fetched from the authors' own site and hash-pinned above.
+mkdir -p "${SOURCES}/tweetnacl-${TWEETNACL_VERSION}"
+(
+    cd "${SOURCES}/tweetnacl-${TWEETNACL_VERSION}"
+    fetch_pinned "https://tweetnacl.cr.yp.to/${TWEETNACL_VERSION}/tweetnacl.c" \
+        "02e65bc3013ff2168983365e55906bc783c4c7e0a60d8100f17bb303a17175c4"
+    fetch_pinned "https://tweetnacl.cr.yp.to/${TWEETNACL_VERSION}/tweetnacl.h" \
+        "43f29ad721d9927b747b0100ab4160c119e7bb180c7c98a66e4bf79d31244287"
+)
 
 echo ""
 echo "All sources downloaded to ${SOURCES}"

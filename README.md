@@ -71,14 +71,15 @@ novi/
 │   ├── 03-base.sh            ← BusyBox userland + rootfs layout
 │   ├── 04-s6.sh              ← s6 supervision stack
 │   ├── 05-kernel.sh          ← Linux kernel
-│   └── 06..18-*.sh           ← Wayland stack, desktop, pkg, novi-state,
-│                                installer, networking
+│   └── 06..20-*.sh           ← Wayland stack, desktop, pkg, novi-state,
+│                                installer, networking, signed repo
 ├── novi-shell/               ← the compositor (RFC 0001)
 ├── novi-panel/               ← top bar + taskbar
 ├── novi-launcher/            ← Alt+Space search / symbol picker
 ├── novi-settings/            ← Settings app
 ├── novi-lockscreen/          ← Super+L session lock
 ├── novi-screenshot/          ← PrintScreen capture
+├── novi-verify/              ← Ed25519 verifier (package trust root)
 ├── init/
 │   ├── s6/
 │   │   ├── stage1            ← PID 1 (mounts vfs, hands to stage2)
@@ -95,6 +96,7 @@ novi/
 │   ├── mkpkg                 ← package builder
 │   ├── novi-state            ← declarative state engine (RFC 0002)
 │   ├── novi-install          ← disk installer (RFC 0003)
+│   ├── mkrepo                ← repository index builder + signer (RFC 0006)
 │   └── pkg-format.md         ← package format spec
 └── scripts/
     ├── mkinitramfs.sh        ← initramfs builder
@@ -125,6 +127,44 @@ bash build.sh --from 15       # resume a build you already got past stage 14
 Output: `/build/rootfs/`  
 ISO: `scripts/mkiso.sh` → `novi.iso`  
 Test: `scripts/mkvm.sh` → QEMU with KVM
+
+## Software
+
+`pkg` fetches from a **signed** repository. The index carries every
+package's SHA-256, so one Ed25519 signature authenticates the whole
+thing — verified on the machine by `novi-verify`, a ~60 KB static
+binary built on TweetNaCl, because this base image has no OpenSSL, no
+GnuPG, and no certificate-validating TLS.
+
+```console
+$ pkg sync
+==> Syncing index from http://repo.example/novi/x86_64
+  -> signature on the repository index verified
+==> index updated: 8 package(s) available
+
+$ pkg install foot
+  -> sha256 verified: foot 1.9.2
+  -> Installing dependencies...
+==> Installing fcft (2.5.1)
+==> Installing foot (1.9.2)
+```
+
+A tampered package fails its hash and is discarded; a tampered index
+fails its signature and the previous one is kept. Both are verified,
+not asserted — see [RFC 0006](docs/rfcs/0006-package-repository-and-signing.md).
+
+And because installed software is just another declared key, it rolls
+back like everything else:
+
+```console
+$ novi-state set packages.foot absent && novi-state apply
+$ novi-state rollback        # foot comes back, from the mirror
+```
+
+Build your own repository with `bash build/20-repo.sh` and serve the
+directory over HTTP. There is no default mirror: there is no public
+Novi repository yet, and pointing a package manager at a host that does
+not exist is worse than pointing it at nothing.
 
 ## Install it
 
@@ -194,8 +234,9 @@ HOME_URL="https://novilinux.org"
 - [x] Installer + on-disk persistence (`novi-install`, RFC 0003)
 - [x] Networking + real system logging (`network.*`, syslogd/klogd, RFC 0004)
 - [x] Real users (`users.*`, account database, installer accounts, RFC 0005)
-- [ ] Package repository ← next
-- [ ] More state domains: packages, keybindings, static IP, WiFi
+- [x] Signed package repository (`pkg sync`, `novi-verify`, `packages.*`, RFC 0006)
+- [ ] Split the desktop out of the base image ← next
+- [ ] More state domains: keybindings, static IP, WiFi
 - [ ] UEFI/GPT install, journalled root
 - [ ] Boot splash
 

@@ -167,6 +167,16 @@ mount -t tmpfs     tmpfs    /run
 mkdir -p /dev/pts
 mount -t devpts -o gid=5,mode=620 devpts /dev/pts 2>/dev/null || true
 
+# /dev/fd and friends. devtmpfs does not create them and plenty of
+# shell constructs (process substitution, /dev/stdin redirects) simply
+# fail without them -- including in the emergency shell this script
+# drops to, which is exactly when you least want a shell that behaves
+# differently from the real system.
+ln -sfn /proc/self/fd /dev/fd 2>/dev/null || true
+ln -sfn /proc/self/fd/0 /dev/stdin 2>/dev/null || true
+ln -sfn /proc/self/fd/1 /dev/stdout 2>/dev/null || true
+ln -sfn /proc/self/fd/2 /dev/stderr 2>/dev/null || true
+
 # /sys/firmware/efi/efivars (UEFI only, ignore failure)
 mount -t efivarfs efivarfs /sys/firmware/efi/efivars 2>/dev/null || true
 
