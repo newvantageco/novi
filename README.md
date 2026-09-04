@@ -132,15 +132,66 @@ sudo apt install -y \
 
 ## Build
 
+To run it in a VM you need three more packages beyond the list above:
+
 ```bash
-bash build.sh                 # every stage: toolchain → kernel → desktop → installer
-bash build.sh --base-only     # stop after the kernel: bootable console, nothing else
-bash build.sh --from 15       # resume a build you already got past stage 14
+sudo apt install -y qemu-system-x86 ovmf qemu-utils
 ```
 
-Output: `/build/rootfs/`  
-ISO: `scripts/mkiso.sh` → `novi.iso`  
-Test: `scripts/mkvm.sh` → QEMU with KVM
+Then, from a clean checkout:
+
+```bash
+bash build.sh                 # everything: toolchain → kernel → desktop → toolchain packages
+bash scripts/mkiso.sh         # → build/novi.iso   (builds the initramfs if missing)
+bash scripts/mkvm.sh          # boot it in QEMU/KVM
+```
+
+That is the whole flow — `mkiso.sh` and `mkvm.sh` take no arguments and
+their defaults are correct.
+
+**Budget for it.** A first build is a few hours (the cross-toolchain and
+the native GCC dominate), downloads about 4 GB of sources including 1.4 GB
+of linux-firmware, and leaves roughly 13 GB under `/build`. `/build` is a
+hardcoded absolute path, not relative to your checkout.
+
+```bash
+bash build.sh --base-only     # stop after the kernel: bootable console, nothing else
+bash build.sh --from 15       # resume; stages are discovered, so NN is just a number
+```
+
+**One gotcha worth knowing:** `mkiso.sh` reuses an existing
+`build/initramfs.cpio.gz` and only builds one when it is missing. After
+any change under `init/` you need both steps, or you will boot the old
+one and wonder why nothing changed:
+
+```bash
+bash build/16-s6-rc-db.sh                                   # regenerate the s6-rc database
+bash scripts/mkinitramfs.sh --output build/initramfs.cpio.gz
+bash scripts/mkiso.sh
+```
+
+### Testing it
+
+```bash
+bash scripts/mkvm.sh                    # live boot, SDL window
+bash scripts/mkvm.sh --display none     # headless, serial on your terminal
+bash scripts/mkvm.sh --disk             # attach a qcow2 and test the installer
+bash scripts/mkvm.sh --disk --no-iso    # boot the installed disk afterwards
+```
+
+Log in as `root` (no password on the live image). Things worth trying:
+
+```console
+novi-state show                   # the machine's declared configuration
+novi-state diff                   # has anything drifted from it?
+novi-state health                 # are the services actually running?
+novi-hwdetect --report            # what hardware was found, what loaded
+pkg install novi-desktop          # the Wayland desktop, offline from the ISO
+pkg install novi-devel            # gcc, make, pkg-config, headers
+novi-install install --disk /dev/vda   # install to the qcow2 (with --disk)
+```
+
+Output: `/build/rootfs/` · ISO: `build/novi.iso` (~424 MB)
 
 ## Software
 

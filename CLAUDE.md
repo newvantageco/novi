@@ -31,10 +31,13 @@ below for why `/build` is hardcoded and unrelated to the repo checkout path.
 - `bash build/04-s6.sh` — skalibs → execline → s6 → s6-rc → s6-linux-init
 - `bash build/05-kernel.sh` — Linux kernel using `kernel/config-x86_64`
 - `bash scripts/mkinitramfs.sh --output <path>` — build the boot initramfs
-- `bash scripts/mkiso.sh` — squash rootfs + GRUB hybrid ISO (defaults assume
-  `${REPO_ROOT}/rootfs` and `${REPO_ROOT}/kernel/vmlinuz`, but the actual
-  build output lives at `/build/rootfs` and `/build/rootfs/boot/vmlinuz-<ver>`
-  — pass `--rootfs`/`--kernel` explicitly until those defaults are fixed)
+- `bash scripts/mkiso.sh` — squash rootfs + GRUB hybrid ISO. Takes no
+  arguments: its defaults are `${ROOTFS}` and
+  `${ROOTFS}/boot/vmlinuz-${LINUX_VERSION}`, which are correct. (This
+  note used to say the defaults were wrong and to pass
+  `--rootfs`/`--kernel` explicitly. They were fixed; the note was not,
+  and it outlived the bug by long enough to waste real time. Verified
+  by running it bare.)
 - `bash scripts/mkvm.sh [--disk]` — boot the ISO in QEMU/KVM
 - `novi-install install --disk DEV` (on the booted live system) — install to
   disk (RFC 0003)
