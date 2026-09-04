@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # ============================================================
 # mkpkg — Build a .pkg.tar.gz package from a staging directory
 #
@@ -25,11 +25,24 @@
 # implement -- not an oversight, just not this script's target runtime.
 # ============================================================
 #
-# shellcheck disable=SC3040
-# `set -o pipefail` is outside strict POSIX sh (shellcheck's default
-# dialect for a `#!/bin/sh` shebang), but this repo's build host is a
-# regular GNU/Linux machine with bash or dash providing /bin/sh, both
-# of which support it.
+# bash, not sh, and deliberately.
+#
+# This used `#!/bin/sh` with `set -euo pipefail` and a comment claiming
+# "bash or dash providing /bin/sh, both of which support it". Dash does
+# not support pipefail. So mkpkg was broken on every Debian and Ubuntu
+# host -- where /bin/sh IS dash, and which is exactly the build host
+# this project documents -- failing with
+# `set: Illegal option -o pipefail` before packaging anything. It
+# worked only where /bin/sh happened to be bash.
+#
+# Nothing caught it because CI had never run: every workflow was pinned
+# to a nonexistent action SHA. The first genuinely green run found this
+# in minutes.
+#
+# packages/pkg keeps `#!/bin/sh` and keeps pipefail, correctly: it runs
+# on-target under BusyBox ash, which this repo's own busybox build does
+# support it on (verified, not assumed). Different runtime, different
+# answer -- which is the whole reason the two scripts are separate.
 set -euo pipefail
 
 die() { echo "error: $*" >&2; exit 1; }

@@ -765,6 +765,23 @@ doesn't):
   `virtio_blk`, built as a module here, not built-in). `05-kernel.sh`
   checks for `depmod` up front and fails loudly instead.
 
+## Build-host scripts are bash; on-target scripts are sh
+
+`/bin/sh` is **dash** on Debian and Ubuntu, and dash does not support
+`set -o pipefail`. `packages/mkpkg` carried `#!/bin/sh` plus
+`set -euo pipefail` and a comment asserting that "bash or dash ... both
+support it", so it failed with `set: Illegal option -o pipefail` on
+exactly the build host this project documents, and worked only where
+`/bin/sh` happened to be bash. It is `#!/bin/bash` now.
+
+`packages/pkg` keeps `#!/bin/sh` *and* keeps `pipefail`, correctly: it
+runs on-target under BusyBox ash, which this repo's own busybox build
+does support it on (verified with the shipped binary, not assumed).
+Different runtime, different answer — which is why the two are separate
+scripts. When adding either kind, ask which shell will actually run it.
+
+Lint is `bash scripts/lint.sh`, the same command CI runs.
+
 ## Shellcheck signal-to-noise
 
 `shellcheck build/*.sh scripts/*.sh` reports many `SC2086` (unquoted
