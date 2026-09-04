@@ -3,6 +3,15 @@
 
 From scratch. musl libc. s6 init. No bloat.
 
+[![Lint](https://github.com/newvantageco/novi/actions/workflows/shellcheck.yml/badge.svg)](https://github.com/newvantageco/novi/actions/workflows/shellcheck.yml)
+[![Build & Test](https://github.com/newvantageco/novi/actions/workflows/build-test.yml/badge.svg)](https://github.com/newvantageco/novi/actions/workflows/build-test.yml)
+[![Security](https://github.com/newvantageco/novi/actions/workflows/security-scan.yml/badge.svg)](https://github.com/newvantageco/novi/actions/workflows/security-scan.yml)
+[![License: GPL v2](https://img.shields.io/badge/License-GPLv2-blue.svg)](LICENSE)
+
+> **Status: pre-alpha.** Boots, installs, and runs a desktop — in QEMU.
+> It has never been booted on physical hardware. Everything below is
+> verified, and "verified" means verified in a virtual machine.
+
 ---
 
 ### The idea
