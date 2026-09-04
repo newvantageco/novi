@@ -1060,8 +1060,18 @@ service_health() {
         printf '%s DOWN %s-deaths\n' "$name" "$deaths"
     elif [ "$deaths" -gt 0 ] && [ "$secs" -lt 60 ]; then
         printf '%s CRASHLOOP %s-deaths-up-%ss\n' "$name" "$deaths" "$secs"
-    elif [ "$ready" != "true" ] && [ "$secs" -ge 60 ]; then
-        # Declares readiness (notification-fd) and never signalled it.
+    elif [ -f "${dir}/notification-fd" ] && [ "$ready" != "true" ] && [ "$secs" -ge 60 ]; then
+        # Declares readiness and never signalled it -- the RFC 0004
+        # syslog shape.
+        #
+        # The notification-fd test is the whole rule, not a detail. A
+        # service that does not declare readiness never reports ready,
+        # by definition, so without this check every getty, syslog,
+        # klog, acpid and hotplug on the machine turned NOTREADY the
+        # moment it had been up for a minute. That shipped: the test
+        # that was supposed to catch it read the services at up-3s and
+        # saw them all healthy, so a check written to end warning
+        # fatigue would have caused it on every machine that stayed on.
         printf '%s NOTREADY up-%ss\n' "$name" "$secs"
     elif [ "$deaths" -gt 0 ]; then
         printf '%s ok restarted-%s-up-%ss\n' "$name" "$deaths" "$secs"

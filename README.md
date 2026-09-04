@@ -252,6 +252,23 @@ a different exit code: a crash-looping service *matches* the declared
 state, and no amount of applying fixes a bug in a service's own
 script. See [RFC 0014](docs/rfcs/0014-service-health.md).
 
+**And it builds its own software now.** Every binary here used to exist
+because it was cross-compiled somewhere else — which meant the only
+machine that could add software to Novi was a machine not running Novi:
+
+```console
+$ pkg install novi-devel          # gcc, binutils, make, musl headers
+$ gcc -dumpmachine
+x86_64-linux-musl
+$ gcc -O2 -o hello hello.c && ./hello
+hello from a novi-built binary
+```
+
+Offline, from the signed repository on the installation medium. That is
+not the same as rebuilding the distro — autotools, git and Python still
+aren't packaged — but it is the prerequisite for all of it. See
+[RFC 0015](docs/rfcs/0015-native-toolchain.md).
+
 **Stated plainly: none of it has been run on a physical machine yet.**
 Every claim in this repository is QEMU-verified, and §21 is exactly the
 part QEMU cannot answer. See
@@ -381,6 +398,7 @@ HOME_URL="https://novilinux.org"
 - [x] Hotplug — devices that arrive after boot (`novi-hotplug`, RFC 0012)
 - [x] Lid, power button, and a shutdown that finishes (RFC 0013)
 - [x] `novi-state health` — "up" is not "working" (RFC 0014)
+- [x] Native toolchain — Novi compiles its own C and C++ (RFC 0015)
 - [ ] **Boot it on real hardware** ← next, and nothing here replaces it
 - [ ] A published repository + offline release key
 - [ ] A Microsoft-signed shim (real Secure Boot); WPA3 (needs mbedTLS)

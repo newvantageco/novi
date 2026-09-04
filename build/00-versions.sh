@@ -15,6 +15,7 @@ LINUX_VERSION="6.10.3"
 MUSL_VERSION="1.2.5"
 BINUTILS_VERSION="2.43"
 GCC_VERSION="14.2.0"
+MAKE_VERSION="4.4.1"          # GNU make, for the native (self-hosting) toolchain
 BUSYBOX_VERSION="1.36.1"
 
 # s6 ecosystem (skarnet.org)

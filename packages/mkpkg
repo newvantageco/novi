@@ -13,7 +13,7 @@
 #   name=curl
 #   version=8.9.1
 #   arch=x86_64
-#   depends=musl zlib openssl
+#   depends=musl,zlib,openssl        <- COMMAS, not spaces
 #   description=Command-line HTTP client
 #
 # Unlike packages/pkg (the installer, which must run on-target under
@@ -52,6 +52,25 @@ PKG_ARCH="$(get_field arch)"
 [ -n "${PKG_NAME}" ]    || die "MANIFEST missing: name"
 [ -n "${PKG_VERSION}" ] || die "MANIFEST missing: version"
 [ -n "${PKG_ARCH}" ]    || die "MANIFEST missing: arch"
+
+# depends is COMMA-separated -- `pkg` splits it with `tr ',' '\n'`.
+# Spaces here produce a package that builds without complaint, indexes
+# without complaint, and fails at install time with
+# "Dependency 'a b c' not found", naming the entire list as one
+# imaginary package. That happened for real with novi-devel, whose
+# MANIFEST was written from this script's own header comment, which
+# had the separator wrong. Rejecting it here is the only place the
+# mistake is cheap to find.
+case "$(get_field depends)" in
+    *" "*) die "MANIFEST: depends must be comma-separated, not space-separated: $(get_field depends)" ;;
+esac
+
+# Same argument as the index format forbidding '|' outright rather
+# than escaping it: a name with a comma in it cannot be expressed, so
+# do not let one be written.
+case "${PKG_NAME}" in
+    *,*|*"|"*|*" "*) die "MANIFEST: name may not contain a comma, pipe or space: ${PKG_NAME}" ;;
+esac
 
 OUTPUT="${OUTDIR}/${PKG_NAME}-${PKG_VERSION}-${PKG_ARCH}.pkg.tar.gz"
 mkdir -p "${OUTDIR}"

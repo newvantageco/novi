@@ -80,6 +80,11 @@ fetch "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${LINUX_VERSION}.tar.x
 
 # Toolchain
 fetch "https://ftp.gnu.org/gnu/binutils/binutils-${BINUTILS_VERSION}.tar.xz"
+
+# GNU make, for the native toolchain (RFC 0015). BusyBox has no make
+# applet, so without this a Novi machine can run a compiler and still
+# not build anything that ships a Makefile -- which is all of it.
+fetch "https://ftp.gnu.org/gnu/make/make-${MAKE_VERSION}.tar.gz"
 fetch "https://ftp.gnu.org/gnu/gcc/gcc-${GCC_VERSION}/gcc-${GCC_VERSION}.tar.xz"
 fetch "https://musl.libc.org/releases/musl-${MUSL_VERSION}.tar.gz"
 

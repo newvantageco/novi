@@ -53,6 +53,11 @@ below for why `/build` is hardcoded and unrelated to the repo checkout path.
   + Intel SOF into `${ROOTFS}/lib/firmware` (~699 MB)
 - `bash build/27-audio.sh` — alsa-lib + alsa-utils (`amixer`, `alsactl`,
   `aplay`, `speaker-test`)
+- `bash build/28-native-toolchain.sh [musl-dev|make|binutils|gcc|repo|all]`
+  — the native (self-hosting) toolchain, staged into
+  `/build/stage-toolchain` and packaged into `/build/repo` by the
+  `repo` phase, which re-signs the index. Takes a phase argument
+  because the gcc build is long and the others are not
 - **`bash build/16-s6-rc-db.sh` after ANY change under `init/`** (see below),
   then `bash scripts/mkinitramfs.sh --output build/initramfs.cpio.gz` and
   `bash scripts/mkiso.sh` to get it into a bootable image
@@ -292,6 +297,42 @@ one of them on a machine `novi-state diff` called converged.
   check is deliberately incomplete — it runs seconds after `s6-rc
   change` returns, so a service about to crash-loop may not have died
   yet. It reports what is already true, not what is about to be.
+
+## Architecture: the native toolchain
+
+RFC 0015 (`docs/rfcs/0015-native-toolchain.md`). `pkg install
+novi-devel` puts gcc, binutils, make and the musl headers on a running
+Novi, which compiles and runs its own C and C++.
+
+- **Cross-native is not cross.** `02-toolchain.sh` builds
+  `--host=this-machine --target=novi`; `28-native-toolchain.sh` builds
+  `--build=this-machine --host=novi --target=novi`. Hence
+  `--with-sysroot=/` (baked in — on the machine running this compiler
+  the root filesystem *is* the sysroot) with
+  `--with-build-sysroot=${SYSROOT}` (where those headers live here), and
+  `--disable-bootstrap` (a bootstrap has to *run* the compiler, and
+  these binaries do not run on the build host).
+- **`depends=` in a MANIFEST is COMMA-separated.** `pkg` splits it with
+  `tr ',' '\n'`. `mkpkg`'s header comment said spaces for a long time,
+  and a package written from it built fine, indexed fine, and failed at
+  install naming the whole list as one imaginary package. `mkpkg` now
+  rejects a space in `depends` outright — same argument as the index
+  format forbidding `|` rather than escaping it.
+- **musl's linker searches `/lib:/usr/local/lib:/usr/lib` and nothing
+  else.** GCC installs its runtime libs to `/usr/lib64`, so
+  `libstdc++.so.6` shipped where nothing looks: C worked perfectly and
+  C++ died at exec. Anything installing to `lib64` on this target needs
+  moving.
+- **`--disable-gprofng`** — it calls `fopen64`/`fseeko64`/`ftello64` and
+  musl 1.2.4 dropped the LFS64 aliases. Same breakage as e2fsprogs in
+  RFC 0008; not worth a patch for a profiler nobody asked for.
+- **The toolchain is packages, never the base image** (~270 MB
+  installed, 98 MB compressed). It ships in the repository on the ISO
+  because until a repository is published that medium is the only
+  mirror there is.
+- **"Novi can compile C" is not "Novi can rebuild itself."** That needs
+  autotools, git, Python and a kernel build, none of which are packaged.
+  Do not overstate this one.
 
 ## Architecture: installation splits `grub-install` in half
 

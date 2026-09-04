@@ -1759,6 +1759,83 @@ could show a failing service, `novi-install` could refuse to call an
 install finished, and `/run/uncaught-logs/current` holds the *reason*
 that would turn "klog is down" into "klog is down because ...".
 
+## 25. A native toolchain
+
+RFC 0015. Fourteen milestones shared one unstated property: **the only
+machine that could add software to Novi was a machine that was not
+running Novi.** `02-toolchain.sh` produces a cross-compiler -- it runs
+on the build host and emits Novi binaries -- and every package in the
+repository came out of it. That is how a distribution starts and it is
+not where one can stay. Nobody can contribute without first
+reproducing this entire build tree (not "clone and build a package",
+but clone, build a cross-toolchain, build a sysroot, then build a
+package), and everything downstream is gated on it: the developer
+audience needs a compiler by definition, the pentest toolkit is mostly
+Python/Ruby/Go/Perl that has to be built, and a browser needs Rust and
+a large native dependency tree.
+
+`pkg install novi-devel` now installs gcc 14.2, binutils 2.43, GNU make
+4.4.1 and the musl headers (~270 MB installed, 98 MB compressed) from
+the signed repository on the machine's own installation medium, with no
+network. The ISO went from 329 MB to 423 MB to carry them, which is
+worth it while a published repository is still §2 on this list and the
+medium is the only mirror that exists.
+
+The builds are *cross-native* -- `--build=host --host=novi
+--target=novi` -- which is a different and fussier thing than the
+cross-compiler in §1 and drives every unusual configure flag:
+`--with-sysroot=/` is what gets baked in (on the machine that runs this
+compiler the root filesystem IS the sysroot) with
+`--with-build-sysroot` pointing at where those headers live on the
+builder, and `--disable-bootstrap` because a bootstrap has to RUN the
+compiler three times and these binaries do not run on the build host.
+`musl-dev` involves no build at all: every file in it was produced by
+§1 and had simply never been copied onto the target, because until now
+nothing on the target could have used it.
+
+**Verified end to end on a booted machine**: `pkg sync` verifying the
+index signature, `pkg install novi-devel` resolving and installing all
+four dependencies offline, `gcc -dumpmachine` reporting
+`x86_64-linux-musl`, then `gcc -O2 -o hello hello.c && ./hello`
+printing `hello from a novi-built binary`, `g++` printing `c++ works`,
+and `make` driving the same build from a Makefile. `readelf -d` on the
+result shows a single `NEEDED: libc.so` -- a musl binary, built by
+Novi, on Novi.
+
+Four bugs, and the last one is the interesting one:
+
+- **gprofng does not build against musl** (`fopen64`/`fseeko64`/
+  `ftello64`; musl 1.2.4 dropped the LFS64 aliases). Disabled rather
+  than patched -- same breakage e2fsprogs needed a patch for in §18,
+  and patching a profiler nobody asked for in order to ship it inside a
+  compiler package is work for its own sake.
+- **`depends=` is comma-separated and `mkpkg`'s own header said
+  spaces.** The package built, indexed and then failed at install
+  naming the entire list as one imaginary dependency. `mkpkg` now
+  refuses a space in `depends` outright, on the same argument the index
+  format uses for forbidding `|` rather than escaping it.
+- **GCC installs its runtime libraries to `/usr/lib64`**, and musl's
+  linker searches `/lib:/usr/local/lib:/usr/lib` and nothing else. C
+  compiled and ran perfectly; C++ compiled, linked, and died at exec
+  with "Error loading shared library libstdc++.so.6". One wrong
+  directory, and only the second language noticed.
+- **§24's own `NOTREADY` check was crying wolf.** A service that does
+  not declare `notification-fd` never reports ready, by definition, so
+  every getty, syslog, klog, acpid and hotplug turned `NOTREADY` the
+  moment it had been up for a minute. It shipped because §24's test
+  read the services at `up-3s`: **the test was too fast to see the
+  bug**, which is the same failure mode as §23's ten-second `poweroff`
+  test, arriving one milestone later in code written by the same hand
+  that had just documented it. A check written specifically to end
+  warning fatigue would have caused it on every machine left switched
+  on.
+
+**What this does not yet mean: Novi cannot rebuild itself.** Compiling
+a C file is not building this distribution -- that needs a kernel
+build, the autotools stack, `git` to fetch source and Python for
+`pkgsplit`, none of which are packaged. The narrower claim is the one
+that matters first: software can now be built *for* Novi *on* Novi.
+
 ## Status Summary
 
 | # | Area | State |
@@ -1787,9 +1864,10 @@ that would turn "klog is down" into "klog is down because ...".
 | 22 | Hotplug | ✅ Supervised uevent listener (busybox `uevent`, 128 MB netlink buffer) + `novi-hotplug`: §21's modalias rule against the kernel's event stream, syslog notes, `alsactl init` for late-arriving sound cards. QMP-verified at runtime — a driver in no list loading on plug, a USB stick mounting and reading back, clean removal. Automount (needs policy), per-interface DHCP and a desktop that notices are roadmap |
 | 23 | Power events & shutdown | ✅ acpid wired to lid and power button, `power.lid`/`power.button` declared and read at event time (with invalid values surfacing as drift, since these keys cannot drift and so are never converged). Found and fixed a bug present since the beginning: **the machine could not shut down while anyone was logged in** — an interactive shell ignores SIGTERM and `timeout-down` was unset, so s6-rc waited forever and shutdownd's `wait_pid()` never returned. Suspend/resume now proven. Power-button-after-S3 is broken in QEMU, traced to a latched ACPI status bit below all of our code |
 | 24 | Service health | ✅ `novi-state health` — `DOWN`/`CRASHLOOP`/`NOTREADY` from `s6-svstat` + `s6-svdt`, closing a blind spot that had hidden four bugs across §14/§19/§23. Deliberately NOT folded into `diff`: a crash-looping service matches the document, and `apply` cannot fix a run script, so drift and health are separate questions with separate exit codes. All four states verified by reproducing the original bugs on a booted machine. Nothing consumes the signal yet (panel, installer, log excerpts) |
+| 25 | Native toolchain | ✅ `pkg install novi-devel` → gcc 14.2 + binutils 2.43 + make 4.4.1 + musl headers, cross-native built, installed offline from the medium's own signed repo; C and C++ compiled and run on a booted Novi, `make` drives a Makefile. Four bugs found, including §24's `NOTREADY` firing on every service that never declares readiness. **Not** self-rebuilding yet: autotools, git, Python and a kernel build are unpackaged. `-dev` packages for the existing libraries, and gdb, are roadmap |
 
-**Next concrete step: write the ISO to a USB stick and boot a real
-machine.** This is no longer a development task, and that is the point.
+**Next concrete step: still to write the ISO to a USB stick and boot a
+real machine.** This is no longer a development task, and that is the point.
 Twenty-one milestones were each verified the same honest way -- boot it
 in QEMU and prove the behaviour end to end -- and §21 is where that
 method runs out of information. Everything it added exists precisely
