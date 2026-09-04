@@ -41,6 +41,8 @@ below for why `/build` is hardcoded and unrelated to the repo checkout path.
 - `bash build/20-repo.sh` — build and sign the first-party package
   repository into `/build/repo` (RFC 0006); serve that directory over HTTP
   and point a machine at it with `mirror =` in `/etc/novi/pkg.conf`
+- `bash build/23-e2fsprogs.sh`, `bash build/24-novi-gpt.sh` — real `mke2fs`
+  (journalled ext4) and the GPT writer UEFI installs need (RFC 0008)
 - `bash build/21-desktop-split.sh` — **destructive**: removes the packaged
   desktop from `/build/rootfs`, leaving a console-only base (RFC 0007).
   Must run after 20; re-running 06..14 puts the files back
@@ -366,6 +368,54 @@ pseudo-device, and it sorts before `eth0` — confirmed live: "network:
 using sit0", then udhcpc broadcasting DISCOVER forever down a tunnel with
 no link. `pick_interface()` requires `/sys/class/net/*/type` to be 1
 (ARPHRD_ETHER).
+
+## Architecture: two firmware paths, one installer
+
+RFC 0008 (`docs/rfcs/0008-uefi-and-journalled-root.md`). `novi-install`
+detects firmware from `/sys/firmware/efi` — the kernel's own record of how
+it got here — and branches:
+
+| | table | bootloader | grub.cfg | needs `search` |
+|---|---|---|---|---|
+| UEFI | GPT via `novi-gpt` | self-contained `BOOTX64.EFI` on the ESP | on the ESP (`/EFI/BOOT`) | yes |
+| BIOS | MBR via BusyBox `fdisk` | `boot.img` + `core.img` in the gap | on the root fs | no |
+
+Things not to undo:
+
+- **`novi-gpt` exists because BusyBox `fdisk` cannot create a GPT** (it
+  reads one, it cannot write one), and the target has no sfdisk/sgdisk/
+  parted. It writes exactly one layout on purpose: a tool that can express
+  every layout is a tool that can express the wrong one. The two classic
+  GPT bugs are handled explicitly — GUIDs are byte literals in GPT's
+  mixed-endian order, and the header CRC covers `header_size` bytes with
+  the CRC field zeroed, not the sector.
+- **An ESP on an MBR label was considered and rejected.** Plenty of
+  firmware boots it, OVMF included — which is the problem: it would pass
+  here and fail on someone's laptop.
+- **`/EFI/BOOT/BOOTX64.EFI`, not a vendor dir + NVRAM entry.** The
+  removable-media path needs no `efibootmgr`, no writable EFI variables,
+  and survives firmware forgetting its boot order.
+- **e2fsprogs installs `mke2fs.e2fsprogs`, beside BusyBox's applet, never
+  over it** — and `blkid`/`findfs`/`fsck`/`uuidgen` are deliberately NOT
+  installed, because `mkinitramfs.sh` parses BusyBox `blkid`'s exact
+  output. Its musl patch (`#define llseek lseek` defines the wrong name;
+  musl 1.2.4 dropped the LFS64 aliases) fails the build loudly if it stops
+  applying.
+- **`CONFIG_NLS_CODEPAGE_437` and friends are load-bearing.**
+  `FAT_DEFAULT_CODEPAGE=437` was set with every `NLS_*` symbol unset, so
+  `mount -t vfat` failed with "Unable to load NLS charset cp437" — no ESP,
+  no UEFI install, and a quietly broken vfat fallback in the initramfs.
+- **`rc.init` runs `mount -a`.** Nothing on this system had ever read
+  `/etc/fstab`: s6-linux-init stage 1 mounts the kernel filesystems and
+  stops, so the installer's fstab was documentation. Confirmed live —
+  `/boot/efi` was an empty directory on a working UEFI install.
+
+**UEFI is fast in QEMU, contrary to a belief this repo carried for a
+while.** OVMF on `q35` **without USB controllers** reaches a login in ~17
+seconds; the old "OVMF is pathologically slow" note had bisected the
+slowdown to xhci and then never re-tested without it. Always pass
+`-vga none` when screendumping a compositor, too — `-machine pc` adds a
+std VGA device and `screendump` defaults to device 0.
 
 ## Architecture: cross-toolchain bootstrap order
 

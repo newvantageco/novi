@@ -1251,6 +1251,83 @@ before `eth0`. Confirmed live -- "network: using sit0", then udhcpc
 broadcasting DISCOVER forever down a tunnel with no link.
 `pick_interface()` now requires ARPHRD_ETHER.
 
+## 18. UEFI Installation & a Journalled Root
+
+RFC 0008. RFC 0003 shipped an installer with two limitations stated up
+front -- BIOS/MBR only, and a journal-less ext2 root -- and between
+them they meant **Novi could not be installed on a typical machine, and
+should not be trusted with data on one.**
+
+Essentially every machine built since about 2012 boots UEFI by default.
+BIOS-only is not a missing convenience; it is "this operating system
+does not install on your laptop", and everything else in this document
+is worth nothing if it cannot get onto a disk. And BusyBox's mke2fs
+writes ext2: on real hardware an unclean shutdown becomes a full fsck
+and a genuine risk to data, where a journal replays a few seconds of
+log. That is a correctness gap, not a missing feature.
+
+**The reason UEFI had been deferred was a stale belief.** OVMF was
+recorded as "pathologically slow" in this project's sandbox -- but that
+slowdown had been bisected to USB controller emulation and never
+re-tested without it. A UEFI boot of the ISO reaches a login prompt in
+**17 seconds**. Worth writing down as a pattern: a measurement kept as
+a fact, past the point where the thing it measured had been fixed.
+
+BusyBox can neither write a GPT (its fdisk reads one and cannot create
+one) nor make a journal, and the target has no sfdisk, sgdisk or
+parted. So two additions:
+
+- **`novi-gpt`**, a small static C program that writes exactly one
+  layout: a 512 MiB EFI System partition and a Linux root. Deliberately
+  not a general partitioner -- a tool that can express every layout is
+  a tool that can express the wrong one, and this runs at the moment a
+  disk is being repartitioned. Verified against tools that did not
+  write it: util-linux `partx` plus an independent parser checking all
+  three CRCs, the protective MBR and both type GUIDs.
+- **e2fsprogs**, installed selectively as `mke2fs.e2fsprogs` beside
+  BusyBox's applet rather than over it -- and pointedly NOT installing
+  its `blkid`/`findfs`/`fsck`, which BusyBox already provides and which
+  other parts of this system parse the exact output of.
+
+The alternative to GPT was an ESP on an MBR label with type 0xEF.
+Plenty of firmware boots that, OVMF included -- which is exactly the
+problem. It would have passed the test here and failed on somebody's
+laptop, and "works on my emulator" is not a claim to make about the
+program that partitions your disk.
+
+`BOOTX64.EFI` goes to the removable-media path `/EFI/BOOT/`, not a
+vendor directory plus an NVRAM entry: no efibootmgr, no writable EFI
+variables, and it survives firmware forgetting its boot order -- which
+is most firmware, eventually.
+
+Two bugs surfaced, both of the same "described but not real" shape this
+document keeps finding:
+
+- **The kernel had no character sets.**
+  `CONFIG_FAT_DEFAULT_CODEPAGE=437` was set with every `NLS_*` symbol
+  unset, so `mount -t vfat` would fail with "Unable to load NLS charset
+  cp437" -- the ESP could not have been mounted at all. It had also
+  been quietly breaking the initramfs's vfat fallback for live media,
+  unnoticed because the ISO9660 path always matched first.
+- **Nothing had ever read `/etc/fstab`.** s6-linux-init's stage 1
+  mounts the kernel-owned filesystems and stops, so the fstab the
+  installer writes was documentation. Confirmed on the first successful
+  UEFI install: `/boot/efi` existed as an empty directory and the ESP
+  named in fstab was simply not mounted -- a kernel update would have
+  written the new image to the root filesystem and left the firmware
+  booting the old one. `rc.init` now runs `mount -a`.
+
+Verified both ways: a UEFI install under OVMF cold-booting from its own
+disk with the ISO detached (`/sys/firmware/efi` present, `/dev/vda2`
+ext4 with `has_journal` and `journal_checksum_v3`, the ESP mounted at
+`/boot/efi` with `codepage=437`, 25 packages, desktop up, declared
+state clean, a marker surviving a further reboot), and the BIOS/MBR
+path re-verified unchanged.
+
+Secure Boot is the notable gap: `BOOTX64.EFI` is unsigned, so a machine
+with Secure Boot enabled refuses it. That needs a shim, a key somebody
+enrols, and a decision about whose key.
+
 ## Status Summary
 
 | # | Area | State |
@@ -1272,27 +1349,28 @@ broadcasting DISCOVER forever down a tunnel with no link.
 | 15 | Users & accounts | ✅ `users.*` domain, a real group database, installer-created accounts with passwords; "configuration is declared, secrets are not" is now a stated platform rule. Non-root `novi-settings`, `users.*.home`/`.uid`, and undeclared-user removal are roadmap |
 | 16 | Package repository & signing | ✅ Signed index (Ed25519 via a hash-pinned TweetNaCl verifier on-target), SHA-256 per package, `pkg sync` + mirror fetch, `packages.*` state domain, first-party desktop repository; both tamper cases verified live. Desktop still also in the base image; release keys, index expiry and version constraints are roadmap |
 | 17 | Base/desktop split | ✅ Console-only base (one library left in /usr/lib), desktop is 25 packages on the medium, split computed from the ELF graph with a build-failing safety check; live-desktop boot, `pkg install novi-desktop` offline, and `novi-install --profile desktop` all verified. Separate console/desktop ISOs and finer-grained packages are roadmap |
+| 18 | UEFI install & journalled root | ✅ Firmware detected from /sys/firmware/efi; GPT+ESP via a purpose-built `novi-gpt`, real ext4 via e2fsprogs, one menu written to two prefixes. Both paths verified end to end. Secure Boot, kernel updates to the ESP, swap//home/encryption are roadmap |
 
-**Next concrete step: two ISOs, and a published repository.** The split
-makes a console ISO and a desktop ISO possible -- right now one image
-carries both paths, which is the correct intermediate step and not the
-end of it. Alongside that, the repository still only exists on whatever
-machine ran `build/20-repo.sh`: a real release key (offline, signing
-off the build host), something at a stable URL, and a signed
-`valid-until` so a validly-signed *stale* index cannot be replayed to
-hold a machine at a version with a known hole.
+**Next concrete step: WiFi.** With RFC 0008 landed, Novi installs on
+real hardware -- and then a laptop with no Ethernet port cannot reach
+the package repository, which is the whole delivery mechanism for
+everything past the base. WiFi needs a supplicant (`wpa_supplicant` or
+`iwd`) in the base image, which is the first genuinely new upstream
+dependency in a while, plus `network.wifi.*` keys and somewhere to keep
+a PSK -- and a PSK is a secret, so §15's rule applies: it does not go
+in `system.conf`.
 
 Ordered honestly, what is left:
 
-1. **Two ISOs and a published repository** -- including the release-key
-   and index-expiry work above.
-2. **Finer-grained packages** -- `novi-shell` still drags the whole
-   wlroots stack; someone who wants only `foot` under another
-   compositor should not need it. Packaging, not new mechanism.
-3. **The remaining `network.*` work** -- static IPv4, WiFi (needs a
-   supplicant in the base image), DHCPv6.
-4. **UEFI/GPT install and a journalled filesystem** -- the two stated
-   limits of RFC 0003's v1.
+1. **WiFi**, and the rest of `network.*` -- static IPv4, DHCPv6.
+2. **Two ISOs and a published repository** -- a console image and a
+   desktop image, an offline release key, something at a stable URL,
+   and a signed `valid-until` so a validly-signed *stale* index cannot
+   be replayed to hold a machine at a version with a known hole.
+3. **Secure Boot**, so an installed machine does not require disabling
+   a security feature to boot.
+4. **Finer-grained packages, and more root layouts** -- swap, a
+   separate `/home`, encryption.
 
 ---
 

@@ -71,8 +71,9 @@ novi/
 │   ├── 03-base.sh            ← BusyBox userland + rootfs layout
 │   ├── 04-s6.sh              ← s6 supervision stack
 │   ├── 05-kernel.sh          ← Linux kernel
-│   └── 06..22-*.sh           ← Wayland stack, desktop, pkg, novi-state,
-│                                installer, networking, signed repo, split
+│   └── 06..24-*.sh           ← Wayland stack, desktop, pkg, novi-state,
+│                                installer, networking, signed repo, split,
+│                                e2fsprogs, novi-gpt
 ├── novi-shell/               ← the compositor (RFC 0001)
 ├── novi-panel/               ← top bar + taskbar
 ├── novi-launcher/            ← Alt+Space search / symbol picker
@@ -80,6 +81,7 @@ novi/
 ├── novi-lockscreen/          ← Super+L session lock
 ├── novi-screenshot/          ← PrintScreen capture
 ├── novi-verify/              ← Ed25519 verifier (package trust root)
+├── novi-gpt/                 ← GPT writer, for UEFI installs (RFC 0008)
 ├── tools/pkgsplit/           ← computes the base/desktop split (RFC 0007)
 ├── init/
 │   ├── s6/
@@ -217,9 +219,20 @@ that governs the machine rather than a fact about it nobody wrote down.
 Passwords are the one thing deliberately kept out of that document; see
 [RFC 0005](docs/rfcs/0005-users-and-accounts.md).
 
-v1 is BIOS/MBR only and one journal-less ext2 partition. Those limits
-and the reasoning are in
-[`docs/rfcs/0003-installation-and-persistence.md`](docs/rfcs/0003-installation-and-persistence.md).
+**Both firmware paths work.** The machine's own firmware decides which,
+and `--firmware` overrides it:
+
+| | layout | bootloader |
+|---|---|---|
+| UEFI | GPT: 512 MiB ESP + ext4 root | `BOOTX64.EFI` on the ESP |
+| BIOS | MBR: one ext4 partition at sector 2048 | `boot.img` in the MBR, `core.img` in the gap |
+
+The root filesystem is real **ext4 with a journal** — an unclean
+shutdown replays a log instead of fscking the whole disk. BusyBox can
+neither write a GPT nor make a journal, so Novi ships `novi-gpt` (a
+small static GPT writer) and e2fsprogs' `mke2fs`. See
+[RFC 0008](docs/rfcs/0008-uefi-and-journalled-root.md) and
+[RFC 0003](docs/rfcs/0003-installation-and-persistence.md).
 
 ## Stack
 
@@ -258,6 +271,7 @@ HOME_URL="https://novilinux.org"
 - [x] Real users (`users.*`, account database, installer accounts, RFC 0005)
 - [x] Signed package repository (`pkg sync`, `novi-verify`, `packages.*`, RFC 0006)
 - [x] Console-only base; the desktop is packages (RFC 0007)
+- [x] UEFI/GPT install + journalled ext4 root (RFC 0008)
 - [ ] Separate console and desktop ISOs ← next
 - [ ] More state domains: keybindings, static IP, WiFi
 - [ ] UEFI/GPT install, journalled root

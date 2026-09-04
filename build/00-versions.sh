@@ -60,6 +60,11 @@ FCFT_VERSION="2.5.1"
 FOOT_VERSION="1.9.2"
 JETBRAINS_MONO_VERSION="2.304"
 
+# e2fsprogs: real mke2fs and e2fsck. BusyBox's mke2fs writes ext2 with
+# no journal, which on real hardware turns an unclean shutdown into a
+# full fsck and a risk to data rather than a journal replay. RFC 0008.
+E2FSPROGS_VERSION="1.47.1"
+
 # TweetNaCl is versioned by release date, not a semver tag. This is the
 # only "version" its authors publish; the sha256 pins in 01-fetch.sh
 # are what actually fix the code.

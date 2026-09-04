@@ -315,6 +315,35 @@ if [[ -d "${GRUB_LIB_DIR}" ]] && command -v grub-mkimage &>/dev/null; then
     mkdir -p "${NOVI_BOOT_DIR}/i386-pc"
     cp "${GRUB_LIB_DIR}"/*.mod "${GRUB_LIB_DIR}"/*.lst "${NOVI_BOOT_DIR}/i386-pc/" 2>/dev/null || true
     echo ">>> BIOS boot artifacts: boot.img $(stat -c%s "${NOVI_BOOT_DIR}/boot.img")B, core.img $(stat -c%s "${NOVI_BOOT_DIR}/core.img")B, $(ls "${NOVI_BOOT_DIR}/i386-pc" | wc -l) modules"
+
+    # ── UEFI ──────────────────────────────────────────────────────────────
+    #
+    # A SELF-CONTAINED bootx64.efi: every module it needs is embedded,
+    # so the installer copies exactly one file onto the ESP and there is
+    # no module directory to keep in sync. The BIOS half cannot do that
+    # -- core.img has to stay small enough for the post-MBR gap -- which
+    # is why the two differ.
+    #
+    # prefix /EFI/BOOT means GRUB looks for grub.cfg beside itself on
+    # the partition it was loaded from (the ESP), so it needs no search
+    # to find its own configuration.
+    #
+    # ext2 reads ext4 too; it is the kernel and initramfs on the root
+    # filesystem that this has to be able to load.
+    GRUB_EFI_DIR="/usr/lib/grub/x86_64-efi"
+    if [[ -d "${GRUB_EFI_DIR}" ]]; then
+        grub-mkimage \
+            -O x86_64-efi \
+            -o "${NOVI_BOOT_DIR}/bootx64.efi" \
+            -p '/EFI/BOOT' \
+            part_gpt part_msdos fat ext2 normal linux configfile \
+            search search_fs_uuid search_label search_fs_file \
+            echo test ls boot gzio all_video efi_gop efi_uga \
+            serial terminal minicmd reboot halt
+        echo ">>> UEFI boot artifact: bootx64.efi $(stat -c%s "${NOVI_BOOT_DIR}/bootx64.efi")B"
+    else
+        echo ">>> WARNING: ${GRUB_EFI_DIR} not found -- no UEFI install support" >&2
+    fi
 else
     # Not fatal: the ISO still boots and runs live. Only `novi-install`
     # is affected, and it checks for these and says so plainly rather

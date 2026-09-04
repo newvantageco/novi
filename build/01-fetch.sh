@@ -198,6 +198,10 @@ else
     echo "[skip]  ${JBMONO_ZIP} already exists"
 fi
 
+# e2fsprogs — real mke2fs (journalled ext4) and e2fsck. From tytso's own
+# kernel.org directory, the upstream home of the project.
+fetch "https://www.kernel.org/pub/linux/kernel/people/tytso/e2fsprogs/v${E2FSPROGS_VERSION}/e2fsprogs-${E2FSPROGS_VERSION}.tar.xz"
+
 # TweetNaCl — the Ed25519 implementation novi-verify is built on, and
 # therefore the trust root for every package this system installs.
 # Public domain, by the NaCl authors (Bernstein, Janssen, Lange,

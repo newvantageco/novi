@@ -47,6 +47,26 @@ ln -sfn /proc/self/fd/0 /dev/stdin
 ln -sfn /proc/self/fd/1 /dev/stdout
 ln -sfn /proc/self/fd/2 /dev/stderr
 
+### 1b. Mount whatever /etc/fstab asks for.
+###
+### Nothing on this system had ever read /etc/fstab. s6-linux-init's
+### stage 1 mounts the kernel-owned filesystems and stops there, so the
+### file novi-install writes was documentation rather than
+### configuration -- confirmed live on a UEFI install, where
+### /boot/efi existed as an empty directory and the EFI System
+### partition named in fstab was simply not mounted. A kernel update
+### would have written the new image into the root filesystem and left
+### the firmware booting the old one.
+###
+### `mount -a` skips entries already mounted and honours `noauto`, so
+### the root and the pseudo-filesystems listed for documentation are
+### no-ops here. The guard is for the live image, which has no fstab at
+### all; `|| true` is because a machine must still boot when a data
+### partition someone added has gone missing.
+if [ -f /etc/fstab ]; then
+    mount -a || echo 'rc.init: some /etc/fstab entries could not be mounted' 1>&2
+fi
+
 ### 2. Start the s6-rc-managed services into the already-running
 ### scandir (/run/service, seeded by s6-linux-init from run-image).
 s6-rc-init -c /etc/s6-rc/compiled -l /run/s6-rc /run/service

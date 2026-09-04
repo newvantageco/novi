@@ -16,13 +16,22 @@
 # directory copy, all of which BusyBox can do. See
 # docs/rfcs/0003-installation-and-persistence.md.
 #
-# Scope of v1, stated plainly rather than discovered later:
-#   * BIOS/MBR boot only. No UEFI, no GPT.
-#   * One partition, the whole disk, ext2 (BusyBox mke2fs makes no
-#     journal). The kernel mounts it with the ext4 driver
-#     (CONFIG_EXT4_USE_FOR_EXT2=y), but an unclean shutdown still means
-#     a full fsck rather than a journal replay.
-#   * Wipes the target disk completely.
+# Both firmware paths are supported (RFC 0008). The machine's own
+# firmware decides which, and `--firmware` overrides it:
+#
+#   UEFI   GPT: a 512 MiB EFI System partition and an ext4 root.
+#          novi-gpt writes the table (BusyBox fdisk cannot create a
+#          GPT); a self-contained bootx64.efi goes on the ESP.
+#   BIOS   MBR: one ext4 partition starting at sector 2048, with
+#          boot.img in the MBR and core.img in the gap behind it.
+#
+# The root filesystem is real ext4 with a journal, made by e2fsprogs'
+# mke2fs rather than BusyBox's -- an unclean shutdown replays a log
+# instead of fscking the whole disk.
+#
+# Still true, and still worth stating: this wipes the target disk
+# completely. There is no partial install, no dual-boot layout, and no
+# undo.
 #
 # shellcheck disable=SC3043
 # `local` is outside strict POSIX sh, which is what shellcheck's `sh`
@@ -45,9 +54,16 @@ need_root() {
 LIVE_DIR="${NOVI_LIVE_DIR:-/run/live}"       # ISO, bind-mounted by /init
 MNT="${NOVI_INSTALL_MNT:-/mnt/novi-target}"
 ROOT_LABEL="${NOVI_ROOT_LABEL:-NOVI_ROOT}"
+ESP_LABEL="${NOVI_ESP_LABEL:-NOVI_ESP}"
+ROOT_FSTYPE="ext4"
 
 TARGET_DISK=""
 NEW_HOSTNAME=""
+FIRMWARE=""
+ESP_MIB=512
+ROOT_PART=""
+ESP_PART=""
+ESP_MOUNTED=0
 PROFILE="desktop"
 TARGET_MIRROR=""
 NEW_USER=""
@@ -71,6 +87,11 @@ Usage:
 Options:
   --disk DEV          target disk, e.g. /dev/sda or /dev/vda (REQUIRED)
   --hostname NAME     hostname for the installed system (default: keep)
+  --firmware F        uefi or bios. Default: whatever this machine
+                      booted with, which is almost always what you want
+                      -- installing the other one produces a disk this
+                      machine cannot boot.
+  --esp-mib N         size of the EFI System partition (default 512)
   --profile P         desktop (default) or console. `desktop` installs the
                       desktop packages from the repository on this medium
                       and declares them, so the installed machine boots
@@ -103,6 +124,10 @@ cleanup() {
         # off first or the unmount below fails with EBUSY and leaves the
         # target filesystem mounted after a failed install.
         umount "$MNT/mnt/novi-repo" 2>/dev/null || true
+        # The ESP is mounted inside the target, so it comes off before
+        # the root does or the unmount below fails with EBUSY.
+        umount "$MNT/boot/efi" 2>/dev/null || true
+        ESP_MOUNTED=0
         umount "$MNT" 2>/dev/null || true
         MOUNTED=0
     fi
@@ -172,11 +197,32 @@ cmd_list() {
 # nvme0n1 -> nvme0n1p1, but sda -> sda1. The `p` goes in exactly where
 # the base name already ends in a digit.
 partition_of() {
-    local disk="$1"
+    local disk="$1" n="$2"
     case "$disk" in
-        *[0-9]) printf '%sp1\n' "$disk" ;;
-        *)      printf '%s1\n'  "$disk" ;;
+        *[0-9]) printf '%sp%s\n' "$disk" "$n" ;;
+        *)      printf '%s%s\n'  "$disk" "$n" ;;
     esac
+}
+
+# What this machine booted with. /sys/firmware/efi exists if and only
+# if the kernel was started by UEFI firmware -- it is the kernel's own
+# record of how it got here, not a guess from hardware.
+#
+# Defaulting to it matters: installing the other one produces a disk
+# this machine cannot boot, and the person doing the install is
+# unlikely to find out until they remove the medium.
+detect_firmware() {
+    if [ -n "$FIRMWARE" ]; then
+        case "$FIRMWARE" in
+            uefi|bios) return 0 ;;
+            *) die "unknown firmware '$FIRMWARE' (expected: uefi, bios)" ;;
+        esac
+    fi
+    if [ -d /sys/firmware/efi ]; then
+        FIRMWARE=uefi
+    else
+        FIRMWARE=bios
+    fi
 }
 
 unmount_everything_on() {
@@ -188,26 +234,69 @@ unmount_everything_on() {
     done
 }
 
-partition_disk() {
-    local disk="$1" part
+wait_for_partition() {
+    local part="$1" disk="$2" tries=0
+    while [ ! -b "$part" ] && [ "$tries" -lt 10 ]; do
+        tries=$(( tries + 1 ))
+        sleep 1
+        partprobe "$disk" 2>/dev/null || true
+        if [ -x /sbin/mdev ]; then
+            mdev -s 2>/dev/null || true
+        fi
+    done
+    [ -b "$part" ] || die "partition $part never appeared after partitioning $disk"
+}
 
-    msg "Partitioning $disk (MBR, one Linux partition)"
+wipe_disk_ends() {
+    local disk="$1" sectors
 
-    unmount_everything_on "$disk"
-
-    # Zero the first 1 MiB: the old partition table, any old bootloader,
-    # and the post-MBR gap core.img is about to go into. Also zero the
-    # last 1 MiB so a leftover GPT backup header at the end of the disk
-    # cannot make the kernel prefer a GPT that no longer exists.
-    dd if=/dev/zero of="$disk" bs=1M count=1 conv=notrunc 2>/dev/null || \
+    # Zero the first 1 MiB: any old partition table, any old bootloader,
+    # and the post-MBR gap. Also the last 1 MiB, so a leftover GPT
+    # backup header at the end of the disk cannot make the kernel
+    # prefer a GPT that no longer exists -- or, when we are the ones
+    # writing a GPT, so a stale one cannot be mistaken for ours.
+    dd if=/dev/zero of="$disk" bs=1M count=1 conv=notrunc 2>/dev/null ||
         die "cannot write to $disk"
-    local sectors
     sectors="$(cat "/sys/block/$(basename "$disk")/size" 2>/dev/null || echo 0)"
     if [ "$sectors" -gt 4096 ]; then
         dd if=/dev/zero of="$disk" bs=512 count=2048 \
            seek=$(( sectors - 2048 )) conv=notrunc 2>/dev/null || true
     fi
     sync
+}
+
+# ---------------------------------------------------------------------------
+# Partitioning
+# ---------------------------------------------------------------------------
+
+partition_uefi() {
+    local disk="$1"
+
+    msg "Partitioning $disk (GPT: EFI System + Linux)"
+    unmount_everything_on "$disk"
+    wipe_disk_ends "$disk"
+
+    command -v novi-gpt >/dev/null 2>&1 ||
+        die "novi-gpt not found; cannot write a GPT (BusyBox fdisk cannot)"
+    novi-gpt "$disk" --esp-mib "$ESP_MIB" >&2 ||
+        die "novi-gpt failed on $disk"
+
+    partprobe "$disk" 2>/dev/null || true
+    sync
+
+    ESP_PART="$(partition_of "$disk" 1)"
+    ROOT_PART="$(partition_of "$disk" 2)"
+    wait_for_partition "$ESP_PART" "$disk"
+    wait_for_partition "$ROOT_PART" "$disk"
+    info "ESP $ESP_PART, root $ROOT_PART"
+}
+
+partition_bios() {
+    local disk="$1"
+
+    msg "Partitioning $disk (MBR, one Linux partition)"
+    unmount_everything_on "$disk"
+    wipe_disk_ends "$disk"
 
     # First sector 2048 is not cosmetic alignment here: it leaves the
     # ~1 MiB post-MBR gap that core.img is written into further down.
@@ -226,31 +315,63 @@ partition_disk() {
     partprobe "$disk" 2>/dev/null || true
     sync
 
-    part="$(partition_of "$disk")"
-    local tries=0
-    while [ ! -b "$part" ] && [ "$tries" -lt 10 ]; do
-        tries=$(( tries + 1 ))
-        sleep 1
-        partprobe "$disk" 2>/dev/null || true
-        if [ -x /sbin/mdev ]; then
-            mdev -s 2>/dev/null || true
-        fi
-    done
-    [ -b "$part" ] || die "partition $part never appeared after partitioning $disk"
-
-    info "created $part"
-    printf '%s\n' "$part"
+    ESP_PART=""
+    ROOT_PART="$(partition_of "$disk" 1)"
+    wait_for_partition "$ROOT_PART" "$disk"
+    info "root $ROOT_PART"
 }
 
-format_partition() {
+partition_disk() {
+    case "$FIRMWARE" in
+        uefi) partition_uefi "$1" ;;
+        *)    partition_bios "$1" ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# Filesystems
+# ---------------------------------------------------------------------------
+
+# e2fsprogs' mke2fs, installed as mke2fs.e2fsprogs so it sits beside
+# BusyBox's applet rather than on top of it (RFC 0008). BusyBox's makes
+# ext2 with no journal, which on real hardware turns an unclean
+# shutdown into a full fsck and a risk to data. If it is somehow
+# missing, fall back rather than refuse -- an ext2 root is worse than
+# ext4 and much better than no install -- but say so.
+make_root_fs() {
     local part="$1"
-    msg "Creating filesystem on $part (label $ROOT_LABEL)"
-    # -F because the partition node was just created and mke2fs is
-    # otherwise squeamish about a device it thinks is in use.
-    mke2fs -F -L "$ROOT_LABEL" "$part" >/dev/null 2>&1 || \
-        die "mke2fs failed on $part"
+    if command -v mke2fs.e2fsprogs >/dev/null 2>&1; then
+        msg "Creating an ext4 filesystem on $part (label $ROOT_LABEL)"
+        mke2fs.e2fsprogs -q -t ext4 -L "$ROOT_LABEL" -F "$part" ||
+            die "mke2fs failed on $part"
+        ROOT_FSTYPE=ext4
+    else
+        warn "e2fsprogs mke2fs not found -- falling back to BusyBox ext2"
+        warn "the root filesystem will have NO JOURNAL"
+        mke2fs -F -L "$ROOT_LABEL" "$part" >/dev/null 2>&1 ||
+            die "mke2fs failed on $part"
+        ROOT_FSTYPE=ext2
+    fi
     sync
-    info "filesystem created"
+    info "root filesystem: $ROOT_FSTYPE"
+}
+
+make_esp() {
+    local part="$1"
+    msg "Creating a FAT32 EFI System partition on $part"
+    # BusyBox mkfs.vfat always makes FAT32, which is what an ESP must
+    # be. Mounting it needs codepage 437 in the kernel -- see
+    # kernel/config-x86_64, where that was missing.
+    mkfs.vfat -n "$ESP_LABEL" "$part" >/dev/null 2>&1 ||
+        die "mkfs.vfat failed on $part"
+    sync
+    info "ESP created"
+}
+
+format_partitions() {
+    make_root_fs "$ROOT_PART"
+    [ -n "$ESP_PART" ] && make_esp "$ESP_PART"
+    return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -261,7 +382,7 @@ copy_system() {
     msg "Copying the running system to $MNT (this takes a while)"
 
     mkdir -p "$MNT"
-    mount "$(partition_of "$TARGET_DISK")" "$MNT" || \
+    mount "$ROOT_PART" "$MNT" ||
         die "could not mount the new filesystem at $MNT"
     MOUNTED=1
 
@@ -287,6 +408,18 @@ copy_system() {
     # Recreate the mount points the copy deliberately skipped.
     mkdir -p "$MNT/proc" "$MNT/sys" "$MNT/dev" "$MNT/run" "$MNT/mnt" "$MNT/boot"
     mkdir -p "$MNT/tmp" && chmod 1777 "$MNT/tmp"
+
+    # The ESP is mounted where it will live on the installed machine,
+    # so the bootloader step writes to the same path fstab names and
+    # nothing has to be moved afterwards.
+    if [ -n "$ESP_PART" ]; then
+        mkdir -p "$MNT/boot/efi"
+        mount -t vfat "$ESP_PART" "$MNT/boot/efi" ||
+            die "could not mount the EFI System partition at $MNT/boot/efi"
+        ESP_MOUNTED=1
+        info "ESP mounted at /boot/efi"
+    fi
+
     sync
     info "system copied"
 }
@@ -300,13 +433,25 @@ write_fstab() {
     cat > "$MNT/etc/fstab" <<FSTAB
 # /etc/fstab — Novi Linux
 #
-# The root filesystem is found by LABEL, not by device node: /dev/sda
-# and /dev/vda are the same disk under different controllers, and a
-# label survives being moved between them.
-#
-# ext2 is what BusyBox's mke2fs writes; the kernel mounts it with the
-# ext4 driver (CONFIG_EXT4_USE_FOR_EXT2). There is no journal.
-LABEL=${ROOT_LABEL}   /       ext4    rw,noatime      0 1
+# Filesystems are found by LABEL, not by device node: /dev/sda and
+# /dev/vda are the same disk under different controllers, and a label
+# survives being moved between them.
+LABEL=${ROOT_LABEL}   /       ${ROOT_FSTYPE}    rw,noatime      0 1
+FSTAB
+
+    if [ -n "$ESP_PART" ]; then
+        cat >> "$MNT/etc/fstab" <<FSTAB
+
+# The EFI System partition. Nothing at runtime needs it -- the firmware
+# reads it before Linux exists -- but a kernel update has to write
+# there, so it is mounted rather than left for someone to find.
+# nofail, so a machine whose ESP has been removed or corrupted still
+# boots to a prompt where that can be fixed.
+LABEL=${ESP_LABEL}    /boot/efi vfat  rw,noatime,nofail  0 2
+FSTAB
+    fi
+
+    cat >> "$MNT/etc/fstab" <<'FSTAB'
 
 # The kernel-owned filesystems are mounted by s6-linux-init's stage 1,
 # not from here. They are listed for the benefit of anything that reads
@@ -375,9 +520,13 @@ install_kernel() {
 # Bootloader
 # ---------------------------------------------------------------------------
 
+# The boot menu, written once and used by both firmware paths. Only
+# where it lands differs: /boot/grub/grub.cfg for BIOS (core.img's
+# baked-in prefix) or /boot/efi/EFI/BOOT/grub.cfg for UEFI (bootx64.efi's).
 write_grub_cfg() {
-    mkdir -p "$MNT/boot/grub"
-    cat > "$MNT/boot/grub/grub.cfg" <<GRUBCFG
+    local dest="$1" search_line="$2"
+    mkdir -p "$(dirname "$dest")"
+    cat > "$dest" <<GRUBCFG
 # Novi Linux — installed system boot menu
 # Written by novi-install.
 
@@ -385,7 +534,9 @@ set default=0
 set timeout=3
 set timeout_style=menu
 
+insmod part_gpt
 insmod part_msdos
+insmod fat
 insmod ext2
 insmod all_video
 insmod gzio
@@ -395,6 +546,8 @@ insmod serial
 serial --unit=0 --speed=115200
 terminal_input console serial
 terminal_output console serial
+
+${search_line}
 
 menuentry "Novi Linux" --class linux {
     linux  /boot/vmlinuz root=LABEL=${ROOT_LABEL} rw \\
@@ -422,12 +575,46 @@ menuentry "Novi Linux (skip declared-state convergence)" --class linux {
 GRUBCFG
 }
 
-install_bootloader() {
+install_bootloader_uefi() {
+    local src="$LIVE_DIR/novi-boot"
+
+    msg "Installing the UEFI bootloader"
+
+    [ "$ESP_MOUNTED" -eq 1 ] || die "the ESP is not mounted"
+    [ -f "$src/bootx64.efi" ] || {
+        warn "no $src/bootx64.efi on this medium"
+        warn "the system is installed but NOT bootable on its own."
+        return 0
+    }
+
+    # /EFI/BOOT/BOOTX64.EFI is the removable-media path every UEFI
+    # implementation looks for without being told. Using it rather than
+    # a vendor directory plus an NVRAM boot entry means the install
+    # needs no efibootmgr, no writable EFI variables, and works on
+    # firmware that has forgotten its boot order -- which is most
+    # firmware, eventually.
+    mkdir -p "$MNT/boot/efi/EFI/BOOT"
+    cp "$src/bootx64.efi" "$MNT/boot/efi/EFI/BOOT/BOOTX64.EFI" ||
+        die "could not copy bootx64.efi to the ESP"
+
+    # bootx64.efi's prefix is /EFI/BOOT, so grub.cfg goes beside it on
+    # the ESP. The kernel and initramfs stay on the root filesystem,
+    # which is why the menu has to `search` for it by label.
+    write_grub_cfg "$MNT/boot/efi/EFI/BOOT/grub.cfg" \
+        "search --no-floppy --label ${ROOT_LABEL} --set=root"
+
+    sync
+    info "bootx64.efi and grub.cfg installed on the ESP"
+}
+
+install_bootloader_bios() {
     local disk="$1" src="$LIVE_DIR/novi-boot" core_sectors
 
-    msg "Installing the bootloader on $disk"
+    msg "Installing the BIOS bootloader on $disk"
 
-    write_grub_cfg
+    # core.img's prefix is (hd0,msdos1)/boot/grub, and the kernel lives
+    # on that same partition, so no search is needed.
+    write_grub_cfg "$MNT/boot/grub/grub.cfg" ""
 
     if [ ! -d "$src" ]; then
         warn "no staged GRUB artifacts at $src"
@@ -443,27 +630,34 @@ install_bootloader() {
     # core.img was built with prefix (hd0,msdos1)/boot/grub and loads
     # the rest of GRUB from there at boot.
     mkdir -p "$MNT/boot/grub/i386-pc"
-    cp "$src"/i386-pc/* "$MNT/boot/grub/i386-pc/" 2>/dev/null || \
+    cp "$src"/i386-pc/* "$MNT/boot/grub/i386-pc/" 2>/dev/null ||
         warn "no GRUB modules staged -- boot may fail"
     sync
 
     # Stage 1: the first 446 bytes of the MBR. Exactly 446, never 512 --
     # bytes 446..509 are the partition table that was just written, and
     # a 512-byte dd would erase it.
-    dd if="$src/boot.img" of="$disk" bs=446 count=1 conv=notrunc 2>/dev/null || \
+    dd if="$src/boot.img" of="$disk" bs=446 count=1 conv=notrunc 2>/dev/null ||
         die "could not write boot.img to the MBR of $disk"
 
     # Stage 1.5: core.img into the post-MBR gap, sector 1 onwards. The
     # partition starts at sector 2048, so there is room for 2047
     # sectors; refuse rather than write into the filesystem.
     core_sectors="$(( ( $(wc -c < "$src/core.img") + 511 ) / 512 ))"
-    [ "$core_sectors" -lt 2047 ] || \
+    [ "$core_sectors" -lt 2047 ] ||
         die "core.img is ${core_sectors} sectors -- too big for the 2047-sector gap"
-    dd if="$src/core.img" of="$disk" bs=512 seek=1 conv=notrunc 2>/dev/null || \
+    dd if="$src/core.img" of="$disk" bs=512 seek=1 conv=notrunc 2>/dev/null ||
         die "could not write core.img to the post-MBR gap of $disk"
 
     sync
     info "bootloader installed (${core_sectors} sectors of core.img in the gap)"
+}
+
+install_bootloader() {
+    case "$FIRMWARE" in
+        uefi) install_bootloader_uefi ;;
+        *)    install_bootloader_bios "$1" ;;
+    esac
 }
 
 # ---------------------------------------------------------------------------
@@ -723,14 +917,26 @@ cmd_install() {
             die "$TARGET_DISK holds the live media this system is running from" ;;
     esac
 
-    for tool in fdisk mke2fs partprobe tar dd mount umount sync chroot chpasswd sed; do
+    detect_firmware
+
+    for tool in partprobe tar dd mount umount sync chroot chpasswd sed; do
         command -v "$tool" >/dev/null 2>&1 || die "missing required tool: $tool"
     done
+    case "$FIRMWARE" in
+        uefi) for tool in novi-gpt mkfs.vfat; do
+                  command -v "$tool" >/dev/null 2>&1 ||
+                      die "missing required tool for a UEFI install: $tool"
+              done ;;
+        *)    command -v fdisk >/dev/null 2>&1 ||
+                  die "missing required tool for a BIOS install: fdisk" ;;
+    esac
+
+    msg "Firmware: ${FIRMWARE}"
 
     confirm_destruction "$TARGET_DISK"
 
-    partition_disk "$TARGET_DISK" >/dev/null
-    format_partition "$(partition_of "$TARGET_DISK")"
+    partition_disk "$TARGET_DISK"
+    format_partitions
     copy_system
     write_fstab
     set_hostname
@@ -748,11 +954,15 @@ cmd_install() {
     warn_if_root_passwordless
 
     sync
+    if [ "$ESP_MOUNTED" -eq 1 ]; then
+        umount "$MNT/boot/efi" || warn "could not unmount the ESP cleanly"
+        ESP_MOUNTED=0
+    fi
     umount "$MNT" || warn "could not unmount $MNT cleanly"
     MOUNTED=0
     sync
 
-    msg "Novi is installed on $TARGET_DISK ($PROFILE profile)"
+    msg "Novi is installed on $TARGET_DISK (${FIRMWARE}, ${ROOT_FSTYPE}, ${PROFILE} profile)"
     info "remove the installation media and reboot"
 }
 
@@ -773,6 +983,8 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --disk)      TARGET_DISK="${2:-}"; shift 2 ;;
         --hostname)  NEW_HOSTNAME="${2:-}"; shift 2 ;;
+        --firmware)  FIRMWARE="${2:-}"; shift 2 ;;
+        --esp-mib)   ESP_MIB="${2:-}"; shift 2 ;;
         --profile)   PROFILE="${2:-}"; shift 2 ;;
         --mirror)    TARGET_MIRROR="${2:-}"; shift 2 ;;
         --user)          NEW_USER="${2:-}"; shift 2 ;;
