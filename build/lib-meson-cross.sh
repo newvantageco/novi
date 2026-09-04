@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # ============================================================
 # lib-meson-cross.sh — shared meson/autotools cross-compilation
 # scaffolding for musl/x86_64 target packages.

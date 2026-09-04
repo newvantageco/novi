@@ -3,9 +3,14 @@ name: Build & Test
 # Trigger on pushes and PRs targeting main and develop branches
 on:
   push:
-    branches: [main, develop]
+    branches: ["**"]
   pull_request:
-    branches: [main, develop]
+    branches: ["**"]
+  # Upstream reachability is checked here rather than on every pull
+  # request -- see the step below.
+  schedule:
+    - cron: '0 5 * * 1'   # Mondays, 05:00 UTC
+  workflow_dispatch:
 
 # Concurrency group: cancel obsolete in-progress runs for the same branch or PR
 concurrency:
@@ -55,7 +60,19 @@ jobs:
 
       # Step 4: Verify that all upstream source archive URLs in build/01-fetch.sh are reachable
       # Uses a curl wrapper performing HTTP HEAD requests (--head / -I) without downloading multi-gigabyte files
+      # Scheduled runs only, deliberately.
+      #
+      # This probes roughly forty third-party servers. As a pull-request
+      # gate that makes every contribution depend on all of them being
+      # up simultaneously, and turns one upstream's bad afternoon into a
+      # red X on somebody's unrelated patch -- it is currently failing
+      # exactly that way on tweetnacl.cr.yp.to, which does not answer a
+      # HEAD request. Upstream availability is real information and it
+      # is not information about the change under review, so it runs
+      # weekly, where a failure means "go look at that mirror" instead
+      # of "your patch is broken".
       - name: Verify upstream source URLs reachability (build/01-fetch.sh)
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         run: |
           # Create a curl interception wrapper in user's PATH that forces HEAD probes
           mkdir -p "$HOME/.bin"
@@ -79,7 +96,12 @@ jobs:
           done
           if [ -n "$url" ]; then
             echo "[curl-head-check] Probing $url"
-            /usr/bin/curl -I -s -f -L --retry 3 --connect-timeout 15 "$url" > /dev/null
+            # HEAD first, then a one-byte ranged GET: not every server
+            # answers HEAD (tweetnacl.cr.yp.to does not), and "does not
+            # implement a verb" is not "the source is gone".
+            /usr/bin/curl -I -s -f -L --retry 2 --connect-timeout 15 "$url" > /dev/null \
+              || /usr/bin/curl -r 0-0 -s -f -L --retry 2 --connect-timeout 15 "$url" > /dev/null \
+              || { echo "::warning::unreachable: $url"; exit 1; }
           fi
           EOF
           chmod +x "$HOME/.bin/curl"

@@ -115,10 +115,17 @@ Because Novi Linux is a lightweight, high-performance distribution, all code and
   #!/usr/bin/env bash
   set -euo pipefail
   ```
-- **ShellCheck Cleanliness**: Every script must pass ShellCheck without warnings or errors:
+- **ShellCheck Cleanliness**: Every script must pass the repository lint.
+  One command, and it is exactly what CI runs — so "it passes locally"
+  and "it passes in CI" are the same claim:
   ```bash
-  shellcheck build/*.sh scripts/*.sh packages/pkg packages/mkpkg
+  bash scripts/lint.sh          # add --list to see which files it checks
   ```
+  It discovers every `*.sh`, every s6 service `run` script, and every
+  executable whose first line is a shell shebang, then runs shellcheck
+  at `error` severity. Three codes are excluded with stated reasons in
+  the script itself; `SC2086` in particular is a documented repo-wide
+  baseline, not a regression to chase when you touch a file.
 - **Quoting Variables**: Always double-quote variable expansions (e.g., `"${VAR}"`, `"$@"`) to prevent word splitting and globbing hazards.
 - **Functions & Modularity**: Use lowercase snake_case for function names (`build_kernel()`, `fetch_source()`) and uppercase for environment/constant variables (`OUTPUT_DIR`, `TARGET_ARCH`).
 - **Meaningful Comments**: Explain *why* an operation is performed, especially compiler flags, kernel configuration options, or patch workarounds.

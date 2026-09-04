@@ -776,7 +776,9 @@ warnings a change introduces.
 ## Contribution conventions
 
 Conventional Commits (`docs/branch-strategy.md`, `CONTRIBUTING.md` have the
-full type/scope list). PRs target `develop`, not `main`. Architectural
+full type/scope list). **PRs target `main`** — `docs/branch-strategy.md`
+describes a `develop` integration branch that does not exist yet, and
+says so at the top. Architectural
 changes — new init subsystems, package format changes, kernel/toolchain
 baseline changes, introducing a desktop/GUI stack — require an RFC first
 (`CONTRIBUTING.md` § RFC Process; drafts live in `docs/rfcs/`).

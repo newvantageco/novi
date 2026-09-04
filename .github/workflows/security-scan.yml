@@ -1,100 +1,80 @@
-name: Security Scan
+name: Security
 
-# Run weekly on Monday mornings and on every Pull Request
+# Weekly, and on every pull request.
 on:
   schedule:
-    - cron: '0 4 * * 1' # Every Monday at 04:00 UTC
+    - cron: '0 4 * * 1'   # Mondays, 04:00 UTC
   pull_request:
-    branches: [main, develop]
+    branches: ["**"]
+  push:
+    branches: [main]
   workflow_dispatch:
 
-# Concurrency group: cancel redundant runs for active PRs
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
   contents: read
-  security-events: write
-  actions: read
 
+# This workflow previously ran Trivy, Semgrep and Gitleaks, all three
+# through actions pinned to commit SHAs that do not exist -- so all
+# three failed at "unable to resolve action" on every run and scanned
+# nothing, while presenting as a security gate.
+#
+# What replaces them is smaller and true. This repository is shell, C
+# and build scripts with no dependency manifests, so a dependency CVE
+# scanner has nothing to read. What it *does* have is a hard rule that
+# matters: no private key material in the tree. scripts/mkiso.sh
+# already refuses to build an image if it finds any, and RFC 0006 makes
+# the repository signing key the project's trust root. Checking the
+# same thing here, in a job that actually runs, is worth more than
+# three that do not.
 jobs:
-  trivy-scan:
-    name: Trivy Vulnerability & Misconfig Scan
+  secrets:
+    name: No key material in the tree
     runs-on: ubuntu-latest
     steps:
-      # Step 1: Check out repository code
       - name: Check out repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      # Step 2: Run Aqua Security Trivy filesystem scan
-      - name: Run Trivy Vulnerability Scanner (FS mode)
-        uses: aquasecurity/trivy-action@18f2510ee396bbf400402947b394f2dd8c87dbb0 # v0.29.0
-        with:
-          scan-type: 'fs'
-          ignore-unfixed: false
-          format: 'sarif'
-          output: 'trivy-results.sarif'
-          severity: 'CRITICAL,HIGH,MEDIUM'
-
-      # Step 3: Upload Trivy SARIF results to GitHub Code Scanning Security tab
-      - name: Upload Trivy SARIF results
-        uses: github/codeql-action/upload-sarif@6bb034416e7614dce01c9057de056092144fbc79 # v3.28.11
-        if: always()
-        with:
-          sarif_file: 'trivy-results.sarif'
-          category: 'trivy'
-
-  semgrep-scan:
-    name: Semgrep Static Security Analysis
-    runs-on: ubuntu-latest
-    container:
-      image: returntocorp/semgrep
-    steps:
-      # Step 1: Check out repository code
-      - name: Check out repository
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-
-      # Step 2: Run Semgrep scan on shell scripts and configuration files
-      - name: Run Semgrep Rules
+      - name: Reject committed private keys
         run: |
-          semgrep scan \
-            --config "p/default" \
-            --config "p/shell" \
-            --config "p/secrets" \
-            --sarif \
-            --output semgrep-results.sarif || true
+          set -uo pipefail
+          fail=0
 
-      # Step 3: Upload Semgrep SARIF report to GitHub Security tab
-      - name: Upload Semgrep SARIF report
-        uses: github/codeql-action/upload-sarif@6bb034416e7614dce01c9057de056092144fbc79 # v3.28.11
-        if: always()
-        with:
-          sarif_file: 'semgrep-results.sarif'
-          category: 'semgrep'
+          # By filename. mkiso.sh refuses to build when it sees these
+          # in the repository directory; the same rule, earlier.
+          if find . -path ./.git -prune -o -type f \
+                \( -name '*.key' -o -name '*.pem' -o -name '*.p12' -o -name '*.pfx' \
+                   -o -name 'id_rsa' -o -name 'id_ed25519' \) -print | grep .; then
+            echo "::error::private key material committed to the repository"
+            fail=1
+          fi
 
-  gitleaks-scan:
-    name: Gitleaks Secret Detection
-    runs-on: ubuntu-latest
-    steps:
-      # Step 1: Full git history checkout required for secret scanning across commits
-      - name: Check out repository with full history
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          fetch-depth: 0
+          # By content, for anything that slipped past the name check.
+          if grep -rIl --exclude-dir=.git -E '^-----BEGIN [A-Z ]*PRIVATE KEY-----' . | grep .; then
+            echo "::error::a PEM private key block is present in the tree"
+            fail=1
+          fi
 
-      # Step 2: Execute Gitleaks to detect accidentally committed tokens, API keys, or private keys
-      - name: Run Gitleaks Scanner
-        uses: gitleaks/gitleaks-action@f00e95db50faefeb9b8cf1424578b87455d31ca9 # v2.3.9
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITLEAKS_ENABLE_SARIF: "true"
-          GITLEAKS_NOTIFY_USER_ISSUE: "false"
+          [ "$fail" -eq 0 ] && echo "clean: no private key material found"
+          exit "$fail"
 
-      # Step 3: Upload Gitleaks SARIF report to GitHub Security tab
-      - name: Upload Gitleaks SARIF report
-        uses: github/codeql-action/upload-sarif@6bb034416e7614dce01c9057de056092144fbc79 # v3.28.11
-        if: always()
-        with:
-          sarif_file: 'gitleaks.sarif'
-          category: 'gitleaks'
+      # The one pinned dependency in this project is its trust root, so
+      # a silent change to it is the thing most worth noticing.
+      - name: Verify the TweetNaCl hash pin is still declared
+        run: |
+          set -uo pipefail
+          # Both TweetNaCl files must still go through fetch_pinned
+          # with a 64-hex digest. Asserting the exact mechanism, not a
+          # variable name that sounded plausible: a CI check built on a
+          # guess about the code is the same failure as the actions
+          # this workflow replaced.
+          pins="$(grep -A2 'tweetnacl\.[ch]' build/01-fetch.sh | grep -cE '"[0-9a-f]{64}"')"
+          if [ "${pins:-0}" -lt 2 ]; then
+            echo "::error::build/01-fetch.sh no longer hash-pins both TweetNaCl files (RFC 0006 trust root)"
+            grep -n -A2 'fetch_pinned' build/01-fetch.sh || true
+            exit 1
+          fi
+          echo "trust root still hash-pinned (${pins} digests)"

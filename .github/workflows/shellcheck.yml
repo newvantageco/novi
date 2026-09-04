@@ -1,36 +1,40 @@
-name: ShellCheck Linting
+name: Lint
 
-# Run ShellCheck on every push and pull request across all branches
+# Every branch: a lint that cannot run is worse than no lint, and this
+# one is cheap.
 on:
   push:
     branches: ["**"]
   pull_request:
     branches: ["**"]
 
-# Concurrency group: cancel redundant in-progress workflow runs for the same branch or PR
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   shellcheck:
-    name: Run ShellCheck on All Shell Scripts
+    name: ShellCheck
     runs-on: ubuntu-latest
     steps:
-      # Step 1: Check out the repository source tree
       - name: Check out repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      # Step 2: Run ShellCheck across all shell scripts in the repo
-      # - Checks .sh files as well as shebang scripts without extensions (e.g. packages/mkpkg, packages/pkg, init/services)
-      # - Sets SC2034 (unused variables) to warning rather than error so it won't fail the build
-      # - Fails fast on error-level issues and automatically renders problem-matcher annotations in PRs
-      - name: Run ShellCheck Action
-        uses: ludeeus/action-shellcheck@58673a5a409f583196fb2846d0a7905c0cb4a520 # v2.0.0
-        with:
-          # Include non-.sh executable shell scripts across build, packages, and init services
-          additional_files: "packages/mkpkg packages/pkg init/services/getty-tty1/run init/services/syslog/run"
-          # Demote SC2034 (unused variables) to warning instead of failing the build
-          sc_args: "-e SC2034"
-          # Fail fast on error severity level
-          severity: error
+      # shellcheck is preinstalled on ubuntu-latest. Installing it
+      # explicitly costs a second and means this job does not silently
+      # change behaviour if that ever stops being true.
+      - name: Install shellcheck
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+
+      # Exactly the command a contributor runs locally. This replaces a
+      # third-party action that was pinned to a commit SHA which does
+      # not exist, so every run for 124 consecutive attempts failed at
+      # "unable to resolve action" without checking a single script.
+      # A first-party tool we can read is also one less thing in the
+      # supply chain, which is the same argument RFC 0006 makes about
+      # the package trust root.
+      - name: Run scripts/lint.sh
+        run: bash scripts/lint.sh
