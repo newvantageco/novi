@@ -93,6 +93,15 @@ static const pixman_color_t STATUS_PIX    = {0xa3a3, 0xa7a7, 0xb7b7, 0xffff};
 static const pixman_color_t MODIFIED_PIX  = {0xf0f0, 0xc0c0, 0x6a6a, 0xffff};
 static const pixman_color_t ERROR_PIX     = {0xf0f0, 0x7a7a, 0x7a7a, 0xffff};
 
+/* One whole-document state, held so undo can put it back. */
+struct snapshot {
+	char **lines;
+	int nlines;
+	int cy, cx;
+	bool modified;
+	size_t bytes;   /* what this costs, for the history budget */
+};
+
 struct novi_edit {
 	struct wl_display *display;
 	struct wl_registry *registry;
@@ -129,6 +138,15 @@ struct novi_edit {
 	int top;       /* first visible line */
 	bool modified;
 	bool read_only;
+
+	/* Undo/redo. See the block comment above snapshot_capture(). */
+	struct snapshot *undo;
+	int nundo, undo_cap;
+	struct snapshot *redo;
+	int nredo, redo_cap;
+	size_t history_bytes;
+	bool coalescing;   /* an open typing run already has its snapshot */
+	bool quit_armed;   /* ^Q pressed once with unsaved changes */
 
 	char path[PATH_MAX];
 	char status[256];
@@ -311,6 +329,20 @@ static bool doc_save(struct novi_edit *e) {
 		return false;
 	}
 	e->modified = false;
+	e->coalescing = false;
+
+	/* Every state in the history now differs from what is on disk, so
+	 * undoing back to one of them leaves an unsaved buffer -- including
+	 * the state the file was loaded in, which is no longer what the
+	 * file contains. Without this the asterisk vanishes on an undo past
+	 * a save and the editor quietly says "nothing to lose here". */
+	for (int i = 0; i < e->nundo; i++) {
+		e->undo[i].modified = true;
+	}
+	for (int i = 0; i < e->nredo; i++) {
+		e->redo[i].modified = true;
+	}
+
 	set_status(e, false, "saved %d line%s", e->nlines, e->nlines == 1 ? "" : "s");
 	return true;
 }
@@ -382,6 +414,205 @@ static void scroll_to_cursor(struct novi_edit *e) {
 	}
 }
 
+/* ── Undo ──────────────────────────────────────────────────────── */
+
+/* Whole-document snapshots, not an operation log.
+ *
+ * An op log (record each insert/delete and apply its inverse) is the
+ * memory-efficient answer and the one a big editor uses. It is also
+ * four hand-written inverse operations that must each be exactly
+ * right, and the failure mode when one is not is silent corruption of
+ * a file somebody asked this program to look after. A snapshot puts
+ * back precisely what was there, by construction rather than by
+ * argument, and this is a small editor for config files.
+ *
+ * What that costs is bounded on purpose rather than hoped about: the
+ * document may be 200000 lines, so the history carries a byte budget
+ * and drops its OLDEST entries when it is exceeded. Editing a huge
+ * file gives you fewer undo steps; it never gives you an editor that
+ * exhausts memory keeping them.
+ *
+ * Consecutive typing is one step, not one per keystroke: `coalescing`
+ * says the current run already pushed its snapshot, and anything that
+ * is not more typing -- a cursor move, a newline, a delete, a save --
+ * closes the run.
+ */
+#define HISTORY_MAX_BYTES (8u * 1024u * 1024u)
+#define HISTORY_MAX_STEPS 256
+
+static void snapshot_free(struct snapshot *s) {
+	for (int i = 0; i < s->nlines; i++) {
+		free(s->lines[i]);
+	}
+	free(s->lines);
+	s->lines = NULL;
+	s->nlines = 0;
+	s->bytes = 0;
+}
+
+static bool snapshot_capture(const struct novi_edit *e, struct snapshot *out) {
+	int n = e->nlines > 0 ? e->nlines : 1;
+	out->lines = calloc((size_t)n, sizeof(*out->lines));
+	if (out->lines == NULL) {
+		return false;
+	}
+	out->nlines = 0;
+	out->bytes = (size_t)n * sizeof(*out->lines);
+	for (int i = 0; i < e->nlines; i++) {
+		out->lines[i] = strdup(e->lines[i]);
+		if (out->lines[i] == NULL) {
+			out->nlines = i;   /* so snapshot_free frees only what exists */
+			snapshot_free(out);
+			return false;
+		}
+		out->bytes += strlen(e->lines[i]) + 1;
+	}
+	out->nlines = e->nlines;
+	out->cy = e->cy;
+	out->cx = e->cx;
+	out->modified = e->modified;
+	return true;
+}
+
+static bool stack_push(struct snapshot **arr, int *n, int *cap,
+		const struct snapshot *s) {
+	if (*n == *cap) {
+		int grown = *cap ? *cap * 2 : 16;
+		struct snapshot *p = realloc(*arr, (size_t)grown * sizeof(*p));
+		if (p == NULL) {
+			return false;
+		}
+		*arr = p;
+		*cap = grown;
+	}
+	(*arr)[(*n)++] = *s;
+	return true;
+}
+
+/* Drop the oldest entries until the whole history fits the budget.
+ * Undo first: losing the far past costs less than losing a redo the
+ * user can still see themselves needing. */
+static void history_trim(struct novi_edit *e) {
+	while ((e->history_bytes > HISTORY_MAX_BYTES || e->nundo > HISTORY_MAX_STEPS)
+			&& e->nundo > 0) {
+		e->history_bytes -= e->undo[0].bytes;
+		snapshot_free(&e->undo[0]);
+		memmove(&e->undo[0], &e->undo[1],
+			(size_t)(--e->nundo) * sizeof(*e->undo));
+	}
+	while (e->history_bytes > HISTORY_MAX_BYTES && e->nredo > 0) {
+		e->history_bytes -= e->redo[0].bytes;
+		snapshot_free(&e->redo[0]);
+		memmove(&e->redo[0], &e->redo[1],
+			(size_t)(--e->nredo) * sizeof(*e->redo));
+	}
+}
+
+static void redo_clear(struct novi_edit *e) {
+	for (int i = 0; i < e->nredo; i++) {
+		e->history_bytes -= e->redo[i].bytes;
+		snapshot_free(&e->redo[i]);
+	}
+	e->nredo = 0;
+}
+
+static void history_free(struct novi_edit *e) {
+	for (int i = 0; i < e->nundo; i++) {
+		snapshot_free(&e->undo[i]);
+	}
+	for (int i = 0; i < e->nredo; i++) {
+		snapshot_free(&e->redo[i]);
+	}
+	free(e->undo);
+	free(e->redo);
+	e->undo = NULL; e->redo = NULL;
+	e->nundo = e->nredo = e->undo_cap = e->redo_cap = 0;
+	e->history_bytes = 0;
+}
+
+/* Record the state an edit is about to replace. Call it AFTER the
+ * cheap guards that can refuse the edit outright and BEFORE the first
+ * byte changes; on a later failure, undo_discard() takes it back off
+ * so undo never offers a step that changes nothing. */
+static void undo_push(struct novi_edit *e, bool coalescable) {
+	redo_clear(e);
+	if (coalescable && e->coalescing && e->nundo > 0) {
+		return;   /* this typing run's snapshot is already on the stack */
+	}
+	struct snapshot s;
+	if (!snapshot_capture(e, &s)) {
+		/* Losing the ability to undo is bad; refusing the edit is
+		 * worse, and silently pretending is worst. Say so and let the
+		 * edit through. */
+		set_status(e, true, "out of memory -- this edit cannot be undone");
+		e->coalescing = false;
+		return;
+	}
+	if (!stack_push(&e->undo, &e->nundo, &e->undo_cap, &s)) {
+		snapshot_free(&s);
+		set_status(e, true, "out of memory -- this edit cannot be undone");
+		e->coalescing = false;
+		return;
+	}
+	e->history_bytes += s.bytes;
+	e->coalescing = coalescable;
+	history_trim(e);
+}
+
+static void undo_discard(struct novi_edit *e) {
+	if (e->nundo == 0) {
+		return;
+	}
+	e->history_bytes -= e->undo[e->nundo - 1].bytes;
+	snapshot_free(&e->undo[--e->nundo]);
+	e->coalescing = false;
+}
+
+/* Swap the live document with the top of one stack, pushing what was
+ * live onto the other. Undo and redo are the same operation in
+ * opposite directions, so they are one function. */
+static void history_step(struct novi_edit *e, bool forward) {
+	struct snapshot **src  = forward ? &e->redo : &e->undo;
+	int *nsrc              = forward ? &e->nredo : &e->nundo;
+	struct snapshot **dst  = forward ? &e->undo : &e->redo;
+	int *ndst              = forward ? &e->nundo : &e->nredo;
+	int *dstcap            = forward ? &e->undo_cap : &e->redo_cap;
+
+	e->coalescing = false;
+	if (*nsrc == 0) {
+		set_status(e, false, forward ? "nothing to redo" : "nothing to undo");
+		return;
+	}
+
+	struct snapshot live;
+	if (!snapshot_capture(e, &live)) {
+		set_status(e, true, "out of memory");
+		return;
+	}
+	if (!stack_push(dst, ndst, dstcap, &live)) {
+		snapshot_free(&live);
+		set_status(e, true, "out of memory");
+		return;
+	}
+	e->history_bytes += live.bytes;
+
+	struct snapshot want = (*src)[--(*nsrc)];
+	e->history_bytes -= want.bytes;
+
+	doc_free(e);
+	e->lines     = want.lines;
+	e->nlines    = want.nlines;
+	e->lines_cap = want.nlines > 0 ? want.nlines : 1;
+	e->cy        = want.cy;
+	e->cx        = want.cx;
+	e->modified  = want.modified;
+	/* want.lines now belongs to the document; do not snapshot_free it. */
+
+	scroll_to_cursor(e);
+	set_status(e, false, forward ? "redone" : "undone");
+	history_trim(e);
+}
+
 /* ── Editing ───────────────────────────────────────────────────── */
 
 static void insert_text(struct novi_edit *e, const char *s) {
@@ -396,8 +627,11 @@ static void insert_text(struct novi_edit *e, const char *s) {
 		set_status(e, true, "line too long");
 		return;
 	}
+	/* Coalescable: a run of typed characters is one undo step. */
+	undo_push(e, true);
 	char *grown = realloc(line, len + add + 1);
 	if (grown == NULL) {
+		undo_discard(e);
 		set_status(e, true, "out of memory");
 		return;
 	}
@@ -413,10 +647,12 @@ static void split_line(struct novi_edit *e) {
 		set_status(e, true, "read-only");
 		return;
 	}
+	undo_push(e, false);
 	char *line = e->lines[e->cy];
 	char *tail = strdup(line + e->cx);
 	if (tail == NULL || !line_insert(e, e->cy + 1, tail)) {
 		free(tail);
+		undo_discard(e);
 		set_status(e, true, "out of memory");
 		return;
 	}
@@ -426,11 +662,12 @@ static void split_line(struct novi_edit *e) {
 	e->modified = true;
 }
 
-static void delete_back(struct novi_edit *e) {
-	if (e->read_only) {
-		set_status(e, true, "read-only");
-		return;
-	}
+/* The mutation with no read-only check and no undo record:
+ * delete_forward()'s join case is exactly "backspace at column 0 one
+ * line down", and doing that through delete_back() would push a second
+ * snapshot for one keypress -- so undo would need two presses to put
+ * back one Delete. */
+static bool do_delete_back(struct novi_edit *e) {
 	if (e->cx > 0) {
 		char *line = e->lines[e->cy];
 		int start = prev_char(line, e->cx);
@@ -445,12 +682,12 @@ static void delete_back(struct novi_edit *e) {
 		size_t plen = strlen(prev), clen = strlen(cur);
 		if (plen + clen > MAX_LINE_LEN) {
 			set_status(e, true, "joined line would be too long");
-			return;
+			return false;
 		}
 		char *joined = realloc(prev, plen + clen + 1);
 		if (joined == NULL) {
 			set_status(e, true, "out of memory");
-			return;
+			return false;
 		}
 		memcpy(joined + plen, cur, clen + 1);
 		e->lines[e->cy - 1] = joined;
@@ -458,6 +695,21 @@ static void delete_back(struct novi_edit *e) {
 		e->cy--;
 		e->cx = (int)plen;
 		e->modified = true;
+	}
+	return true;
+}
+
+static void delete_back(struct novi_edit *e) {
+	if (e->read_only) {
+		set_status(e, true, "read-only");
+		return;
+	}
+	if (e->cx == 0 && e->cy == 0) {
+		return;   /* nothing behind the cursor; do not record a no-op */
+	}
+	undo_push(e, false);
+	if (!do_delete_back(e)) {
+		undo_discard(e);
 	}
 }
 
@@ -468,18 +720,29 @@ static void delete_forward(struct novi_edit *e) {
 	}
 	char *line = e->lines[e->cy];
 	int len = (int)strlen(line);
+	if (e->cx >= len && e->cy >= e->nlines - 1) {
+		return;   /* end of the document */
+	}
+	undo_push(e, false);
 	if (e->cx < len) {
 		int end = next_char(line, e->cx);
 		memmove(line + e->cx, line + end, (size_t)(len - end) + 1);
 		e->modified = true;
-	} else if (e->cy < e->nlines - 1) {
+	} else {
 		/* Deleting the newline at end-of-line is joining the next line
 		 * onto this one -- the same operation as backspace-at-column-0
 		 * one line down, so do exactly that rather than write it
 		 * twice. */
+		int was_cy = e->cy;
 		e->cy++;
 		e->cx = 0;
-		delete_back(e);
+		if (!do_delete_back(e)) {
+			/* Put the cursor back where the user left it: the refusal
+			 * must not move it as a side effect. */
+			e->cy = was_cy;
+			e->cx = len;
+			undo_discard(e);
+		}
 	}
 }
 
@@ -568,7 +831,7 @@ static void render(struct novi_edit *e, uint32_t *px, uint32_t stride_px) {
 	char right[sizeof(e->status) + 64];
 	snprintf(right, sizeof(right), "%d:%d   %s",
 		e->cy + 1, e->cx + 1,
-		e->status[0] ? e->status : "^S save   ^Q quit");
+		e->status[0] ? e->status : "^S save   ^Z undo   ^Y redo   ^Q quit");
 	int rw = novi_text_width(e->font_small, right);
 	novi_text_draw(dest, e->font_small, (int)w - PAD - rw, sbase, right,
 		e->status_is_error ? ERROR_PIX : STATUS_PIX);
@@ -639,13 +902,29 @@ static void surface_draw_frame(struct novi_edit *e) {
 
 static void handle_key(struct novi_edit *e, xkb_keysym_t sym, bool ctrl) {
 	e->status[0] = '\0';
+	bool was_quit_armed = e->quit_armed;
+	e->quit_armed = false;
 
 	if (ctrl) {
 		switch (sym) {
 		case XKB_KEY_s: case XKB_KEY_S:
 			doc_save(e);
 			return;
+		case XKB_KEY_z: case XKB_KEY_Z:
+			history_step(e, false);
+			return;
+		case XKB_KEY_y: case XKB_KEY_Y:
+			history_step(e, true);
+			return;
 		case XKB_KEY_q: case XKB_KEY_Q:
+			/* An editor must not throw away work on one keypress. The
+			 * second ^Q is the confirmation -- no modal dialog, which
+			 * this program has no widget for and does not need. */
+			if (e->modified && !was_quit_armed) {
+				e->quit_armed = true;
+				set_status(e, true, "unsaved changes -- ^Q again to discard, ^S to save");
+				return;
+			}
 			e->running = false;
 			return;
 		default:
@@ -655,6 +934,11 @@ static void handle_key(struct novi_edit *e, xkb_keysym_t sym, bool ctrl) {
 
 	switch (sym) {
 	case XKB_KEY_Escape:
+		if (e->modified && !was_quit_armed) {
+			e->quit_armed = true;
+			set_status(e, true, "unsaved changes -- Esc again to discard, ^S to save");
+			return;
+		}
 		e->running = false;
 		return;
 	case XKB_KEY_Up:
@@ -718,6 +1002,20 @@ static void handle_key(struct novi_edit *e, xkb_keysym_t sym, bool ctrl) {
 		 * with no text and no binding. */
 		break;
 	}
+
+	/* A cursor move ends the run of typing that undo treats as one
+	 * step. Without this, typing a word, arrowing away and typing
+	 * another would collapse into a single undo that swallows both. */
+	switch (sym) {
+	case XKB_KEY_Up: case XKB_KEY_Down: case XKB_KEY_Left: case XKB_KEY_Right:
+	case XKB_KEY_Home: case XKB_KEY_End:
+	case XKB_KEY_Page_Up: case XKB_KEY_Page_Down:
+		e->coalescing = false;
+		break;
+	default:
+		break;
+	}
+
 	scroll_to_cursor(e);
 }
 
@@ -781,6 +1079,9 @@ static void keyboard_key(void *data, struct wl_keyboard *kb, uint32_t serial,
 		int n = xkb_state_key_get_utf8(e->xkb_state, code, buf, sizeof(buf));
 		if (n > 0 && (unsigned char)buf[0] >= 0x20 && buf[0] != 0x7f) {
 			e->status[0] = '\0';
+			/* Typing after a ^Q that asked for confirmation is not
+			 * confirmation of anything; the next ^Q must ask again. */
+			e->quit_armed = false;
 			insert_text(e, buf);
 			scroll_to_cursor(e);
 			surface_draw_frame(e);
@@ -969,6 +1270,7 @@ int main(int argc, char **argv) {
 		;
 	}
 
+	history_free(&e);
 	doc_free(&e);
 	if (e.xkb_state != NULL) {
 		xkb_state_unref(e.xkb_state);
