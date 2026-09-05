@@ -433,13 +433,15 @@ $ novi-state rollback        # foot comes back, from the mirror
 **The base image is console-only.** `/usr/lib` in it holds three
 libraries and nothing else: `libskarnet` for s6, `libnl` for the WiFi
 supplicant, and `libasound` for audio — each one there because a
-console system genuinely needs it. The desktop (compositor, panel,
-launcher, terminal, fonts, and the whole Wayland/wlroots stack) is 25
-packages, and the installation medium carries the signed repository, so
-installing it needs no network at all:
+console system genuinely needs it. The desktop is packages: eleven
+programs — compositor, panel, launcher, settings, terminal, text
+editor, file manager, image viewer, lock screen, screenshot tool and
+the font — plus the Wayland/wlroots stack they link. The installation
+medium carries the signed repository, so installing it needs no network
+at all:
 
 ```console
-$ pkg install novi-desktop        # 25 packages, ~7 seconds, from the ISO
+$ pkg install novi-desktop        # from the ISO, no network
 ```
 
 Which files leave the base is **computed** from the ELF dependency
@@ -452,6 +454,55 @@ directory over HTTP, or point `mirror` at a local directory. There is
 no default public mirror: there is no public Novi repository yet, and
 pointing a package manager at a host that does not exist is worse than
 pointing it at nothing.
+
+## The applications
+
+The desktop's programs are first-party and written against raw
+xdg-shell, drawing with pixman and fcft — there is no GUI toolkit on
+this system, because adding one is a decision with an RFC behind it and
+nobody has made it yet.
+
+**`novi-edit`** is a text editor with the two properties an editor has
+to have before it can be trusted with a config file. It has undo and
+redo (`^Z`/`^Y`), as whole-document snapshots on a bounded budget
+rather than an operation log — a snapshot puts back precisely what was
+there by construction, and the failure mode of a wrong inverse
+operation is silent corruption of somebody's file. And `^Q` on a
+modified buffer asks before discarding, rather than throwing the work
+away on one keypress. Selection is shift-arrows and `^A`; saving is
+atomic (temp file, `fsync`, `rename`) and preserves the original's
+mode, so a config file at 0600 does not come back 0644.
+
+**`novi-files`** browses, and changes things. Enter opens a file in the
+right program — `.png` goes to the viewer, everything else to the
+editor, and the row icon is derived from that same decision so it
+cannot disagree with what Enter will do. `F2` renames and refuses a
+name that already exists, rather than silently replacing it the way a
+bare `rename(2)` would. Delete removes a file or an empty directory on
+`y`; a directory with things in it counts the tree first and asks
+
+```
+delete 'project' and 214 files in 31 folders?   type yes:
+```
+
+There is no trash on this system and no undo in that program, so the
+confirmation names what is about to go, and a count that could not be
+finished refuses the delete instead of guessing.
+
+**`novi-view`** displays PNG, BMP and PPM, sniffing the format from the
+magic bytes rather than the extension, and decoding *before* it opens a
+window — so an unreadable file prints a line and exits rather than
+flashing up an empty one.
+
+**Copy and paste work between programs**, over core-Wayland
+`wl_data_device_manager` — the same mechanism foot speaks, because that
+is the only way copying in a terminal and pasting in an editor can
+possibly work. And the selection outlives the program that made it:
+copy in the editor, close the editor, paste anywhere. That is not free
+— a Wayland selection belongs to the client that set it and dies with
+it — so novi-shell keeps its own copy and re-offers it when the owner
+exits, reading and writing on the compositor's event loop because a
+blocking pipe in the compositor freezes every window on the screen.
 
 ## Install it
 
@@ -547,6 +598,9 @@ HOME_URL="https://novilinux.org"
 - [x] Lid, power button, and a shutdown that finishes (RFC 0013)
 - [x] `novi-state health` — "up" is not "working" (RFC 0014)
 - [x] Native toolchain — Novi compiles its own C and C++ (RFC 0015)
+- [x] Applications — text editor, file manager, image viewer, with undo,
+      real file operations, and a confirmation that names what it will delete
+- [x] A clipboard that works between programs, and outlives the one that filled it
 - [ ] **Boot it on real hardware** ← next, and nothing here replaces it
 - [ ] A published repository + offline release key
 - [ ] A Microsoft-signed shim (real Secure Boot); WPA3 (needs mbedTLS)
