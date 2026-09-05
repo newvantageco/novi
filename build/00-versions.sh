@@ -17,6 +17,8 @@ BINUTILS_VERSION="2.43"
 GCC_VERSION="14.2.0"
 MAKE_VERSION="4.4.1"          # GNU make, for the native (self-hosting) toolchain
 PKGCONF_VERSION="2.3.0"       # pkg-config implementation in C (no perl, no glib)
+ZLIB_VERSION="1.3.1"          # deflate; libpng needs it, and so will everything else
+LIBPNG_VERSION="1.6.43"       # PNG decode, for novi-view
 BUSYBOX_VERSION="1.36.1"
 
 # s6 ecosystem (skarnet.org)

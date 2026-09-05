@@ -297,10 +297,32 @@ static void go_up(struct novi_files *s) {
 	}
 }
 
-/* Everything that is not a directory goes to novi-edit. When there is
- * an image viewer this is where the dispatch table goes; one target is
- * not a table yet, and pretending otherwise would be scaffolding for a
- * decision not taken. */
+/* Dispatch. This was a single target (the editor) until novi-view
+ * existed; now there are two, so there is a table.
+ *
+ * By extension, not by content. Sniffing the file's magic bytes would
+ * be more correct and is what novi-view itself does -- but that means
+ * opening and reading every file just to draw a list, and the list is
+ * drawn far more often than anything is opened. The cost of being
+ * wrong is bounded and cheap: novi-view decodes before it opens a
+ * window, so a .png that is not one prints a line and exits rather
+ * than flashing up an empty window. The editor is the fallback for
+ * everything else, which is why it had to be written first. */
+static const char *EXT_IMAGE[] = {".png", ".bmp", ".ppm", ".pgm", ".pnm", NULL};
+
+static bool has_ext(const char *name, const char *const *exts) {
+	const char *dot = strrchr(name, '.');
+	if (dot == NULL) {
+		return false;
+	}
+	for (int i = 0; exts[i] != NULL; i++) {
+		if (strcasecmp(dot, exts[i]) == 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
 static void open_selected(struct novi_files *s) {
 	if (s->nentries == 0) {
 		return;
@@ -323,14 +345,15 @@ static void open_selected(struct novi_files *s) {
 		set_status(s, true, "fork failed: %s", strerror(errno));
 		return;
 	}
+	const char *app = has_ext(e->name, EXT_IMAGE) ? "novi-view" : "novi-edit";
 	if (pid == 0) {
 		/* Its own session, so it outlives this window being closed --
 		 * the same reasoning novi-shell's spawn() documents. */
 		setsid();
-		execlp("novi-edit", "novi-edit", full, (char *)NULL);
+		execlp(app, app, full, (char *)NULL);
 		_exit(127);
 	}
-	set_status(s, false, "opened %s", e->name);
+	set_status(s, false, "opened %s in %s", e->name, app);
 }
 
 /* ── Rendering ─────────────────────────────────────────────────── */
@@ -397,15 +420,27 @@ static void render(struct novi_files *s, uint32_t *px, uint32_t stride_px) {
 			draw_rect(px, stride_px, w, h, 0, y, 3, ROW_H, SEL_BAR);
 		}
 
-		/* ICON_PENCIL for a plain file is a compromise: the generated
-		 * set (shared/icons) has no generic document glyph, and pencil
-		 * is the least-wrong of what exists -- it at least says "this
-		 * opens in the editor", which here is true. A `file` icon
-		 * belongs in the next pass of tools/svg2icon, not in a
-		 * hand-drawn one-off here. */
+		/* The icon answers the same question Enter does, from the
+		 * same has_ext() -- a row that shows the image glyph opens in
+		 * novi-view, one that shows the file glyph opens in the
+		 * editor. Two answers derived separately would eventually
+		 * disagree, and a file manager whose icons lie about what
+		 * Enter will do is worse than one with no icons.
+		 *
+		 * (Until novi-view existed this drew ICON_PENCIL for every
+		 * plain file, because the generated set had no document glyph
+		 * and "this opens in the editor" was true of everything. It
+		 * stopped being true the moment a second app could be
+		 * launched; `file` and `image` went through tools/svg2icon in
+		 * the same change.) */
+		enum novi_icon_id icon = ICON_FILE;
+		if (e->is_dir) {
+			icon = ICON_FOLDER;
+		} else if (has_ext(e->name, EXT_IMAGE)) {
+			icon = ICON_IMAGE;
+		}
 		draw_icon(px, stride_px, w, h, PAD, y + (ROW_H - ICON_SIZE) / 2,
-			e->is_dir ? ICON_FOLDER : ICON_PENCIL,
-			e->is_dir ? ICON_DIR_COLOR : ICON_FILE_COLOR);
+			icon, e->is_dir ? ICON_DIR_COLOR : ICON_FILE_COLOR);
 
 		int baseline = y + (ROW_H - s->font->height) / 2 + s->font->ascent;
 		novi_text_draw(dest, s->font, PAD + ICON_SIZE + ICON_GAP, baseline,

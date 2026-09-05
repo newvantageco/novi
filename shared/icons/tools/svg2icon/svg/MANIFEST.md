@@ -20,6 +20,8 @@ icon here was vendored.
 | `folder.svg` | `folder` | app-grid: files |
 | `globe.svg` | `globe` | app-grid: web |
 | `pencil.svg` | `pencil` | app-grid: editor |
+| `file.svg` | `file` | files: a plain file |
+| `image.svg` | `image` | files: a file novi-view can open |
 | `package.svg` | `package` | app-grid: pkg |
 | `settings.svg` | `settings` | app-grid: settings |
 | `shield.svg` | `shield` | app-grid: security tools |

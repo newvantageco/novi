@@ -110,6 +110,21 @@ install -D -m 644 "${REPO_ROOT}/rootfs/etc/profile" "${ROOTFS}/etc/profile"
 install -D -m 755 "${REPO_ROOT}/packages/novi-hwdetect" "${ROOTFS}/sbin/novi-hwdetect"
 install -D -m 755 "${REPO_ROOT}/packages/novi-hotplug" "${ROOTFS}/sbin/novi-hotplug"
 
+# The live-boot desktop helper (RFC 0007): the base image is
+# console-only, so a live boot that wants a desktop installs one from
+# the repository on the medium, and this is the script that does it.
+# init/skel/rc.init calls it when `novi.live.desktop` is on the kernel
+# command line.
+#
+# It used to be build/22-live-desktop.sh -- a whole discovered build
+# stage whose entire body was this one `install` line, for a file that
+# is repo content under rootfs/ exactly like the seven above it. It
+# came back here when novi-view needed stage number 22 and the 20s
+# turned out to be full; a stage that cross-compiles nothing and
+# installs one shell script was the one that did not need to exist.
+install -D -m 755 "${REPO_ROOT}/rootfs/usr/bin/novi-live-desktop" \
+    "${ROOTFS}/usr/bin/novi-live-desktop"
+
 # ACPI event handlers. The two path names are dictated by busybox
 # acpid's compiled-in action table (PWRF -> power button, LID -> lid),
 # not chosen here; renaming either means acpid runs nothing.

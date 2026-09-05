@@ -19,6 +19,8 @@ enum novi_icon_id {
 	ICON_FOLDER,         /* app-grid: files */
 	ICON_GLOBE,          /* app-grid: web */
 	ICON_PENCIL,         /* app-grid: editor */
+	ICON_FILE,           /* files: a plain file */
+	ICON_IMAGE,          /* files: a file the viewer can open */
 	ICON_PACKAGE,        /* app-grid: pkg */
 	ICON_SETTINGS,       /* app-grid: settings */
 	ICON_SHIELD,         /* app-grid: security tools */

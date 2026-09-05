@@ -48,6 +48,8 @@ static const struct icon_job JOBS[] = {
 	{ "ICON_FOLDER",        "icon_folder_px",        "svg/folder.svg",        24 },
 	{ "ICON_GLOBE",         "icon_globe_px",         "svg/globe.svg",         24 },
 	{ "ICON_PENCIL",        "icon_pencil_px",        "svg/pencil.svg",        24 },
+	{ "ICON_FILE",          "icon_file_px",          "svg/file.svg",          24 },
+	{ "ICON_IMAGE",         "icon_image_px",         "svg/image.svg",         24 },
 	{ "ICON_PACKAGE",       "icon_package_px",       "svg/package.svg",       24 },
 	{ "ICON_SETTINGS",      "icon_settings_px",      "svg/settings.svg",      24 },
 	{ "ICON_SHIELD",        "icon_shield_px",        "svg/shield.svg",        24 },

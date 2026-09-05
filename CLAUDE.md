@@ -19,7 +19,9 @@ this file.
 
 Full pipeline: `bash build.sh` — it **discovers** `build/NN-*.sh` and runs
 all of them in numeric order, so a new stage is part of the build the moment
-the file exists. `--base-only` stops after the kernel (01–05: bootable
+the file exists. Two stages may not share a number and `build.sh` refuses
+if they do: `NN` is what `--from`/`--to` name and what a failed stage tells
+you to resume from, so a duplicate turns the identity into a guess. `--base-only` stops after the kernel (01–05: bootable
 console, no desktop/pkg/state/installer), `--from NN` resumes. Each stage can
 also be run standalone (`bash build/NN-*.sh`) but stages depend on prior
 stages' output in `/build/{sources,tools,sysroot,rootfs}` — see Architecture
@@ -47,6 +49,9 @@ below for why `/build` is hardcoded and unrelated to the repo checkout path.
 - `bash build/25-wifi.sh` — libnl, wpa_supplicant, `iw`, `novi-wifi`
   (RFC 0009); also builds hostapd into `/build/wifi-test/` for the hwsim
   test harness, deliberately not into the image
+- `bash build/21-imagelibs.sh`, `bash build/22-novi-view.sh` — zlib and
+  libpng (the first image *decoding* on this system; novi-screenshot
+  could only ever write) and the viewer that uses them
 - `bash build/23-e2fsprogs.sh`, `bash build/24-novi-gpt.sh` — real `mke2fs`
   (journalled ext4) and the GPT writer UEFI installs need (RFC 0008)
 - `bash build/31-desktop-split.sh` — **destructive**: removes the packaged
@@ -613,6 +618,28 @@ Three things it is important not to break:
   that a run script's binary exists, so a declared-off service pointing at
   a not-yet-installed binary is inert, not broken — and a machine that
   installs `novi-desktop` can then just flip the key.
+- **A library's three names must move or stay as a unit, and one stray
+  utility in `/usr/bin` is enough to break that.** libpng's `make
+  install` puts `pngfix` and `png-fix-itxt` in the base; they are not
+  desktop binaries, so their closure pinned `libpng16.so.16` and
+  `libz.so.1` into the base while the sweep moved
+  `libpng16.so.16.43.0` and `libz.so.1.3.1` out with the desktop. The
+  base kept two dangling symlinks, the packages shipped without the
+  only names anything records, and — because `owner` is keyed on
+  basename — `novi-view`'s derived `depends=` silently lost `libpng`
+  and `zlib` too. Everything built, indexed, signed and installed;
+  `pkg install novi-desktop` reported success; the viewer died at exec
+  with `Error loading shared library libpng16.so.16`. pkgsplit now
+  fails the build on a straddling sibling group, and `21-imagelibs.sh`
+  does not install utilities nobody asked for. **Do not put anything in
+  the image that nothing asked for** — in a split computed from what
+  the base needs, dead weight is not inert, it votes.
+- **`closure()` used to stop at every soname symlink.** A symlink has no
+  ELF header, so `readelf -d` returns nothing and the walk ended at
+  `libfoo.so.N` without ever reading the file it points at. It survived
+  because the `PACKAGE_TABLE` sweep drags table-owned libraries along
+  regardless — but it made the reachability answer wrong, which matters
+  the moment anything reasons about it. It follows links now.
 
 Two smaller ones:
 

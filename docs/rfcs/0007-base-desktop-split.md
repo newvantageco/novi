@@ -173,7 +173,7 @@ rejected in RFC 0003 for the same reason: two overlapping notions of
 - `build/30-repo.sh` — rewritten to drive it
 - `build/31-desktop-split.sh` — removes exactly the files 20 packaged,
   from the manifest 20 wrote (one source of truth, or the two drift)
-- `build/22-live-desktop.sh`, `rootfs/usr/bin/novi-live-desktop`
+- `build/03-base.sh` (installs it), `rootfs/usr/bin/novi-live-desktop`
 - `scripts/mkiso.sh` — stages the repository, adds the Live Desktop
   entry, refuses to ship key material
 - `packages/pkg` — local-directory mirrors

@@ -92,6 +92,14 @@ fetch "https://ftp.gnu.org/gnu/make/make-${MAKE_VERSION}.tar.gz"
 # than freedesktop pkg-config: it is plain C with no dependencies,
 # where the original needs glib.
 fetch "https://distfiles.ariadne.space/pkgconf/pkgconf-${PKGCONF_VERSION}.tar.xz"
+
+# zlib and libpng, for novi-view. PNG is the only image
+# format anyone actually hands you, and decoding it needs both. zlib is
+# also the first general-purpose compression library in this image --
+# freetype was built with -Dzlib=internal precisely because there was
+# none.
+fetch "https://zlib.net/fossils/zlib-${ZLIB_VERSION}.tar.gz"
+fetch "https://download.sourceforge.net/libpng/libpng-${LIBPNG_VERSION}.tar.xz"
 fetch "https://ftp.gnu.org/gnu/gcc/gcc-${GCC_VERSION}/gcc-${GCC_VERSION}.tar.xz"
 fetch "https://musl.libc.org/releases/musl-${MUSL_VERSION}.tar.gz"
 

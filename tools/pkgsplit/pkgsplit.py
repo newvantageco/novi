@@ -59,6 +59,7 @@ DESKTOP_BINARIES = [
     "usr/bin/novi-settings",
     "usr/bin/novi-edit",
     "usr/bin/novi-files",
+    "usr/bin/novi-view",
     "usr/bin/novi-lockscreen",
     "usr/bin/novi-screenshot",
     "usr/bin/foot",
@@ -134,6 +135,12 @@ PACKAGE_TABLE = [
      [r"^novi-edit$"]),
     ("novi-files",       "OS",            "File manager",
      [r"^novi-files$"]),
+    ("novi-view",        "OS",            "Image viewer",
+     [r"^novi-view$"]),
+    ("zlib",             "ZLIB",          "Deflate compression library",
+     [r"^libz\.so"]),
+    ("libpng",           "LIBPNG",        "PNG image codec",
+     [r"^libpng"]),
     ("novi-lockscreen",  "OS",            "Super+L session lock",
      [r"^novi-lockscreen$"]),
     ("novi-screenshot",  "OS",            "PrintScreen screen capture",
@@ -177,7 +184,7 @@ DATA_FILES = [
 # Packages that exist only to pull others in.
 META_PACKAGES = [
     ("novi-desktop", "OS", "The Novi desktop: compositor, panel, launcher, terminal",
-     ["novi-shell", "novi-panel", "novi-launcher", "novi-settings", "novi-edit", "novi-files",
+     ["novi-shell", "novi-panel", "novi-launcher", "novi-settings", "novi-edit", "novi-files", "novi-view",
       "novi-lockscreen", "novi-screenshot", "foot", "fonts-jetbrains-mono"]),
 ]
 
@@ -218,14 +225,40 @@ class Rootfs:
     def needed(self, rel):
         return readelf_needed(self.readelf, self.full(rel))
 
+    # rel, plus every link hop it goes through, ending at the real file.
+    #
+    # A soname symlink has no ELF header of its own, so readelf_needed()
+    # returns nothing for it -- which meant the walk below used to stop
+    # dead at every `libfoo.so.N`, seeing only the one name a binary
+    # records and never the file that name points at. Nothing had
+    # noticed, because the sweep further down claims table-owned
+    # libraries whether the graph reached them or not. It stops being
+    # survivable the moment anything reasons about reachability, which
+    # the straddle check in main() now does.
+    def chain(self, rel):
+        out, cur, hops = [], rel, 0
+        while hops < 16:
+            out.append(cur)
+            full = self.full(cur)
+            if not os.path.islink(full):
+                break
+            tgt = os.readlink(full)
+            cur = (os.path.normpath(tgt.lstrip("/")) if os.path.isabs(tgt)
+                   else os.path.normpath(os.path.join(os.path.dirname(cur), tgt)))
+            if cur in out or not os.path.exists(self.full(cur)):
+                break
+            hops += 1
+        return out
+
     def closure(self, seeds):
         seen, queue = set(), [s for s in seeds if os.path.exists(self.full(s))]
         while queue:
             rel = queue.pop()
             if rel in seen:
                 continue
-            seen.add(rel)
-            for so in self.needed(rel):
+            hops = self.chain(rel)
+            seen.update(hops)
+            for so in self.needed(hops[-1]):
                 tgt = self.soname.get(so)
                 if tgt and tgt not in seen:
                     queue.append(tgt)
@@ -331,6 +364,40 @@ def main():
                 expanded.add(rel)
 
     move = sorted(expanded)
+
+    # A library's real file, its soname link and its development link are
+    # one thing with three names. If some of those names move and some
+    # stay, the base image keeps a symlink pointing at a file that is no
+    # longer there, and the package ships a library the dynamic linker
+    # cannot find by the only name anything records -- neither of which
+    # is visible anywhere at build time.
+    #
+    # Not theoretical. libpng's `make install` puts `pngfix` and
+    # `png-fix-itxt` in /usr/bin; they are not desktop binaries, so their
+    # closure pinned `libpng16.so.16` and `libz.so.1` into the base while
+    # the sweep moved `libpng16.so.16.43.0` and `libz.so.1.3.1` out with
+    # the desktop. Both packages built, indexed, signed and installed
+    # cleanly; `pkg install novi-desktop` reported success; and novi-view
+    # died at exec with "Error loading shared library libpng16.so.16".
+    # The stage that caused it no longer installs those two programs --
+    # but the next library to ship a utility would have done it again, so
+    # the check is here rather than only there.
+    moved = set(move)
+    straddling = set()
+    for rel in move:
+        for sib in rf.siblings(rel):
+            if sib not in moved and os.path.exists(rf.full(sib)):
+                straddling.add((sib, rel))
+    if straddling:
+        print("ERROR: a library is being split across the base/desktop "
+              "boundary -- these names stay in the base image while the "
+              "file they name moves out:", file=sys.stderr)
+        for sib, rel in sorted(straddling):
+            print("  %s stays, %s moves" % (sib, rel), file=sys.stderr)
+        print("Something in the base links one of these by soname. Find it "
+              "with readelf -d and decide whether it belongs in a "
+              "console-only image at all.", file=sys.stderr)
+        return 1
 
     # Safety net: nothing that stays may need anything that goes.
     moving_sonames = {os.path.basename(m) for m in move}
