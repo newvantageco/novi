@@ -294,7 +294,7 @@ if [[ -f "${NOVI_REPO_DIR}/index" ]]; then
     echo ">>> repository: $(ls "${ISO_DIR}/novi-repo"/*.pkg.tar.gz 2>/dev/null | wc -l) package(s), $(du -sh "${ISO_DIR}/novi-repo" | cut -f1)"
 else
     echo ">>> WARNING: no package repository at ${NOVI_REPO_DIR} -- the ISO will" >&2
-    echo ">>>          have no desktop to install. Run build/20-repo.sh first." >&2
+    echo ">>>          have no desktop to install. Run build/30-repo.sh first." >&2
 fi
 
 echo ">>> Staging BIOS boot artifacts for the installer ..."

@@ -170,8 +170,8 @@ rejected in RFC 0003 for the same reason: two overlapping notions of
 
 - `tools/pkgsplit/pkgsplit.py` — the computed split, package
   assignment, dependency derivation, safety check
-- `build/20-repo.sh` — rewritten to drive it
-- `build/21-desktop-split.sh` — removes exactly the files 20 packaged,
+- `build/30-repo.sh` — rewritten to drive it
+- `build/31-desktop-split.sh` — removes exactly the files 20 packaged,
   from the manifest 20 wrote (one source of truth, or the two drift)
 - `build/22-live-desktop.sh`, `rootfs/usr/bin/novi-live-desktop`
 - `scripts/mkiso.sh` — stages the repository, adds the Live Desktop

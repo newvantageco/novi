@@ -447,7 +447,7 @@ graph, not listed by hand, and the build fails if anything left behind
 still links against something being moved out — see
 [RFC 0007](docs/rfcs/0007-base-desktop-split.md).
 
-Build your own repository with `bash build/20-repo.sh` and serve the
+Build your own repository with `bash build/30-repo.sh` and serve the
 directory over HTTP, or point `mirror` at a local directory. There is
 no default public mirror: there is no public Novi repository yet, and
 pointing a package manager at a host that does not exist is worse than

@@ -31,7 +31,7 @@ install -D -m 755 "${REPO_ROOT}/packages/pkg" "${ROOTFS}/usr/bin/pkg"
 # Where this machine gets software from (RFC 0006). Shipped with no
 # mirror set: there is no public Novi repository yet, and pointing a
 # package manager at a host that does not exist is worse than pointing
-# it at nothing. build/20-repo.sh builds one and installs the key that
+# it at nothing. build/30-repo.sh builds one and installs the key that
 # signs it.
 #
 # packages/mkrepo, like packages/mkpkg, stays a build-host tool and is

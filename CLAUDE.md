@@ -41,7 +41,7 @@ below for why `/build` is hardcoded and unrelated to the repo checkout path.
 - `bash scripts/mkvm.sh [--disk]` — boot the ISO in QEMU/KVM
 - `novi-install install --disk DEV` (on the booted live system) — install to
   disk (RFC 0003)
-- `bash build/20-repo.sh` — build and sign the first-party package
+- `bash build/30-repo.sh` — build and sign the first-party package
   repository into `/build/repo` (RFC 0006); serve that directory over HTTP
   and point a machine at it with `mirror =` in `/etc/novi/pkg.conf`
 - `bash build/25-wifi.sh` — libnl, wpa_supplicant, `iw`, `novi-wifi`
@@ -49,7 +49,7 @@ below for why `/build` is hardcoded and unrelated to the repo checkout path.
   test harness, deliberately not into the image
 - `bash build/23-e2fsprogs.sh`, `bash build/24-novi-gpt.sh` — real `mke2fs`
   (journalled ext4) and the GPT writer UEFI installs need (RFC 0008)
-- `bash build/21-desktop-split.sh` — **destructive**: removes the packaged
+- `bash build/31-desktop-split.sh` — **destructive**: removes the packaged
   desktop from `/build/rootfs`, leaving a console-only base (RFC 0007).
   Must run after 20; re-running 06..14 puts the files back
 - `bash build/26-firmware.sh` — curated linux-firmware + `wireless-regdb`
@@ -604,7 +604,7 @@ Three things it is important not to break:
   the graph finds what is *reachable*, `PACKAGE_TABLE` claims what is
   *ours*, and anything claimed that the base does not need moves too. A
   file matching no pattern is a hard error, never a guess.
-- **`build/21-desktop-split.sh` deletes exactly what `20-repo.sh`
+- **`build/31-desktop-split.sh` deletes exactly what `30-repo.sh`
   packaged**, from the manifest 20 wrote. One source of truth, or the two
   drift and the image ends up broken or still fat. Re-running stages
   06..14 puts the files back; that ordering is what `build.sh` does.

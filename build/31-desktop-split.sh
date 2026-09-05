@@ -1,13 +1,13 @@
 #!/bin/bash
 # ============================================================
-# 21-desktop-split.sh — Remove the desktop from the base image
+# 31-desktop-split.sh — Remove the desktop from the base image
 #
 # RFC 0007. §2 of the platform roadmap wants a small native base with
 # everything else delivered as packages. Until now the desktop was in
 # the base image AND in the repository, which is the architecture
 # described rather than the one shipped.
 #
-# This stage deletes exactly the files build/20-repo.sh packaged, using
+# This stage deletes exactly the files build/30-repo.sh packaged, using
 # the manifest that stage wrote. It does not have its own idea of what
 # the desktop is -- one source of truth for the split, computed from
 # the ELF dependency graph, or the two drift apart and the image ends
@@ -31,7 +31,7 @@ source "${SCRIPT_DIR}/00-versions.sh"
 
 MANIFEST="${BUILD_DIR}/repo-desktop-files.list"
 [ -f "${MANIFEST}" ] || {
-    echo "ERROR: ${MANIFEST} not found -- run build/20-repo.sh first." >&2
+    echo "ERROR: ${MANIFEST} not found -- run build/30-repo.sh first." >&2
     exit 1
 }
 

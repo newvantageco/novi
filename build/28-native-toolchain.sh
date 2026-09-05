@@ -250,17 +250,23 @@ fi
 
 # ── Into the repository ───────────────────────────────────────────────────
 #
-# 20-repo.sh builds packages by running pkgsplit over the rootfs, which
+# 30-repo.sh builds packages by running pkgsplit over the rootfs, which
 # is the right tool for the desktop split and the wrong one here: none
 # of this is IN the rootfs, and none of it should be. So these are
 # packaged directly and the index is re-signed over the whole
 # directory. mkrepo indexes whatever it finds, so adding to an existing
 # repository is just running it again -- with the same key, so the
 # public half already in the image stays valid.
-if [ "$ONLY" = "all" ] || [ "$ONLY" = "repo" ]; then
+# Packaging is NOT part of `all`, and is invoked by 32-toolchain-repo.sh
+# instead. 30-repo.sh wipes and recreates ${BUILD_DIR}/repo, so anything
+# that adds to the repository has to run after it -- and this stage
+# builds gcc, which has to run long before that. Build and publish are
+# two different times in the pipeline; they are now two different
+# stages.
+if [ "$ONLY" = "repo" ]; then
     REPO_OUT="${BUILD_DIR}/repo"
     KEY_FILE="${BUILD_DIR}/keys/novi-repo.key"
-    [ -d "${REPO_OUT}" ] || { echo "ERROR: ${REPO_OUT} not found -- run build/20-repo.sh first." >&2; exit 1; }
+    [ -d "${REPO_OUT}" ] || { echo "ERROR: ${REPO_OUT} not found -- run build/30-repo.sh first." >&2; exit 1; }
     [ -f "${KEY_FILE}" ] || { echo "ERROR: signing key ${KEY_FILE} not found." >&2; exit 1; }
 
     echo ">>> Packaging the toolchain into ${REPO_OUT} ..."

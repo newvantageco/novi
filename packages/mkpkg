@@ -146,7 +146,7 @@ echo "[mkpkg] Done: ${OUTPUT} (${SIZE})"
 # having built the package perfectly. Nobody noticed while mkpkg was
 # only ever run by hand, where the package is plainly there and the
 # status is never checked. The first script to call it in a loop under
-# `set -e` (build/20-repo.sh) died on the very first package.
+# `set -e` (build/30-repo.sh) died on the very first package.
 #
 # awk instead of head: it reads the whole stream and simply stops
 # printing, so tar always finishes writing and always exits 0.

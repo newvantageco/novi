@@ -166,7 +166,7 @@ The desktop: `foot` and `fcft`, and Novi's own `novi-shell`,
 `novi-screenshot`. §2 wants a small native base with everything else
 delivered as packages, and the desktop is the largest thing currently
 baked into the base image that a console-only machine has no use for.
-`build/20-repo.sh` builds these from exactly the binaries the earlier
+`build/30-repo.sh` builds these from exactly the binaries the earlier
 stages produced, so the repository's contents and the image's contents
 cannot drift.
 
@@ -176,7 +176,7 @@ repository at all.
 
 ### The signing key
 
-`build/20-repo.sh` generates a development key under `${BUILD_DIR}/keys`
+`build/30-repo.sh` generates a development key under `${BUILD_DIR}/keys`
 on first run and installs its public half into the image at
 `/etc/novi/keys/novi-repo.pub`. That is correct for a build you run
 yourself — you are the publisher, and trusting your own repository is
@@ -222,7 +222,7 @@ Implemented:
 - `packages/pkg` — `pkg sync`, mirror fetch, SHA-256 verification,
   index-aware `search`/`info`
 - `rootfs/etc/novi/pkg.conf`, installed by `build/11-pkg.sh`
-- `build/20-repo.sh` — builds and signs the first-party repository
+- `build/30-repo.sh` — builds and signs the first-party repository
 - `packages/novi-state` — the `packages.*` domain
 
 ### Three bugs this work surfaced

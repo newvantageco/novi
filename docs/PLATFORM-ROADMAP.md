@@ -1890,7 +1890,7 @@ Ordered honestly, what is left after that:
 2. **A published repository and an offline release key** -- something
    at a stable URL, signed off the build host. Everything a package
    system needs exists and is verified; it all points at a repository
-   that lives only on whichever machine last ran `build/20-repo.sh`,
+   that lives only on whichever machine last ran `build/30-repo.sh`,
    with a development key the image trusts. A real release key lives
    offline and signs somewhere that is not the build host.
 3. **A Microsoft-signed shim** -- `bootx64.efi` is signed now, but by a

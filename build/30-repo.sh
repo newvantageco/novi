@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-# 20-repo.sh — Build and sign the first-party package repository
+# 30-repo.sh — Build and sign the first-party package repository
 #
 # RFC 0006 gave `pkg` something to fetch from. RFC 0007 decides WHAT is
 # in it: the desktop, so the base image can stop carrying it.
@@ -102,5 +102,5 @@ echo ""
 echo "Repository built: ${REPO_OUT}  ($(du -sh "${REPO_OUT}" | cut -f1))"
 echo "Desktop file manifest: ${MANIFEST} ($(wc -l < "${MANIFEST}") files)"
 echo ""
-echo "  bash build/21-desktop-split.sh   # remove those files from the base image"
+echo "  bash build/31-desktop-split.sh   # remove those files from the base image"
 echo "  bash scripts/mkiso.sh            # the ISO carries this repo at /novi-repo"
