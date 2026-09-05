@@ -459,8 +459,31 @@ signal at all.**
   "can't run '/etc/init.d/rcS'". Stage 03 now removes that symlink at the
   source, and `16-s6-rc-db.sh` checks `/sbin/init` and repairs it.
 
-When touching any build stage, ask what it does to artifacts a *later* stage
-owns. `bash build.sh --from NN` exists and people will use it.
+A third case, the mirror image of those two: **a stage can be correct in a
+warm tree and broken from scratch.** `novi-launcher` (stage 08) links
+`fcft`, which stage **09** built. Its Makefile said so out loud — "all
+already built for foot (build/09-foot.sh), no new dependency" — which
+was true in the tree it was written in and false in build order. A
+genuinely clean `bash build.sh` stopped at stage 08 with
+`cannot find -lfcft`, and nothing noticed because building from an
+empty `/build` is rare and CI compiles nothing. The font libraries now
+live in `06-wayland.sh` with the rest of the shared stack: a library
+more than one client links belongs in the library stage, not inside
+whichever application happened to need it first.
+
+So when touching any build stage, ask both questions: what does it do to
+artifacts a *later* stage owns (`--from NN` exists and people use it),
+and does it depend on anything a later stage produces? The second is
+invisible in every tree except a clean one.
+
+**And do not repair a broken `/build` by hand.** Extracting packages back
+over the rootfs to recover build inputs, then deleting what does not
+belong with an ad-hoc `rm` loop, produces a tree nobody can reason
+about — including an image that reached s6-linux-init and never started
+stage 2, with no error anywhere, resisting several rounds of bisection.
+Re-running the stages in order fixed it in one pass and would have been
+faster from the start. The stages are the recovery mechanism; that is
+what they are for.
 
 ## Architecture: users, and where secrets are not
 
