@@ -59,7 +59,9 @@
 #include <wayland-client.h>
 #include <xkbcommon/xkbcommon.h>
 
+#include "clipboard.h"
 #include "text.h"
+
 #include "xdg-shell-client-protocol.h"
 
 #define WINDOW_WIDTH  900
@@ -86,6 +88,9 @@
 #define CURSOR_COLOR    0xff2dd4bfu
 #define CURLINE_COLOR   0xff1e1e2au
 
+/* Sits under the text, so it has to stay dark enough for TEXT_PIX to
+ * read against it -- this is the cursor-line tint, deepened. */
+#define SEL_COLOR      0xff2c3a55u
 static const pixman_color_t TEXT_PIX      = {0xc8c8, 0xcccc, 0xd8d8, 0xffff};
 static const pixman_color_t GUTTER_PIX    = {0x5555, 0x5858, 0x6a6a, 0xffff};
 static const pixman_color_t GUTTER_CUR_PIX= {0x9a9a, 0xa0a0, 0xb4b4, 0xffff};
@@ -138,6 +143,15 @@ struct novi_edit {
 	int top;       /* first visible line */
 	bool modified;
 	bool read_only;
+
+	/* Selection. `has_sel` says the anchor is live; the selected range
+	 * is everything between (ay,ax) and the cursor, in either order. */
+	bool has_sel;
+	int ay, ax;
+
+	struct novi_clipboard *clipboard;
+	struct wl_data_device_manager *data_device_manager;
+	uint32_t last_key_serial;
 
 	/* Undo/redo. See the block comment above snapshot_capture(). */
 	struct snapshot *undo;
@@ -414,6 +428,100 @@ static void scroll_to_cursor(struct novi_edit *e) {
 	}
 }
 
+/* ── Selection ─────────────────────────────────────────────────── */
+
+/* The anchor stays where the selection started and the cursor is the
+ * other end, so extending backwards is the same code as extending
+ * forwards. Everything that moves the cursor either extends the
+ * selection (Shift held) or drops it (Shift not held), which is the one
+ * rule that makes a selection behave the way people expect.
+ */
+
+static void sel_clear(struct novi_edit *e) {
+	e->has_sel = false;
+}
+
+/* Anchor here if there is no selection yet -- called before a movement
+ * that is meant to extend one. */
+static void sel_anchor(struct novi_edit *e) {
+	if (!e->has_sel) {
+		e->has_sel = true;
+		e->ay = e->cy;
+		e->ax = e->cx;
+	}
+}
+
+/* True if anything is actually selected. An anchor sitting exactly on
+ * the cursor is an empty selection, which is not one.
+ *
+ * The range check is not paranoia. An anchor is a position in the
+ * document as it was when the selection started, and every routine that
+ * reads a selection indexes lines[] with it -- so an anchor left
+ * pointing past the end of a document that has since shrunk is an
+ * out-of-bounds read, not a cosmetic glitch. That happened: undo
+ * restored a shorter document without clearing the selection, the
+ * anchor kept pointing at a line that no longer existed, and the next
+ * ^C walked off the end of lines[] and took the editor with it.
+ *
+ * The rule below (every mutation drops the selection) is what actually
+ * prevents it. This is the check that makes the next way of getting it
+ * wrong show up as "nothing is selected" instead of as a crash. */
+static bool sel_active(const struct novi_edit *e) {
+	if (!e->has_sel) {
+		return false;
+	}
+	if (e->ay < 0 || e->ay >= e->nlines) {
+		return false;
+	}
+	if (e->ax < 0 || e->ax > (int)strlen(e->lines[e->ay])) {
+		return false;
+	}
+	return !(e->ay == e->cy && e->ax == e->cx);
+}
+
+/* The selection in document order, whichever end the cursor is at. */
+static void sel_range(const struct novi_edit *e,
+		int *y0, int *x0, int *y1, int *x1) {
+	if (e->ay < e->cy || (e->ay == e->cy && e->ax <= e->cx)) {
+		*y0 = e->ay; *x0 = e->ax; *y1 = e->cy; *x1 = e->cx;
+	} else {
+		*y0 = e->cy; *x0 = e->cx; *y1 = e->ay; *x1 = e->ax;
+	}
+}
+
+/* The selected text, newline-joined, malloc'd. NULL if nothing is
+ * selected or the allocation failed. */
+static char *sel_text(const struct novi_edit *e) {
+	if (!sel_active(e)) {
+		return NULL;
+	}
+	int y0, x0, y1, x1;
+	sel_range(e, &y0, &x0, &y1, &x1);
+
+	size_t total = 1;
+	for (int y = y0; y <= y1; y++) {
+		int a = (y == y0) ? x0 : 0;
+		int b = (y == y1) ? x1 : (int)strlen(e->lines[y]);
+		total += (size_t)(b - a) + 1;   /* +1 for the newline, or slack */
+	}
+	char *out = malloc(total);
+	if (out == NULL) {
+		return NULL;
+	}
+	size_t n = 0;
+	for (int y = y0; y <= y1; y++) {
+		int a = (y == y0) ? x0 : 0;
+		int b = (y == y1) ? x1 : (int)strlen(e->lines[y]);
+		memcpy(out + n, e->lines[y] + a, (size_t)(b - a));
+		n += (size_t)(b - a);
+		if (y < y1) {
+			out[n++] = '\n';
+		}
+	}
+	out[n] = '\0';
+	return out;
+}
+
 /* ── Undo ──────────────────────────────────────────────────────── */
 
 /* Whole-document snapshots, not an operation log.
@@ -606,6 +714,10 @@ static void history_step(struct novi_edit *e, bool forward) {
 	e->cy        = want.cy;
 	e->cx        = want.cx;
 	e->modified  = want.modified;
+	/* A snapshot does not carry a selection, and an anchor into the
+	 * document this one just replaced is meaningless even when it
+	 * happens to still be in range. */
+	sel_clear(e);
 	/* want.lines now belongs to the document; do not snapshot_free it. */
 
 	scroll_to_cursor(e);
@@ -615,31 +727,90 @@ static void history_step(struct novi_edit *e, bool forward) {
 
 /* ── Editing ───────────────────────────────────────────────────── */
 
-static void insert_text(struct novi_edit *e, const char *s) {
-	if (e->read_only) {
-		set_status(e, true, "read-only");
-		return;
-	}
+/* Defined with the clipboard below, because that is where the rest of
+ * the selection editing lives; needed here because every edit made with
+ * a selection up replaces it first. */
+static bool delete_selection(struct novi_edit *e, bool record);
+
+
+/* The mutations, with no read-only check and no undo record. A paste
+ * is one edit made of many of these, and it must be one undo step, so
+ * the recording lives in the callers below rather than in here.
+ *
+ * Each of them drops the selection, and that is the invariant the
+ * anchor depends on: once the document has changed, an anchor into the
+ * old one means nothing -- at best it highlights the wrong text, at
+ * worst it points at a line that no longer exists. Typing with an
+ * anchor still live also made the "selection" grow one character per
+ * keystroke, which is not what anybody asked for. */
+static bool raw_insert(struct novi_edit *e, const char *s) {
+	sel_clear(e);
 	size_t add = strlen(s);
 	char *line = e->lines[e->cy];
 	size_t len = strlen(line);
 	if (len + add > MAX_LINE_LEN) {
 		set_status(e, true, "line too long");
-		return;
+		return false;
 	}
-	/* Coalescable: a run of typed characters is one undo step. */
-	undo_push(e, true);
 	char *grown = realloc(line, len + add + 1);
 	if (grown == NULL) {
-		undo_discard(e);
 		set_status(e, true, "out of memory");
-		return;
+		return false;
 	}
 	memmove(grown + e->cx + add, grown + e->cx, len - (size_t)e->cx + 1);
 	memcpy(grown + e->cx, s, add);
 	e->lines[e->cy] = grown;
 	e->cx += (int)add;
 	e->modified = true;
+	return true;
+}
+
+static bool raw_split(struct novi_edit *e) {
+	sel_clear(e);
+	char *line = e->lines[e->cy];
+	char *tail = strdup(line + e->cx);
+	if (tail == NULL || !line_insert(e, e->cy + 1, tail)) {
+		free(tail);
+		set_status(e, true, "out of memory");
+		return false;
+	}
+	line[e->cx] = '\0';
+	e->cy++;
+	e->cx = 0;
+	e->modified = true;
+	return true;
+}
+
+static void insert_text(struct novi_edit *e, const char *s) {
+	if (e->read_only) {
+		set_status(e, true, "read-only");
+		return;
+	}
+	/* Typing over a selection replaces it, and the two together are one
+	 * undo step -- so the snapshot is pushed here, before either. */
+	if (sel_active(e)) {
+		undo_push(e, false);
+		e->coalescing = false;
+		if (!delete_selection(e, false)) {
+			undo_discard(e);
+			return;
+		}
+		if (!raw_insert(e, s)) {
+			/* The deletion stands and is on the stack; nothing is
+			 * lost, the insert simply did not fit. */
+			set_status(e, true, "line too long");
+		}
+		return;
+	}
+	if (strlen(e->lines[e->cy]) + strlen(s) > MAX_LINE_LEN) {
+		set_status(e, true, "line too long");
+		return;
+	}
+	/* Coalescable: a run of typed characters is one undo step. */
+	undo_push(e, true);
+	if (!raw_insert(e, s)) {
+		undo_discard(e);
+	}
 }
 
 static void split_line(struct novi_edit *e) {
@@ -648,18 +819,13 @@ static void split_line(struct novi_edit *e) {
 		return;
 	}
 	undo_push(e, false);
-	char *line = e->lines[e->cy];
-	char *tail = strdup(line + e->cx);
-	if (tail == NULL || !line_insert(e, e->cy + 1, tail)) {
-		free(tail);
+	if (sel_active(e) && !delete_selection(e, false)) {
 		undo_discard(e);
-		set_status(e, true, "out of memory");
 		return;
 	}
-	line[e->cx] = '\0';
-	e->cy++;
-	e->cx = 0;
-	e->modified = true;
+	if (!raw_split(e)) {
+		undo_discard(e);
+	}
 }
 
 /* The mutation with no read-only check and no undo record:
@@ -668,6 +834,7 @@ static void split_line(struct novi_edit *e) {
  * snapshot for one keypress -- so undo would need two presses to put
  * back one Delete. */
 static bool do_delete_back(struct novi_edit *e) {
+	sel_clear(e);
 	if (e->cx > 0) {
 		char *line = e->lines[e->cy];
 		int start = prev_char(line, e->cx);
@@ -704,6 +871,10 @@ static void delete_back(struct novi_edit *e) {
 		set_status(e, true, "read-only");
 		return;
 	}
+	if (sel_active(e)) {
+		delete_selection(e, true);
+		return;
+	}
 	if (e->cx == 0 && e->cy == 0) {
 		return;   /* nothing behind the cursor; do not record a no-op */
 	}
@@ -716,6 +887,10 @@ static void delete_back(struct novi_edit *e) {
 static void delete_forward(struct novi_edit *e) {
 	if (e->read_only) {
 		set_status(e, true, "read-only");
+		return;
+	}
+	if (sel_active(e)) {
+		delete_selection(e, true);
 		return;
 	}
 	char *line = e->lines[e->cy];
@@ -746,6 +921,155 @@ static void delete_forward(struct novi_edit *e) {
 	}
 }
 
+/* ── Selection edits and the clipboard ─────────────────────────── */
+
+/* Remove the selected range. `record` is false when the caller has
+ * already pushed a snapshot -- a paste is one undo step, not a delete
+ * step followed by an insert step. */
+static bool delete_selection(struct novi_edit *e, bool record) {
+	if (!sel_active(e)) {
+		return false;
+	}
+	if (e->read_only) {
+		set_status(e, true, "read-only");
+		return false;
+	}
+	int y0, x0, y1, x1;
+	sel_range(e, &y0, &x0, &y1, &x1);
+
+	if (record) {
+		undo_push(e, false);
+	}
+
+	if (y0 == y1) {
+		char *line = e->lines[y0];
+		size_t len = strlen(line);
+		memmove(line + x0, line + x1, len - (size_t)x1 + 1);
+	} else {
+		/* Head of the first line, tail of the last, joined; everything
+		 * between them goes. */
+		char *first = e->lines[y0];
+		const char *tail = e->lines[y1] + x1;
+		size_t tlen = strlen(tail);
+		char *joined = realloc(first, (size_t)x0 + tlen + 1);
+		if (joined == NULL) {
+			if (record) {
+				undo_discard(e);
+			}
+			set_status(e, true, "out of memory");
+			return false;
+		}
+		memcpy(joined + x0, tail, tlen + 1);
+		e->lines[y0] = joined;
+		for (int y = y1; y > y0; y--) {
+			line_remove(e, y);
+		}
+	}
+
+	e->cy = y0;
+	e->cx = x0;
+	sel_clear(e);
+	e->modified = true;
+	scroll_to_cursor(e);
+	return true;
+}
+
+/* Insert text that may contain newlines, at the cursor. The caller has
+ * already recorded the undo step. */
+static bool insert_multiline(struct novi_edit *e, const char *text) {
+	const char *p = text;
+	for (;;) {
+		const char *nl = strchr(p, '\n');
+		size_t chunk = nl != NULL ? (size_t)(nl - p) : strlen(p);
+		if (chunk > 0) {
+			char *piece = strndup(p, chunk);
+			if (piece == NULL) {
+				set_status(e, true, "out of memory");
+				return false;
+			}
+			/* Strip a \r before the \n: text copied from somewhere
+			 * with CRLF line endings should not leave a control
+			 * character sitting in the middle of the document. */
+			size_t plen = strlen(piece);
+			if (plen > 0 && piece[plen - 1] == '\r') {
+				piece[plen - 1] = '\0';
+			}
+			raw_insert(e, piece);
+			free(piece);
+		}
+		if (nl == NULL) {
+			return true;
+		}
+		raw_split(e);
+		p = nl + 1;
+	}
+}
+
+static void clipboard_copy(struct novi_edit *e) {
+	char *text = sel_text(e);
+	if (text == NULL) {
+		set_status(e, false, "nothing selected");
+		return;
+	}
+	if (!novi_clipboard_copy(e->clipboard, text, e->last_key_serial)) {
+		set_status(e, true, "no clipboard available");
+	} else {
+		set_status(e, false, "copied");
+	}
+	free(text);
+}
+
+static void clipboard_cut(struct novi_edit *e) {
+	if (!sel_active(e)) {
+		set_status(e, false, "nothing selected");
+		return;
+	}
+	if (e->read_only) {
+		set_status(e, true, "read-only");
+		return;
+	}
+	char *text = sel_text(e);
+	if (text == NULL) {
+		set_status(e, true, "out of memory");
+		return;
+	}
+	bool ok = novi_clipboard_copy(e->clipboard, text, e->last_key_serial);
+	free(text);
+	if (!ok) {
+		/* Do not delete what could not be copied: a cut that loses the
+		 * text is not a cut, it is a delete the user did not ask for. */
+		set_status(e, true, "no clipboard available -- nothing cut");
+		return;
+	}
+	delete_selection(e, true);
+	set_status(e, false, "cut");
+}
+
+static void clipboard_paste(struct novi_edit *e) {
+	if (e->read_only) {
+		set_status(e, true, "read-only");
+		return;
+	}
+	char *text = novi_clipboard_paste(e->clipboard);
+	if (text == NULL || text[0] == '\0') {
+		free(text);
+		set_status(e, false, "clipboard is empty");
+		return;
+	}
+
+	/* One snapshot for the whole thing: replacing a selection with
+	 * pasted text is one edit, and it should take one ^Z. */
+	undo_push(e, false);
+	e->coalescing = false;
+	if (sel_active(e)) {
+		delete_selection(e, false);
+	}
+	insert_multiline(e, text);
+	free(text);
+	scroll_to_cursor(e);
+	set_status(e, false, "pasted");
+}
+
 /* ── Rendering ─────────────────────────────────────────────────── */
 
 static void draw_rect(uint32_t *px, uint32_t stride_px, uint32_t buf_w,
@@ -761,6 +1085,22 @@ static void draw_rect(uint32_t *px, uint32_t stride_px, uint32_t buf_w,
 			px[row * (int)stride_px + col] = color;
 		}
 	}
+}
+
+/* The rendered width of the first `bytes` bytes of line `ln`.
+ *
+ * Measured, not computed from a column count: the font is not
+ * guaranteed monospace at every codepoint even when it is a monospace
+ * family, and a selection whose edges disagree with the cursor by a
+ * fraction of a glyph looks broken in exactly the way that makes people
+ * distrust an editor. The cursor and both selection edges all come
+ * through here so they cannot disagree. */
+static int prefix_width(struct novi_edit *e, int ln, int bytes) {
+	char save = e->lines[ln][bytes];
+	e->lines[ln][bytes] = '\0';
+	int px_w = novi_text_width(e->font, e->lines[ln]);
+	e->lines[ln][bytes] = save;
+	return px_w;
 }
 
 static void render(struct novi_edit *e, uint32_t *px, uint32_t stride_px) {
@@ -789,6 +1129,30 @@ static void render(struct novi_edit *e, uint32_t *px, uint32_t stride_px) {
 				(int)w - GUTTER_W, lh, CURLINE_COLOR);
 		}
 
+		/* The selection, under the text. Both ends are measured
+		 * widths, for the same reason the cursor is: a column count
+		 * would drift the moment a glyph is not one cell wide. A line
+		 * fully inside the selection is highlighted to the right edge,
+		 * so a multi-line selection reads as one block rather than as
+		 * a ragged set of runs. */
+		if (sel_active(e)) {
+			int sy0, sx0, sy1, sx1;
+			sel_range(e, &sy0, &sx0, &sy1, &sx1);
+			if (ln >= sy0 && ln <= sy1) {
+				int a = (ln == sy0) ? sx0 : 0;
+				int b = (ln == sy1) ? sx1 : (int)strlen(e->lines[ln]);
+				int ax = text_x + prefix_width(e, ln, a);
+				int bx = text_x + prefix_width(e, ln, b);
+				if (ln < sy1) {
+					bx = (int)w;   /* the newline is selected too */
+				}
+				if (bx > ax) {
+					draw_rect(px, stride_px, w, h, ax, PAD + r * lh,
+						bx - ax, lh, SEL_COLOR);
+				}
+			}
+		}
+
 		char num[16];
 		snprintf(num, sizeof(num), "%d", ln + 1);
 		int nw = novi_text_width(e->font_small, num);
@@ -798,15 +1162,8 @@ static void render(struct novi_edit *e, uint32_t *px, uint32_t stride_px) {
 		novi_text_draw(dest, e->font, text_x, baseline, e->lines[ln], TEXT_PIX);
 
 		if (is_cursor_line) {
-			/* Cursor x is the rendered width of the text before it --
-			 * measured, not computed from a column count, because the
-			 * font is not guaranteed monospace at every codepoint even
-			 * when it is a monospace family. */
-			char save = e->lines[ln][e->cx];
-			e->lines[ln][e->cx] = '\0';
-			int cw = novi_text_width(e->font, e->lines[ln]);
-			e->lines[ln][e->cx] = save;
-			draw_rect(px, stride_px, w, h, text_x + cw, PAD + r * lh,
+			draw_rect(px, stride_px, w, h,
+				text_x + prefix_width(e, ln, e->cx), PAD + r * lh,
 				2, lh, CURSOR_COLOR);
 		}
 	}
@@ -831,7 +1188,7 @@ static void render(struct novi_edit *e, uint32_t *px, uint32_t stride_px) {
 	char right[sizeof(e->status) + 64];
 	snprintf(right, sizeof(right), "%d:%d   %s",
 		e->cy + 1, e->cx + 1,
-		e->status[0] ? e->status : "^S save   ^Z undo   ^Y redo   ^Q quit");
+		e->status[0] ? e->status : "^S save  ^Z undo  ^Y redo  ^C copy  ^X cut  ^V paste  ^Q quit");
 	int rw = novi_text_width(e->font_small, right);
 	novi_text_draw(dest, e->font_small, (int)w - PAD - rw, sbase, right,
 		e->status_is_error ? ERROR_PIX : STATUS_PIX);
@@ -900,7 +1257,8 @@ static void surface_draw_frame(struct novi_edit *e) {
 	wl_surface_commit(e->surface);
 }
 
-static void handle_key(struct novi_edit *e, xkb_keysym_t sym, bool ctrl) {
+static void handle_key(struct novi_edit *e, xkb_keysym_t sym, bool ctrl,
+		bool shift) {
 	e->status[0] = '\0';
 	bool was_quit_armed = e->quit_armed;
 	e->quit_armed = false;
@@ -909,6 +1267,24 @@ static void handle_key(struct novi_edit *e, xkb_keysym_t sym, bool ctrl) {
 		switch (sym) {
 		case XKB_KEY_s: case XKB_KEY_S:
 			doc_save(e);
+			return;
+		case XKB_KEY_c: case XKB_KEY_C:
+			clipboard_copy(e);
+			return;
+		case XKB_KEY_x: case XKB_KEY_X:
+			clipboard_cut(e);
+			return;
+		case XKB_KEY_v: case XKB_KEY_V:
+			clipboard_paste(e);
+			return;
+		case XKB_KEY_a: case XKB_KEY_A:
+			e->has_sel = true;
+			e->ay = 0;
+			e->ax = 0;
+			e->cy = e->nlines - 1;
+			e->cx = (int)strlen(e->lines[e->cy]);
+			e->coalescing = false;
+			scroll_to_cursor(e);
 			return;
 		case XKB_KEY_z: case XKB_KEY_Z:
 			history_step(e, false);
@@ -932,8 +1308,30 @@ static void handle_key(struct novi_edit *e, xkb_keysym_t sym, bool ctrl) {
 		}
 	}
 
+	/* Every movement below either extends the selection or drops it.
+	 * Deciding it once here, rather than in each case, is what keeps
+	 * "shift-arrow selects" from being true of some keys and not
+	 * others -- which is how a selection stops being trustworthy. */
+	switch (sym) {
+	case XKB_KEY_Up: case XKB_KEY_Down: case XKB_KEY_Left: case XKB_KEY_Right:
+	case XKB_KEY_Home: case XKB_KEY_End:
+	case XKB_KEY_Page_Up: case XKB_KEY_Page_Down:
+		if (shift) {
+			sel_anchor(e);
+		} else {
+			sel_clear(e);
+		}
+		break;
+	default:
+		break;
+	}
+
 	switch (sym) {
 	case XKB_KEY_Escape:
+		if (sel_active(e)) {
+			sel_clear(e);
+			return;   /* Esc drops a selection before it offers to quit */
+		}
 		if (e->modified && !was_quit_armed) {
 			e->quit_armed = true;
 			set_status(e, true, "unsaved changes -- Esc again to discard, ^S to save");
@@ -1065,9 +1463,15 @@ static void keyboard_key(void *data, struct wl_keyboard *kb, uint32_t serial,
 	if (key_state != WL_KEYBOARD_KEY_STATE_PRESSED || e->xkb_state == NULL) {
 		return;
 	}
+	/* The serial of the keypress, kept because claiming the clipboard
+	 * selection has to name the input event that justifies it. */
+	e->last_key_serial = serial;
+
 	xkb_keycode_t code = key + 8;
 	xkb_keysym_t sym = xkb_state_key_get_one_sym(e->xkb_state, code);
 	bool ctrl = xkb_state_mod_name_is_active(e->xkb_state, XKB_MOD_NAME_CTRL,
+		XKB_STATE_MODS_EFFECTIVE) > 0;
+	bool shift = xkb_state_mod_name_is_active(e->xkb_state, XKB_MOD_NAME_SHIFT,
 		XKB_STATE_MODS_EFFECTIVE) > 0;
 
 	/* Text first: anything the keymap turns into printable UTF-8 and
@@ -1088,7 +1492,7 @@ static void keyboard_key(void *data, struct wl_keyboard *kb, uint32_t serial,
 			return;
 		}
 	}
-	handle_key(e, sym, ctrl);
+	handle_key(e, sym, ctrl, shift);
 	surface_draw_frame(e);
 }
 
@@ -1190,6 +1594,9 @@ static void registry_global(void *data, struct wl_registry *registry,
 	} else if (strcmp(interface, wl_seat_interface.name) == 0) {
 		e->seat = wl_registry_bind(registry, name, &wl_seat_interface, 5);
 		wl_seat_add_listener(e->seat, &seat_listener, e);
+	} else if (strcmp(interface, wl_data_device_manager_interface.name) == 0) {
+		e->data_device_manager = wl_registry_bind(registry, name,
+			&wl_data_device_manager_interface, 3);
 	} else if (strcmp(interface, xdg_wm_base_interface.name) == 0) {
 		e->wm_base = wl_registry_bind(registry, name,
 			&xdg_wm_base_interface, 1);
@@ -1245,6 +1652,11 @@ int main(int argc, char **argv) {
 		return 1;
 	}
 
+	/* No clipboard is not a fatal condition: an editor that refuses to
+	 * start because the compositor has no wl_data_device_manager is
+	 * worse than one where ^C says so. */
+	e.clipboard = novi_clipboard_create(e.display, e.data_device_manager, e.seat);
+
 	e.font = novi_text_load_font("JetBrains Mono:size=15");
 	e.font_small = novi_text_load_font("JetBrains Mono:size=12");
 	if (e.font == NULL || e.font_small == NULL) {
@@ -1270,6 +1682,7 @@ int main(int argc, char **argv) {
 		;
 	}
 
+	novi_clipboard_destroy(e.clipboard);
 	history_free(&e);
 	doc_free(&e);
 	if (e.xkb_state != NULL) {

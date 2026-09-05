@@ -120,3 +120,36 @@ export SYSROOT="${BUILD_DIR}/sysroot"
 export ROOTFS="${BUILD_DIR}/rootfs"
 
 export PATH="${TOOLS}/bin:${PATH}"
+
+# ── require_desktop_headers ───────────────────────────────────────────
+#
+# Every stage that cross-compiles a Wayland client needs the headers and
+# .pc files that 06-wayland.sh put in the rootfs. 31-desktop-split.sh
+# takes them out again (RFC 0015 made them a package), so in a tree
+# where a full build has already run, rebuilding one client stops with
+# four "No such file or directory" lines from four different headers and
+# no indication of why or what to do.
+#
+# That is not a hypothetical. Chaining a rebuild into 30-repo.sh without
+# checking it succeeded packaged a rootfs with no desktop in it, and
+# 31-desktop-split.sh then deleted from the base exactly what that empty
+# manifest described -- leaving no desktop in the image AND none in the
+# repository. Recovering meant re-running the stages, which is the
+# documented mechanism and took fifteen minutes. One clear line at the
+# top of the stage is cheaper than that.
+require_desktop_headers() {
+    if [ -f "${ROOTFS}/usr/include/wayland-client.h" ]; then
+        return 0
+    fi
+    echo "ERROR: the desktop headers are not in ${ROOTFS}." >&2
+    echo "" >&2
+    echo "  31-desktop-split.sh has removed them (they ship as the" >&2
+    echo "  novi-headers package). Put them back before building a" >&2
+    echo "  client against them:" >&2
+    echo "" >&2
+    echo "      bash scripts/restore-build-inputs.sh" >&2
+    echo "" >&2
+    echo "  Then re-run this stage, and re-run 30-repo.sh and" >&2
+    echo "  31-desktop-split.sh before making an image." >&2
+    exit 1
+}

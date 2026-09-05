@@ -38,8 +38,8 @@ xdg-shell-client-protocol.h: $(XDG_SHELL_XML)
 xdg-shell-protocol.c: $(XDG_SHELL_XML)
 	$(WAYLAND_SCANNER) private-code $< $@
 
-novi-edit: main.c ../common/text.c xdg-shell-protocol.c xdg-shell-client-protocol.h
-	$(CC) $(CFLAGS) -o $@ main.c ../common/text.c xdg-shell-protocol.c $(LDLIBS)
+novi-edit: main.c ../common/text.c ../common/clipboard.c xdg-shell-protocol.c xdg-shell-client-protocol.h
+	$(CC) $(CFLAGS) -o $@ main.c ../common/text.c ../common/clipboard.c xdg-shell-protocol.c $(LDLIBS)
 
 install: novi-edit
 	install -D -m 755 novi-edit "$(DESTDIR)$(PREFIX)/bin/novi-edit"

@@ -358,6 +358,47 @@ Novi, which compiles and runs its own C and C++.
   autotools, git, Python and a kernel build, none of which are packaged.
   Do not overstate this one.
 
+## Architecture: the clipboard, and what a selection anchor means
+
+`common/clipboard.c` is the whole of it — core-Wayland
+`wl_data_device_manager`, which novi-shell already creates. No new
+protocol: copying in foot and pasting in novi-edit only works if both
+ends speak the standard thing, and they do.
+
+- **Pasting what you yourself copied never goes near the wire.** It
+  cannot: answering our own `wl_data_offer` means our own `send`
+  callback has to run, and that needs the event loop we would be
+  sitting inside, blocked on the pipe. That is a deadlock, not a slow
+  path, which is why the module keeps its own copy of what it put on
+  the clipboard and returns that.
+- **A selection dies with the process that owns it.** Copy in the
+  editor, close the editor, paste elsewhere — nothing, on every Wayland
+  desktop. It is why novi-launcher's symbol picker stays resident after
+  its window is gone (`novi_clipboard_serving()`), the same reason
+  wl-copy does. A clipboard manager in the compositor is the only real
+  fix and does not exist yet.
+- `flush` before closing our end of the paste pipe: the fd is handed to
+  the compositor when the request actually goes out, not when it is
+  queued.
+
+**Every mutation of the document drops the selection**, and that is an
+invariant, not tidiness. An anchor is a position in the document as it
+was when the selection started, and every routine that reads a
+selection indexes `lines[]` with it. Undo restored a *shorter* document
+without clearing the selection; the anchor kept pointing at a line that
+no longer existed; the next `^C` read off the end of `lines[]` and the
+editor died with `SIGSEGV addr=0`. The same anchor left live while
+typing also made a phantom selection that grew one character per
+keystroke. `sel_active()` additionally range-checks the anchor, so the
+next way of getting this wrong shows up as "nothing is selected"
+instead of as a crash.
+
+The crash was found by giving novi-edit a temporary SIGSEGV handler
+that printed a breadcrumb, booting it, and reading the screendumps —
+one of which showed the phantom highlight on a line index that no
+longer existed. Two rounds of reasoning about the code had failed to
+find it. **When a GUI bug survives careful reading, screenshot it.**
+
 ## Architecture: installation splits `grub-install` in half
 
 RFC 0003 (`docs/rfcs/0003-installation-and-persistence.md`). The installed
@@ -480,6 +521,17 @@ So when touching any build stage, ask both questions: what does it do to
 artifacts a *later* stage owns (`--from NN` exists and people use it),
 and does it depend on anything a later stage produces? The second is
 invisible in every tree except a clean one.
+
+**A stage that cross-compiles a client calls `require_desktop_headers`
+first** (`build/00-versions.sh`). 31-desktop-split.sh removes the
+headers, so in any tree where a full build has run, rebuilding one
+client stops with four "No such file or directory" lines and no clue.
+The line it prints instead names `scripts/restore-build-inputs.sh`.
+That guard exists because chaining a rebuild into `30-repo.sh` without
+checking it succeeded packaged a rootfs with no desktop in it, and
+31-desktop-split.sh then deleted from the base exactly what that empty
+manifest described — no desktop in the image AND none in the
+repository. **Never chain `30-repo.sh` after an unchecked build.**
 
 **And do not repair a broken `/build` by hand.** Extracting packages back
 over the rootfs to recover build inputs, then deleting what does not

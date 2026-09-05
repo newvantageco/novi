@@ -60,6 +60,7 @@
 #include <xkbcommon/xkbcommon.h>
 
 #include "wlr-layer-shell-unstable-v1-protocol.h"
+#include "../common/clipboard.h"
 #include "../common/text.h"
 #include "../shared/icons/icon_blit.h"
 #include "../shared/icons/icons.h"
@@ -187,7 +188,7 @@ struct novi_launcher {
 	 * standard Wayland clipboard-source lifetime (the same reason
 	 * wl-copy stays resident), not specific to this client. */
 	bool symbol_mode;
-	bool clipboard_serving;
+	struct novi_clipboard *clipboard;
 	uint32_t last_key_serial;
 
 	char input[INPUT_MAX + 1];
@@ -596,101 +597,21 @@ static const struct symbol_entry *find_symbol_match(
 	return NULL;
 }
 
-static const struct wl_data_source_listener clipboard_source_listener;
-
-/* Bundles what the data-source callbacks need -- there's only ever one
- * clipboard source alive per process (this client copies exactly once,
- * on Enter), so static storage is simpler than heap-allocating a
- * per-source context. */
-static struct {
-	struct novi_launcher *state;
-	char utf8[5];
-} clipboard_ctx;
-
-/* Sets a copy of `utf8` as the clipboard selection via the standard
- * core-Wayland wl_data_device_manager (novi-shell already creates one --
- * wlr_data_device_manager_create() in novi-shell/main.c -- for exactly
- * this, not a new protocol). */
+/* Put `utf8` on the clipboard. The mechanism is common/clipboard.c --
+ * core-Wayland wl_data_device_manager, which novi-shell already creates
+ * (wlr_data_device_manager_create() in novi-shell/main.c).
+ *
+ * This used to be ninety lines of wl_data_source plumbing right here,
+ * written for this one symbol picker. novi-edit needed the same thing
+ * plus paste, and two clipboards in one desktop is how one of them ends
+ * up subtly different from the other -- so the plumbing moved to
+ * common/ and this is what is left of it. */
 static void copy_to_clipboard(struct novi_launcher *state, const char *utf8) {
-	if (state->data_device_manager == NULL || state->seat == NULL) {
+	if (!novi_clipboard_copy(state->clipboard, utf8, state->last_key_serial)) {
 		fprintf(stderr, "novi-launcher: no clipboard support "
 			"(wl_data_device_manager or wl_seat missing)\n");
-		return;
 	}
-	clipboard_ctx.state = state;
-	snprintf(clipboard_ctx.utf8, sizeof(clipboard_ctx.utf8), "%s", utf8);
-
-	struct wl_data_source *source =
-		wl_data_device_manager_create_data_source(state->data_device_manager);
-	wl_data_source_offer(source, "text/plain;charset=utf-8");
-	wl_data_source_offer(source, "UTF8_STRING");
-	wl_data_source_offer(source, "text/plain");
-	wl_data_source_add_listener(source, &clipboard_source_listener, NULL);
-
-	struct wl_data_device *device =
-		wl_data_device_manager_get_data_device(state->data_device_manager,
-			state->seat);
-	/* set_selection needs the serial of the input event that justifies
-	 * claiming the selection -- the Enter keypress that triggered this
-	 * copy, captured in keyboard_key() below. */
-	wl_data_device_set_selection(device, source, state->last_key_serial);
-	state->clipboard_serving = true;
 }
-
-static void clipboard_source_target(void *data, struct wl_data_source *source,
-		const char *mime_type) {
-	(void)data; (void)source; (void)mime_type;
-}
-
-static void clipboard_source_send(void *data, struct wl_data_source *source,
-		const char *mime_type, int32_t fd) {
-	(void)data; (void)source; (void)mime_type;
-	const char *utf8 = clipboard_ctx.utf8;
-	size_t len = strlen(utf8);
-	size_t written = 0;
-	while (written < len) {
-		ssize_t n = write(fd, utf8 + written, len - written);
-		if (n <= 0) {
-			break;
-		}
-		written += (size_t)n;
-	}
-	close(fd);
-}
-
-static void clipboard_source_cancelled(void *data,
-		struct wl_data_source *source) {
-	(void)data;
-	/* Another client took the selection (or novi-launcher itself is
-	 * being torn down) -- this source's job is done, and nothing else
-	 * keeps this process alive once clipboard_serving drops. */
-	wl_data_source_destroy(source);
-	clipboard_ctx.state->clipboard_serving = false;
-}
-
-static void clipboard_source_dnd_drop_performed(void *data,
-		struct wl_data_source *source) {
-	(void)data; (void)source;
-}
-
-static void clipboard_source_dnd_finished(void *data,
-		struct wl_data_source *source) {
-	(void)data; (void)source;
-}
-
-static void clipboard_source_action(void *data, struct wl_data_source *source,
-		uint32_t dnd_action) {
-	(void)data; (void)source; (void)dnd_action;
-}
-
-static const struct wl_data_source_listener clipboard_source_listener = {
-	.target = clipboard_source_target,
-	.send = clipboard_source_send,
-	.cancelled = clipboard_source_cancelled,
-	.dnd_drop_performed = clipboard_source_dnd_drop_performed,
-	.dnd_finished = clipboard_source_dnd_finished,
-	.action = clipboard_source_action,
-};
 
 /* ── Rendering ───────────────────────────────────────────────────── */
 
@@ -1109,7 +1030,7 @@ static void keyboard_key(void *data, struct wl_keyboard *kb, uint32_t serial,
 				copy_to_clipboard(state, utf8);
 			}
 			/* Hide the overlay immediately -- copy_to_clipboard() (if
-			 * it ran) already armed clipboard_serving, which is what
+			 * it ran) already claimed the selection, which is what
 			 * actually keeps the process alive past this point, not
 			 * the surface staying mapped. */
 			if (state->layer_surface != NULL) {
@@ -1299,6 +1220,9 @@ int main(int argc, char *argv[]) {
 		return 1;
 	}
 
+	state.clipboard = novi_clipboard_create(state.display,
+		state.data_device_manager, state.seat);
+
 	state.font = novi_text_load_font("JetBrains Mono:size=16");
 	if (state.font == NULL) {
 		fprintf(stderr, "novi-launcher: failed to load JetBrains Mono\n");
@@ -1328,11 +1252,16 @@ int main(int argc, char *argv[]) {
 	 * zwlr_layer_surface_v1 description). */
 	wl_surface_commit(state.surface);
 
-	while ((state.running || state.clipboard_serving) &&
+	/* Staying alive past `running` is the standard data-source
+	 * lifetime, the same reason wl-copy stays resident: the paste has
+	 * not happened yet, and this process is the only thing that can
+	 * answer it. */
+	while ((state.running || novi_clipboard_serving(state.clipboard)) &&
 			wl_display_dispatch(state.display) != -1) {
 		/* All the real work happens in the listener callbacks above.
-		 * clipboard_serving keeps this alive after the overlay itself
-		 * is gone (see keyboard_key()'s Enter/--symbols handling) so a
+		 * Owning the selection keeps this alive after the overlay
+		 * itself is gone (see keyboard_key()'s Enter/--symbols
+		 * handling) so a
 		 * copied symbol can still actually be pasted somewhere. */
 	}
 

@@ -13,6 +13,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 source "${SCRIPT_DIR}/00-versions.sh"
+require_desktop_headers
 
 command -v wayland-scanner >/dev/null 2>&1 || {
     echo "ERROR: wayland-scanner not found on the build host (package: libwayland-bin)" >&2
