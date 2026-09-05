@@ -72,7 +72,7 @@ xdg-shell-protocol.c: $(XDG_SHELL_XML)
 ICONS_SRC = ../shared/icons/icon_blit.c ../shared/icons/icons_generated.c
 
 novi-launcher: main.c ../common/text.c ../common/clipboard.c $(ICONS_SRC) wlr-layer-shell-unstable-v1-protocol.c wlr-layer-shell-unstable-v1-protocol.h xdg-shell-protocol.c
-	$(CC) $(CFLAGS) -o $@ main.c ../common/text.c ../common/clipboard.c $(ICONS_SRC) wlr-layer-shell-unstable-v1-protocol.c xdg-shell-protocol.c $(LDLIBS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ main.c ../common/text.c ../common/clipboard.c $(ICONS_SRC) wlr-layer-shell-unstable-v1-protocol.c xdg-shell-protocol.c $(LDLIBS)
 
 install: novi-launcher
 	install -D -m 755 novi-launcher "$(DESTDIR)$(PREFIX)/bin/novi-launcher"

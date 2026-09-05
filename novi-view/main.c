@@ -730,7 +730,11 @@ int main(int argc, char **argv) {
 	v.xdg_toplevel = xdg_surface_get_toplevel(v.xdg_surface);
 	xdg_toplevel_add_listener(v.xdg_toplevel, &toplevel_listener, &v);
 
-	char title[PATH_MAX + 16];
+	/* The suffix is 17 bytes, not 16: the em-dash is three of them.
+	 * A PATH_MAX path plus a suffix that does not fit is a title cut
+	 * short -- harmless, but it is also a warning on every build, and
+	 * a warning nobody can act on is how a build stops being read. */
+	char title[PATH_MAX + 32];
 	snprintf(title, sizeof(title), "%s — Image Viewer", v.path);
 	xdg_toplevel_set_title(v.xdg_toplevel, title);
 	xdg_toplevel_set_app_id(v.xdg_toplevel, "novi-view");

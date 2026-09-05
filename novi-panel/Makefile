@@ -55,7 +55,7 @@ wlr-foreign-toplevel-management-unstable-v1-protocol.c: $(FOREIGN_TOPLEVEL_XML)
 	$(WAYLAND_SCANNER) private-code $< $@
 
 novi-panel: main.c ../common/text.c wlr-layer-shell-unstable-v1-protocol.c wlr-layer-shell-unstable-v1-protocol.h xdg-shell-protocol.c wlr-foreign-toplevel-management-unstable-v1-protocol.c wlr-foreign-toplevel-management-unstable-v1-protocol.h
-	$(CC) $(CFLAGS) -o $@ main.c ../common/text.c wlr-layer-shell-unstable-v1-protocol.c xdg-shell-protocol.c wlr-foreign-toplevel-management-unstable-v1-protocol.c $(LDLIBS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ main.c ../common/text.c wlr-layer-shell-unstable-v1-protocol.c xdg-shell-protocol.c wlr-foreign-toplevel-management-unstable-v1-protocol.c $(LDLIBS)
 
 install: novi-panel
 	install -D -m 755 novi-panel "$(DESTDIR)$(PREFIX)/bin/novi-panel"

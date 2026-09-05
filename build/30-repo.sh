@@ -64,6 +64,16 @@ if [[ ! -f "${KEY_FILE}" ]]; then
     chmod 600 "${KEY_FILE}"
 fi
 
+# ── Refuse to package a binary that lost its hardening ────────────────────
+#
+# Here rather than in scripts/lint.sh because this needs a built rootfs
+# and CI compiles nothing -- and here rather than at the end of the
+# build because this is the last moment every first-party binary is
+# still in the rootfs, before 31-desktop-split.sh moves them into
+# packages. Shipping an unhardened binary is not something to notice
+# afterwards.
+bash "${REPO_ROOT}/scripts/check-hardening.sh"
+
 # ── Work out the split and stage every package ────────────────────────────
 echo ">>> Computing the base/desktop split from the ELF dependency graph ..."
 rm -rf "${STAGE_DIR}" "${REPO_OUT}"

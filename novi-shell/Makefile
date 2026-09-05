@@ -64,7 +64,7 @@ wlr-layer-shell-unstable-v1-protocol.h: $(LAYER_SHELL_XML)
 	$(WAYLAND_SCANNER) server-header $< $@
 
 novi-shell: main.c xdg-shell-protocol.c xdg-shell-protocol.h wlr-layer-shell-unstable-v1-protocol.h
-	$(CC) $(CFLAGS) -o $@ main.c xdg-shell-protocol.c $(LDLIBS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ main.c xdg-shell-protocol.c $(LDLIBS)
 
 install: novi-shell
 	install -D -m 755 novi-shell "$(DESTDIR)$(PREFIX)/bin/novi-shell"

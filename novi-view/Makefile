@@ -37,7 +37,7 @@ xdg-shell-protocol.c: $(XDG_SHELL_XML)
 	$(WAYLAND_SCANNER) private-code $< $@
 
 novi-view: main.c ../common/text.c xdg-shell-protocol.c xdg-shell-client-protocol.h
-	$(CC) $(CFLAGS) -o $@ main.c ../common/text.c xdg-shell-protocol.c $(LDLIBS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ main.c ../common/text.c xdg-shell-protocol.c $(LDLIBS)
 
 install: novi-view
 	install -D -m 755 novi-view "$(DESTDIR)$(PREFIX)/bin/novi-view"

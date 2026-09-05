@@ -351,10 +351,33 @@ static bool parse_app_file(const char *path, struct app_entry *out) {
 		while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {
 			line[--len] = '\0';
 		}
+		/* A descriptor line longer than the field it goes in is a
+		 * broken descriptor, and truncating it quietly is the worst of
+		 * the three options: a cut `name=` mislabels the entry, and a
+		 * cut `exec=` registers an app whose command cannot run, with
+		 * nothing anywhere saying why. Refuse the file and say so.
+		 *
+		 * (Found by -O2. At -O0 gcc cannot see the buffer sizes
+		 * through the inlining, so -Wformat-truncation stayed quiet
+		 * for as long as this code had no optimisation flag.) */
 		if (strncmp(line, "name=", 5) == 0) {
-			snprintf(out->name, sizeof(out->name), "%s", line + 5);
+			if ((size_t)(len - 5) >= sizeof(out->name)) {
+				fprintf(stderr, "novi-launcher: %s: name= is too long "
+					"(%zu bytes, max %zu)\n", path, len - 5,
+					sizeof(out->name) - 1);
+				fclose(f);
+				return false;
+			}
+			memcpy(out->name, line + 5, len - 5 + 1);
 		} else if (strncmp(line, "exec=", 5) == 0) {
-			snprintf(out->exec, sizeof(out->exec), "%s", line + 5);
+			if ((size_t)(len - 5) >= sizeof(out->exec)) {
+				fprintf(stderr, "novi-launcher: %s: exec= is too long "
+					"(%zu bytes, max %zu)\n", path, len - 5,
+					sizeof(out->exec) - 1);
+				fclose(f);
+				return false;
+			}
+			memcpy(out->exec, line + 5, len - 5 + 1);
 		} else if (strncmp(line, "icon=", 5) == 0) {
 			out->icon_id = resolve_icon_name(line + 5);
 		}

@@ -577,6 +577,47 @@ Re-running the stages in order fixed it in one pass and would have been
 faster from the start. The stages are the recovery mechanism; that is
 what they are for.
 
+## Architecture: the kernel was hardened and the userland was not
+
+`kernel/config-x86_64` sets `STACKPROTECTOR_STRONG`, `RANDOMIZE_BASE`,
+`STRICT_KERNEL_RWX`, `FORTIFY_SOURCE` and `INIT_ON_ALLOC_DEFAULT_ON`.
+Every binary it was protecting was built with **none** of it: `type=EXEC`
+(so kernel ASLR could not apply), no `__stack_chk_fail`, no `BIND_NOW`,
+and no optimisation at all — which also means `_FORTIFY_SOURCE` would
+have been a no-op even if it had been set.
+
+`harden_flags()` in `build/00-versions.sh` is the one place that sets
+it, and the client stages call it next to `require_desktop_headers`.
+**Not** applied to the static binaries (BusyBox, `novi-verify`): static
+PIE is a different flag with different failure modes in PID 1's path,
+and widening it is its own change with its own boot test.
+
+Three things this turned up that generalise:
+
+- **`CFLAGS` reached the compile and `LDFLAGS` reached nothing.** Every
+  Makefile here linked with `$(CC) $(CFLAGS) -o $@ …` and never named
+  `$(LDFLAGS)`, so `-pie` and `-z now` were dropped while
+  `-fstack-protector-strong` went through. The binaries looked hardened
+  if you checked only for a stack canary. **Check the artifact, not the
+  flags you think you passed** — `scripts/check-hardening.sh` does, and
+  `30-repo.sh` runs it before packaging, which is the last moment every
+  first-party binary is still in the rootfs.
+- **`readelf … | grep -q` under `set -o pipefail` reports a false
+  failure.** grep exits on the first match, readelf takes SIGPIPE, and
+  pipefail turns that into a non-zero pipeline. The first version of
+  the checker called three binaries unhardened while `readelf -s` by
+  hand showed the symbol twice. Read each file's headers into a
+  variable once instead.
+- **`-O0` hides `-Wformat-truncation`.** Turning on `-O2` surfaced three
+  real `snprintf` truncations that had been invisible for the life of
+  the project, one of which silently cut a `.app` descriptor's `exec=`
+  line — registering an application whose command could not run, with
+  nothing anywhere saying why.
+
+Verified the way it has to be: `novi-edit` loaded at three different
+addresses across three runs on a booted machine. A flag being set is
+not ASLR; a different address every time is.
+
 ## Architecture: what the machine says it is
 
 `/etc/os-release` is a relative symlink to `/usr/lib/os-release`, which

@@ -121,6 +121,49 @@ export ROOTFS="${BUILD_DIR}/rootfs"
 
 export PATH="${TOOLS}/bin:${PATH}"
 
+# ── harden_flags ──────────────────────────────────────────────────────
+#
+# Compile-time hardening for the code this project writes. Call it in a
+# stage before building; it exports CFLAGS/LDFLAGS, and every Makefile
+# here uses `CFLAGS +=`, so the stage's own flags are appended to these
+# rather than replacing them.
+#
+# This exists because the kernel config is hardened -- STACKPROTECTOR_
+# STRONG, RANDOMIZE_BASE, STRICT_KERNEL_RWX, FORTIFY_SOURCE,
+# INIT_ON_ALLOC_DEFAULT_ON are all set in kernel/config-x86_64 -- and
+# the userland it was protecting had none of it. Every binary in the
+# image was type=EXEC with no __stack_chk_fail symbol and no BIND_NOW:
+# no ASLR, no stack guard, no fortified string functions, and a GOT
+# that stayed writable for the life of the process.
+#
+# The project's stated security model (PLATFORM-ROADMAP §9) is "small
+# TCB by construction", which is an argument about how MANY binaries
+# can be attacked, not about how hard any one of them is to attack.
+# Alpine is the same libc and the same smallness argument and ships PIE
+# + SSP + fortify by default; there was no reason not to.
+#
+# What each one is for:
+#   -O2                    fortify is a no-op without optimisation, and
+#                          these clients were being built at -O0
+#   -fstack-protector-strong   a canary on any frame with an array or a
+#                          local whose address is taken
+#   -D_FORTIFY_SOURCE=2    musl's checked str*/mem*/sprintf variants
+#   -fPIE -pie             the binary can be loaded anywhere, so kernel
+#                          ASLR actually applies to it
+#   -Wl,-z,relro,-z,now    resolve every symbol at load, then make the
+#                          GOT read-only
+#   -Wl,-z,noexecstack     no executable stack (musl needs none)
+#
+# Deliberately NOT applied to the static binaries (BusyBox, novi-verify)
+# or to anything under kernel/: static PIE is a different flag with
+# different failure modes in PID 1's path, and the kernel has its own
+# hardening already set in its own config. Widening this is its own
+# change, with its own boot test.
+harden_flags() {
+    export CFLAGS="-O2 -fstack-protector-strong -D_FORTIFY_SOURCE=2 -fPIE ${CFLAGS:-}"
+    export LDFLAGS="-pie -Wl,-z,relro,-z,now -Wl,-z,noexecstack ${LDFLAGS:-}"
+}
+
 # ── require_desktop_headers ───────────────────────────────────────────
 #
 # Every stage that cross-compiles a Wayland client needs the headers and
