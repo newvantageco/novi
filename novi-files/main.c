@@ -96,6 +96,7 @@ static const pixman_color_t ERROR_PIX   = {0xf0f0, 0x7a7a, 0x7a7a, 0xffff};
 enum prompt_kind {
 	PROMPT_NONE = 0,
 	PROMPT_DELETE,   /* y/n */
+	PROMPT_DELETE_TREE, /* type "yes" -- a directory with things in it */
 	PROMPT_RENAME,   /* text */
 	PROMPT_MKDIR,    /* text */
 };
@@ -144,6 +145,7 @@ struct novi_files {
 	char prompt_target[NAME_MAX_LEN + 1];  /* what the prompt acts on */
 	char prompt_text[NAME_MAX_LEN + 1];    /* what has been typed */
 	int prompt_len;
+	unsigned long tree_files, tree_dirs;   /* what a recursive delete would take */
 
 	char status[256];
 	bool status_is_error;
@@ -390,6 +392,10 @@ static void open_selected(struct novi_files *s) {
  * the cursor somewhere sensible when it finishes. */
 static void scroll_to_sel(struct novi_files *s);
 
+/* Defined with the other prompts; do_delete() escalates to it when what
+ * it was asked to remove turns out to have things inside. */
+static void prompt_open_tree(struct novi_files *s, const char *name);
+
 
 /* This program can now destroy things, so what it will and will not do
  * is worth stating plainly:
@@ -466,6 +472,102 @@ static void reload_selecting(struct novi_files *s, const char *name, int fallbac
 	scroll_to_sel(s);
 }
 
+/* Depth is bounded because this recurses on the C stack, and a
+ * directory tree is attacker-controlled input as much as anything else
+ * on a filesystem is -- a deep enough one would otherwise be a stack
+ * overflow rather than an error message. Anything past this reports a
+ * failure and deletes nothing. */
+#define TREE_MAX_DEPTH 64
+
+/* Everything under `path`, not counting `path` itself. Returns false if
+ * the tree could not be fully walked -- in which case the counts are
+ * meaningless and the caller must not offer to delete it, because a
+ * count you could not finish is exactly the count you must not show
+ * somebody as "this is what you are about to lose". */
+static bool count_tree(const char *path, int depth,
+		unsigned long *files, unsigned long *dirs) {
+	if (depth > TREE_MAX_DEPTH) {
+		return false;
+	}
+	DIR *d = opendir(path);
+	if (d == NULL) {
+		return false;
+	}
+	bool ok = true;
+	struct dirent *de;
+	while ((de = readdir(d)) != NULL) {
+		if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) {
+			continue;
+		}
+		char sub[PATH_MAX];
+		int n = snprintf(sub, sizeof(sub), "%s/%s", path, de->d_name);
+		if (n < 0 || (size_t)n >= sizeof(sub)) {
+			ok = false;
+			continue;
+		}
+		struct stat st;
+		if (lstat(sub, &st) != 0) {
+			ok = false;
+			continue;
+		}
+		/* lstat, so a symlink to a directory counts as one file and is
+		 * never walked into. Following one would count -- and later
+		 * delete -- things outside the tree entirely. */
+		if (S_ISDIR(st.st_mode)) {
+			(*dirs)++;
+			if (!count_tree(sub, depth + 1, files, dirs)) {
+				ok = false;
+			}
+		} else {
+			(*files)++;
+		}
+	}
+	closedir(d);
+	return ok;
+}
+
+/* Remove `path` and everything under it. Same lstat rule: a symlink is
+ * unlinked, never followed. */
+static bool remove_tree(const char *path, int depth) {
+	if (depth > TREE_MAX_DEPTH) {
+		return false;
+	}
+	DIR *d = opendir(path);
+	if (d == NULL) {
+		return false;
+	}
+	bool ok = true;
+	struct dirent *de;
+	while ((de = readdir(d)) != NULL) {
+		if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) {
+			continue;
+		}
+		char sub[PATH_MAX];
+		int n = snprintf(sub, sizeof(sub), "%s/%s", path, de->d_name);
+		if (n < 0 || (size_t)n >= sizeof(sub)) {
+			ok = false;
+			continue;
+		}
+		struct stat st;
+		if (lstat(sub, &st) != 0) {
+			ok = false;
+			continue;
+		}
+		if (S_ISDIR(st.st_mode)) {
+			if (!remove_tree(sub, depth + 1)) {
+				ok = false;
+			}
+		} else if (unlink(sub) != 0) {
+			ok = false;
+		}
+	}
+	closedir(d);
+	if (rmdir(path) != 0) {
+		ok = false;
+	}
+	return ok;
+}
+
 static void do_delete(struct novi_files *s, const char *name) {
 	char full[PATH_MAX];
 	if (!child_path(s, name, full, sizeof(full))) {
@@ -485,7 +587,12 @@ static void do_delete(struct novi_files *s, const char *name) {
 	if (S_ISDIR(st.st_mode)) {
 		if (rmdir(full) != 0) {
 			if (errno == ENOTEMPTY || errno == EEXIST) {
-				set_status(s, true, "'%s' is not empty -- only empty directories are removed here", name);
+				/* prompt_open() normally catches this and asks the
+				 * recursive question instead, so reaching here means
+				 * something landed in the directory between the
+				 * question and the answer. Ask again, with the count
+				 * as it is now. */
+				prompt_open_tree(s, name);
 			} else {
 				set_status(s, true, "cannot delete: %s", strerror(errno));
 			}
@@ -498,6 +605,30 @@ static void do_delete(struct novi_files *s, const char *name) {
 
 	reload_selecting(s, NULL, keep);
 	set_status(s, false, "deleted %s", name);
+}
+
+/* The recursive one. Reached only from the typed confirmation. */
+static void do_delete_tree(struct novi_files *s, const char *name) {
+	char full[PATH_MAX];
+	if (!child_path(s, name, full, sizeof(full))) {
+		return;
+	}
+	struct stat st;
+	if (lstat(full, &st) != 0 || !S_ISDIR(st.st_mode)) {
+		set_status(s, true, "'%s' is not a directory any more", name);
+		return;
+	}
+	int keep = s->sel;
+	bool ok = remove_tree(full, 0);
+	reload_selecting(s, ok ? NULL : name, keep);
+	if (ok) {
+		set_status(s, false, "deleted %s and everything in it", name);
+	} else {
+		/* Partial failure is the honest report. Some of it is gone and
+		 * some of it is not, and saying "deleted" would be a lie about
+		 * a destructive operation. */
+		set_status(s, true, "'%s' was only partly deleted -- check it", name);
+	}
 }
 
 static void do_rename(struct novi_files *s, const char *from, const char *to) {
@@ -562,10 +693,48 @@ static void prompt_close(struct novi_files *s) {
 	s->prompt_target[0] = '\0';
 }
 
+/* Does this directory have anything in it? Cheaper than counting, and
+ * it is the only question prompt_open() needs to pick which of the two
+ * delete confirmations to ask. */
+static bool dir_is_nonempty(const char *path) {
+	DIR *d = opendir(path);
+	if (d == NULL) {
+		return false;
+	}
+	bool any = false;
+	struct dirent *de;
+	while ((de = readdir(d)) != NULL) {
+		if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) {
+			continue;
+		}
+		any = true;
+		break;
+	}
+	closedir(d);
+	return any;
+}
+
 static void prompt_open(struct novi_files *s, enum prompt_kind kind) {
 	if (kind != PROMPT_MKDIR && s->nentries == 0) {
 		set_status(s, true, "nothing selected");
 		return;
+	}
+
+	/* Ask the right question the first time. Being asked "y / n", saying
+	 * y, and then being asked something else is a bait-and-switch --
+	 * the second question is the one that mattered, and it should have
+	 * been the only one. lstat, so a symlink to a directory is a file
+	 * here as it is everywhere else in this program. */
+	if (kind == PROMPT_DELETE) {
+		char full[PATH_MAX];
+		struct stat st;
+		const char *sel = s->entries[s->sel].name;
+		if (child_path(s, sel, full, sizeof(full)) &&
+		    lstat(full, &st) == 0 && S_ISDIR(st.st_mode) &&
+		    dir_is_nonempty(full)) {
+			prompt_open_tree(s, sel);
+			return;
+		}
 	}
 	prompt_close(s);
 	s->status[0] = '\0';
@@ -585,6 +754,34 @@ static void prompt_open(struct novi_files *s, enum prompt_kind kind) {
 	}
 }
 
+/* The escalation: a directory with things in it. `y` is the right
+ * amount of friction for one file and the wrong amount for a tree, so
+ * this one shows what is inside and asks for a typed word. Three lower
+ * case letters is not a hoop to jump through -- it is just impossible
+ * to hit by accident, which `y` next to `t` on the keyboard is not.
+ *
+ * The count is computed before the question is asked, and a count that
+ * could not be finished refuses the operation instead of guessing: a
+ * number you could not actually total is exactly the number you must
+ * not show somebody as what they are about to lose. */
+static void prompt_open_tree(struct novi_files *s, const char *name) {
+	char full[PATH_MAX];
+	if (!child_path(s, name, full, sizeof(full))) {
+		return;
+	}
+	unsigned long files = 0, dirs = 0;
+	if (!count_tree(full, 0, &files, &dirs)) {
+		set_status(s, true, "cannot read all of '%s' -- not deleting it", name);
+		return;
+	}
+	prompt_close(s);
+	s->status[0] = '\0';
+	s->prompt = PROMPT_DELETE_TREE;
+	s->tree_files = files;
+	s->tree_dirs = dirs;
+	snprintf(s->prompt_target, sizeof(s->prompt_target), "%s", name);
+}
+
 /* The prompt's own text, for the status bar. */
 static void prompt_line(const struct novi_files *s, char *out, size_t outlen) {
 	switch (s->prompt) {
@@ -596,6 +793,14 @@ static void prompt_line(const struct novi_files *s, char *out, size_t outlen) {
 		break;
 	case PROMPT_MKDIR:
 		snprintf(out, outlen, "new folder: %s", s->prompt_text);
+		break;
+	case PROMPT_DELETE_TREE:
+		snprintf(out, outlen,
+			"delete '%s' and %lu file%s in %lu folder%s?   type yes: %s",
+			s->prompt_target,
+			s->tree_files, s->tree_files == 1 ? "" : "s",
+			s->tree_dirs + 1, s->tree_dirs == 0 ? "" : "s",
+			s->prompt_text);
 		break;
 	case PROMPT_NONE:
 		out[0] = '\0';
@@ -635,6 +840,13 @@ static void prompt_commit(struct novi_files *s) {
 
 	switch (kind) {
 	case PROMPT_DELETE: do_delete(s, target);        break;
+	case PROMPT_DELETE_TREE:
+		if (strcmp(text, "yes") == 0) {
+			do_delete_tree(s, target);
+		} else {
+			set_status(s, false, "not deleted");
+		}
+		break;
 	case PROMPT_RENAME: do_rename(s, target, text);  break;
 	case PROMPT_MKDIR:  do_mkdir(s, text);           break;
 	case PROMPT_NONE:                                break;
@@ -798,7 +1010,8 @@ static void render(struct novi_files *s, uint32_t *px, uint32_t stride_px) {
 		char line[PATH_MAX + 64];
 		prompt_line(s, line, sizeof(line));
 		novi_text_draw(dest, s->font_small, PAD, sbase, line,
-			s->prompt == PROMPT_DELETE ? ERROR_PIX : NAME_PIX);
+			s->prompt == PROMPT_DELETE || s->prompt == PROMPT_DELETE_TREE
+				? ERROR_PIX : NAME_PIX);
 		if (s->prompt != PROMPT_DELETE) {
 			int cw = novi_text_width(s->font_small, line);
 			draw_rect(px, stride_px, w, h, PAD + cw + 1,

@@ -413,6 +413,27 @@ one of which showed the phantom highlight on a line index that no
 longer existed. Two rounds of reasoning about the code had failed to
 find it. **When a GUI bug survives careful reading, screenshot it.**
 
+## Architecture: a compositor answers when the client is ready
+
+`zxdg_decoration_manager_v1` arrives *before* the client's first commit
+— that is the correct order, and foot and everything else do it. But
+answering it means sending a configure, and a configure cannot go to an
+xdg_surface that has not been committed yet: wlroots logs `A configure
+is scheduled for an uninitialized xdg_surface` and drops it.
+
+That fired on **every window this compositor ever opened**, and nothing
+looked broken, because the mode is re-sent with the real configure at
+initial commit and clients end up server-side decorated anyway. Which
+is exactly what made it worth fixing: a per-window ERROR that means
+nothing is how a log stops being read — the same argument as `/init`'s
+twenty-two meaningless `Could not load module` warnings a boot.
+
+`server_new_xdg_decoration()` now holds the answer in a small
+per-decoration struct with a `surface.commit` listener and gives it once
+the surface is initialised. Any future compositor-to-client reply has
+the same constraint: **before the initial commit there is nobody to
+configure.**
+
 ## Architecture: installation splits `grub-install` in half
 
 RFC 0003 (`docs/rfcs/0003-installation-and-persistence.md`). The installed

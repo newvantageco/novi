@@ -2632,6 +2632,55 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
 	wl_signal_add(&xdg_toplevel->events.set_app_id, &toplevel->set_app_id);
 }
 
+/* Answering a decoration request means sending a configure, and a
+ * configure cannot go to an xdg_surface the client has not committed
+ * yet. A well-behaved client asks for its decoration mode BEFORE that
+ * first commit -- foot does, and so does everything else -- so
+ * answering immediately is answering too early: wlroots logs
+ *
+ *     [ERROR] A configure is scheduled for an uninitialized xdg_surface
+ *
+ * and drops the configure on the floor. That fired on every single
+ * window this compositor has ever opened. Nothing looked broken,
+ * because the mode is re-sent with the real configure at initial
+ * commit and clients end up server-side decorated anyway -- which is
+ * exactly the problem with it: a per-window ERROR that means nothing
+ * is how a log stops being read.
+ *
+ * So hold the answer until the surface is initialised, then give it. */
+struct novi_decoration {
+	struct wlr_xdg_toplevel_decoration_v1 *decoration;
+	struct wl_listener surface_commit;
+	struct wl_listener destroy;
+};
+
+static void decoration_answer(struct novi_decoration *deco) {
+	if (!deco->decoration->toplevel->base->initialized) {
+		return;
+	}
+	wlr_xdg_toplevel_decoration_v1_set_mode(deco->decoration,
+		WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+	/* Once is enough; stop listening but keep the link valid so the
+	 * destroy handler can remove it unconditionally. */
+	wl_list_remove(&deco->surface_commit.link);
+	wl_list_init(&deco->surface_commit.link);
+}
+
+static void decoration_surface_commit(struct wl_listener *listener, void *data) {
+	(void)data;
+	struct novi_decoration *deco =
+		wl_container_of(listener, deco, surface_commit);
+	decoration_answer(deco);
+}
+
+static void decoration_destroy(struct wl_listener *listener, void *data) {
+	(void)data;
+	struct novi_decoration *deco = wl_container_of(listener, deco, destroy);
+	wl_list_remove(&deco->surface_commit.link);
+	wl_list_remove(&deco->destroy.link);
+	free(deco);
+}
+
 static void server_new_xdg_decoration(struct wl_listener *listener, void *data) {
 	/* Fires when a client explicitly asks (via zxdg_decoration_manager_v1
 	 * .get_toplevel_decoration) whether it should draw its own title bar
@@ -2644,8 +2693,24 @@ static void server_new_xdg_decoration(struct wl_listener *listener, void *data) 
 	 * this answers -- so this path is genuinely exercised today. */
 	(void)listener;
 	struct wlr_xdg_toplevel_decoration_v1 *decoration = data;
-	wlr_xdg_toplevel_decoration_v1_set_mode(decoration,
-		WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+
+	struct novi_decoration *deco = calloc(1, sizeof(*deco));
+	if (deco == NULL) {
+		/* Out of memory for a title-bar preference is not worth
+		 * refusing the window over; the client keeps whatever mode it
+		 * defaults to. */
+		return;
+	}
+	deco->decoration = decoration;
+	deco->surface_commit.notify = decoration_surface_commit;
+	wl_signal_add(&decoration->toplevel->base->surface->events.commit,
+		&deco->surface_commit);
+	deco->destroy.notify = decoration_destroy;
+	wl_signal_add(&decoration->events.destroy, &deco->destroy);
+
+	/* A client that somehow asked after its first commit gets the
+	 * answer straight away rather than waiting for the next one. */
+	decoration_answer(deco);
 }
 
 static void xdg_popup_commit(struct wl_listener *listener, void *data) {
