@@ -58,6 +58,7 @@ DESKTOP_BINARIES = [
     "usr/bin/novi-launcher",
     "usr/bin/novi-settings",
     "usr/bin/novi-edit",
+    "usr/bin/novi-files",
     "usr/bin/novi-lockscreen",
     "usr/bin/novi-screenshot",
     "usr/bin/foot",
@@ -131,6 +132,8 @@ PACKAGE_TABLE = [
      [r"^novi-settings$"]),
     ("novi-edit",        "OS",            "Text editor",
      [r"^novi-edit$"]),
+    ("novi-files",       "OS",            "File manager",
+     [r"^novi-files$"]),
     ("novi-lockscreen",  "OS",            "Super+L session lock",
      [r"^novi-lockscreen$"]),
     ("novi-screenshot",  "OS",            "PrintScreen screen capture",
@@ -174,7 +177,7 @@ DATA_FILES = [
 # Packages that exist only to pull others in.
 META_PACKAGES = [
     ("novi-desktop", "OS", "The Novi desktop: compositor, panel, launcher, terminal",
-     ["novi-shell", "novi-panel", "novi-launcher", "novi-settings", "novi-edit",
+     ["novi-shell", "novi-panel", "novi-launcher", "novi-settings", "novi-edit", "novi-files",
       "novi-lockscreen", "novi-screenshot", "foot", "fonts-jetbrains-mono"]),
 ]
 
