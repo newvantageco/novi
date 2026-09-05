@@ -20,6 +20,8 @@
  * milestone.
  */
 #include <assert.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <getopt.h>
 #include <linux/input-event-codes.h>
 #include <stdbool.h>
@@ -181,6 +183,8 @@ enum novi_cursor_mode {
 	NOVI_CURSOR_RESIZE,
 };
 
+struct novi_clip_read;
+
 struct novi_server {
 	struct wl_display *wl_display;
 	struct wlr_backend *backend;
@@ -219,6 +223,14 @@ struct novi_server {
 	struct wl_listener new_input;
 	struct wl_listener request_cursor;
 	struct wl_listener request_set_selection;
+
+	/* Clipboard persistence. See the block comment above
+	 * clip_source_send(). */
+	struct wl_listener set_selection;
+	char *clip_text;                       /* the last text copied, ours to keep */
+	size_t clip_len;
+	struct wlr_data_source *clip_source;   /* our source, while it is the selection */
+	struct novi_clip_read *clip_read;      /* the read in flight, if any */
 	struct wl_list keyboards;
 	enum novi_cursor_mode cursor_mode;
 	struct novi_toplevel *grabbed_toplevel;
@@ -876,6 +888,337 @@ static void seat_request_cursor(struct wl_listener *listener, void *data) {
 		wlr_cursor_set_surface(server->cursor, event->surface,
 				event->hotspot_x, event->hotspot_y);
 	}
+}
+
+/* ── Clipboard persistence ─────────────────────────────────────── */
+
+/* A Wayland selection is owned by the client that set it, and it dies
+ * with that client. Copy in the editor, close the editor, paste
+ * anywhere: nothing. That is not a bug in any of those programs -- it
+ * is what the protocol says -- and every desktop that does not feel
+ * broken has something that fixes it. The two ways are a clipboard
+ * manager speaking zwlr_data_control_v1, or the compositor keeping the
+ * text itself. This is the second: the seat is already here, and a
+ * clipboard buffer is not UI, so RFC 0001's "UI belongs in a client"
+ * rule does not reach it.
+ *
+ * The rule is: watch what clients put on the selection, keep a copy,
+ * and when the selection goes away because its owner did, put the copy
+ * back as a source of our own.
+ *
+ * **Neither half may block.** This is PID-1-of-the-desktop code: a
+ * blocking read from a client's pipe freezes every window on the
+ * screen, and so does a blocking write of a megabyte into a 64 KB pipe
+ * whose reader is slow. Both directions therefore run on the
+ * compositor's own event loop, in chunks, which is most of the length
+ * of what follows.
+ */
+
+#define CLIP_MAX_BYTES (1u * 1024u * 1024u)
+
+/* Best first. A client offers what it likes; we ask for the best text
+ * type it named, and offer all three when the text is ours. */
+static const char *const CLIP_MIME[] = {
+	"text/plain;charset=utf-8",
+	"UTF8_STRING",
+	"text/plain",
+};
+#define CLIP_MIME_COUNT ((int)(sizeof(CLIP_MIME) / sizeof(CLIP_MIME[0])))
+
+/* Our own data source. wlr_data_source has no user-data field, so the
+ * server pointer rides along in the enclosing struct. */
+struct novi_clip_source {
+	struct wlr_data_source base;
+	struct novi_server *server;
+};
+
+/* One in-flight read of a client's selection into our buffer. */
+struct novi_clip_read {
+	struct novi_server *server;
+	struct wl_event_source *ev;
+	int fd;
+	char *buf;
+	size_t len, cap;
+};
+
+/* One in-flight write of our buffer to a client's pipe. It owns its own
+ * copy of the text, so a new copy landing mid-paste cannot pull the
+ * bytes out from under a reader. */
+struct novi_clip_write {
+	struct wl_event_source *ev;
+	int fd;
+	char *data;
+	size_t len, sent;
+};
+
+static void clip_read_finish(struct novi_clip_read *r, bool keep) {
+	struct novi_server *server = r->server;
+	if (keep && r->len > 0) {
+		free(server->clip_text);
+		server->clip_text = r->buf;
+		server->clip_len = r->len;
+		r->buf = NULL;
+	}
+	if (server->clip_read == r) {
+		server->clip_read = NULL;
+	}
+	wl_event_source_remove(r->ev);
+	close(r->fd);
+	free(r->buf);
+	free(r);
+}
+
+static int clip_read_cb(int fd, uint32_t mask, void *data) {
+	struct novi_clip_read *r = data;
+	if (mask & (WL_EVENT_ERROR | WL_EVENT_HANGUP)) {
+		/* HANGUP can arrive with the last bytes still buffered, so
+		 * drain before giving up rather than after. */
+		for (;;) {
+			if (r->len + 1 >= r->cap) {
+				size_t grown = r->cap ? r->cap * 2 : 4096;
+				if (grown > CLIP_MAX_BYTES) {
+					break;
+				}
+				char *p = realloc(r->buf, grown);
+				if (p == NULL) {
+					break;
+				}
+				r->buf = p;
+				r->cap = grown;
+			}
+			ssize_t n = read(fd, r->buf + r->len, r->cap - r->len - 1);
+			if (n <= 0) {
+				break;
+			}
+			r->len += (size_t)n;
+		}
+		if (r->buf != NULL) {
+			r->buf[r->len] = '\0';
+		}
+		clip_read_finish(r, true);
+		return 0;
+	}
+
+	if (r->len + 1 >= r->cap) {
+		size_t grown = r->cap ? r->cap * 2 : 4096;
+		if (grown > CLIP_MAX_BYTES) {
+			/* Too big to keep. Not an error and not worth a log line
+			 * every time somebody copies a large file's contents --
+			 * the selection still works normally while its owner is
+			 * alive, it just will not outlive it. */
+			clip_read_finish(r, false);
+			return 0;
+		}
+		char *p = realloc(r->buf, grown);
+		if (p == NULL) {
+			clip_read_finish(r, false);
+			return 0;
+		}
+		r->buf = p;
+		r->cap = grown;
+	}
+
+	ssize_t n = read(fd, r->buf + r->len, r->cap - r->len - 1);
+	if (n < 0) {
+		if (errno == EAGAIN || errno == EINTR) {
+			return 0;
+		}
+		clip_read_finish(r, false);
+		return 0;
+	}
+	if (n == 0) {
+		r->buf[r->len] = '\0';
+		clip_read_finish(r, true);
+		return 0;
+	}
+	r->len += (size_t)n;
+	return 0;
+}
+
+static void clip_write_finish(struct novi_clip_write *w) {
+	wl_event_source_remove(w->ev);
+	close(w->fd);
+	free(w->data);
+	free(w);
+}
+
+static int clip_write_cb(int fd, uint32_t mask, void *data) {
+	struct novi_clip_write *w = data;
+	if (mask & (WL_EVENT_ERROR | WL_EVENT_HANGUP)) {
+		clip_write_finish(w);
+		return 0;
+	}
+	while (w->sent < w->len) {
+		ssize_t n = write(fd, w->data + w->sent, w->len - w->sent);
+		if (n < 0) {
+			if (errno == EAGAIN) {
+				return 0;   /* come back when it drains */
+			}
+			if (errno == EINTR) {
+				continue;
+			}
+			break;          /* reader went away */
+		}
+		w->sent += (size_t)n;
+	}
+	clip_write_finish(w);
+	return 0;
+}
+
+static void clip_source_send(struct wlr_data_source *source,
+		const char *mime_type, int32_t fd) {
+	(void)mime_type;
+	struct novi_clip_source *cs = wl_container_of(source, cs, base);
+	struct novi_server *server = cs->server;
+
+	int flags = fcntl(fd, F_GETFL, 0);
+	if (flags >= 0) {
+		fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+	}
+
+	struct novi_clip_write *w = calloc(1, sizeof(*w));
+	if (w == NULL || server->clip_text == NULL) {
+		free(w);
+		close(fd);
+		return;
+	}
+	w->data = malloc(server->clip_len + 1);
+	if (w->data == NULL) {
+		free(w);
+		close(fd);
+		return;
+	}
+	memcpy(w->data, server->clip_text, server->clip_len);
+	w->data[server->clip_len] = '\0';
+	w->len = server->clip_len;
+	w->fd = fd;
+	w->ev = wl_event_loop_add_fd(wl_display_get_event_loop(server->wl_display),
+		fd, WL_EVENT_WRITABLE, clip_write_cb, w);
+	if (w->ev == NULL) {
+		free(w->data);
+		free(w);
+		close(fd);
+	}
+}
+
+static void clip_source_destroy(struct wlr_data_source *source) {
+	struct novi_clip_source *cs = wl_container_of(source, cs, base);
+	if (cs->server != NULL && cs->server->clip_source == source) {
+		cs->server->clip_source = NULL;
+	}
+	free(cs);
+}
+
+static const struct wlr_data_source_impl clip_source_impl = {
+	.send = clip_source_send,
+	.destroy = clip_source_destroy,
+};
+
+/* Put our remembered text back on the selection, as a source that
+ * belongs to the compositor and therefore outlives every client. */
+static void clip_offer_ours(struct novi_server *server) {
+	if (server->clip_text == NULL || server->clip_len == 0) {
+		return;
+	}
+	struct novi_clip_source *cs = calloc(1, sizeof(*cs));
+	if (cs == NULL) {
+		return;
+	}
+	/* wlr_data_source_init() overwrites the whole base struct, so
+	 * anything of ours is set after it, never before. */
+	wlr_data_source_init(&cs->base, &clip_source_impl);
+	cs->server = server;
+	struct wlr_data_source *src = &cs->base;
+	for (int i = 0; i < CLIP_MIME_COUNT; i++) {
+		char **slot = wl_array_add(&src->mime_types, sizeof(char *));
+		char *dup = strdup(CLIP_MIME[i]);
+		if (slot == NULL || dup == NULL) {
+			free(dup);
+			wlr_data_source_destroy(src);
+			return;
+		}
+		*slot = dup;
+	}
+	server->clip_source = src;
+	wlr_seat_set_selection(server->seat, src,
+		wl_display_next_serial(server->wl_display));
+}
+
+/* Start reading a client's selection into our buffer. */
+static void clip_capture(struct novi_server *server,
+		struct wlr_data_source *src) {
+	int best = -1;
+	char **mime;
+	wl_array_for_each(mime, &src->mime_types) {
+		for (int i = 0; i < CLIP_MIME_COUNT; i++) {
+			if (strcmp(*mime, CLIP_MIME[i]) == 0 && (best < 0 || i < best)) {
+				best = i;
+			}
+		}
+	}
+	if (best < 0) {
+		/* Not text. We do not persist images or anything else yet, and
+		 * the honest consequence is that the previous *text* stays
+		 * remembered rather than being replaced by something we cannot
+		 * hold. */
+		return;
+	}
+
+	int fds[2];
+	if (pipe(fds) != 0) {
+		return;
+	}
+	if (fcntl(fds[0], F_SETFL, O_NONBLOCK) != 0) {
+		close(fds[0]);
+		close(fds[1]);
+		return;
+	}
+
+	struct novi_clip_read *r = calloc(1, sizeof(*r));
+	if (r == NULL) {
+		close(fds[0]);
+		close(fds[1]);
+		return;
+	}
+	r->server = server;
+	r->fd = fds[0];
+	r->ev = wl_event_loop_add_fd(wl_display_get_event_loop(server->wl_display),
+		fds[0], WL_EVENT_READABLE, clip_read_cb, r);
+	if (r->ev == NULL) {
+		free(r);
+		close(fds[0]);
+		close(fds[1]);
+		return;
+	}
+	server->clip_read = r;
+
+	wlr_data_source_send(src, CLIP_MIME[best], fds[1]);
+	close(fds[1]);
+}
+
+static void seat_set_selection(struct wl_listener *listener, void *data) {
+	(void)data;
+	struct novi_server *server = wl_container_of(listener, server, set_selection);
+	struct wlr_data_source *src = server->seat->selection_source;
+
+	if (src != NULL && src->impl == &clip_source_impl) {
+		return;   /* our own; setting it below is what got us here */
+	}
+
+	/* Whatever we were reading is about to be stale either way. */
+	if (server->clip_read != NULL) {
+		clip_read_finish(server->clip_read, false);
+	}
+
+	if (src != NULL) {
+		clip_capture(server, src);
+		return;
+	}
+
+	/* The selection is empty. Either a client cleared it deliberately
+	 * or -- far more often -- the client that owned it exited, which is
+	 * exactly the case this whole file section exists for. */
+	clip_offer_ours(server);
 }
 
 static void seat_request_set_selection(struct wl_listener *listener, void *data) {
@@ -2553,6 +2896,11 @@ int main(int argc, char *argv[]) {
 	server.request_set_selection.notify = seat_request_set_selection;
 	wl_signal_add(&server.seat->events.request_set_selection,
 			&server.request_set_selection);
+	/* request_set_selection is a client ASKING; set_selection is the
+	 * selection having actually changed, including to nothing when its
+	 * owner exits. Clipboard persistence needs the second. */
+	server.set_selection.notify = seat_set_selection;
+	wl_signal_add(&server.seat->events.set_selection, &server.set_selection);
 
 	/* Add a Unix socket to the Wayland display. */
 	const char *socket = wl_display_add_socket_auto(server.wl_display);

@@ -371,12 +371,26 @@ ends speak the standard thing, and they do.
   sitting inside, blocked on the pipe. That is a deadlock, not a slow
   path, which is why the module keeps its own copy of what it put on
   the clipboard and returns that.
-- **A selection dies with the process that owns it.** Copy in the
-  editor, close the editor, paste elsewhere — nothing, on every Wayland
-  desktop. It is why novi-launcher's symbol picker stays resident after
-  its window is gone (`novi_clipboard_serving()`), the same reason
-  wl-copy does. A clipboard manager in the compositor is the only real
-  fix and does not exist yet.
+- **A selection dies with the process that owns it — so novi-shell
+  keeps a copy.** That is the protocol, not a bug in any client: copy in
+  the editor, close the editor, paste anywhere, and on a bare Wayland
+  desktop you get nothing. The two fixes are a manager speaking
+  `zwlr_data_control_v1` or the compositor holding the text; novi-shell
+  does the second, because the seat is already there and a clipboard
+  buffer is not UI, so RFC 0001's "UI belongs in a client" rule does not
+  reach it. It watches `seat->events.set_selection` (the selection
+  having *changed*, including to nothing — not `request_set_selection`,
+  which is a client asking), keeps up to 1 MB of text, and re-offers it
+  as a compositor-owned source when the selection empties.
+- **Neither half of that may block**, and both are on the compositor's
+  own event loop for it. A blocking read from a client's pipe freezes
+  every window on the screen; so does a blocking write of a megabyte
+  into a 64 KB pipe whose reader is slow. That is most of the length of
+  the code.
+- novi-launcher's symbol picker still stays resident after its window is
+  gone (`novi_clipboard_serving()`), and should: persistence hands the
+  text over when the owner *exits*, which is not a reason to exit before
+  the compositor has read it.
 - `flush` before closing our end of the paste pipe: the fd is handed to
   the compositor when the request actually goes out, not when it is
   queued.
