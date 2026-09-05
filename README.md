@@ -568,13 +568,19 @@ small static GPT writer) and e2fsprogs' `mke2fs`. See
 
 ## OS Identity
 
+`/etc/os-release`, a relative symlink to `/usr/lib/os-release`, which
+`build/03-base.sh` generates from `build/00-versions.sh` — so the
+machine's idea of its own version cannot drift from the build's:
+
 ```
 NAME="Novi"
-VERSION="0.1.0"
 ID=novi
+VERSION="0.1.0 (Axiom)"
+VERSION_ID=0.1.0
 VERSION_CODENAME=Axiom
 PRETTY_NAME="Novi Linux 0.1.0 (Axiom)"
 HOME_URL="https://novilinux.org"
+BUG_REPORT_URL="https://github.com/newvantageco/novi/issues"
 ```
 
 `uname -r` → `6.10.3-novi`

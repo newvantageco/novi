@@ -577,6 +577,25 @@ Re-running the stages in order fixed it in one pass and would have been
 faster from the start. The stages are the recovery mechanism; that is
 what they are for.
 
+## Architecture: what the machine says it is
+
+`/etc/os-release` is a relative symlink to `/usr/lib/os-release`, which
+`03-base.sh` **generates** from `00-versions.sh`. It had never existed
+— found by a clean build, after the README had documented its exact
+contents as fact for as long as the file had not been written.
+
+Generated, not repo content under `rootfs/etc/`, and that is the
+opposite call from `passwd`/`group`/`shadow` deliberately: those hold
+policy (fixed GIDs, the root password field) that should show up in a
+diff, while every field here is already a variable one file away. A
+second copy is only somewhere for the version to go stale, which is
+exactly what happened to the README.
+
+`/usr/lib` is one of pkgsplit's `LIB_DIRS`, so a new file there is
+worth a thought — this one is safe because the sweep only claims files
+matching a `PACKAGE_TABLE` pattern, and `os-release` matches none, so
+it stays in the base.
+
 ## Architecture: users, and where secrets are not
 
 RFC 0005 (`docs/rfcs/0005-users-and-accounts.md`).

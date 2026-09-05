@@ -1041,8 +1041,13 @@ static void clipboard_cut(struct novi_edit *e) {
 		set_status(e, true, "no clipboard available -- nothing cut");
 		return;
 	}
-	delete_selection(e, true);
-	set_status(e, false, "cut");
+	/* The copy succeeded, so the text is safe either way -- but if the
+	 * deletion did not happen this was a copy, and saying "cut" about
+	 * it would be a lie about a document that still has the text in
+	 * it. delete_selection() has already said why. */
+	if (delete_selection(e, true)) {
+		set_status(e, false, "cut");
+	}
 }
 
 static void clipboard_paste(struct novi_edit *e) {
@@ -1064,10 +1069,17 @@ static void clipboard_paste(struct novi_edit *e) {
 	if (sel_active(e)) {
 		delete_selection(e, false);
 	}
-	insert_multiline(e, text);
+	bool whole = insert_multiline(e, text);
 	free(text);
 	scroll_to_cursor(e);
-	set_status(e, false, "pasted");
+	/* A paste that ran out of room part-way leaves the document holding
+	 * some of the clipboard, which is worth knowing; insert_multiline()
+	 * has already set the reason, so do not overwrite it with "pasted".
+	 * One ^Z still takes all of it back -- the snapshot was pushed
+	 * before any of it. */
+	if (whole) {
+		set_status(e, false, "pasted");
+	}
 }
 
 /* ── Rendering ─────────────────────────────────────────────────── */

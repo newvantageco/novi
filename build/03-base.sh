@@ -125,6 +125,38 @@ install -D -m 755 "${REPO_ROOT}/packages/novi-hotplug" "${ROOTFS}/sbin/novi-hotp
 install -D -m 755 "${REPO_ROOT}/rootfs/usr/bin/novi-live-desktop" \
     "${ROOTFS}/usr/bin/novi-live-desktop"
 
+# /etc/os-release -- how anything that is not this project asks what
+# this machine is running. It had never existed. Every tool that wants
+# to identify a distro reads it (the freedesktop spec is the closest
+# thing there is to a universal answer to "what am I on"), and the
+# README documented its exact contents as fact for as long as the file
+# had not been written.
+#
+# Generated from 00-versions.sh rather than kept as repo content under
+# rootfs/etc/, and that is the opposite call from passwd/group/shadow
+# on purpose: those hold policy (fixed GIDs, the root password field)
+# that should show up in a diff, while every field here is already a
+# variable one file away. A second copy would only be somewhere for the
+# version to go stale -- which is precisely what happened to the README.
+#
+# The real file lives in /usr/lib with a relative symlink from /etc, as
+# the spec asks: /usr/lib/os-release is vendor data that belongs with
+# the OS, /etc is where an administrator may override it, and an
+# application that only looks in /etc still finds it.
+install -d -m 755 "${ROOTFS}/usr/lib"
+cat > "${ROOTFS}/usr/lib/os-release" <<EOF
+NAME="${OS_NAME}"
+ID=${OS_ID}
+VERSION="${OS_VERSION} (${OS_CODENAME})"
+VERSION_ID=${OS_VERSION}
+VERSION_CODENAME=${OS_CODENAME}
+PRETTY_NAME="${OS_NAME} Linux ${OS_VERSION} (${OS_CODENAME})"
+HOME_URL="https://novilinux.org"
+BUG_REPORT_URL="https://github.com/newvantageco/novi/issues"
+EOF
+chmod 644 "${ROOTFS}/usr/lib/os-release"
+ln -sf ../usr/lib/os-release "${ROOTFS}/etc/os-release"
+
 # ACPI event handlers. The two path names are dictated by busybox
 # acpid's compiled-in action table (PWRF -> power button, LID -> lid),
 # not chosen here; renaming either means acpid runs nothing.

@@ -146,6 +146,7 @@ struct novi_files {
 	char prompt_text[NAME_MAX_LEN + 1];    /* what has been typed */
 	int prompt_len;
 	unsigned long tree_files, tree_dirs;   /* what a recursive delete would take */
+	bool tree_capped;                      /* ...and whether that is a floor */
 
 	char status[256];
 	bool status_is_error;
@@ -479,15 +480,34 @@ static void reload_selecting(struct novi_files *s, const char *name, int fallbac
  * failure and deletes nothing. */
 #define TREE_MAX_DEPTH 64
 
-/* Everything under `path`, not counting `path` itself. Returns false if
- * the tree could not be fully walked -- in which case the counts are
- * meaningless and the caller must not offer to delete it, because a
- * count you could not finish is exactly the count you must not show
- * somebody as "this is what you are about to lose". */
+/* And bound the width. count_tree() runs synchronously on the Wayland
+ * event loop, on a keypress, BEFORE the user has agreed to anything --
+ * so on a big enough directory, pressing Delete would freeze the window
+ * while it walked. Past this many entries the walk stops and the
+ * question says "over N", which is still true and still enough to
+ * decide on. The removal itself is allowed to take as long as it takes:
+ * by then it has been asked for. */
+#define TREE_COUNT_CAP 20000
+
+/* Everything under `path`, not counting `path` itself.
+ *
+ * Returns false if the tree could not be walked -- unreadable, or too
+ * deep -- in which case the counts are meaningless and the caller must
+ * not offer to delete it, because a count you could not finish is
+ * exactly the count you must not show somebody as "this is what you are
+ * about to lose".
+ *
+ * Stopping at TREE_COUNT_CAP is NOT that. It returns true with a count
+ * that is a floor rather than a total, and the caller says "over" in
+ * front of it -- a truthful lower bound is a fine thing to decide on,
+ * where a wrong total is not. */
 static bool count_tree(const char *path, int depth,
 		unsigned long *files, unsigned long *dirs) {
 	if (depth > TREE_MAX_DEPTH) {
 		return false;
+	}
+	if (*files + *dirs >= TREE_COUNT_CAP) {
+		return true;   /* capped, not failed -- see TREE_COUNT_CAP */
 	}
 	DIR *d = opendir(path);
 	if (d == NULL) {
@@ -520,6 +540,9 @@ static bool count_tree(const char *path, int depth,
 			}
 		} else {
 			(*files)++;
+		}
+		if (*files + *dirs >= TREE_COUNT_CAP) {
+			break;
 		}
 	}
 	closedir(d);
@@ -779,6 +802,7 @@ static void prompt_open_tree(struct novi_files *s, const char *name) {
 	s->prompt = PROMPT_DELETE_TREE;
 	s->tree_files = files;
 	s->tree_dirs = dirs;
+	s->tree_capped = (files + dirs >= TREE_COUNT_CAP);
 	snprintf(s->prompt_target, sizeof(s->prompt_target), "%s", name);
 }
 
@@ -796,8 +820,9 @@ static void prompt_line(const struct novi_files *s, char *out, size_t outlen) {
 		break;
 	case PROMPT_DELETE_TREE:
 		snprintf(out, outlen,
-			"delete '%s' and %lu file%s in %lu folder%s?   type yes: %s",
+			"delete '%s' and %s%lu file%s in %lu folder%s?   type yes: %s",
 			s->prompt_target,
+			s->tree_capped ? "over " : "",
 			s->tree_files, s->tree_files == 1 ? "" : "s",
 			s->tree_dirs + 1, s->tree_dirs == 0 ? "" : "s",
 			s->prompt_text);

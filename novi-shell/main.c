@@ -916,6 +916,18 @@ static void seat_request_cursor(struct wl_listener *listener, void *data) {
 
 #define CLIP_MAX_BYTES (1u * 1024u * 1024u)
 
+/* How long a client gets to drain one paste before we give up on it.
+ *
+ * This is a bound on the compositor, not a courtesy to the client.
+ * Every `wl_data_offer.receive` makes a pipe and an event source here,
+ * any client may call it as often as it likes, and a client that asks
+ * and then never reads leaves both armed forever -- so without this,
+ * a buggy program can walk the compositor out of file descriptors, and
+ * a compositor out of file descriptors is a dead desktop. A megabyte
+ * in ten seconds is a reader that has stopped, not a reader that is
+ * slow. */
+#define CLIP_WRITE_TIMEOUT_MS 10000
+
 /* Best first. A client offers what it likes; we ask for the best text
  * type it named, and offer all three when the text is ours. */
 static const char *const CLIP_MIME[] = {
@@ -946,6 +958,7 @@ struct novi_clip_read {
  * bytes out from under a reader. */
 struct novi_clip_write {
 	struct wl_event_source *ev;
+	struct wl_event_source *timeout;
 	int fd;
 	char *data;
 	size_t len, sent;
@@ -1037,9 +1050,17 @@ static int clip_read_cb(int fd, uint32_t mask, void *data) {
 
 static void clip_write_finish(struct novi_clip_write *w) {
 	wl_event_source_remove(w->ev);
+	if (w->timeout != NULL) {
+		wl_event_source_remove(w->timeout);
+	}
 	close(w->fd);
 	free(w->data);
 	free(w);
+}
+
+static int clip_write_timeout(void *data) {
+	clip_write_finish(data);
+	return 0;
 }
 
 static int clip_write_cb(int fd, uint32_t mask, void *data) {
@@ -1092,12 +1113,17 @@ static void clip_source_send(struct wlr_data_source *source,
 	w->data[server->clip_len] = '\0';
 	w->len = server->clip_len;
 	w->fd = fd;
-	w->ev = wl_event_loop_add_fd(wl_display_get_event_loop(server->wl_display),
-		fd, WL_EVENT_WRITABLE, clip_write_cb, w);
+	struct wl_event_loop *loop = wl_display_get_event_loop(server->wl_display);
+	w->ev = wl_event_loop_add_fd(loop, fd, WL_EVENT_WRITABLE, clip_write_cb, w);
 	if (w->ev == NULL) {
 		free(w->data);
 		free(w);
 		close(fd);
+		return;
+	}
+	w->timeout = wl_event_loop_add_timer(loop, clip_write_timeout, w);
+	if (w->timeout != NULL) {
+		wl_event_source_timer_update(w->timeout, CLIP_WRITE_TIMEOUT_MS);
 	}
 }
 
