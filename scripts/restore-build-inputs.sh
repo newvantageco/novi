@@ -41,32 +41,39 @@ REPO_OUT="${BUILD_DIR}/repo"
     exit 1
 }
 
-# Packages that are toolchain, not desktop. These install to the same
-# prefixes but belong only in the repository; restoring them would put
-# ~270 MB of compiler into a console base image that is meant to be
-# 788 MB in total, and the next 40-repo.sh run would not remove them
-# because pkgsplit does not claim them.
+# WHAT GETS RESTORED IS DERIVED, NOT LISTED.
 #
-# novi-headers is deliberately NOT in this list, though it looks like it
-# belongs: it holds the headers and .pc files for the shipped libraries,
-# which is precisely what a GUI client needs to compile. musl-dev is the
-# one that is excluded, because those are the musl and kernel headers
-# the cross-compiler already has in its own sysroot. Getting this
-# backwards restores 26 packages and zero headers, and the build fails
-# in exactly the same way it did before you ran this.
-SKIP='gcc|binutils|make|pkgconf|musl-dev|novi-devel'
+# 40-repo.sh writes ${MANIFEST} -- every file pkgsplit moved out of the
+# base image -- so "put back what the split took" is a question that
+# already has a written answer. Restoring exactly those paths cannot go
+# wrong as the repository grows.
+#
+# It used to be the other way round: unpack every package except a
+# hand-maintained blocklist of toolchain names. That was right until
+# the repository gained a package that was neither desktop nor
+# toolchain. RFC 0019 added `git` and `openssh`, this script cheerfully
+# installed them into the console base image, and the next 40-repo.sh
+# failed with pkgsplit's straddle check -- "usr/lib/libz.so.1 stays,
+# usr/lib/libz.so moves" -- because a base binary now linked zlib. The
+# error was correct and named nothing that would lead you here. A
+# blocklist has to be updated by whoever adds the next package, and
+# nothing tells them.
+MANIFEST="${BUILD_DIR}/repo-desktop-files.list"
+
+[ -s "${MANIFEST}" ] || {
+    echo "ERROR: no split manifest at ${MANIFEST}." >&2
+    echo "       It is written by build/40-repo.sh; run that first." >&2
+    exit 1
+}
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "${WORK}"' EXIT
 
+# Unpack everything, then copy back only what the manifest names. The
+# unpack is cheap and the filter is the part that has to be right.
 count=0
 for f in "${REPO_OUT}"/*.pkg.tar.gz; do
     [ -e "${f}" ] || continue
-    base="$(basename "${f}")"
-    name="${base%%-[0-9]*}"
-    if [[ "${name}" =~ ^(${SKIP})$ ]]; then
-        continue
-    fi
     tar xzf "${f}" -C "${WORK}" 2>/dev/null || true
     count=$(( count + 1 ))
 done
@@ -76,9 +83,28 @@ done
     exit 1
 }
 
-cp -a "${WORK}/files/." "${ROOTFS}/"
+restored=0
+missing=0
+while IFS= read -r rel; do
+    [ -n "${rel}" ] || continue
+    src="${WORK}/files/${rel}"
+    # -e follows symlinks and a soname link whose target has not been
+    # unpacked yet would look absent, so test for the link too.
+    if [ -e "${src}" ] || [ -L "${src}" ]; then
+        mkdir -p "${ROOTFS}/$(dirname "${rel}")"
+        cp -a "${src}" "${ROOTFS}/${rel}"
+        restored=$(( restored + 1 ))
+    else
+        missing=$(( missing + 1 ))
+    fi
+done < "${MANIFEST}"
 
-echo "Restored build inputs from ${count} package(s) into ${ROOTFS}"
+echo "Restored ${restored} file(s) into ${ROOTFS} from ${count} package(s)"
+echo "  (the manifest 40-repo.sh wrote: $(wc -l < "${MANIFEST}") path(s))"
+if [ "${missing}" -gt 0 ]; then
+    echo "  WARNING: ${missing} manifest path(s) were in no package -- the" >&2
+    echo "           manifest and the repository are out of step." >&2
+fi
 echo "  headers : $(find "${ROOTFS}/usr/include" -type f 2>/dev/null | wc -l) file(s)"
 echo "  pkgconfig: $(find "${ROOTFS}/usr/lib/pkgconfig" -type f 2>/dev/null | wc -l) file(s)"
 echo ""

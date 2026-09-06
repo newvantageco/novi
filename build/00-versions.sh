@@ -79,6 +79,12 @@ LIBNL_VERSION="3.11.0"
 # nftables and its two libraries, for RFC 0016's declarative firewall.
 # The kernel has had CONFIG_NF_TABLES since it was written and the image
 # has never contained anything that could configure it.
+# Developer tooling (RFC 0019). `pkg install novi-devel` puts a compiler
+# on the machine and nothing that can fetch something to compile.
+# Both are packages, never base image.
+OPENSSH_VERSION="9.9p2"
+GIT_VERSION="2.47.1"
+
 # Full-disk encryption (RFC 0018). The kernel has had CONFIG_DM_CRYPT
 # since the config was written and nothing could create a container.
 # Five upstreams, all small, all built static: cryptsetup links them and

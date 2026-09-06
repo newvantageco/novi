@@ -82,6 +82,11 @@ below for why `/build` is hardcoded and unrelated to the repo checkout path.
   libuuid and libdevmapper built static into a private prefix and
   linked into one `cryptsetup` binary, which is the only thing
   installed
+- `bash build/35-devtools.sh [openssh|git|repo|all]` — git and the ssh
+  client (RFC 0019), staged into `/build/stage-devtools` and published
+  by `43-devtools-repo.sh`. Packages, never base. Also builds `sshd`
+  into `/build/ssh-test/` as the test peer, deliberately not into the
+  image
 - **`bash build/16-s6-rc-db.sh` after ANY change under `init/`** (see below),
   then `bash scripts/mkinitramfs.sh --output build/initramfs.cpio.gz` and
   `bash scripts/mkiso.sh` to get it into a bootable image
@@ -619,6 +624,49 @@ stage 2, with no error anywhere, resisting several rounds of bisection.
 Re-running the stages in order fixed it in one pass and would have been
 faster from the start. The stages are the recovery mechanism; that is
 what they are for.
+
+## Architecture: git and ssh, and the blocklist that rotted
+
+RFC 0019 (`docs/rfcs/0019-git-and-ssh.md`). `pkg install git` — over
+ssh and locally, never https.
+
+- **OpenSSH is built `--without-openssl`**, which is the only reason
+  it is in this image at all (RFC 0006's argument for `novi-verify`,
+  RFC 0009's for `CONFIG_TLS=internal`). The cost is ed25519 keys
+  ONLY — no RSA, ECDSA, certificates, FIDO or PKCS#11 — and that is
+  worth stating wherever this is described rather than leaving to be
+  discovered against an old server.
+- **git is built `NO_CURL=1`**, so there is no `https://` remote. Both
+  gaps are the same gap: closing it means a TLS library, and the
+  honest candidate is mbedTLS, which RFC 0009 already named as the way
+  to WPA3. One library would serve WPA3, git and `pkg` — a decision to
+  make once, on its own.
+- **`NO_REGEX=NeedsStartEnd`**: musl's `regexec()` has no
+  `REG_STARTEND`. git's own `#error` names the exact flag, which is
+  the kindest way an upstream can handle a libc difference.
+- **`--without-zlib-version-check` is a cross-compile necessity.**
+  OpenSSH's check compiles a program that calls `zlibVersion()` and
+  *runs* it; cross-compiling it cannot, so it concludes "zlib too old"
+  about zlib 1.3.1. Same shape as skalibs' run-time sysdeps: any
+  autoconf test that must execute its own output is a wall.
+- **OpenSSH 9.8 split the daemon.** `sshd` is only the listener now
+  and execs `sshd-session` from a compiled-in `/usr/libexec` path;
+  `make sshd` alone gives you a daemon that accepts a connection and
+  dies with "sshd-session does not exist or is not executable". sshd
+  is built here as the *test peer* and never installed — the hostapd
+  bargain from RFC 0009.
+- **`restore-build-inputs.sh` now restores what the MANIFEST names,
+  not "every package except a blocklist".** The blocklist was correct
+  until the repository gained a package that was neither desktop nor
+  toolchain: `git` and `openssh` were cheerfully installed into the
+  console base image, and the next `40-repo.sh` failed with pkgsplit's
+  straddle check — `usr/lib/libz.so.1 stays, usr/lib/libz.so moves` —
+  because a base binary suddenly linked zlib. The error was correct
+  and pointed nowhere near the cause. `40-repo.sh` already writes
+  `repo-desktop-files.list`; restoring exactly those paths is a
+  derived answer that cannot rot, and a blocklist is one that has to
+  be updated by whoever adds the next package, with nothing to tell
+  them.
 
 ## Architecture: full-disk encryption, and BusyBox fdisk's default
 

@@ -568,6 +568,7 @@ small static GPT writer) and e2fsprogs' `mke2fs`. See
 | Packages | pkg / .pkg.tar.gz | Custom minimal format |
 | Firewall | nftables 1.0.9 | One declared key, one policy file, no daemon |
 | Encryption | LUKS2 (cryptsetup 2.7.5) | One static binary, kernel AF_ALG crypto, no OpenSSL |
+| Dev tools | git 2.47.1 + OpenSSH 9.9p2 | Packages, not base; ssh built without OpenSSL |
 
 ## OS Identity
 
@@ -616,6 +617,8 @@ BUG_REPORT_URL="https://github.com/newvantageco/novi/issues"
       (Settings → Network, RFC 0017)
 - [x] Full-disk encryption — `novi-install --encrypt`, LUKS2, unlocked by
       the initramfs; both firmware paths verified (RFC 0018)
+- [x] `pkg install git` — git over ssh, and an OpenSSH client built without
+      OpenSSL (ed25519 only). No https yet; that needs a TLS stack (RFC 0019)
 - [ ] **Boot it on real hardware** ← next, and nothing here replaces it
 - [ ] A published repository + offline release key
 - [ ] A Microsoft-signed shim (real Secure Boot); WPA3 (needs mbedTLS)

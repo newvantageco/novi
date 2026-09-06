@@ -251,6 +251,12 @@ fetch "https://netfilter.org/projects/libmnl/files/libmnl-${LIBMNL_VERSION}.tar.
 fetch "https://netfilter.org/projects/libnftnl/files/libnftnl-${LIBNFTNL_VERSION}.tar.xz"
 fetch "https://netfilter.org/projects/nftables/files/nftables-${NFTABLES_VERSION}.tar.xz"
 
+# Developer tooling (RFC 0019): git, and the ssh client it needs to
+# reach anything. OpenSSH is built --without-openssl, which is the
+# whole reason it is allowed in this image at all.
+fetch "https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-${OPENSSH_VERSION}.tar.gz"
+fetch "https://cdn.kernel.org/pub/software/scm/git/git-${GIT_VERSION}.tar.xz"
+
 # Full-disk encryption (RFC 0018). popt and json-c are cryptsetup's
 # hard dependencies; util-linux and LVM2 are enormous trees fetched for
 # exactly one library each (libuuid, libdevmapper) -- see
