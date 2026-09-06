@@ -589,6 +589,47 @@ Re-running the stages in order fixed it in one pass and would have been
 faster from the start. The stages are the recovery mechanism; that is
 what they are for.
 
+## Architecture: a GUI that runs something slow
+
+RFC 0017 (`docs/rfcs/0017-wifi-in-the-desktop.md`). `novi-settings`'
+Network panel scans, joins and forgets WiFi networks, and it is the
+first client here that had to run a subprocess taking *seconds*.
+
+- **The panel is a front-end to `novi-wifi` and `novi-state`, like
+  every other panel.** It does not open `/etc/novi/wifi.conf`, walk
+  `/sys/class/net`, or run `wpa_cli` — same argument as the System
+  panel shelling out to `novi-state set`. Three verbs were added to
+  `novi-wifi` for it: `add <ssid> --stdin`, `scan --tsv`, `iface`.
+- **A passphrase goes down a pipe, never in argv.**
+  `/proc/<pid>/cmdline` is world-readable for as long as the process
+  lives.
+- **`scan --tsv` puts the signal FIRST.** An SSID may contain spaces,
+  so a trailing field cannot be found by counting from the left — the
+  padded human table is unparseable for that reason, and a GUI parsing
+  a table meant for people breaks the first time somebody puts two
+  spaces in their router's name. Tabs and newlines in an SSID are
+  dropped, not escaped (an SSID is attacker-controlled text off the
+  air); same call the package index makes about `|`.
+- **`job_start`/`job_pump` is the async runner**, and three details in
+  it are load-bearing: the pipe's read end is `O_NONBLOCK` (a blocking
+  second read sleeps until the child produces more — freezing the
+  window for the length of the scan); the poll watches `POLLHUP` as
+  well as `POLLIN` (a child that prints nothing and exits produces
+  only a hangup, and waiting for `POLLIN` alone leaves the window
+  saying "Scanning..." forever); and the main loop uses libwayland's
+  `wl_display_prepare_read`/`read_events`/`cancel_read` protocol —
+  `cancel_read` on **every** path that does not read, poll errors
+  included, or the next `prepare_read` blocks forever.
+- **`set_status` copies now.** It used to store the pointer, which was
+  fine while every caller passed a string literal; this panel reports
+  what a child process just said, from a buffer the next job
+  overwrites.
+- **The proof that the loop is not blocked is a panel switch mid-scan**,
+  not a "Scanning..." label. The label is drawn synchronously by the
+  keypress that started the job and would appear either way; a
+  different panel rendering while the child is still running could
+  not.
+
 ## Architecture: the firewall, and the exec the kernel could not make
 
 RFC 0016 (`docs/rfcs/0016-declarative-firewall.md`). `network.firewall

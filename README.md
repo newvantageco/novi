@@ -611,6 +611,8 @@ BUG_REPORT_URL="https://github.com/newvantageco/novi/issues"
 - [x] A clipboard that works between programs, and outlives the one that filled it
 - [x] A firewall in the same document as your hostname (`network.firewall`,
       nftables, default-drop input, on by default, RFC 0016)
+- [x] WiFi from the desktop — scan, pick, type the passphrase, connected
+      (Settings → Network, RFC 0017)
 - [ ] **Boot it on real hardware** ← next, and nothing here replaces it
 - [ ] A published repository + offline release key
 - [ ] A Microsoft-signed shim (real Secure Boot); WPA3 (needs mbedTLS)

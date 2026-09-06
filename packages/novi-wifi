@@ -3,8 +3,9 @@
 #
 #   novi-wifi list                 networks this machine has credentials for
 #   novi-wifi add <ssid>           add one (prompts for the passphrase)
+#   novi-wifi add <ssid> --stdin   add one, passphrase read from stdin
 #   novi-wifi forget <ssid>        remove one
-#   novi-wifi scan                 what is on the air right now
+#   novi-wifi scan [--tsv]         what is on the air right now
 #   novi-wifi status               what the supplicant is doing
 #
 # WHY THIS IS NOT novi-state. A WiFi passphrase is a secret, and
@@ -43,9 +44,18 @@ novi-wifi — the WiFi networks this machine knows
 Usage:
   novi-wifi list             networks this machine has credentials for
   novi-wifi add <ssid>       add one (prompts for the passphrase)
+  novi-wifi add <ssid> --stdin
+                             add one, passphrase read from stdin
   novi-wifi forget <ssid>    remove one
   novi-wifi scan             what is on the air right now
+  novi-wifi scan --tsv       the same, as signal<TAB>ssid
   novi-wifi status           what the supplicant is doing
+  novi-wifi iface            the wireless interface's name, if there is one
+
+--stdin exists so a GUI can add a network without a terminal, and it
+takes the passphrase on stdin rather than as an argument because an
+argument is world-readable in /proc/<pid>/cmdline for as long as the
+process lives.
 
 Turning WiFi on and off is declared state, not a command here:
 
@@ -100,8 +110,8 @@ cmd_list() {
 }
 
 cmd_add() {
-    local ssid="${1:-}"
-    [ -n "$ssid" ] || die "Usage: novi-wifi add <ssid>"
+    local ssid="${1:-}" mode="${2:-}"
+    [ -n "$ssid" ] || die "Usage: novi-wifi add <ssid> [--stdin]"
     need_root
     ensure_conf
 
@@ -117,6 +127,32 @@ cmd_add() {
         die "wpa_passphrase not found"
 
     local pass1 pass2
+
+    # --stdin: one line on stdin is the passphrase, no prompt, no
+    # confirmation, no tty. That is what a GUI needs -- novi-settings'
+    # Network panel is the caller -- and it is deliberately stdin
+    # rather than a third argument: an argument is visible in
+    # /proc/<pid>/cmdline to every user on the machine for as long as
+    # the process lives, and a WiFi PSK is a secret. Same rule as
+    # /etc/shadow and the rest of this file.
+    #
+    # No confirmation field either, and that is the caller's job, not
+    # an omission: a GUI can show the passphrase back or ask twice
+    # itself, and a second read here would just be a prompt nobody
+    # sees.
+    if [ "$mode" = "--stdin" ]; then
+        # shellcheck disable=SC2162
+        read pass1 || die "no passphrase on stdin"
+        if [ "${#pass1}" -lt 8 ] || [ "${#pass1}" -gt 63 ]; then
+            pass1=""
+            die "a WPA passphrase must be 8 to 63 characters"
+        fi
+        add_network_block "$ssid" "$pass1"
+        pass1=""
+        return 0
+    fi
+    [ -z "$mode" ] || die "unknown option '$mode' (only --stdin)"
+
     while : ; do
         printf '  passphrase for %s: ' "$ssid" >&2
         stty -echo 2>/dev/null || true
@@ -153,15 +189,23 @@ cmd_add() {
         break
     done
 
+    add_network_block "$ssid" "$pass1"
+    pass1=""; pass2=""
+}
+
+# Derive the PSK, append the block, and tell a running supplicant to
+# re-read the file. Shared by the interactive and --stdin paths, so
+# that the two cannot drift into storing credentials differently.
+add_network_block() {
+    local ssid="$1" pass="$2" block
+
     # wpa_passphrase derives the 256-bit PSK, so the passphrase itself
     # is not stored. That is not real protection -- the PSK is
     # equivalent for joining the network -- but it does stop a
     # passphrase someone reuses elsewhere from sitting in a file in
     # plaintext.
-    local block
-    block="$(wpa_passphrase "$ssid" "$pass1" 2>/dev/null | grep -v '^[[:space:]]*#psk=')" ||
+    block="$(wpa_passphrase "$ssid" "$pass" 2>/dev/null | grep -v '^[[:space:]]*#psk=')" ||
         die "wpa_passphrase failed"
-    pass1=""; pass2=""
 
     printf '\n%s\n' "$block" >> "$CONF"
     chmod 600 "$CONF"
@@ -170,9 +214,24 @@ cmd_add() {
     if [ "$(novi-state get network.wifi 2>/dev/null || printf off)" != "on" ]; then
         info "WiFi is not enabled yet. To turn it on:"
         info "    novi-state set network.wifi on && novi-state apply"
-    else
-        info "run 'novi-state apply' or reconnect to pick it up"
+        return 0
     fi
+
+    # A running supplicant has already read wifi.conf and will not
+    # notice an appended block on its own. `reconfigure` is the one
+    # command that makes it re-read the file, and it is the difference
+    # between "added" and "connected" -- without it the honest advice
+    # was "run novi-state apply", i.e. restart the service, to pick up
+    # a network you just typed in. Not fatal if it fails: the
+    # credential IS stored, and the next start will use it.
+    local iface
+    if command -v wpa_cli >/dev/null 2>&1 && iface="$(wifi_iface)"; then
+        if wpa_cli -i "$iface" -p "$CTRL_DIR" reconfigure >/dev/null 2>&1; then
+            info "supplicant reloaded -- it will try '$ssid' now"
+            return 0
+        fi
+    fi
+    info "run 'novi-state apply' to pick it up"
 }
 
 cmd_forget() {
@@ -225,20 +284,59 @@ wifi_iface() {
 
 cmd_scan() {
     need_root
-    local iface
+    local iface fmt="${1:-}"
+    case "$fmt" in
+        ''|--tsv) : ;;
+        *) die "unknown option '$fmt' (only --tsv)" ;;
+    esac
     iface="$(wifi_iface)" || die "no wireless interface found"
     command -v iw >/dev/null 2>&1 || die "iw not found"
     ip link set "$iface" up 2>/dev/null || true
-    msg "Scanning on $iface"
+    [ "$fmt" = "--tsv" ] || msg "Scanning on $iface"
+
     # SSID and signal strength, not iw's full dump. `iw scan` needs
     # root and prints a page per BSS; what a person wants is a list of
     # names they might recognise.
+    #
+    # --tsv is signal<TAB>ssid, in that order, because an SSID may
+    # contain spaces and a trailing field cannot be found by counting
+    # from the left. The padded human table above is unparseable for
+    # exactly that reason, and a GUI parsing a table meant for people
+    # is a thing that breaks quietly the first time somebody names
+    # their router with two spaces in it. Sorted by signal, strongest
+    # first -- the order a person picking a network wants.
+    #
+    # An SSID is attacker-controlled text off the air: a tab or a
+    # newline in one would forge a row. Both are dropped rather than
+    # escaped, on the same argument as the package index forbidding
+    # `|` instead of escaping it.
+    if [ "$fmt" = "--tsv" ]; then
+        iw dev "$iface" scan 2>/dev/null | awk '
+            /signal:/ { sig = $2 }
+            /^\tSSID: / {
+                sub(/^\tSSID: /, "")
+                gsub(/[\t\r]/, "", $0)
+                if (length($0)) printf "%s\t%s\n", sig, $0
+            }' | sort -rn -k1,1 | awk -F'\t' '!seen[$2]++'
+        return 0
+    fi
+
     iw dev "$iface" scan 2>/dev/null | awk '
         /signal:/ { sig = $2 }
         /^\tSSID: / {
             sub(/^\tSSID: /, "")
             if (length($0)) printf "%-32s %8s dBm\n", $0, sig
         }' | sort -u
+}
+
+# The wireless interface's name on stdout, nothing on stderr, exit 1
+# when there is none. Exists so that a caller that needs to *display*
+# the interface -- novi-settings' Network panel -- does not grow its
+# own idea of what counts as a wireless device. The rule (RFC 0009) is
+# that the kernel says so, via /sys/class/net/*/phy80211, and there
+# should be exactly one place that knows it.
+cmd_iface() {
+    wifi_iface || exit 1
 }
 
 cmd_status() {
@@ -255,6 +353,7 @@ case "${1:-}" in
     forget) shift; cmd_forget "$@" ;;
     scan)   shift; cmd_scan "$@" ;;
     status) shift; cmd_status "$@" ;;
+    iface)  shift; cmd_iface "$@" ;;
     -h|--help|help) usage ;;
     *)      usage; exit 1 ;;
 esac
