@@ -1,0 +1,67 @@
+# /etc/ssh/sshd_config — Novi Linux (RFC 0022)
+#
+# Novi's own, not the sshd_config upstream generates. Upstream's
+# defaults are written for a system whose root account has a password;
+# the shipped Novi root account has an EMPTY password field, so a few
+# of them have to be different here and the differences are the reason
+# this file exists rather than being taken from the build tree.
+#
+# Everything not mentioned is OpenSSH's default, on purpose. A config
+# that restates defaults is a config that silently freezes them at
+# whatever they were the day it was written.
+
+# ── Who may log in ────────────────────────────────────────────────
+#
+# Root may not, over ssh, at all -- not even with a key. /etc/shadow
+# ships with `root::` (no password), which is deliberate for an
+# installable live image and catastrophic the moment a port is open;
+# `prohibit-password` would still be one `passwd` away from being the
+# account everyone on the internet tries first. Root logs in at the
+# console, or someone in `wheel` uses `su`.
+PermitRootLogin no
+
+# Password authentication is ON, and that is safe here for a reason
+# worth stating rather than assuming, because the reason is not this
+# line -- it is what sits behind it.
+#
+# A FRESH NOVI HAS NOBODY WHO CAN LOG IN. Not "nobody with a good
+# password": nobody. root has an empty hash and is refused by
+# PermitRootLogin above and by PermitEmptyPasswords below. Every other
+# account novi-state or novi-install creates starts LOCKED (`!` in
+# /etc/shadow, RFC 0005), and OpenSSH refuses a locked account
+# outright -- with a key, too, which is easy to assume it does not.
+# Verified: an account with an authorized_keys it owns and a `!` in
+# shadow gets "Permission denied (publickey,password)".
+#
+# So opening port 22 on a machine nobody has touched exposes nothing
+# that can be authenticated to, and the act that changes that is
+# somebody at the console running `passwd`. Turning password auth off
+# would be marginally stricter and would also mean nobody can ever
+# reach a machine they did not pre-seed a key onto -- not a trade a
+# general-purpose OS gets to make on its users' behalf.
+PasswordAuthentication yes
+PermitEmptyPasswords no
+PubkeyAuthentication yes
+
+# There is deliberately no `UsePAM no` here. There is no PAM on this
+# system -- OpenSSH is built --without-pam -- and a build without it
+# does not merely default the option off, it does not KNOW the keyword:
+# sshd prints "line 39: Unsupported option UsePAM" on every start and
+# on every `sshd -t`. A line whose only effect is a warning about
+# itself is worse than the absence it was documenting.
+
+# ── What runs ─────────────────────────────────────────────────────
+#
+# scp has spoken SFTP rather than the old rcp protocol since OpenSSH
+# 9.0, so this line is what makes `scp` to this machine work at all,
+# not just `sftp`. The path is where the openssh-server package puts
+# it, which is where configure baked it in.
+Subsystem sftp /usr/libexec/sftp-server
+
+# ── Logging ───────────────────────────────────────────────────────
+#
+# The service runs `sshd -D -e`, so this goes to stderr and into s6's
+# catch-all log with everything else. VERBOSE records the fingerprint
+# of the key each session authenticated with, which is the one line
+# anybody ever wants after the fact.
+LogLevel VERBOSE

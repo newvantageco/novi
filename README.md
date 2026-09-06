@@ -327,6 +327,24 @@ WPA2 and WPA3-Personal, from one stored block — the machine takes
 whichever the access point offers, with nothing to choose. See
 [RFC 0009](docs/rfcs/0009-wifi.md) and [RFC 0021](docs/rfcs/0021-wpa3.md).
 
+**Nothing opens a port on your behalf.** Novi's firewall drops
+everything inbound it did not ask for, and turning on a daemon does not
+change that — because a firewall that opens itself when a service
+starts is not a firewall:
+
+```console
+$ pkg install openssh-server
+$ novi-state set services.sshd on && novi-state apply
+warning: services.sshd is on, but the firewall does not allow port 22
+warning:     add it:  novi-state set network.firewall.allow 22 && novi-state apply
+```
+
+Two decisions, two lines in the same document, both in the same diff
+and the same rollback. The host key is generated on that machine the
+first time the service starts — no Novi image contains one, so no two
+machines share one. Root cannot log in over ssh at all. See
+[RFC 0022](docs/rfcs/0022-sshd.md).
+
 **It tries to work on hardware it has never seen.** Nothing in this
 system used to load a driver it had not been told about in advance —
 three hardcoded `modprobe` lists, all written against QEMU, which is a
@@ -573,6 +591,7 @@ small static GPT writer) and e2fsprogs' `mke2fs`. See
 | Dev tools | git 2.47.1 + OpenSSH 9.9p2 | Packages, not base; ssh built without OpenSSL |
 | TLS | mbedTLS 3.6.2 + curl 8.11.1 | Packages, not base; CA bundle hash-pinned |
 | WiFi | wpa_supplicant 2.11 + wolfSSL 5.7.6 | WPA2 and WPA3-SAE; no OpenSSL |
+| Remote access | sshd 9.9p2 | A package; host key made on first start; root refused |
 
 ## OS Identity
 
@@ -627,6 +646,8 @@ BUG_REPORT_URL="https://github.com/newvantageco/novi/issues"
       no TLS library reaches the base image from it (RFC 0020)
 - [x] WPA3-Personal — wolfSSL, SAE, PMF; one stored block joins WPA2 or
       WPA3, verified against an SAE-only access point (RFC 0021)
+- [x] `pkg install openssh-server` — a daemon whose host key is made on
+      the machine, and a firewall hole you have to declare (RFC 0022)
 - [ ] **Boot it on real hardware** ← next, and nothing here replaces it
 - [ ] A published repository + offline release key
 - [ ] A Microsoft-signed shim (real Secure Boot); OWE and SAE-PK

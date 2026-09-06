@@ -808,6 +808,90 @@ first client here that had to run a subprocess taking *seconds*.
   different panel rendering while the child is still running could
   not.
 
+## Architecture: sshd, and the port that does not open itself
+
+RFC 0022 (`docs/rfcs/0022-sshd.md`). `openssh-server` as a package,
+`services.sshd`, and a second declared key for the hole.
+
+- **The host key is generated on first start, in
+  `init/services/sshd/run`, and exists nowhere in the image.** A
+  distribution that ships a host key ships the same one to every
+  machine that installs it — anybody holding the ISO can then
+  impersonate any of them. Nothing in `novi.iso` and no package
+  contains one. `ssh-keygen -A` is not used: this OpenSSH has no
+  OpenSSL, so ed25519 is the only key type that can exist, and naming
+  it beats printing two failures.
+- **`network.firewall.allow` is a SEPARATE key from `services.<name>`,
+  and that is the design, not an oversight.** Deriving the holes from
+  the enabled services is one key instead of two and it is what people
+  expect; it is also a firewall that opens itself because a daemon
+  started, which is a service registry with a policy file attached.
+  The set of things reachable from the network has to be one list a
+  person chose.
+- **The cost of that split is a machine you cannot reach and no
+  explanation, so `novi-state` prints one.** It is *not drift* — both
+  keys are exactly as declared, so `diff` cannot report it and `apply`
+  cannot fix it. `firewall_hole_note()` says it from both commands.
+  `LISTENING_SERVICES` exists only to produce that sentence; nothing
+  in it opens anything.
+- **Ports are numbers, never names.** `nft` resolves `ssh` through
+  `/etc/services`, which BusyBox does not ship — a name would work on
+  the build host and fail on the machine.
+- **Declared and observed port lists are compared canonically**
+  (sorted numerically per protocol), or `22, 80` would report eternal
+  drift against `80,22` and `apply` would rewrite the same ports every
+  run. When they match, the observer echoes the *declared* string back
+  verbatim so the document's own formatting is never "corrected".
+  Firewall off means the key is inert, not drifted — same call
+  `network.interface` makes with the network service down.
+- **`EARLY_KEYS` is `network.firewall network.firewall.allow`, in that
+  order.** The ruleset reload empties the sets, so filling them first
+  would fill sets that are about to be replaced.
+- **`PermitRootLogin no`, not `prohibit-password`.** `/etc/shadow`
+  ships `root::`. `PasswordAuthentication yes` is safe *only because*
+  of what sits behind it, and the load-bearing half is not the one you
+  would guess: **OpenSSH refuses a locked account outright, with a key
+  too.** `allowed_user()` checks the `!` in shadow before any
+  authentication method is tried, so an account novi-state created,
+  owning a valid `authorized_keys`, gets `Permission denied
+  (publickey,password)` until someone runs `passwd`. Verified live —
+  it denied this RFC's own first test run. A freshly opened port 22
+  therefore has nobody who can authenticate at all.
+- **No `UsePAM no` in sshd_config.** Built `--without-pam`, sshd does
+  not know the keyword and prints `Unsupported option UsePAM` on every
+  start and every `sshd -t`. A line whose only effect is a warning
+  about itself is worse than the absence it documented.
+- **`exec sshd` is not enough: sshd re-execs itself and demands an
+  absolute `argv[0]`.** `exec sshd -D -e` gave `sshd requires
+  execution with an absolute path` once a second forever, from a
+  binary whose `sshd -t` had just called the config perfect. PATH was
+  fine (04-s6.sh puts `/usr/sbin` on it) — it is `argv[0]` sshd
+  objects to.
+- **A longrun that declares readiness must also declare
+  `timeout-up`.** This service had `notification-fd` and none, so with
+  the package absent its `exit 1` became a crash loop and `s6-rc -u
+  change` waited FOREVER: `novi-state apply` hung, the console with
+  it, and boot convergence would have hung the boot. `network` and
+  `wifi` had always bounded it; this one broke the pattern. The
+  corollary to "a longrun anything observes needs notification-fd".
+- **A `sed` range whose start line also matches the end pattern does
+  not end on that line.** `/elements = {/,/}/` ran on to the set's own
+  closing brace, and a greedy `.*` captured `22 } ` — so the firewall
+  observer called a perfectly correct set unparseable, `diff` reported
+  permanent drift and `apply` rewrote the same port three times.
+  `[^}]*`, not `.*`.
+- **The service definition is base content; the binaries are a
+  package.** s6-rc does not check that a run script's program exists,
+  so it is inert until `pkg install openssh-server` — the seatd /
+  novi-shell arrangement from RFC 0007.
+- **Readiness means the host key exists**, not that a socket is bound.
+  sshd says nothing when it starts listening, and claiming otherwise
+  is the RFC 0014 mistake again. The host key is the one precondition
+  anything else can race on.
+- `sshd`, `/var/empty` and the UID are base content for the same
+  reason `/etc/passwd` is repo content: a UID and a directory mode are
+  baked into a squashed image, so they are build-time facts.
+
 ## Architecture: the firewall, and the exec the kernel could not make
 
 RFC 0016 (`docs/rfcs/0016-declarative-firewall.md`). `network.firewall

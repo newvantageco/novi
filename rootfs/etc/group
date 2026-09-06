@@ -11,6 +11,7 @@
 #   tty(5)    getty/login chown the terminal to it
 #   disk(6)   raw block device access; what novi-install needs
 #   wheel(10) `su` to root -- Novi's admin group
+#   sshd(22)  sshd's privsep account; owns nothing (RFC 0022)
 #   audio(29) /dev/snd/*
 #   video(44) /dev/dri/* -- a desktop session needs it
 #   input(101) /dev/input/* -- keyboards and pointers
@@ -29,6 +30,7 @@ kmem:x:9:
 wheel:x:10:
 cdrom:x:11:
 dialout:x:20:
+sshd:x:22:
 audio:x:29:
 video:x:44:
 users:x:100:

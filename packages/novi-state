@@ -198,6 +198,102 @@ observe_service() {
 # makes changing either show up as real drift -- and gives `apply`
 # something to do about it -- instead of the change silently having no
 # effect until the next reboot.
+# ---------------------------------------------------------------------------
+# Firewall holes (RFC 0022)
+#
+# `network.firewall.allow = 22, 123/udp` is a list of ports the input
+# chain accepts. It is a SEPARATE key from `services.<name>` on
+# purpose: enabling a daemon must not open a port. That something
+# listens and that the world may reach it are two decisions, and a
+# firewall that opens itself because a service started is not a
+# firewall -- it is a service registry with a policy file attached.
+# The cost is that turning ssh on is two keys, and `apply` says the
+# second one out loud rather than leaving it to be discovered.
+# ---------------------------------------------------------------------------
+
+# Services that listen, and on what. Used ONLY to warn -- nothing here
+# opens anything. A service absent from this list is not assumed
+# silent; it is simply not something this file knows the port of.
+LISTENING_SERVICES="sshd:22"
+
+# Canonicalise a port list so a declared value and an observed one can
+# be compared as strings: "22, 80/tcp,123/udp" and "80,22,123/udp"
+# describe the same holes and must not read as drift. Sorted
+# numerically per protocol, tcp bare, udp suffixed, "none" when empty.
+# Returns 1 on anything it cannot parse, printing nothing.
+#
+# NUMBERS ONLY, deliberately. nft resolves a name like `ssh` through
+# /etc/services, which BusyBox does not ship -- so a name would work on
+# a build host and fail on the machine, which is the worst of the three
+# possible outcomes. A lookup table that exists in one place and not
+# the other is worse than typing 22.
+firewall_ports_canon() {
+    local raw="$1" tok port proto tcp="" udp="" out="" oldifs
+    raw="$(printf '%s' "$raw" | tr -d ' \t')"
+    case "$raw" in ''|none) printf 'none'; return 0 ;; esac
+    oldifs="$IFS"; IFS=','
+    for tok in $raw; do
+        IFS="$oldifs"
+        case "$tok" in
+            '')    IFS=','; continue ;;
+            */udp) port="${tok%/udp}"; proto=udp ;;
+            */tcp) port="${tok%/tcp}"; proto=tcp ;;
+            */*)   return 1 ;;
+            *)     port="$tok"; proto=tcp ;;
+        esac
+        case "$port" in ''|*[!0-9]*) return 1 ;; esac
+        [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || return 1
+        if [ "$proto" = tcp ]; then
+            tcp="$tcp$port
+"
+        else
+            udp="$udp$port
+"
+        fi
+        IFS=','
+    done
+    IFS="$oldifs"
+    for port in $(printf '%s' "$tcp" | sort -un); do out="$out,$port"; done
+    for port in $(printf '%s' "$udp" | sort -un); do out="$out,$port/udp"; done
+    [ -n "$out" ] || { printf 'none'; return 0; }
+    printf '%s' "${out#,}"
+}
+
+# The elements of one nft set, as space-separated words. nft wraps long
+# element lists across lines, so the whole `elements = { ... }` block is
+# collapsed before it is read rather than assuming one line.
+#
+# `[^}]*` and not `.*` for the captured part, and that is the whole of
+# a bug that got as far as a live boot. A sed range whose start line
+# also matches the end pattern does NOT end on that line -- it runs on
+# to the next `}`, which is the set's own closing brace. So the
+# collapsed text was `elements = { 22 } }`, and a greedy `.*` ran to
+# the LAST brace and captured `22 } `. That reached the parser as an
+# unparseable value, `diff` reported permanent drift against a set
+# that was exactly right, and `apply` rewrote the same port three
+# times and gave up. Stopping at the first `}` is the fix.
+firewall_set_elements() {
+    nft list set inet novi "$1" 2>/dev/null |
+        sed -n '/elements = {/,/}/p' |
+        tr '\n' ' ' |
+        sed -n 's/.*elements = {\([^}]*\)}.*/\1/p' |
+        tr ',' ' '
+}
+
+# What the kernel is actually allowing, in the same canonical form.
+# "unsupported" when the sets are not there at all -- an /etc/novi/
+# firewall.nft older than RFC 0022 loads fine and simply has no holes
+# to fill, and reporting that as "none" would let `diff` call a machine
+# converged when the key it declared can never take effect.
+firewall_live_ports() {
+    local e raw=""
+    nft list set inet novi open_tcp >/dev/null 2>&1 || { printf 'unsupported'; return 0; }
+    nft list set inet novi open_udp >/dev/null 2>&1 || { printf 'unsupported'; return 0; }
+    for e in $(firewall_set_elements open_tcp); do raw="$raw,$e"; done
+    for e in $(firewall_set_elements open_udp); do raw="$raw,$e/udp"; done
+    firewall_ports_canon "${raw#,}" 2>/dev/null || printf 'unparseable'
+}
+
 observe_network() {
     local sub="$1"
     case "$sub" in
@@ -234,6 +330,33 @@ observe_network() {
                 printf 'on'
             else
                 printf 'off'
+            fi
+            ;;
+        # The holes, compared as canonical port lists (RFC 0022).
+        #
+        # When the live sets match what was declared, the DECLARED
+        # string is echoed back verbatim rather than the canonical
+        # form -- otherwise `network.firewall.allow = 22, 80` would
+        # report eternal drift against an identical `80,22`, and
+        # `apply` would rewrite the same two ports on every run. When
+        # they do not match, the canonical live list is the answer,
+        # which is the one a person needs to see.
+        firewall.allow)
+            local live declared
+            # No table means no holes to be out of step with -- the
+            # same call `network.interface` makes with the service
+            # down. Permanent unfixable drift on a machine that simply
+            # is not filtering would be a worse answer than silence.
+            if [ "$(observe_network firewall)" != "on" ]; then
+                state_get "network.$sub"
+                return 0
+            fi
+            live="$(firewall_live_ports)"
+            declared="$(firewall_ports_canon "$(state_get network.firewall.allow)" 2>/dev/null || printf '?')"
+            if [ "$live" = "$declared" ]; then
+                state_get "network.$sub"
+            else
+                printf '%s' "$live"
             fi
             ;;
         wifi.interface)
@@ -539,12 +662,71 @@ converge_firewall() {
     esac
 }
 
+# Fill the two sets the shipped ruleset declares (RFC 0022).
+#
+# `flush set` then `add element`, never a diff of the two lists:
+# whatever is in the kernel was either put there by this function or by
+# somebody bypassing the document, and in both cases the document wins.
+#
+# This runs AFTER converge_firewall in the same pass, because
+# `state_keys` is sorted and `network.firewall` is a prefix of
+# `network.firewall.allow`. That ordering matters: turning the firewall
+# on reloads the table, which empties the sets, and the allow key is
+# observed after that has happened rather than before.
+converge_firewall_allow() {
+    local want="$1" canon port
+    command -v nft >/dev/null 2>&1 ||
+        die "network.firewall.allow: nft not found -- this image cannot filter"
+    canon="$(firewall_ports_canon "$want")" ||
+        die "network.firewall.allow: '$want' is not a port list (numbers, each optionally /tcp or /udp, comma separated, or 'none')"
+
+    # Nothing to fill and nothing to complain about: the key is inert
+    # while the firewall is off, exactly as the observer reports it.
+    nft list table inet novi >/dev/null 2>&1 || return 0
+
+    nft list set inet novi open_tcp >/dev/null 2>&1 &&
+    nft list set inet novi open_udp >/dev/null 2>&1 ||
+        die "network.firewall.allow: the novi table has no open_tcp/open_udp set -- $FIREWALL_RULES predates RFC 0022"
+
+    nft flush set inet novi open_tcp || die "network.firewall.allow: could not flush open_tcp"
+    nft flush set inet novi open_udp || die "network.firewall.allow: could not flush open_udp"
+    [ "$canon" = "none" ] && return 0
+
+    for port in $(printf '%s' "$canon" | tr ',' ' '); do
+        case "$port" in
+            */udp) nft add element inet novi open_udp "{ ${port%/udp} }" ||
+                       die "network.firewall.allow: nft refused udp port ${port%/udp}" ;;
+            *)     nft add element inet novi open_tcp "{ $port }" ||
+                       die "network.firewall.allow: nft refused tcp port $port" ;;
+        esac
+    done
+}
+
+# A declared service that listens, with its port shut, is the one thing
+# this split makes possible that nobody wants. It is not drift -- both
+# keys are exactly as declared -- so `diff` cannot report it and
+# `apply` cannot fix it. Saying it is the whole remedy.
+firewall_hole_note() {
+    [ "$(state_get network.firewall)" = "on" ] || return 0
+    local entry name port open
+    open=",$(firewall_ports_canon "$(state_get network.firewall.allow)" 2>/dev/null || printf '?'),"
+    for entry in $LISTENING_SERVICES; do
+        name="${entry%%:*}"
+        port="${entry##*:}"
+        [ "$(state_get "services.$name")" = "on" ] || continue
+        case "$open" in *",$port,"*) continue ;; esac
+        warn "services.$name is on, but the firewall does not allow port $port"
+        warn "    add it:  novi-state set network.firewall.allow $port && novi-state apply"
+    done
+}
+
 converge_network() {
     local sub="$1" want="$2"
     case "$sub" in
         dhcp) converge_service network "$want" ;;
         wifi) converge_service wifi "$want" ;;
         firewall) converge_firewall "$want" ;;
+        firewall.allow) converge_firewall_allow "$want" ;;
         wifi.interface)
             if s6-rc -a list 2>/dev/null | grep -qx wifi; then
                 s6-rc -d change wifi ||
@@ -838,9 +1020,11 @@ cmd_diff() {
     if [ "$drift" -eq 0 ]; then
         msg "system matches declared state"
         diff_health_note
+        firewall_hole_note
         return 0
     fi
     diff_health_note
+    firewall_hole_note
     return 1
 }
 
@@ -874,6 +1058,7 @@ cmd_apply() {
     # changed here," not "someone ran apply."
     if cmd_diff >/dev/null 2>&1; then
         msg "already converged -- nothing to apply"
+        firewall_hole_note
         return 0
     fi
 
@@ -930,6 +1115,7 @@ cmd_apply() {
         warn "state did not settle after $pass passes -- 'novi-state diff' will show what is still drifting"
     fi
     msg "applied $total change(s)"
+    firewall_hole_note
 }
 
 # Converge at boot, so the document is what the machine actually boots
@@ -972,7 +1158,10 @@ cmd_apply() {
 # The firewall qualifies because the kernel holds the ruleset and
 # there is no service behind it (RFC 0016); `network.dhcp` does not,
 # and putting it here would deadlock exactly as the oneshot did.
-EARLY_KEYS="network.firewall"
+# network.firewall.allow rides along for the same reason and must
+# come second: the ruleset reload empties the sets, so filling them
+# before it would fill sets that are about to be replaced.
+EARLY_KEYS="network.firewall network.firewall.allow"
 
 # Same guarantee as cmd_boot: this runs from PID 1's stage 2 under
 # `-e`, so it exits 0 whatever happens, and cmd_boot's own comment on
@@ -1109,6 +1298,7 @@ Keys:
   network.wifi                    on | off  (the supplicant; see novi-wifi)
   network.wifi.interface          auto | <name>
   network.firewall                on | off  (/etc/novi/firewall.nft)
+  network.firewall.allow          none | 22 | 22,123/udp  (ports let in)
   users.<name>.shell              /bin/sh | absent  (declares the account)
   users.<name>.groups             wheel,video,input | none
   packages.<name>                 present | absent

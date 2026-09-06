@@ -66,9 +66,17 @@ cd "${SOURCES}"
 
 # ── Base rootfs directory layout ─────────────────────────
 echo "==> Creating rootfs hierarchy"
-mkdir -p "${ROOTFS}"/{boot,dev,etc,home,lib,mnt,opt,proc,root,run,srv,sys,tmp,usr/{bin,lib,share},var/{log,run,tmp}}
+mkdir -p "${ROOTFS}"/{boot,dev,etc,home,lib,mnt,opt,proc,root,run,srv,sys,tmp,usr/{bin,lib,share},var/{empty,log,run,tmp}}
 chmod 1777 "${ROOTFS}/tmp"
 chmod 700  "${ROOTFS}/root"
+# /var/empty is sshd's privilege-separation chroot (RFC 0022). It must
+# be owned by root, contain nothing, and be writable by nobody else --
+# sshd checks all three at startup and refuses to run otherwise, which
+# is the point of it. It is in the BASE hierarchy although sshd is a
+# package, for the same reason the sshd account is in /etc/passwd: a
+# directory's ownership and mode are baked into the squashed image, so
+# they are build-time facts, not install-time ones.
+chmod 755  "${ROOTFS}/var/empty"
 
 # ── User/group database ──────────────────────────────────
 # Nothing ever created /etc/passwd or /etc/group -- confirmed via a

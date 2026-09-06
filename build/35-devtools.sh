@@ -202,11 +202,80 @@ exchange is curve25519-sha256.
 Every forge accepts ed25519. An old server with only an RSA host key
 does not, and there is no way around that from here.
 
-There is no sshd in this package: a listening service needs host keys,
-a privilege-separation user, an s6 service, a declared state key and a
-hole in the firewall. Each of those deserves a deliberate decision.
+The daemon is a SEPARATE package, openssh-server -- host keys, a
+privilege-separation account, an s6 service, a declared state key and
+a hole in the firewall are five decisions, and RFC 0022 makes them.
+Installing a client should not start a listener.
 DOC
     echo "    openssh staged ($(du -sh "${files}" | cut -f1))"
+
+    # ── openssh-server ────────────────────────────────────────────
+    #
+    # A SECOND package, from the same build, and the split is the
+    # point rather than tidiness: `pkg install openssh` has to be able
+    # to mean "I want to ssh out of here" without also meaning "the
+    # world may ssh in". The three binaries below are exactly what a
+    # listener needs and nothing that a client does.
+    #
+    # NO HOST KEY IS PACKAGED. Not here, not generated at build time,
+    # not anywhere in the image -- a distribution that ships one ships
+    # the same one to every machine that installs it. init/services/
+    # sshd/run makes the machine's own on first start.
+    #
+    # sshd-session because OpenSSH 9.8 split the daemon (see above);
+    # sftp-server because scp has spoken SFTP since OpenSSH 9.0, so
+    # without it `scp` to this machine fails and `sftp` never worked.
+    files="$(stage_pkg openssh-server "${OPENSSH_VERSION}" "openssh,zlib" \
+        "OpenSSH daemon (ed25519 host keys only; RFC 0022)")"
+    mkdir -p "${files}/usr/sbin" "${files}/usr/libexec" "${files}/etc/ssh"
+    install -m 755 "${WORK}/openssh-${OPENSSH_VERSION}/sshd" \
+        "${files}/usr/sbin/sshd"
+    # /usr/libexec is compiled in, not chosen here: sshd execs
+    # sshd-session by an absolute path baked at configure time, and
+    # putting it anywhere else gives a daemon that accepts a
+    # connection and dies.
+    for b in sshd-session sftp-server; do
+        install -m 755 "${WORK}/openssh-${OPENSSH_VERSION}/${b}" \
+            "${files}/usr/libexec/${b}"
+    done
+    # Novi's own sshd_config, not the generated sshd_config.out. The
+    # generated one is upstream's defaults with this build's paths
+    # substituted in, and upstream's defaults are wrong for a machine
+    # whose root account ships with an empty password field.
+    install -m 644 "${REPO_ROOT}/rootfs/etc/ssh/sshd_config" \
+        "${files}/etc/ssh/sshd_config"
+    strip_tree "${files}"
+
+    mkdir -p "${files}/usr/share/doc/openssh-server"
+    cat > "${files}/usr/share/doc/openssh-server/README" <<'DOC'
+openssh-server — sshd, off until you say otherwise.
+
+  novi-state set services.sshd on
+  novi-state set network.firewall.allow 22
+  novi-state apply
+
+Two keys, not one. Enabling a daemon does not open a port: that
+something listens and that the world may reach it are separate
+decisions (RFC 0016, RFC 0022). `novi-state apply` tells you when you
+have done the first and not the second.
+
+THE HOST KEY IS MADE ON THIS MACHINE, the first time the service
+starts, and is ed25519 because this OpenSSH has no OpenSSL and so no
+RSA or ECDSA (RFC 0019). Nothing in the image contains a host key.
+
+ROOT CANNOT LOG IN OVER SSH and password authentication is on. Those
+two go together: the shipped root account has an EMPTY password field,
+so `PermitRootLogin no` is what stops the first machine to open port 22
+from handing itself to whoever gets there first. sshd also refuses
+empty passwords outright, and accounts novi-state creates start
+locked -- so a fresh install is unreachable until somebody with the
+console deliberately gives an account a password or an
+authorized_keys.
+
+  ssh-keygen -t ed25519            # on the machine you connect FROM
+  cat ~/.ssh/id_ed25519.pub | ssh ... >> ~/.ssh/authorized_keys
+DOC
+    echo "    openssh-server staged ($(du -sh "${files}" | cut -f1))"
     echo "    test-only (NOT in the image): ${BUILD_DIR}/ssh-test/sshd"
 fi
 

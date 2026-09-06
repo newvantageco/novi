@@ -18,6 +18,30 @@
 # installed in another table.
 
 table inet novi {
+	# Ports opened by declaration, and by nothing else. Both sets are
+	# empty here; `network.firewall.allow` in /etc/novi/system.conf
+	# fills them, and `novi-state` is the only thing that writes them
+	# (RFC 0022).
+	#
+	# They are SETS rather than rules in this file because the holes
+	# are configuration and this file is policy. A port list belongs
+	# in the same document as the hostname, where `novi-state diff`
+	# can see it and a generation can roll it back; the shape of the
+	# filter belongs here.
+	#
+	# Enabling a daemon does not open a port. That something listens
+	# and that the world may reach it are two decisions, and a
+	# firewall that opens itself because a service started is not a
+	# firewall. `novi-state apply` says so out loud when it starts a
+	# service whose port is closed.
+	set open_tcp {
+		type inet_service
+	}
+
+	set open_udp {
+		type inet_service
+	}
+
 	chain input {
 		type filter hook input priority filter; policy drop;
 
@@ -46,6 +70,12 @@ table inet novi {
 		# the lease never renews.
 		udp dport 68 accept
 		ip6 nexthdr udp udp dport 546 accept
+
+		# The declared holes. Empty sets match nothing, so on a
+		# machine that has declared nothing these two lines are the
+		# same as not being here.
+		tcp dport @open_tcp accept
+		udp dport @open_udp accept
 	}
 
 	# Nothing here forwards. If Novi ever routes for anything, that is
