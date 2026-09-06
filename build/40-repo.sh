@@ -113,4 +113,20 @@ echo "Repository built: ${REPO_OUT}  ($(du -sh "${REPO_OUT}" | cut -f1))"
 echo "Desktop file manifest: ${MANIFEST} ($(wc -l < "${MANIFEST}") files)"
 echo ""
 echo "  bash build/41-desktop-split.sh   # remove those files from the base image"
+echo "  bash build/42-toolchain-repo.sh  # this stage WIPED the toolchain packages"
 echo "  bash scripts/mkiso.sh            # the ISO carries this repo at /novi-repo"
+
+# Said out loud because the failure is silent. This stage removes
+# ${REPO_OUT} and rebuilds it from the rootfs, which drops anything
+# another stage published into it -- today that is the native
+# toolchain (28/42), 95 MB of it. build.sh runs the stages in order and
+# is fine; running this one by hand and stopping produces an ISO that
+# is simply smaller, with no error and nothing to say which packages a
+# repository was supposed to hold.
+if [ -d "${BUILD_DIR}/stage-toolchain" ] &&
+   ! ls "${REPO_OUT}"/novi-devel-*.pkg.tar.gz >/dev/null 2>&1; then
+    echo ""
+    echo "NOTE: /build/stage-toolchain exists but novi-devel is not in the"
+    echo "      repository -- this stage wiped it. Run build/42-toolchain-repo.sh"
+    echo "      before mkiso.sh, or the image ships without a compiler."
+fi

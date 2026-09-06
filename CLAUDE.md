@@ -580,6 +580,14 @@ checking it succeeded packaged a rootfs with no desktop in it, and
 manifest described — no desktop in the image AND none in the
 repository. **Never chain `40-repo.sh` after an unchecked build.**
 
+**`40-repo.sh` WIPES `/build/repo`, so `42-toolchain-repo.sh` has to run
+again after it.** `build.sh` gets this right because it runs the stages
+in order; running 40 and 41 by hand and stopping does not. The only
+symptom is an ISO that is 95 MB smaller and has no `novi-devel` in its
+repository — no error, and nothing says which packages a repository
+was *supposed* to contain. Check the size, or check
+`ls /build/repo/*.pkg.tar.gz | wc -l` (37, not 31).
+
 **And do not repair a broken `/build` by hand.** Extracting packages back
 over the rootfs to recover build inputs, then deleting what does not
 belong with an ad-hoc `rm` loop, produces a tree nobody can reason
