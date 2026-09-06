@@ -72,6 +72,12 @@ below for why `/build` is hardcoded and unrelated to the repo checkout path.
   `/build/stage-toolchain` and packaged into `/build/repo` by the
   `repo` phase, which re-signs the index. Takes a phase argument
   because the gcc build is long and the others are not
+- `bash build/30-novi-umh.sh` — `/sbin/usermode-helper`, the one binary
+  `CONFIG_STATIC_USERMODEHELPER` lets the kernel exec. Without it no
+  kernel-initiated `request_module()` runs at all (RFC 0016)
+- `bash build/33-nftables.sh` — libmnl, libnftnl, nftables and the
+  shipped ruleset `/etc/novi/firewall.nft` (RFC 0016). Base image, not
+  a package: 1.1 MB stripped
 - **`bash build/16-s6-rc-db.sh` after ANY change under `init/`** (see below),
   then `bash scripts/mkinitramfs.sh --output build/initramfs.cpio.gz` and
   `bash scripts/mkiso.sh` to get it into a bootable image
@@ -582,6 +588,59 @@ stage 2, with no error anywhere, resisting several rounds of bisection.
 Re-running the stages in order fixed it in one pass and would have been
 faster from the start. The stages are the recovery mechanism; that is
 what they are for.
+
+## Architecture: the firewall, and the exec the kernel could not make
+
+RFC 0016 (`docs/rfcs/0016-declarative-firewall.md`). `network.firewall
+= on` in `system.conf`, one policy file at `/etc/novi/firewall.nft`,
+converged by `novi-state` — no daemon, because the kernel holds the
+ruleset.
+
+- **`CONFIG_STATIC_USERMODEHELPER=y` was set and
+  `/sbin/usermode-helper` did not exist.** That routes every
+  usermode-helper call the kernel makes — `request_module()` above all
+  — through one compiled-in path, so **no kernel-initiated module
+  autoload had ever worked**, for the life of the project. Invisible
+  because every module this image loads is named by something in
+  userspace (`/init`'s list, `novi-hwdetect`, `novi-hotplug`); it
+  surfaced only when nf_tables tried to autoload `nft_ct` and the
+  failure came back as `Could not process rule: No such file or
+  directory`, which reads like a missing file and is a missing exec.
+  `novi-umh/main.c` is the missing half: the kernel leaves the helper
+  it meant to run in `argv[0]`, so it is a filter (allowlist, one
+  entry, `/sbin/modprobe`) and not a dispatcher. Refusals go to
+  `/dev/kmsg` — the bug was a silent exec failure, and a silent
+  refusal is the same bug in a different hat.
+- **It has to be in the initramfs too.** Different root filesystem,
+  same compiled-in path. Same argument as `/dev/fd`.
+- **`novi-state boot --early` exists because boot convergence is too
+  late for a firewall.** The full pass runs after `s6-rc change`
+  returns — correct for everything whose convergence *is* a service
+  transition — by which point `network` holds a lease and any declared
+  service that listens is listening. Measured, not supposed: the table
+  appeared a second or two after the login prompt. `EARLY_KEYS` is
+  `network.firewall` and the membership rule is that converging the
+  key must need nothing from s6-rc. It is deliberately not a general
+  "apply one key" flag; partial convergence on demand is how a client
+  ends up owning half the document.
+- **`nft -f` is additive, so the converger deletes the table first.**
+  Reloading after an edit that *removed* a rule would otherwise leave
+  the removed rule in place. And `nft delete table` on a table that
+  does not exist is an error, so turning the firewall off has to
+  tolerate it being off already — the one case convergence must treat
+  as success.
+- **The observer reports `unsupported`, not `off`, when `nft` is
+  missing.** A machine that cannot filter is not a machine that is not
+  filtering, and `off` would let `diff` call it converged.
+- **`-L` is not enough to link against a library in `${ROOTFS}`.**
+  `nft` pulls in `libnftables.so`, whose `DT_NEEDED` names
+  `libnftnl.so.11`; the linker must *find that file* to resolve
+  transitive symbols, and the cross-gcc's sysroot is `${SYSROOT}`.
+  The five "undefined reference to `nftnl_expr_alloc@LIBNFTNL_11`"
+  read like a libnftnl too old to have them, and `readelf` showed all
+  five exported by the library that had just been installed.
+  `-Wl,-rpath-link` is the fix, as `build/lib-meson-cross.sh` already
+  knew.
 
 ## Architecture: the kernel was hardened and the userland was not
 

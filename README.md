@@ -34,6 +34,7 @@ $ cat /etc/novi/system.conf          # this IS your system's config
 hostname = novi
 network.dhcp = on
 network.dns = auto
+network.firewall = on
 services.novi-shell = off
 
 $ novi-state diff                    # has anything drifted?
@@ -565,6 +566,7 @@ small static GPT writer) and e2fsprogs' `mke2fs`. See
 | Kernel | Linux 6.10.3-novi | tinyconfig + custom, 280+ options |
 | Compiler | GCC 14.2 + musl | Full C/C++ cross-compiler |
 | Packages | pkg / .pkg.tar.gz | Custom minimal format |
+| Firewall | nftables 1.0.9 | One declared key, one policy file, no daemon |
 
 ## OS Identity
 
@@ -607,6 +609,8 @@ BUG_REPORT_URL="https://github.com/newvantageco/novi/issues"
 - [x] Applications — text editor, file manager, image viewer, with undo,
       real file operations, and a confirmation that names what it will delete
 - [x] A clipboard that works between programs, and outlives the one that filled it
+- [x] A firewall in the same document as your hostname (`network.firewall`,
+      nftables, default-drop input, on by default, RFC 0016)
 - [ ] **Boot it on real hardware** ← next, and nothing here replaces it
 - [ ] A published repository + offline release key
 - [ ] A Microsoft-signed shim (real Secure Boot); WPA3 (needs mbedTLS)

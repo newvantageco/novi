@@ -75,6 +75,13 @@ E2FSPROGS_VERSION="1.47.1"
 # the same source tree and is built only to test against; it is not
 # installed into the image.
 LIBNL_VERSION="3.11.0"
+
+# nftables and its two libraries, for RFC 0016's declarative firewall.
+# The kernel has had CONFIG_NF_TABLES since it was written and the image
+# has never contained anything that could configure it.
+LIBMNL_VERSION="1.0.5"
+LIBNFTNL_VERSION="1.2.6"
+NFTABLES_VERSION="1.0.9"
 WPA_SUPPLICANT_VERSION="2.11"
 IW_VERSION="6.9"
 

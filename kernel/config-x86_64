@@ -78,6 +78,13 @@ CONFIG_INIT_ON_FREE_DEFAULT_ON=n
 CONFIG_GCC_PLUGINS=y
 CONFIG_GCC_PLUGIN_STACKLEAK=y
 CONFIG_RANDSTRUCT_PERFORMANCE=y
+# Every usermode-helper call the kernel makes -- request_module() above
+# all -- goes through one compiled-in path instead of whatever
+# /proc/sys/kernel/modprobe or core_pattern currently says. That path is
+# the default of STATIC_USERMODEHELPER_PATH, /sbin/usermode-helper, and it
+# MUST exist in both the rootfs and the initramfs or the kernel can
+# autoload nothing at all -- silently, which is how it went unnoticed
+# until RFC 0016. build/30-novi-umh.sh builds it.
 CONFIG_STATIC_USERMODEHELPER=y
 CONFIG_INTEGRITY=y
 CONFIG_IMA=y
@@ -358,6 +365,10 @@ CONFIG_IPV6=y
 CONFIG_NETFILTER=y
 CONFIG_NF_CONNTRACK=m
 CONFIG_NF_TABLES=m
+# The inet family: one table covering IPv4 and IPv6 rather than two
+# that can drift apart (RFC 0016). Unmentioned meant `n`, so
+# `table inet novi` would have failed to load.
+CONFIG_NF_TABLES_INET=y
 CONFIG_NFT_INET_INGRESS=m
 CONFIG_NFT_PAYLOAD=m
 CONFIG_NFT_CT=m

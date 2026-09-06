@@ -588,6 +588,26 @@ else
     echo "         drivers /init names by hand, which is a QEMU-shaped guess." >&2
 fi
 
+# ─── /sbin/usermode-helper ───────────────────────────────────────────────────
+# CONFIG_STATIC_USERMODEHELPER routes every kernel usermode-helper call
+# -- request_module() included -- through one compiled-in path, and the
+# initramfs is a different root filesystem, so it needs its own copy or
+# a kernel-initiated autoload before switch_root execs nothing. /init
+# names its modules explicitly and so does novi-hwdetect, which is why
+# nothing here has depended on that autoload; a copy costs 13 KB and
+# means the emergency shell behaves like the real system, the same
+# argument as /dev/fd.
+# /build/rootfs, hardcoded for the same reason the busybox candidate
+# list above is: BUILD_DIR is /build and has nothing to do with where
+# this repository is checked out.
+UMH_SRC="${UMH_SRC:-/build/rootfs/sbin/usermode-helper}"
+if [[ -x "${UMH_SRC}" ]]; then
+    install -D -m 755 "${UMH_SRC}" "${WORK_DIR}/sbin/usermode-helper"
+else
+    echo "WARNING: ${UMH_SRC} not found -- run build/30-novi-umh.sh. Kernel" >&2
+    echo "         module autoload will fail silently in the initramfs." >&2
+fi
+
 # ─── /etc/mdev.conf (for mdev-based hotplug) ─────────────────────────────────
 mkdir -p "${WORK_DIR}/etc"
 cat > "${WORK_DIR}/etc/mdev.conf" <<'MDEV_CONF'

@@ -243,6 +243,14 @@ fi
 # curated subset that ends up in the image.
 fetch "https://cdn.kernel.org/pub/linux/kernel/firmware/linux-firmware-${LINUX_FIRMWARE_VERSION}.tar.xz"
 
+# nftables and its two libraries (RFC 0016). netfilter.org publishes
+# these as plain tarballs, which is the easiest fetch in this file.
+# nftables is configured --with-mini-gmp --without-cli, so none of gmp,
+# readline or jansson is needed alongside them.
+fetch "https://netfilter.org/projects/libmnl/files/libmnl-${LIBMNL_VERSION}.tar.bz2"
+fetch "https://netfilter.org/projects/libnftnl/files/libnftnl-${LIBNFTNL_VERSION}.tar.xz"
+fetch "https://netfilter.org/projects/nftables/files/nftables-${NFTABLES_VERSION}.tar.xz"
+
 # WiFi: libnl (wpa_supplicant's nl80211 driver needs it), wpa_supplicant
 # and hostapd (same upstream tree; hostapd is test-only -- see
 # build/25-wifi.sh), and iw for diagnostics.
