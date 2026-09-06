@@ -613,6 +613,14 @@ ruleset.
   refusal is the same bug in a different hat.
 - **It has to be in the initramfs too.** Different root filesystem,
   same compiled-in path. Same argument as `/dev/fd`.
+- **Each `write()` to `/dev/kmsg` is its own kernel log record.**
+  Composing one line out of three writes put the reason in one record
+  and the path in the next, so `dmesg | grep novi-umh` showed
+  `novi-umh: refused ` with nothing after it — precisely the
+  information the message exists to carry. Build the line, write once.
+- Verified by pointing `/proc/sys/kernel/modprobe` at a script that
+  would `touch /tmp/PWNED` and making the kernel want a module: three
+  refusals in `dmesg`, naming the path, and no `/tmp/PWNED`.
 - **`novi-state boot --early` exists because boot convergence is too
   late for a firewall.** The full pass runs after `s6-rc change`
   returns — correct for everything whose convergence *is* a service

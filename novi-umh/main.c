@@ -59,17 +59,33 @@ static const char *const ALLOWED[] = {
 /* No stdio: this runs in a kernel-spawned process with an environment
  * nobody chose, and /dev/kmsg is where a message has somewhere to go
  * even when nothing else is up yet. Failure to log is not failure to
- * decide, so the result is ignored. */
+ * decide, so the result is ignored.
+ *
+ * ONE write, not three. Each write() to /dev/kmsg becomes its own
+ * kernel log record, so composing a line out of several of them puts
+ * the reason in one record and the path in the next -- and `dmesg |
+ * grep novi-umh` then shows a refusal with nothing after it, which is
+ * exactly the information the message exists to carry. Found by
+ * reading the output of the first refusal this program ever made. */
 static void kmsg(const char *a, const char *b) {
+	char line[256];
+	size_t n = 0, i;
+
+	for (i = 0; a[i] != '\0' && n < sizeof(line) - 2; i++) {
+		line[n++] = a[i];
+	}
+	if (b != NULL) {
+		for (i = 0; b[i] != '\0' && n < sizeof(line) - 2; i++) {
+			line[n++] = b[i];
+		}
+	}
+	line[n++] = '\n';
+
 	int fd = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
 	if (fd < 0) {
 		return;
 	}
-	(void)!write(fd, a, strlen(a));
-	if (b != NULL) {
-		(void)!write(fd, b, strlen(b));
-	}
-	(void)!write(fd, "\n", 1);
+	(void)!write(fd, line, n);
 	close(fd);
 }
 

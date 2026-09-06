@@ -188,6 +188,14 @@ is the only usermode helper this configuration reaches. Refusals go to
 so separately — the bug being fixed here was a silent exec failure,
 and a silent refusal would be the same bug in a different hat.
 
+Tested by being the attacker: `/proc/sys/kernel/modprobe` pointed at a
+script that would `touch /tmp/PWNED`, then a rule the kernel needs a
+module for. Three `novi-umh: refused /tmp/evil` lines in `dmesg`, and
+no `/tmp/PWNED`. (The first version of that message printed nothing
+after "refused": each `write()` to `/dev/kmsg` becomes its own log
+record, so a line composed of three writes puts the path in a record
+of its own. Build the line, write once.)
+
 ### Where it converges, and why twice
 
 Boot convergence runs after `s6-rc change` returns (RFC 0002; the
