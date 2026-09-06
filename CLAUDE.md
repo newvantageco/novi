@@ -633,17 +633,15 @@ what they are for.
 ## Architecture: HTTPS, and a correction about WPA3
 
 RFC 0020 (`docs/rfcs/0020-https.md`). mbedTLS, curl and a Mozilla CA
-bundle, **as packages** — the base image still carries no TLS stack,
-which is the whole reason this was allowed.
+bundle, **as packages** — no TLS *library* reaches the base image from
+this work, which is the whole reason it was allowed.
 
 - **RFC 0009 said mbedTLS was the way to WPA3. It is not, for
   wpa_supplicant 2.11.** That tree offers `CONFIG_TLS` values of
   openssl, gnutls, wolfssl, internal, linux and none, and
   `grep -rli mbedtls` over the whole tarball returns nothing. WPA3
-  needs **wolfSSL** (which has a backend, and is GPL-2.0, so
-  compatible with this project's licence), a newer hostap, or a
-  backport of the out-of-tree `crypto_mbedtls.c`. Both RFCs now say
-  so; a wrong claim repeated in a roadmap is how the wrong work gets
+  needed **wolfSSL**, which RFC 0021 then did. Both RFCs now say so;
+  a wrong claim repeated in a roadmap is how the wrong work gets
   scheduled.
 - **The CA bundle is hash-pinned, and it is only the second thing
   here that is.** The first is TweetNaCl, because it verifies package
@@ -1148,18 +1146,70 @@ slowdown to xhci and then never re-tested without it. Always pass
 `-vga none` when screendumping a compositor, too — `-machine pc` adds a
 std VGA device and `screendump` defaults to device 0.
 
+## Architecture: WPA3, and what "no TLS in the base" actually forbade
+
+RFC 0021 (`docs/rfcs/0021-wpa3.md`). `CONFIG_TLS=wolfssl`, and SAE
+verified against a WPA3-only AP.
+
+- **The base image already linked a TLS implementation, and had from
+  the start.** `CONFIG_TLS=internal` is not "no crypto" — it is ~200 KB
+  of AES, SHA, RSA, bignum and a TLS 1.2 handshake compiled into
+  wpa_supplicant. RFC 0009's rule was *no OpenSSL*; RFC 0006's was
+  *checking a package signature must not need a TLS stack*
+  (`novi-verify`, still static, still the only thing on that path).
+  Neither said the supplicant may not have crypto. So this swaps
+  200 KB nobody has reviewed for 1.4 MB that is audited and
+  maintained — a rehousing of attack surface, not a widening. Get the
+  rule right before invoking it: the vague version of it would have
+  blocked this forever.
+- **wolfSSL is built in `25-wifi.sh`, not a stage of its own.** The
+  novi-launcher/fcft rule is about a library built in a *later* stage
+  than its consumer; wolfSSL's only consumers are wpa_supplicant and
+  hostapd, built in this same stage, so there is no ordering hazard.
+  The day something else links it, it moves.
+- **Autotools, not cmake, and it is not cosmetic.** cmake's
+  `WOLFSSL_WPAS` is NOT the same define set as autotools'
+  `--enable-wpas`, which also turns on `OPENSSL_EXTRA` and ~20 others
+  (`HAVE_SECRET_CALLBACK`, `HAVE_KEYING_MATERIAL`, `KEEP_PEER_CERT`
+  …). With the cmake flag, `tls_wolfssl.c` failed on fourteen errors —
+  `SSL_OP_NO_TLSv1` undeclared, implicit declarations of
+  `wolfSSL_get_client_random` and friends. Use the switch upstream
+  maintains rather than reconstructing the list.
+- **`CFLAGS`/`LIBS` go into the generated `.config`, which is a
+  makefile fragment** (`CFLAGS += …`). Passing `CFLAGS=` on the `make`
+  command line *replaces* everything upstream's makefiles put there.
+  Same trap as RFC 0009's exported `LDFLAGS`, one level in.
+- **`ieee80211w=1`, not `=2`.** SAE requires PMF, so without it a WPA3
+  AP refuses to associate at all; `=2` would have made every WPA2 AP
+  unjoinable. One block with `key_mgmt=WPA-PSK SAE` joins whichever
+  the AP offers, and both halves are tested — a WPA3-only AP
+  (`sae_require_mfp=1`) and a WPA2-only AP, with the same block.
+- **`sae_password=` is the plaintext passphrase on disk, unavoidably.**
+  SAE derives from the passphrase, not from the PBKDF2 PSK, so there
+  is no one-way transform to store. `/etc/novi/wifi.conf` was already
+  0600 and root-only for this reason. `novi-wifi add --wpa2-only` is
+  the escape hatch: `psk=` only, no plaintext, no WPA3.
+- **`wpa_passphrase`'s output ends with `}`, so appending to it puts
+  keys at file scope.** Three SAE keys landed outside the block,
+  wpa_supplicant refused the file, and `novi-wifi status` reported
+  *"the supplicant is not running"* — a message about a service,
+  produced by a syntax error in a config file. `add_network_block`
+  drops the brace, appends, restores it, and `die`s rather than
+  editing blind if the last line is not `}`.
+
 ## Architecture: WiFi, and the second secret store
 
 RFC 0009 (`docs/rfcs/0009-wifi.md`).
 
-- **wpa_supplicant is built with `CONFIG_TLS=internal`**, so it links no
-  OpenSSL. The base image has none and `novi-verify` exists so it stays
-  that way. iwd was rejected because its control interface is D-Bus.
-- **No WPA3**, and that is a decision, not an omission: SAE/OWE need EC
-  crypto that internal TLS does not implement (it links to
-  `undefined reference to crypto_ec_get_prime`). mbedTLS is the named way
-  in. It connects to WPA3 routers in transition mode, not to WPA3-only
-  networks.
+- **wpa_supplicant links no OpenSSL**, and that is the rule — not "no
+  crypto". It was `CONFIG_TLS=internal` and is `CONFIG_TLS=wolfssl`
+  since RFC 0021; see that section below. iwd was rejected because its
+  control interface is D-Bus.
+- **WPA3 was impossible under internal TLS** and is the reason for the
+  swap: SAE/OWE need EC crypto internal does not implement, and
+  turning them on linked cleanly right up to `undefined reference to
+  crypto_ec_get_prime`. RFC 0009 named mbedTLS as the way in and was
+  wrong (RFC 0020 found there is no mbedTLS backend in 2.11 at all).
 - **`network.wifi` and `network.wifi.interface` are all that is declared.**
   Passphrases live in `/etc/novi/wifi.conf` at 0600, in wpa_supplicant's
   own format, managed by `novi-wifi`. Same rule as `/etc/shadow`:
@@ -1169,8 +1219,8 @@ RFC 0009 (`docs/rfcs/0009-wifi.md`).
   a name starting with `wl`.
 - **hostapd is built by `25-wifi.sh` and never installed.** It is the test
   peer; verification runs two `mac80211_hwsim` radios, one AP one station,
-  with a real WPA2 handshake between them. It needs `CONFIG_TLS=internal`
-  too — its default backend is OpenSSL and it does not ask.
+  with a real handshake between them. It needs `CONFIG_TLS` set
+  explicitly too — its default backend is OpenSSL and it does not ask.
 
 **`s6-rc -a list` reporting a longrun "up" has now hidden three separate
 crash-loops** (RFC 0004's `syslog`; here, `wpa_supplicant -s` rejected

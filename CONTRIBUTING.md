@@ -41,7 +41,8 @@ sudo apt install -y \
     libmpc-dev libmpfr-dev libgmp-dev \
     rsync cpio file mksquashfs xorriso grub-common grub-pc-bin grub-efi-amd64-bin mtools kmod \
     shellcheck qemu-system-x86 \
-    meson ninja-build pkg-config libwayland-bin hwdata gperf
+    meson ninja-build pkg-config libwayland-bin hwdata gperf \
+    autoconf automake libtool cmake
 ```
 
 `meson`/`ninja-build`/`pkg-config` are for `build/06-wayland.sh` onward (the
@@ -55,6 +56,12 @@ builds into the target rootfs. `hwdata` is needed because
 `/usr/share/hwdata/pnp.ids` (a build-time PCI/USB ID data file) to exist
 on the host; confirmed by hitting `ERROR: File
 /usr/share/hwdata/pnp.ids does not exist.` with it missing, not guessed.
+`autoconf`/`automake`/`libtool` are for `build/25-wifi.sh`: wolfSSL's
+source arrives from `git archive` (GitHub's `/archive/refs/tags/`
+endpoint is unreachable from some networks) and so carries no generated
+`configure` — the stage runs its `autogen.sh`. `cmake` is used by
+`build/31-mbedtls.sh`, which is mbedTLS's own build system.
+
 `gperf` is needed by `fontconfig` (`build/09-foot.sh`): without it on
 the host, meson falls back to building fontconfig's vendored `gperf`
 subproject using the cross C++ compiler, which fails outright

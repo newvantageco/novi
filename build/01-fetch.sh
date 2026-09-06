@@ -251,6 +251,13 @@ fetch "https://netfilter.org/projects/libmnl/files/libmnl-${LIBMNL_VERSION}.tar.
 fetch "https://netfilter.org/projects/libnftnl/files/libnftnl-${LIBNFTNL_VERSION}.tar.xz"
 fetch "https://netfilter.org/projects/nftables/files/nftables-${NFTABLES_VERSION}.tar.xz"
 
+# WPA3 (RFC 0021). Fetched by git rather than as a tarball because
+# GitHub's /archive/refs/tags/ endpoint is not reachable from this
+# build environment (403) and wolfSSL publishes no release asset under
+# a predictable name -- fetch_git exists for exactly this.
+fetch_git "wolfssl" "${WOLFSSL_VERSION}" \
+    "https://github.com/wolfSSL/wolfssl" "v${WOLFSSL_VERSION}-stable"
+
 # HTTPS (RFC 0020): mbedTLS, curl, and the certificate authorities the
 # whole thing rests on.
 fetch "https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-${MBEDTLS_VERSION}/mbedtls-${MBEDTLS_VERSION}.tar.bz2"

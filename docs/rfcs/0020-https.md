@@ -61,6 +61,9 @@ separate library and it stays out of this RFC — but it is no longer
 blocked on "we have no TLS library", it is blocked on picking the
 right one for that job.
 
+> **Resolved by RFC 0021**: wolfSSL, built in the WiFi stage,
+> `CONFIG_TLS=wolfssl`. SAE verified against a WPA3-only access point.
+
 ### curl, and what is switched off
 
 curl 8.11.1 with `--with-mbedtls` and everything else this image has no
@@ -105,7 +108,8 @@ rewritten.
   HTTPS would put curl in the base to gain confidentiality about which
   packages you install — a real but secondary property, and its own
   decision.
-- **Not WPA3.** See the correction above.
+- **Not WPA3.** See the correction above — RFC 0021 did it, with
+  wolfSSL, not with this library.
 - **Not a system-wide TLS policy**, certificate pinning, OCSP, or CT.
 - **Not `update-ca-certificates`.** The bundle is a file in a package;
   replacing it is `pkg update`. A local-additions directory is

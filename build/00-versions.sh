@@ -79,6 +79,12 @@ LIBNL_VERSION="3.11.0"
 # nftables and its two libraries, for RFC 0016's declarative firewall.
 # The kernel has had CONFIG_NF_TABLES since it was written and the image
 # has never contained anything that could configure it.
+# WPA3 (RFC 0021). wolfSSL is the crypto backend wpa_supplicant 2.11
+# actually has (RFC 0020 established that mbedTLS is not), and it is
+# dual GPL-2.0 / commercial, so the GPL half is clean under this
+# project's own licence.
+WOLFSSL_VERSION="5.7.6"
+
 # HTTPS (RFC 0020). mbedTLS is dual Apache-2.0 / GPL-2.0-or-later, so
 # it is clean under this project's own GPLv2. The CA bundle is Mozilla's
 # set as curl.se publishes it, pinned by date AND by hash -- it is a

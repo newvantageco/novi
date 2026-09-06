@@ -323,7 +323,9 @@ $ novi-state set network.wifi on && novi-state apply
 `system.conf` says *that* this machine uses WiFi. `/etc/novi/wifi.conf`
 says *which* networks, at mode 0600. `novi-state diff` can tell you the
 supplicant should be running; it cannot tell anyone your passphrase.
-WPA2 only for now — see [RFC 0009](docs/rfcs/0009-wifi.md).
+WPA2 and WPA3-Personal, from one stored block — the machine takes
+whichever the access point offers, with nothing to choose. See
+[RFC 0009](docs/rfcs/0009-wifi.md) and [RFC 0021](docs/rfcs/0021-wpa3.md).
 
 **It tries to work on hardware it has never seen.** Nothing in this
 system used to load a driver it had not been told about in advance —
@@ -432,9 +434,9 @@ $ novi-state rollback        # foot comes back, from the mirror
 ```
 
 **The base image is console-only.** `/usr/lib` in it holds three
-libraries and nothing else: `libskarnet` for s6, `libnl` for the WiFi
-supplicant, and `libasound` for audio — each one there because a
-console system genuinely needs it. The desktop is packages: eleven
+libraries and nothing else: `libskarnet` for s6, `libnl` and
+`libwolfssl` for the WiFi supplicant, and `libasound` for audio — each
+one there because a console system genuinely needs it. The desktop is packages: eleven
 programs — compositor, panel, launcher, settings, terminal, text
 editor, file manager, image viewer, lock screen, screenshot tool and
 the font — plus the Wayland/wlroots stack they link. The installation
@@ -570,6 +572,7 @@ small static GPT writer) and e2fsprogs' `mke2fs`. See
 | Encryption | LUKS2 (cryptsetup 2.7.5) | One static binary, kernel AF_ALG crypto, no OpenSSL |
 | Dev tools | git 2.47.1 + OpenSSH 9.9p2 | Packages, not base; ssh built without OpenSSL |
 | TLS | mbedTLS 3.6.2 + curl 8.11.1 | Packages, not base; CA bundle hash-pinned |
+| WiFi | wpa_supplicant 2.11 + wolfSSL 5.7.6 | WPA2 and WPA3-SAE; no OpenSSL |
 
 ## OS Identity
 
@@ -602,7 +605,7 @@ BUG_REPORT_URL="https://github.com/newvantageco/novi/issues"
 - [x] Signed package repository (`pkg sync`, `novi-verify`, `packages.*`, RFC 0006)
 - [x] Console-only base; the desktop is packages (RFC 0007)
 - [x] UEFI/GPT install + journalled ext4 root (RFC 0008)
-- [x] WiFi (`network.wifi`, `novi-wifi`, WPA2, RFC 0009)
+- [x] WiFi (`network.wifi`, `novi-wifi`, WPA2 + WPA3, RFC 0009, RFC 0021)
 - [x] Real upgrades + index freshness (`pkg update`, `valid-until`, RFC 0010)
 - [x] Hardware enablement (`novi-hwdetect`, firmware, ALSA, power, RFC 0011)
 - [x] Hotplug — devices that arrive after boot (`novi-hotplug`, RFC 0012)
@@ -621,10 +624,13 @@ BUG_REPORT_URL="https://github.com/newvantageco/novi/issues"
 - [x] `pkg install git` — git over ssh, and an OpenSSH client built without
       OpenSSL (ed25519 only) (RFC 0019)
 - [x] HTTPS — mbedTLS, curl and a hash-pinned Mozilla CA bundle, as packages;
-      the base image still carries no TLS stack (RFC 0020)
+      no TLS library reaches the base image from it (RFC 0020)
+- [x] WPA3-Personal — wolfSSL, SAE, PMF; one stored block joins WPA2 or
+      WPA3, verified against an SAE-only access point (RFC 0021)
 - [ ] **Boot it on real hardware** ← next, and nothing here replaces it
 - [ ] A published repository + offline release key
-- [ ] A Microsoft-signed shim (real Secure Boot); WPA3 (needs mbedTLS)
+- [ ] A Microsoft-signed shim (real Secure Boot); OWE and SAE-PK
+      (compiled in, untested)
 - [ ] Automount + `novi-eject`; idle-suspend and low-battery; Mesa
 - [ ] More state domains: keybindings, static IP
 - [ ] Boot splash
