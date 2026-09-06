@@ -78,6 +78,11 @@ dies with "sshd-session does not exist or is not executable".
 
 ### Git without curl
 
+> **Superseded by RFC 0020.** git now has curl, mbedTLS and a CA
+> bundle, all as packages, and `https://` remotes work. The reasoning
+> below is why it was left out here rather than done badly as a side
+> effect — the decision it defers is the one RFC 0020 makes.
+
 `NO_CURL=1 NO_OPENSSL=1 NO_EXPAT=1`, plus `NO_PERL`, `NO_PYTHON`,
 `NO_TCLTK` and `NO_GETTEXT` for things that would need interpreters
 this image does not have.

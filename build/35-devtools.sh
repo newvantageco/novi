@@ -14,7 +14,12 @@
 # repository, so anything that adds to it has to run after, and this
 # build has to run long before.
 #
-#   bash build/35-devtools.sh [openssh|git|repo|all]
+#   bash build/35-devtools.sh [openssh|ca|curl|git|repo|all]
+#
+# Phase order matters when run by hand: `git` links the curl that the
+# `curl` phase staged, and `curl` links the mbedTLS that
+# 31-mbedtls.sh built. `all` runs them in the right order; both check
+# and refuse rather than producing a git with no https in it.
 #
 # OPENSSH IS BUILT --without-openssl, and that is the only reason it is
 # allowed in this image at all. This project has refused to carry a TLS
@@ -30,13 +35,17 @@
 # RSA-only server, which is worth saying out loud rather than leaving
 # to be discovered.
 #
-# GIT IS BUILT WITHOUT CURL, which means no `git clone https://`.
-# Same argument: curl needs TLS. `git@host:repo` and `ssh://` work,
-# and so does everything local. Closing the https gap means picking a
-# TLS library, and the honest candidate -- mbedTLS, which RFC 0009
-# already named as the way to WPA3 -- would serve WPA3, git and `pkg`
-# at once. That is a decision to make once, on its own, not smuggled
-# in behind a git package.
+# GIT NOW HAS CURL, and therefore https:// remotes (RFC 0020). That
+# was the one thing RFC 0019 deliberately left out, on the grounds that
+# picking a TLS library deserved its own decision rather than being
+# smuggled in behind a git package. RFC 0020 made it: mbedTLS, built by
+# 31-mbedtls.sh, as a package.
+#
+# So this stage also builds curl and packages the certificate
+# authorities. `ca-certificates` is the only new TRUST decision in any
+# of this -- 143 organisations any one of which can vouch for any name
+# -- which is why the bundle is hash-pinned in 01-fetch.sh alongside
+# TweetNaCl, and why it is a package somebody can decline to install.
 # ============================================================
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -48,6 +57,10 @@ CROSS="${TOOLS}/bin/${TARGET_TRIPLE}"
 
 WORK="${BUILD_DIR}/devtools-build"
 STAGE_DIR="${BUILD_DIR}/stage-devtools"
+# Where 31-mbedtls.sh left its headers and libraries. Not ${ROOTFS}:
+# putting a TLS stack in the base image is the thing RFC 0020 exists
+# to avoid.
+TLS_DEPS="${BUILD_DIR}/tls-deps"
 JOBS="$(nproc)"
 ONLY="${1:-all}"
 
@@ -197,6 +210,109 @@ DOC
     echo "    test-only (NOT in the image): ${BUILD_DIR}/ssh-test/sshd"
 fi
 
+# ── ca-certificates ───────────────────────────────────────────────────
+#
+# Mozilla's root store as curl.se publishes it. No conversion, no
+# rehashing, no c_rehash symlink farm: mbedTLS and curl both read one
+# concatenated PEM file, and a directory of hashed symlinks exists for
+# OpenSSL's benefit, which is not present here.
+if [ "$ONLY" = "all" ] || [ "$ONLY" = "ca" ]; then
+    echo ">>> Staging ca-certificates (${CACERT_DATE}) ..."
+    src="${SOURCES}/cacert-${CACERT_DATE}.pem"
+    [ -f "${src}" ] || { echo "ERROR: ${src} not found -- run build/01-fetch.sh." >&2; exit 1; }
+
+    files="$(stage_pkg ca-certificates "${CACERT_DATE//-/.}" "" \
+        "Mozilla's CA root store (${CACERT_DATE}) -- 143 certificates")"
+    install -D -m 644 "${src}" "${files}/etc/ssl/certs/ca-certificates.crt"
+
+    mkdir -p "${files}/usr/share/doc/ca-certificates"
+    cat > "${files}/usr/share/doc/ca-certificates/README" <<DOC
+ca-certificates — Mozilla's root store, ${CACERT_DATE}.
+
+  /etc/ssl/certs/ca-certificates.crt
+
+This is the list of organisations whose word this machine accepts about
+who a server is. There are 143 of them, and ANY ONE of them can issue a
+certificate for ANY name. That is the deal the web makes; Novi does not
+improve on it and does not pretend to.
+
+What it does do is make the set explicit: the file is hash-pinned at
+build time (build/01-fetch.sh), versioned by the date it was published,
+and shipped as a package you can decline to install. Nothing in the
+base image needs it -- \`pkg\` trusts an Ed25519 signature over the
+repository index, not the transport (RFC 0006).
+
+To trust something else as well, append it to the file. There is no
+update-ca-certificates here: the bundle is a package, and replacing it
+is \`pkg update\`.
+DOC
+    echo "    ca-certificates staged ($(du -sh "${files}" | cut -f1))"
+fi
+
+# ── curl ──────────────────────────────────────────────────────────────
+if [ "$ONLY" = "all" ] || [ "$ONLY" = "curl" ]; then
+    require_zlib
+    [ -f "${TLS_DEPS}/lib/libmbedtls.so" ] || {
+        echo "ERROR: mbedTLS not found in ${TLS_DEPS} -- run build/31-mbedtls.sh." >&2
+        exit 1
+    }
+    echo ">>> Building curl ${CURL_VERSION} (mbedTLS) ..."
+    rm -rf "${WORK}/curl-${CURL_VERSION}"
+    tar xf "${SOURCES}/curl-${CURL_VERSION}.tar.xz" -C "${WORK}"
+    (
+        cd "${WORK}/curl-${CURL_VERSION}"
+        # Everything switched off here is a dependency this image does
+        # not have or a protocol git never asks for. A smaller curl is
+        # a smaller thing to be wrong -- and in an image whose split is
+        # computed from what is present, unused code is not inert.
+        #
+        # --with-ca-bundle names the path the ca-certificates package
+        # installs, so the default works with no configuration at all.
+        #
+        # There is no --without-ssl here and there must not be: curl
+        # treats it as "no TLS at all" and refuses outright when a
+        # backend is also named ("--without-ssl has been set together
+        # with an explicit option to use an ssl library"). Naming
+        # --with-mbedtls IS the exclusion -- curl builds exactly the
+        # backends it is told to.
+        # --build is given EXPLICITLY, and that is not decoration.
+        # curl's configure has a "checking run-time libs availability"
+        # test guarded by `if test "x$cross_compiling" != xyes` -- it
+        # compiles a program, runs it, and fails the build when it
+        # cannot. With only --host, autoconf did not conclude it was
+        # cross-compiling and ran the test, which died with "one or
+        # more libs available at link-time are not available run-time"
+        # naming -lmbedtls: a message about the target's runtime linker
+        # produced by trying to execute a target binary here. Naming
+        # both triples makes autoconf certain.
+        ./configure \
+            --build="$(gcc -dumpmachine)" \
+            --host="${TARGET_TRIPLE}" \
+            --prefix=/usr \
+            --with-mbedtls="${TLS_DEPS}" \
+            --with-ca-bundle=/etc/ssl/certs/ca-certificates.crt \
+            --without-libssh2 --without-libssh --without-libidn2 \
+            --without-brotli --without-zstd --without-libpsl \
+            --without-nghttp2 --without-ngtcp2 --without-librtmp \
+            --with-zlib="${ROOTFS}/usr" \
+            --disable-ldap --disable-ldaps --disable-rtsp --disable-dict \
+            --disable-telnet --disable-tftp --disable-pop3 --disable-imap \
+            --disable-smb --disable-smtp --disable-gopher --disable-mqtt \
+            --disable-manual --enable-shared --disable-static >/dev/null
+        make -j"${JOBS}" >/dev/null
+    )
+
+    files="$(stage_pkg curl "${CURL_VERSION}" "mbedtls,ca-certificates,zlib" \
+        "curl and libcurl, over mbedTLS")"
+    make -C "${WORK}/curl-${CURL_VERSION}" install DESTDIR="${files}" >/dev/null
+    # The .la files record the build host's absolute paths and are read
+    # by nothing on the target -- the same trap 33-nftables.sh
+    # documents, one directory later.
+    rm -f "${files}"/usr/lib/*.la
+    strip_tree "${files}"
+    echo "    curl staged ($(du -sh "${files}" | cut -f1))"
+fi
+
 # ── git ───────────────────────────────────────────────────────────────
 if [ "$ONLY" = "all" ] || [ "$ONLY" = "git" ]; then
     require_zlib
@@ -204,15 +320,34 @@ if [ "$ONLY" = "all" ] || [ "$ONLY" = "git" ]; then
     rm -rf "${WORK}/git-${GIT_VERSION}"
     tar xf "${SOURCES}/git-${GIT_VERSION}.tar.xz" -C "${WORK}"
 
-    files="$(stage_pkg git "${GIT_VERSION}" "openssh,zlib" \
-        "Git, over ssh and locally (built without curl)")"
+    [ -d "${STAGE_DIR}/curl/files/usr/include" ] || {
+        echo "ERROR: curl has not been staged -- run this stage's 'curl' phase" >&2
+        echo "       (and build/31-mbedtls.sh) before 'git'." >&2
+        exit 1
+    }
+    files="$(stage_pkg git "${GIT_VERSION}" "openssh,curl,zlib" \
+        "Git, over https, ssh and locally")"
+
+    # -rpath-link, not just -L, and this is the second time this repo
+    # has learned it (see 33-nftables.sh, CLAUDE.md). Linking git means
+    # pulling in libcurl.so, whose DT_NEEDED names libmbedtls.so.21 --
+    # and the linker has to FIND that file to resolve the symbols
+    # libcurl refers to. Without it: five "undefined reference to
+    # `mbedtls_ssl_conf_ca_chain'" from a library that exports every
+    # one of them, sitting in a directory already named with -L.
+    GIT_LDFLAGS="-L${ROOTFS}/usr/lib -L${TLS_DEPS}/lib"
+    GIT_LDFLAGS="${GIT_LDFLAGS} -L${STAGE_DIR}/curl/files/usr/lib"
+    GIT_LDFLAGS="${GIT_LDFLAGS} -Wl,-rpath-link,${ROOTFS}/usr/lib"
+    GIT_LDFLAGS="${GIT_LDFLAGS} -Wl,-rpath-link,${TLS_DEPS}/lib"
+    GIT_LDFLAGS="${GIT_LDFLAGS} -Wl,-rpath-link,${STAGE_DIR}/curl/files/usr/lib"
 
     # Every NO_ here removes a dependency this image does not have,
     # not a feature of git's object model:
     #   NO_OPENSSL   git falls back to its own collision-detecting
     #                SHA-1, which is what upstream uses without it
-    #   NO_CURL      no https:// remote helper -- see the header
-    #   NO_EXPAT     http-push, which needs curl anyway
+    #   NO_EXPAT     the dumb http-push protocol, which no forge has
+    #                spoken for a decade; git-remote-https does not
+    #                need it
     #   NO_PERL      git-send-email, add--interactive, git-svn
     #   NO_PYTHON    git-p4
     #   NO_TCLTK     git gui, gitk
@@ -232,18 +367,24 @@ if [ "$ONLY" = "all" ] || [ "$ONLY" = "git" ]; then
         make -j"${JOBS}" \
             CC="${CROSS}-gcc" AR="${CROSS}-ar" \
             CFLAGS="-O2 -I${ROOTFS}/usr/include" \
-            LDFLAGS="-L${ROOTFS}/usr/lib" \
+            LDFLAGS="${GIT_LDFLAGS}" \
             prefix=/usr \
-            NO_OPENSSL=1 NO_CURL=1 NO_EXPAT=1 \
+            NO_OPENSSL=1 NO_EXPAT=1 \
+            CURL_CONFIG=false \
+            CURL_CFLAGS="-I${STAGE_DIR}/curl/files/usr/include" \
+            CURL_LDFLAGS="-L${STAGE_DIR}/curl/files/usr/lib -lcurl" \
             NO_PERL=1 NO_PYTHON=1 NO_TCLTK=1 NO_GETTEXT=1 \
             NO_REGEX=NeedsStartEnd \
             >/dev/null
         make install \
             CC="${CROSS}-gcc" AR="${CROSS}-ar" \
             CFLAGS="-O2 -I${ROOTFS}/usr/include" \
-            LDFLAGS="-L${ROOTFS}/usr/lib" \
+            LDFLAGS="${GIT_LDFLAGS}" \
             prefix=/usr DESTDIR="${files}" \
-            NO_OPENSSL=1 NO_CURL=1 NO_EXPAT=1 \
+            NO_OPENSSL=1 NO_EXPAT=1 \
+            CURL_CONFIG=false \
+            CURL_CFLAGS="-I${STAGE_DIR}/curl/files/usr/include" \
+            CURL_LDFLAGS="-L${STAGE_DIR}/curl/files/usr/lib -lcurl" \
             NO_PERL=1 NO_PYTHON=1 NO_TCLTK=1 NO_GETTEXT=1 \
             NO_REGEX=NeedsStartEnd \
             >/dev/null
@@ -254,17 +395,18 @@ if [ "$ONLY" = "all" ] || [ "$ONLY" = "git" ]; then
     cat > "${files}/usr/share/doc/git/README" <<'DOC'
 git — over ssh and locally.
 
+  git clone https://host/user/repo.git
   git clone git@host:user/repo.git
   git clone ssh://host/path/to/repo
   git clone /path/on/this/machine
 
-NO https:// REMOTES. This git is built without curl, because curl needs
-a TLS stack and this image deliberately has none (RFC 0006, RFC 0019).
-`git clone https://...` fails with "Unable to find remote helper for
-'https'" -- that is this, not a broken install. Use the ssh URL; every
-forge offers one.
+https works through curl and mbedTLS (RFC 0020), and verifies the
+server against /etc/ssl/certs/ca-certificates.crt -- the
+ca-certificates package. Without that package installed, every https
+clone fails at certificate verification, which is the correct
+behaviour and not a bug.
 
-Also absent, for want of an interpreter: git-send-email, git-svn and
+Absent, for want of an interpreter: git-send-email, git-svn and
 `git add -i` (perl), git-p4 (python), git gui and gitk (tcl/tk).
 DOC
     echo "    git staged ($(du -sh "${files}" | cut -f1))"

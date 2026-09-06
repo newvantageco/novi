@@ -251,6 +251,20 @@ fetch "https://netfilter.org/projects/libmnl/files/libmnl-${LIBMNL_VERSION}.tar.
 fetch "https://netfilter.org/projects/libnftnl/files/libnftnl-${LIBNFTNL_VERSION}.tar.xz"
 fetch "https://netfilter.org/projects/nftables/files/nftables-${NFTABLES_VERSION}.tar.xz"
 
+# HTTPS (RFC 0020): mbedTLS, curl, and the certificate authorities the
+# whole thing rests on.
+fetch "https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-${MBEDTLS_VERSION}/mbedtls-${MBEDTLS_VERSION}.tar.bz2"
+fetch "https://curl.se/download/curl-${CURL_VERSION}.tar.xz"
+
+# The CA bundle is HASH-PINNED, and it is only the second thing in this
+# project that is. The first is TweetNaCl, because it verifies package
+# signatures; this is the same argument. A CA bundle is a list of
+# parties whose word is accepted about who a server is -- if it arrives
+# modified, every HTTPS connection this system makes is validated
+# against a set somebody else chose. Fetching a *dated* file rather
+# than the rolling cacert.pem is what makes pinning possible at all.
+fetch_pinned "https://curl.se/ca/cacert-${CACERT_DATE}.pem" "${CACERT_SHA256}"
+
 # Developer tooling (RFC 0019): git, and the ssh client it needs to
 # reach anything. OpenSSH is built --without-openssl, which is the
 # whole reason it is allowed in this image at all.

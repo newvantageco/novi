@@ -82,9 +82,14 @@ below for why `/build` is hardcoded and unrelated to the repo checkout path.
   libuuid and libdevmapper built static into a private prefix and
   linked into one `cryptsetup` binary, which is the only thing
   installed
-- `bash build/35-devtools.sh [openssh|git|repo|all]` — git and the ssh
-  client (RFC 0019), staged into `/build/stage-devtools` and published
-  by `43-devtools-repo.sh`. Packages, never base. Also builds `sshd`
+- `bash build/31-mbedtls.sh` — mbedTLS (RFC 0020), into
+  `/build/tls-deps` for linking and into the `mbedtls` package for the
+  target. Never `${ROOTFS}`: a TLS stack in the base image is the
+  thing that RFC is careful to avoid
+- `bash build/35-devtools.sh [openssh|ca|curl|git|repo|all]` — the ssh
+  client, the CA bundle, curl and git (RFC 0019, RFC 0020), staged
+  into `/build/stage-devtools` and published by
+  `43-devtools-repo.sh`. Packages, never base. Also builds `sshd`
   into `/build/ssh-test/` as the test peer, deliberately not into the
   image
 - **`bash build/16-s6-rc-db.sh` after ANY change under `init/`** (see below),
@@ -625,6 +630,47 @@ Re-running the stages in order fixed it in one pass and would have been
 faster from the start. The stages are the recovery mechanism; that is
 what they are for.
 
+## Architecture: HTTPS, and a correction about WPA3
+
+RFC 0020 (`docs/rfcs/0020-https.md`). mbedTLS, curl and a Mozilla CA
+bundle, **as packages** — the base image still carries no TLS stack,
+which is the whole reason this was allowed.
+
+- **RFC 0009 said mbedTLS was the way to WPA3. It is not, for
+  wpa_supplicant 2.11.** That tree offers `CONFIG_TLS` values of
+  openssl, gnutls, wolfssl, internal, linux and none, and
+  `grep -rli mbedtls` over the whole tarball returns nothing. WPA3
+  needs **wolfSSL** (which has a backend, and is GPL-2.0, so
+  compatible with this project's licence), a newer hostap, or a
+  backport of the out-of-tree `crypto_mbedtls.c`. Both RFCs now say
+  so; a wrong claim repeated in a roadmap is how the wrong work gets
+  scheduled.
+- **The CA bundle is hash-pinned, and it is only the second thing
+  here that is.** The first is TweetNaCl, because it verifies package
+  signatures; a CA bundle is a list of parties whose word is accepted
+  about who a server is, so a modified one means every HTTPS
+  connection is validated against a set somebody else chose. Pinning
+  needs a *dated* `cacert-YYYY-MM-DD.pem`, not the rolling file.
+- **curl refuses `--without-ssl` alongside `--with-mbedtls`** —
+  "conflicting parameters". Naming the backend IS the exclusion.
+- **`--build` must be given explicitly to curl's configure.** Its
+  "checking run-time libs availability" test is guarded by
+  `if test "x$cross_compiling" != xyes`, and with only `--host`
+  autoconf did not conclude it was cross-compiling: it compiled a
+  program, tried to *run* it, and failed the build with "one or more
+  libs available at link-time are not available run-time" naming
+  `-lmbedtls`. Name both triples.
+- **`-Wl,-rpath-link` again**, and that is twice now (33-nftables.sh
+  was the first). Linking git pulls in `libcurl.so`, whose
+  `DT_NEEDED` names `libmbedtls.so.21`; `-L` alone gave five
+  "undefined reference to `mbedtls_ssl_conf_ca_chain`" from a library
+  that exports every one of them.
+- **The proof that HTTPS verification works is a triple, not a
+  success.** Untrusted certificate refused → the same CA appended to
+  the bundle → the same clone succeeds → a self-signed certificate for
+  the same name still refused. Any one of those alone cannot
+  distinguish "verification works" from "nothing works".
+
 ## Architecture: git and ssh, and the blocklist that rotted
 
 RFC 0019 (`docs/rfcs/0019-git-and-ssh.md`). `pkg install git` — over
@@ -636,11 +682,9 @@ ssh and locally, never https.
   ONLY — no RSA, ECDSA, certificates, FIDO or PKCS#11 — and that is
   worth stating wherever this is described rather than leaving to be
   discovered against an old server.
-- **git is built `NO_CURL=1`**, so there is no `https://` remote. Both
-  gaps are the same gap: closing it means a TLS library, and the
-  honest candidate is mbedTLS, which RFC 0009 already named as the way
-  to WPA3. One library would serve WPA3, git and `pkg` — a decision to
-  make once, on its own.
+- **git was built `NO_CURL=1`** and no longer is: RFC 0020 made the
+  TLS decision on its own and git now has `https://` remotes through
+  curl and mbedTLS, all three as packages.
 - **`NO_REGEX=NeedsStartEnd`**: musl's `regexec()` has no
   `REG_STARTEND`. git's own `#error` names the exact flag, which is
   the kindest way an upstream can handle a libc difference.

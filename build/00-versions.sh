@@ -79,6 +79,16 @@ LIBNL_VERSION="3.11.0"
 # nftables and its two libraries, for RFC 0016's declarative firewall.
 # The kernel has had CONFIG_NF_TABLES since it was written and the image
 # has never contained anything that could configure it.
+# HTTPS (RFC 0020). mbedTLS is dual Apache-2.0 / GPL-2.0-or-later, so
+# it is clean under this project's own GPLv2. The CA bundle is Mozilla's
+# set as curl.se publishes it, pinned by date AND by hash -- it is a
+# trust root, and the only other pinned source in this project is the
+# other trust root (TweetNaCl, RFC 0006).
+MBEDTLS_VERSION="3.6.2"
+CURL_VERSION="8.11.1"
+CACERT_DATE="2025-05-20"
+CACERT_SHA256="ab3ee3651977a4178a702b0b828a4ee7b2bbb9127235b0ab740e2e15974bf5db"
+
 # Developer tooling (RFC 0019). `pkg install novi-devel` puts a compiler
 # on the machine and nothing that can fetch something to compile.
 # Both are packages, never base image.
