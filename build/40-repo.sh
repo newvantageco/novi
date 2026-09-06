@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-# 30-repo.sh — Build and sign the first-party package repository
+# 40-repo.sh — Build and sign the first-party package repository
 #
 # RFC 0006 gave `pkg` something to fetch from. RFC 0007 decides WHAT is
 # in it: the desktop, so the base image can stop carrying it.
@@ -69,7 +69,7 @@ fi
 # Here rather than in scripts/lint.sh because this needs a built rootfs
 # and CI compiles nothing -- and here rather than at the end of the
 # build because this is the last moment every first-party binary is
-# still in the rootfs, before 31-desktop-split.sh moves them into
+# still in the rootfs, before 41-desktop-split.sh moves them into
 # packages. Shipping an unhardened binary is not something to notice
 # afterwards.
 bash "${REPO_ROOT}/scripts/check-hardening.sh"
@@ -112,5 +112,5 @@ echo ""
 echo "Repository built: ${REPO_OUT}  ($(du -sh "${REPO_OUT}" | cut -f1))"
 echo "Desktop file manifest: ${MANIFEST} ($(wc -l < "${MANIFEST}") files)"
 echo ""
-echo "  bash build/31-desktop-split.sh   # remove those files from the base image"
+echo "  bash build/41-desktop-split.sh   # remove those files from the base image"
 echo "  bash scripts/mkiso.sh            # the ISO carries this repo at /novi-repo"

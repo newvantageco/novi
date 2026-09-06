@@ -13,8 +13,8 @@
 # general-purpose compression library in this image: freetype was built
 # with -Dzlib=internal precisely because there was none to link.
 #
-# Numbered 21 because it must run before 30-repo.sh packages it and
-# before 31-desktop-split.sh removes the headers -- same constraint as
+# Numbered 21 because it must run before 40-repo.sh packages it and
+# before 41-desktop-split.sh removes the headers -- same constraint as
 # every other library stage. 21 came free when 21-desktop-split.sh
 # moved to 31.
 # ============================================================

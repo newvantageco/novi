@@ -19,7 +19,13 @@ this file.
 
 Full pipeline: `bash build.sh` — it **discovers** `build/NN-*.sh` and runs
 all of them in numeric order, so a new stage is part of the build the moment
-the file exists. Two stages may not share a number and `build.sh` refuses
+the file exists. **01–39 build content into the rootfs; 40+ package it.**
+That gap is deliberate: everything that puts a file in the image has to
+run before `40-repo.sh` computes the base/desktop split from what is
+there. The packaging stages used to be 30/31/32 with content filling
+20–29, and twice a new stage had nowhere legal to go — a base binary
+built after the split would ship, but pkgsplit would have computed the
+split without it, which is a trap rather than a rule. Two stages may not share a number and `build.sh` refuses
 if they do: `NN` is what `--from`/`--to` name and what a failed stage tells
 you to resume from, so a duplicate turns the identity into a guess. `--base-only` stops after the kernel (01–05: bootable
 console, no desktop/pkg/state/installer), `--from NN` resumes. Each stage can
@@ -43,7 +49,7 @@ below for why `/build` is hardcoded and unrelated to the repo checkout path.
 - `bash scripts/mkvm.sh [--disk]` — boot the ISO in QEMU/KVM
 - `novi-install install --disk DEV` (on the booted live system) — install to
   disk (RFC 0003)
-- `bash build/30-repo.sh` — build and sign the first-party package
+- `bash build/40-repo.sh` — build and sign the first-party package
   repository into `/build/repo` (RFC 0006); serve that directory over HTTP
   and point a machine at it with `mirror =` in `/etc/novi/pkg.conf`
 - `bash build/25-wifi.sh` — libnl, wpa_supplicant, `iw`, `novi-wifi`
@@ -54,7 +60,7 @@ below for why `/build` is hardcoded and unrelated to the repo checkout path.
   could only ever write) and the viewer that uses them
 - `bash build/23-e2fsprogs.sh`, `bash build/24-novi-gpt.sh` — real `mke2fs`
   (journalled ext4) and the GPT writer UEFI installs need (RFC 0008)
-- `bash build/31-desktop-split.sh` — **destructive**: removes the packaged
+- `bash build/41-desktop-split.sh` — **destructive**: removes the packaged
   desktop from `/build/rootfs`, leaving a console-only base (RFC 0007).
   Must run after 20; re-running 06..14 puts the files back
 - `bash build/26-firmware.sh` — curated linux-firmware + `wireless-regdb`
@@ -558,15 +564,15 @@ and does it depend on anything a later stage produces? The second is
 invisible in every tree except a clean one.
 
 **A stage that cross-compiles a client calls `require_desktop_headers`
-first** (`build/00-versions.sh`). 31-desktop-split.sh removes the
+first** (`build/00-versions.sh`). 41-desktop-split.sh removes the
 headers, so in any tree where a full build has run, rebuilding one
 client stops with four "No such file or directory" lines and no clue.
 The line it prints instead names `scripts/restore-build-inputs.sh`.
-That guard exists because chaining a rebuild into `30-repo.sh` without
+That guard exists because chaining a rebuild into `40-repo.sh` without
 checking it succeeded packaged a rootfs with no desktop in it, and
-31-desktop-split.sh then deleted from the base exactly what that empty
+41-desktop-split.sh then deleted from the base exactly what that empty
 manifest described — no desktop in the image AND none in the
-repository. **Never chain `30-repo.sh` after an unchecked build.**
+repository. **Never chain `40-repo.sh` after an unchecked build.**
 
 **And do not repair a broken `/build` by hand.** Extracting packages back
 over the rootfs to recover build inputs, then deleting what does not
@@ -600,7 +606,7 @@ Three things this turned up that generalise:
   `-fstack-protector-strong` went through. The binaries looked hardened
   if you checked only for a stack canary. **Check the artifact, not the
   flags you think you passed** — `scripts/check-hardening.sh` does, and
-  `30-repo.sh` runs it before packaging, which is the last moment every
+  `40-repo.sh` runs it before packaging, which is the last moment every
   first-party binary is still in the rootfs.
 - **`readelf … | grep -q` under `set -o pipefail` reports a false
   failure.** grep exits on the first match, readelf takes SIGPIPE, and
@@ -756,7 +762,7 @@ Three things it is important not to break:
   the graph finds what is *reachable*, `PACKAGE_TABLE` claims what is
   *ours*, and anything claimed that the base does not need moves too. A
   file matching no pattern is a hard error, never a guess.
-- **`build/31-desktop-split.sh` deletes exactly what `30-repo.sh`
+- **`build/41-desktop-split.sh` deletes exactly what `40-repo.sh`
   packaged**, from the manifest 20 wrote. One source of truth, or the two
   drift and the image ends up broken or still fat. Re-running stages
   06..14 puts the files back; that ordering is what `build.sh` does.

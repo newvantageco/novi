@@ -7,10 +7,10 @@
 # build/14-novi-settings.sh -- see that script's comments.
 #
 # Numbered 20 because that number came free when 20-repo.sh moved to
-# 30: a GUI client has to build BEFORE 31-desktop-split.sh deletes the
+# 30: a GUI client has to build BEFORE 41-desktop-split.sh deletes the
 # headers and libraries it compiles against, and be packaged by
-# 30-repo.sh. That is the whole reason those two stages moved to the
-# end -- see 30-repo.sh's header.
+# 40-repo.sh. That is the whole reason those two stages moved to the
+# end -- see 40-repo.sh's header.
 # ============================================================
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
