@@ -312,9 +312,28 @@ if [[ -d "${GRUB_LIB_DIR}" ]] && command -v grub-mkimage &>/dev/null; then
         -p '(hd0,msdos1)/boot/grub' \
         biosdisk part_msdos ext2 normal linux configfile search \
         search_fs_uuid search_label echo test ls boot
+
+    # A SECOND core.img, for the encrypted layout (RFC 0018).
+    #
+    # The prefix is baked in at this moment and cannot be changed on
+    # the target -- that coupling is documented in CLAUDE.md, and this
+    # is it being honoured rather than discovered. `(hd0,msdos1)/boot/
+    # grub` is right when partition 1 IS the root filesystem; an
+    # encrypted install makes partition 1 an unencrypted /boot of its
+    # own, where the same files live one directory higher. Same module
+    # list: GRUB still only has to read an msdos table and an ext
+    # filesystem. It never sees the LUKS container at all -- the
+    # initramfs opens that.
+    grub-mkimage \
+        -O i386-pc \
+        -o "${NOVI_BOOT_DIR}/core-boot.img" \
+        -p '(hd0,msdos1)/grub' \
+        biosdisk part_msdos ext2 normal linux configfile search \
+        search_fs_uuid search_label echo test ls boot
+
     mkdir -p "${NOVI_BOOT_DIR}/i386-pc"
     cp "${GRUB_LIB_DIR}"/*.mod "${GRUB_LIB_DIR}"/*.lst "${NOVI_BOOT_DIR}/i386-pc/" 2>/dev/null || true
-    echo ">>> BIOS boot artifacts: boot.img $(stat -c%s "${NOVI_BOOT_DIR}/boot.img")B, core.img $(stat -c%s "${NOVI_BOOT_DIR}/core.img")B, $(ls "${NOVI_BOOT_DIR}/i386-pc" | wc -l) modules"
+    echo ">>> BIOS boot artifacts: boot.img $(stat -c%s "${NOVI_BOOT_DIR}/boot.img")B, core.img $(stat -c%s "${NOVI_BOOT_DIR}/core.img")B, core-boot.img $(stat -c%s "${NOVI_BOOT_DIR}/core-boot.img")B, $(ls "${NOVI_BOOT_DIR}/i386-pc" | wc -l) modules"
 
     # ── UEFI ──────────────────────────────────────────────────────────────
     #

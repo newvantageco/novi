@@ -430,6 +430,61 @@ resolve_root_device() {
     return 1
 }
 
+# ── Unlocking an encrypted root (RFC 0018) ────────────────────────────────────
+#
+# `novi.luks=UUID=<luks-uuid>` names the LUKS container; the bootloader
+# passes `root=/dev/mapper/novi-root` alongside it, so everything below
+# this block is the ordinary disk-root path with nothing added.
+#
+# The spec goes through resolve_root_device() rather than a second
+# lookup: a LUKS partition answers blkid with its own header UUID and
+# TYPE="crypto_LUKS", so finding it is the same problem, and one
+# implementation means one set of retry semantics on a disk that has
+# not appeared yet.
+LUKS_SPEC="$(get_param novi.luks)"
+LUKS_NAME="novi-root"
+
+unlock_luks() {
+    spec="$1"
+    command -v cryptsetup >/dev/null 2>&1 || \
+        panic "novi.luks= was passed but this initramfs has no cryptsetup"
+
+    # dm_crypt does autoload -- device-mapper asks the kernel for
+    # `dm-crypt` by name and /sbin/usermode-helper now lets that
+    # request through (RFC 0016), verified on a booted machine. Asking
+    # for it explicitly anyway costs nothing and turns the failure mode
+    # from an obscure ioctl error into a missing module: this is the
+    # one place in the boot where there is no shell to debug from.
+    modprobe dm_crypt 2>/dev/null || true
+
+    luks_dev="$(resolve_root_device "${spec}")" || \
+        panic "Could not find the encrypted device '${spec}'"
+    info "Encrypted root: ${luks_dev}"
+
+    # ONE invocation with --tries, not a shell loop around it.
+    # cryptsetup already retries internally (three times by default),
+    # so a loop of three around it asks nine times -- confirmed live,
+    # by counting the prompts. Its own counter is also the one that
+    # knows the difference between a wrong passphrase and a device
+    # that could not be opened at all, which a shell loop would retry
+    # pointlessly.
+    #
+    # Three attempts and then a shell, not an endless prompt: someone
+    # who cannot type the passphrase needs somewhere to look at the
+    # disk from -- `cryptsetup luksDump` is in this initramfs too --
+    # and a loop is the one thing that guarantees they cannot.
+    if cryptsetup open --tries 3 "${luks_dev}" "${LUKS_NAME}"; then
+        info "Unlocked as /dev/mapper/${LUKS_NAME}"
+        return 0
+    fi
+
+    panic "Could not unlock ${luks_dev}"
+}
+
+if [ -n "${LUKS_SPEC}" ] && ! has_param boot=live; then
+    unlock_luks "${LUKS_SPEC}"
+fi
+
 if [ -n "${ROOT_SPEC}" ] && ! has_param boot=live; then
     info "Disk root requested: root=${ROOT_SPEC}"
 
@@ -586,6 +641,25 @@ if [[ -f "${HWDETECT}" ]]; then
 else
     echo "WARNING: ${HWDETECT} not found -- the initramfs will only load the" >&2
     echo "         drivers /init names by hand, which is a QEMU-shaped guess." >&2
+fi
+
+# ─── /sbin/cryptsetup ────────────────────────────────────────────────────────
+# The root filesystem of an encrypted install cannot be mounted until
+# something opens the container, and that something has to be here --
+# in the initramfs, before switch_root. One static binary (RFC 0018),
+# so there is no loader and no library list to keep correct.
+#
+# Carried unconditionally, not only when the image was built for an
+# encrypted install: this initramfs is the one the ISO boots AND the
+# one novi-install copies onto the target, and a boot medium that can
+# only unlock disks it was told about in advance is a rescue disk that
+# cannot rescue.
+CRYPTSETUP_SRC="${CRYPTSETUP_SRC:-/build/rootfs/sbin/cryptsetup}"
+if [[ -x "${CRYPTSETUP_SRC}" ]]; then
+    install -D -m 755 "${CRYPTSETUP_SRC}" "${WORK_DIR}/sbin/cryptsetup"
+else
+    echo "WARNING: ${CRYPTSETUP_SRC} not found -- run build/34-cryptsetup.sh." >&2
+    echo "         An encrypted root will not boot with this initramfs." >&2
 fi
 
 # ─── /sbin/usermode-helper ───────────────────────────────────────────────────

@@ -72,6 +72,35 @@ fi
 # still in the rootfs, before 41-desktop-split.sh moves them into
 # packages. Shipping an unhardened binary is not something to notice
 # afterwards.
+
+# REFUSE TO RUN ON AN ALREADY-SPLIT ROOTFS.
+#
+# pkgsplit computes the desktop from what is IN the rootfs. Run this
+# after 41-desktop-split.sh has already taken the desktop out and the
+# answer is "nothing leaves the base": an empty manifest, a repository
+# holding only the novi-desktop meta-package, and an ISO with no
+# desktop anywhere -- no error, because an empty answer is a valid
+# answer to the question that was asked.
+#
+# That is the same failure CLAUDE.md already records from the other
+# direction (chaining this stage after a client build that failed).
+# The guard is here rather than in a comment because the comment did
+# not stop it happening a second time. `bash build.sh` never trips it;
+# re-running stages by hand does.
+if [ ! -x "${ROOTFS}/usr/bin/novi-shell" ]; then
+    echo "ERROR: ${ROOTFS} has no desktop in it -- ${ROOTFS}/usr/bin/novi-shell" >&2
+    echo "       is missing, so 41-desktop-split.sh has already run here." >&2
+    echo "" >&2
+    echo "  Computing the split now would find nothing to move, write an" >&2
+    echo "  empty manifest, and produce an ISO with no desktop at all." >&2
+    echo "" >&2
+    echo "  Put the desktop back first:" >&2
+    echo "      bash build.sh --from 06 --to 29" >&2
+    echo "  then re-run this stage, 41-desktop-split.sh and" >&2
+    echo "  42-toolchain-repo.sh in that order." >&2
+    exit 1
+fi
+
 bash "${REPO_ROOT}/scripts/check-hardening.sh"
 
 # ── Work out the split and stage every package ────────────────────────────

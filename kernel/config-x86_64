@@ -201,6 +201,13 @@ CONFIG_BLOCK=y
 CONFIG_BLK_DEV_LOOP=y
 CONFIG_BLK_DEV_DM=m
 CONFIG_DM_CRYPT=m
+# XTS, built in rather than modular: it is the mode dm-crypt uses for
+# LUKS2's default aes-xts-plain64, and it was simply unmentioned, which
+# means `n` -- so DM_CRYPT was present and could not have opened the
+# container cryptsetup creates by default (RFC 0018). AES and its
+# AES-NI implementation, SHA-256 and the AF_ALG user API are already
+# set further down; XTS was the one hole.
+CONFIG_CRYPTO_XTS=y
 CONFIG_DM_SNAPSHOT=m
 CONFIG_DM_THIN_PROVISIONING=m
 CONFIG_DM_VERITY=m

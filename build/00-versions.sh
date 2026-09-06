@@ -79,6 +79,17 @@ LIBNL_VERSION="3.11.0"
 # nftables and its two libraries, for RFC 0016's declarative firewall.
 # The kernel has had CONFIG_NF_TABLES since it was written and the image
 # has never contained anything that could configure it.
+# Full-disk encryption (RFC 0018). The kernel has had CONFIG_DM_CRYPT
+# since the config was written and nothing could create a container.
+# Five upstreams, all small, all built static: cryptsetup links them and
+# the initramfs carries one binary instead of a loader and five
+# libraries.
+POPT_VERSION="1.19"              # cryptsetup's CLI argument parser
+JSON_C_VERSION="0.18"            # LUKS2 metadata is JSON; not optional
+UTIL_LINUX_VERSION="2.40.2"      # libuuid ONLY -- see build/34-cryptsetup.sh
+LVM2_VERSION="2.03.28"           # libdevmapper ONLY, same
+CRYPTSETUP_VERSION="2.7.5"
+
 LIBMNL_VERSION="1.0.5"
 LIBNFTNL_VERSION="1.2.6"
 NFTABLES_VERSION="1.0.9"

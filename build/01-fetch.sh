@@ -251,6 +251,16 @@ fetch "https://netfilter.org/projects/libmnl/files/libmnl-${LIBMNL_VERSION}.tar.
 fetch "https://netfilter.org/projects/libnftnl/files/libnftnl-${LIBNFTNL_VERSION}.tar.xz"
 fetch "https://netfilter.org/projects/nftables/files/nftables-${NFTABLES_VERSION}.tar.xz"
 
+# Full-disk encryption (RFC 0018). popt and json-c are cryptsetup's
+# hard dependencies; util-linux and LVM2 are enormous trees fetched for
+# exactly one library each (libuuid, libdevmapper) -- see
+# build/34-cryptsetup.sh for why neither can be avoided.
+fetch "http://ftp.rpm.org/popt/releases/popt-1.x/popt-${POPT_VERSION}.tar.gz"
+fetch "https://s3.amazonaws.com/json-c_releases/releases/json-c-${JSON_C_VERSION}.tar.gz"
+fetch "https://www.kernel.org/pub/linux/utils/util-linux/v${UTIL_LINUX_VERSION%.*}/util-linux-${UTIL_LINUX_VERSION}.tar.xz"
+fetch "https://sourceware.org/ftp/lvm2/LVM2.${LVM2_VERSION}.tgz"
+fetch "https://cdn.kernel.org/pub/linux/utils/cryptsetup/v${CRYPTSETUP_VERSION%.*}/cryptsetup-${CRYPTSETUP_VERSION}.tar.xz"
+
 # WiFi: libnl (wpa_supplicant's nl80211 driver needs it), wpa_supplicant
 # and hostapd (same upstream tree; hostapd is test-only -- see
 # build/25-wifi.sh), and iw for diagnostics.

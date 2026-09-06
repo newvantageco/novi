@@ -78,6 +78,10 @@ below for why `/build` is hardcoded and unrelated to the repo checkout path.
 - `bash build/33-nftables.sh` — libmnl, libnftnl, nftables and the
   shipped ruleset `/etc/novi/firewall.nft` (RFC 0016). Base image, not
   a package: 1.1 MB stripped
+- `bash build/34-cryptsetup.sh` — LUKS2 (RFC 0018): popt, json-c,
+  libuuid and libdevmapper built static into a private prefix and
+  linked into one `cryptsetup` binary, which is the only thing
+  installed
 - **`bash build/16-s6-rc-db.sh` after ANY change under `init/`** (see below),
   then `bash scripts/mkinitramfs.sh --output build/initramfs.cpio.gz` and
   `bash scripts/mkiso.sh` to get it into a bootable image
@@ -580,6 +584,25 @@ checking it succeeded packaged a rootfs with no desktop in it, and
 manifest described — no desktop in the image AND none in the
 repository. **Never chain `40-repo.sh` after an unchecked build.**
 
+**`40-repo.sh` now REFUSES to run on an already-split rootfs**, and that
+guard exists because the comment above did not stop it happening.
+pkgsplit computes the desktop from what is *in* the rootfs, so running
+40 after 41 has taken the desktop out asks a question whose honest
+answer is "nothing leaves the base": an empty manifest, a repository
+holding one meta-package, and a 95 MB-smaller ISO with no desktop
+anywhere — no error, because an empty answer is a valid answer.
+`bash build.sh` never trips it; re-running stages by hand does. The
+recovery is the stages, in order: `bash build.sh --from 06 --to 29`,
+then 40, 41, 42.
+
+**`restore-build-inputs.sh` launders stale files forward.** It restores
+headers and `.pc` files *from the packages*, so anything that was in a
+package once stays in every package built from that restored tree,
+even after the stage that produced it stopped producing it. A clean
+06..29 rebuild put 440 headers in `/usr/include`; the restored tree had
+543. The clean number is the right one — treat a manifest that shrinks
+after a real rebuild as a correction, not a regression.
+
 **`40-repo.sh` WIPES `/build/repo`, so `42-toolchain-repo.sh` has to run
 again after it.** `build.sh` gets this right because it runs the stages
 in order; running 40 and 41 by hand and stopping does not. The only
@@ -596,6 +619,63 @@ stage 2, with no error anywhere, resisting several rounds of bisection.
 Re-running the stages in order fixed it in one pass and would have been
 faster from the start. The stages are the recovery mechanism; that is
 what they are for.
+
+## Architecture: full-disk encryption, and BusyBox fdisk's default
+
+RFC 0018 (`docs/rfcs/0018-full-disk-encryption.md`).
+`novi-install --encrypt` makes a LUKS2 root; the initramfs asks for the
+passphrase.
+
+- **`CONFIG_CRYPTO_XTS` was the one hole.** `DM_CRYPT`, AES, AES-NI,
+  SHA-256 and the AF_ALG user API were all set; XTS — the mode LUKS2's
+  default `aes-xts-plain64` needs — was unmentioned, which means `n`.
+  dm-crypt was present and could not have opened the container
+  cryptsetup creates by default. Same shape as RFC 0016's
+  `NF_TABLES_INET`.
+- **`cryptsetup` is ONE STATIC BINARY**, and the four static libraries
+  it links (`popt`, `json-c`, `libuuid`, `libdevmapper`) never reach
+  `${ROOTFS}` — they live in `/build/crypt-deps`. Two reasons: the
+  initramfs is a different root filesystem and a dynamic build means
+  shipping a loader and a library list into it that can rot; and
+  pkgsplit never sees a `.a` or a header it has no `PACKAGE_TABLE`
+  pattern for. `34-cryptsetup.sh` **fails the build** if
+  `cryptsetup.static` has a `PT_INTERP`.
+- **The crypto backend is `kernel`** — AF_ALG. Every other backend
+  cryptsetup offers is a library this image has refused to carry
+  (OpenSSL, gcrypt, NSS, nettle), which is the whole argument for
+  `novi-verify` in RFC 0006.
+- **BusyBox `fdisk`'s default first sector for a new partition is 63**
+  — the start of the disk — not the first free sector after the
+  partitions that already exist, which is what util-linux offers and
+  what anyone writing the keystrokes expects. Taking the default
+  produced a partition 2 of 63..2047: 992 KB, overlapping the post-MBR
+  gap. cryptsetup refused it with "keyslots area is very small" and
+  "Cannot wipe header", naming neither the size nor the cause. Give
+  every sector explicitly. **This class of bug is testable without a
+  VM**: the shipped BusyBox is a static x86_64 binary, so
+  `printf '…' | /build/rootfs/bin/busybox fdisk -u <12G sparse file>`
+  reproduces it in a second.
+- **The BIOS encrypted layout needs its own `core.img`.** The prefix is
+  baked in at `grub-mkimage` time; `(hd0,msdos1)/boot/grub` is right
+  when partition 1 IS the root filesystem and wrong when partition 1 is
+  `/boot`. `mkiso.sh` generates `core-boot.img` with prefix
+  `(hd0,msdos1)/grub` beside it.
+- **Mount the boot partition BEFORE the ESP.** `/boot/efi` lives inside
+  `/boot`; mounting the ESP first and the boot partition on top of it
+  buries the ESP mount — the same shape as `/run/live` in RFC 0003.
+- **`cryptsetup` flushes input when it takes the terminal**
+  (`tcsetattr(TCSAFLUSH)`), so a passphrase typed in the same
+  millisecond the prompt appears is discarded, echoed in the clear, and
+  simply ignored. That is a *test harness* problem, not a product one —
+  a person types seconds later — but it cost a debugging round: give an
+  automated test a pause after the prompt.
+- **`00-versions.sh` exports `SOURCES`, and that is a name makefiles
+  use.** LVM2's `make.tmpl` has `OBJECTS = $(SOURCES:%.c=%.o)` and its
+  top-level makefile never assigns it, so the environment came straight
+  through and the build died with `make: *** /build/sources: Is a
+  directory. Stop.` — naming our own export and no part of LVM2.
+  `env -u SOURCES make …`. Any autotools tree with a plain `SOURCES`
+  can hit this.
 
 ## Architecture: a GUI that runs something slow
 
