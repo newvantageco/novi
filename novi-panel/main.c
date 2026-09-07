@@ -45,10 +45,19 @@
  * a dimmed placeholder: there was nowhere to restore a minimized
  * window FROM before this existed.
  *
+ * A network indicator has since been added on the right, next to the
+ * clock: wired, wifi with signal bars, or offline, read from the
+ * interface each service publishes under /run/novi plus one nl80211
+ * query (netstat.c), and clicking it opens novi-settings. That closes
+ * half of what this comment used to list as missing, and the guess it
+ * made was right -- it reuses the same coverage-mask technique, and
+ * the thing that had been holding it up really was the data source.
+ *
  * Still not done: workspace switcher (novi-shell has no workspace
- * concept yet), status icons (wifi/battery/power -- would reuse the
- * same coverage-mask technique, just needs real status data sources
- * this repo doesn't have yet).
+ * concept yet), and battery/power status -- deliberately, not for want
+ * of a data source: QEMU emulates no battery, so a battery indicator
+ * could be written here and could not be verified, and this project
+ * does not ship claims it has not watched work.
  *
  * Rendering uses real, anti-aliased text via fcft+pixman (see
  * common/text.h) -- the same font-rendering pipeline foot itself
@@ -75,6 +84,8 @@
 #include "wlr-layer-shell-unstable-v1-protocol.h"
 #include "wlr-foreign-toplevel-management-unstable-v1-protocol.h"
 #include "../common/text.h"
+#include "icons.h"
+#include "netstat.h"
 
 #define PANEL_HEIGHT 32
 #define BG_COLOR 0xff181820u /* opaque near-black, XRGB8888 */
@@ -101,11 +112,6 @@
  * to-gap ratio and 2:7 stroke-to-square ratio (so the icon reads with
  * the same visual weight as the original), just at a smaller overall
  * canvas than 24px. */
-#define APPS_ICON_SQUARE 7
-#define APPS_ICON_GAP 4
-#define APPS_ICON_RADIUS 1
-#define APPS_ICON_STROKE 2
-#define APPS_ICON_SIZE (2 * APPS_ICON_SQUARE + APPS_ICON_GAP)
 #define APPS_ICON_TEXT_GAP 8 /* gap between the icon and the "Apps" label */
 /* text-secondary / accent, matching apps_label_color/apps_label_hover_
  * color below exactly (same tokens, packed 0xRRGGBB here since the
@@ -120,6 +126,37 @@
  * separate processes/binaries -- duplicating one string is simpler and
  * more honest than inventing shared config machinery for it. */
 #define NOVI_DEFAULT_LAUNCHER "novi-launcher"
+
+/* ── Network indicator ────────────────────────────────────────────────
+ *
+ * RFC 0009's roadmap parked this: "status icons (wifi/battery/power --
+ * would reuse the same coverage-mask technique, just needs real status
+ * data sources this repo doesn't have yet)". The data source now
+ * exists (netstat.c); the coverage-mask technique is reused exactly as
+ * that note predicted.
+ *
+ * Battery is still not here, and that is a deliberate omission rather
+ * than an oversight: QEMU emulates no battery, so a battery indicator
+ * could be written and could not be verified, and this project does
+ * not describe unverified things as working. /sys/class/power_supply
+ * is where it goes when there is a machine with one.
+ *
+ * The wifi glyph is the standard fan -- a dot and three arcs sharing
+ * one origin -- drawn parametrically for the same reason the apps icon
+ * is (docs/design/ICON-PIPELINE.md's sanctioned "purely parametric
+ * shapes hand-coded directly": this build host still has no SVG
+ * rasterizer). Four elements, four signal levels, which is why
+ * NET_BARS_MAX is 4 and not a number someone picked.
+ */
+#define NOVI_DEFAULT_SETTINGS "novi-settings"
+
+
+#define NET_ICON_COLOR 0xa3a7b7u      /* text-secondary, at rest */
+#define NET_ICON_DIM_COLOR 0x4a4d5cu  /* an element that is present but unlit */
+#define NET_ICON_HOVER_COLOR 0x2dd4bfu
+
+#define NET_BUTTON_H_PADDING 8
+#define CLOCK_GAP 12 /* between the status area and the clock */
 
 /* Taskbar (wlr-foreign-toplevel-management-unstable-v1): a row of
  * pill buttons after the Apps button, one per open novi-shell window,
@@ -175,10 +212,18 @@ struct novi_panel {
 
 	struct fcft_font *font;
 	int apps_button_w; /* text width of "Apps" + horizontal padding */
+	int clock_w;       /* text width of "00:00:00" -- monospace, so fixed */
+	int net_button_w;  /* the network indicator's clickable width */
+
+	/* Refreshed once per redraw, which is the 1 Hz clock tick -- see
+	 * netstat.h on why that is cheap enough to do unconditionally. */
+	struct net_status net;
 
 	double pointer_x, pointer_y; /* last-known surface-local coords */
 	bool apps_button_hover;
 	bool apps_button_pressed; /* press happened inside the button */
+	bool net_button_hover;
+	bool net_button_pressed;
 	/* Same press-then-release-in-bounds convention as apps_button_
 	 * pressed, for whichever taskbar entry (if any) the press landed
 	 * on -- NULL means no taskbar press is armed. Re-validated against
@@ -226,6 +271,26 @@ static bool point_in_apps_button(const struct novi_panel *panel,
 	return px >= x && px < x + w && py >= y && py < y + h;
 }
 
+/* The network indicator sits immediately left of the clock, and both
+ * are right-anchored -- same single-source-of-truth reason as
+ * apps_button_rect(): render(), the hit-test and layout_taskbar()'s
+ * right-hand limit all read this one function. */
+static void net_button_rect(const struct novi_panel *panel,
+		int *x, int *y, int *w, int *h) {
+	*w = panel->net_button_w;
+	*x = (int)panel->width - PANEL_EDGE_PADDING - panel->clock_w -
+		CLOCK_GAP - *w;
+	*y = BUTTON_V_MARGIN;
+	*h = (int)panel->height - 2 * BUTTON_V_MARGIN;
+}
+
+static bool point_in_net_button(const struct novi_panel *panel,
+		double px, double py) {
+	int x, y, w, h;
+	net_button_rect(panel, &x, &y, &w, &h);
+	return px >= x && px < x + w && py >= y && py < y + h;
+}
+
 static void surface_draw_frame(struct novi_panel *panel);
 
 /* Recomputes every taskbar_entry's on-screen x/w, left-to-right
@@ -243,6 +308,19 @@ static void layout_taskbar(struct novi_panel *panel) {
 	apps_button_rect(panel, &btn_x, &btn_y, &btn_w, &btn_h);
 	(void)btn_y; (void)btn_h;
 	int x = btn_x + btn_w + TASKBAR_START_GAP;
+
+	/* The row stops where the status area starts. Before the network
+	 * indicator existed the taskbar simply ran on and the clock was
+	 * drawn over the top of it -- ugly with enough windows open, and
+	 * strictly worse now that there is something clickable on that
+	 * side: an entry drawn under the indicator would still hit-test as
+	 * an entry. An entry that does not fit gets w = 0, and both
+	 * render() and find_taskbar_entry_at() treat that as absent. */
+	int net_x, net_y, net_w, net_h;
+	net_button_rect(panel, &net_x, &net_y, &net_w, &net_h);
+	(void)net_y; (void)net_w; (void)net_h;
+	int limit = net_x - TASKBAR_ENTRY_GAP;
+
 	struct taskbar_entry *entry;
 	wl_list_for_each(entry, &panel->taskbar_entries, link) {
 		const char *label = entry->title[0] ? entry->title : "(untitled)";
@@ -250,6 +328,11 @@ static void layout_taskbar(struct novi_panel *panel) {
 		int w = text_w + 2 * TASKBAR_ENTRY_H_PADDING;
 		if (w > TASKBAR_ENTRY_MAX_W) {
 			w = TASKBAR_ENTRY_MAX_W;
+		}
+		if (x + w > limit) {
+			entry->x = x;
+			entry->w = 0;
+			continue;
 		}
 		entry->x = x;
 		entry->w = w;
@@ -327,88 +410,34 @@ static void draw_rect(uint32_t *px, uint32_t stride_px, uint32_t buf_w,
 	}
 }
 
-/* Signed distance from (px,py), relative to a rounded box's own
- * center, to that box's boundary: negative inside, positive outside,
- * magnitude is the distance to the nearest edge (corner arc included).
- * Inigo Quilez's widely-used 2D rounded-box SDF formula (public
- * domain) -- the same one novi-shell's drop-shadow code uses, applied
- * here rather than shared, since these are separate client binaries
- * with no shared geometry module yet. */
-static double rounded_box_sdf(double px, double py, double half_w,
-		double half_h, double radius) {
-	double qx = fabs(px) - half_w + radius;
-	double qy = fabs(py) - half_h + radius;
-	double outside_x = qx > 0.0 ? qx : 0.0;
-	double outside_y = qy > 0.0 ? qy : 0.0;
-	double outside = sqrt(outside_x * outside_x + outside_y * outside_y);
-	double inside = qx > qy ? qx : qy;
-	if (inside > 0.0) {
-		inside = 0.0;
-	}
-	return outside + inside - radius;
-}
-
-/* Per-pixel coverage [0,1] of the apps-grid icon at icon-local
- * coordinates (x,y) -- see APPS_ICON_* for where the icon's exact
- * geometry (Lucide's layout-grid.svg) comes from. A "stroke" (the
- * icon is a line icon, not filled, per GUI-DESIGN-LANGUAGE.md §5) is
- * just "distance to the shape's boundary is within half the stroke
- * width," directly expressible from the same signed-distance value a
- * filled shape's own edge-antialiasing would use -- keeping a band
- * around zero instead of everything <= 0. Checks all four squares and
- * takes the strongest hit; they never overlap (there's a real gap
- * between them), so at most one is ever non-zero per pixel, but max()
- * is the correct combine for a union of independent shapes regardless. */
-static double apps_icon_coverage(double x, double y) {
-	static const double square_pos[4][2] = {
-		{0, 0},
-		{APPS_ICON_SQUARE + APPS_ICON_GAP, 0},
-		{APPS_ICON_SQUARE + APPS_ICON_GAP, APPS_ICON_SQUARE + APPS_ICON_GAP},
-		{0, APPS_ICON_SQUARE + APPS_ICON_GAP},
-	};
-	double half = APPS_ICON_SQUARE / 2.0;
-	double half_stroke = APPS_ICON_STROKE / 2.0;
-	double best = 0.0;
-	for (int i = 0; i < 4; i++) {
-		double cx = square_pos[i][0] + half;
-		double cy = square_pos[i][1] + half;
-		double d = rounded_box_sdf(x - cx, y - cy, half, half, APPS_ICON_RADIUS);
-		double dist_from_stroke_center = fabs(d) - half_stroke;
-		double coverage = 0.5 - dist_from_stroke_center;
-		if (coverage > 1.0) {
-			coverage = 1.0;
-		} else if (coverage < 0.0) {
-			coverage = 0.0;
-		}
-		if (coverage > best) {
-			best = coverage;
-		}
-	}
-	return best;
-}
-
-/* Composites the icon onto the (already-opaque) button background at
+/* Composites an icon onto the (already-opaque) button background at
  * (icon_x, icon_y) -- a plain linear blend toward tint_color per pixel
  * coverage, written back as another opaque pixel, since this buffer is
  * XRGB8888 throughout (novi-panel has no real alpha channel anywhere,
  * unlike novi-launcher; the button background under the icon is
- * already fully painted by the time this runs). */
-static void draw_apps_icon(uint32_t *px, uint32_t stride_px, uint32_t buf_w,
-		uint32_t buf_h, int icon_x, int icon_y, uint32_t tint_color) {
+ * already fully painted by the time this runs).
+ *
+ * Taking the mask as a function pointer rather than being the apps
+ * icon's own blitter is what lets the network glyph draw itself in two
+ * passes -- dim for every element, then bright for the lit ones -- over
+ * the same background, with no second copy of this loop. */
+static void draw_icon(uint32_t *px, uint32_t stride_px, uint32_t buf_w,
+		uint32_t buf_h, int icon_x, int icon_y, int icon_w, int icon_h,
+		icon_coverage_fn coverage_fn, const void *ctx, uint32_t tint_color) {
 	uint8_t tint_r = (tint_color >> 16) & 0xff;
 	uint8_t tint_g = (tint_color >> 8) & 0xff;
 	uint8_t tint_b = tint_color & 0xff;
-	for (int y = 0; y < APPS_ICON_SIZE; y++) {
+	for (int y = 0; y < icon_h; y++) {
 		int py = icon_y + y;
 		if (py < 0 || py >= (int)buf_h) {
 			continue;
 		}
-		for (int x = 0; x < APPS_ICON_SIZE; x++) {
+		for (int x = 0; x < icon_w; x++) {
 			int pxc = icon_x + x;
 			if (pxc < 0 || pxc >= (int)buf_w) {
 				continue;
 			}
-			double coverage = apps_icon_coverage(x + 0.5, y + 0.5);
+			double coverage = coverage_fn(x + 0.5, y + 0.5, ctx);
 			if (coverage <= 0.0) {
 				continue;
 			}
@@ -425,6 +454,44 @@ static void draw_apps_icon(uint32_t *px, uint32_t stride_px, uint32_t buf_w,
 	}
 }
 
+/* Draws whichever glyph the status calls for, dim pass then lit pass.
+ * `tint` is the lit colour, so hover changes one argument and nothing
+ * else -- the unlit elements stay dim on hover, which is what makes
+ * three bars out of four still read as three bars. */
+static void draw_net_icon(uint32_t *px, uint32_t stride_px, uint32_t buf_w,
+		uint32_t buf_h, int icon_x, int icon_y,
+		const struct net_status *net, uint32_t tint) {
+	if (net->kind == NET_WIRED) {
+		draw_icon(px, stride_px, buf_w, buf_h, icon_x, icon_y,
+			NET_ICON_W, NET_ICON_H, novi_net_wired_coverage, NULL, tint);
+		return;
+	}
+
+	struct net_fan dim = { .mask = NET_FAN_ALL, .slash = 0 };
+	draw_icon(px, stride_px, buf_w, buf_h, icon_x, icon_y,
+		NET_ICON_W, NET_ICON_H, novi_net_wifi_coverage, &dim, NET_ICON_DIM_COLOR);
+
+	if (net->kind == NET_OFFLINE) {
+		/* The slash goes on in the LIT colour, over a fan that is
+		 * entirely dim. Drawing it dim as well -- which is what the
+		 * first version did -- makes the one element carrying the
+		 * meaning the least visible thing in the glyph. */
+		struct net_fan slash = { .mask = 0u, .slash = 1 };
+		draw_icon(px, stride_px, buf_w, buf_h, icon_x, icon_y,
+			NET_ICON_W, NET_ICON_H, novi_net_wifi_coverage, &slash, tint);
+		return;
+	}
+	if (net->bars <= 0) {
+		return;
+	}
+	/* bars=1 lights the dot, bars=4 the dot and all three arcs -- the
+	 * low bits of ALL, which is why the elements are ordered inward to
+	 * outward in the mask. */
+	struct net_fan lit = { .mask = (1u << net->bars) - 1u, .slash = 0 };
+	draw_icon(px, stride_px, buf_w, buf_h, icon_x, icon_y,
+		NET_ICON_W, NET_ICON_H, novi_net_wifi_coverage, &lit, tint);
+}
+
 static void render(struct novi_panel *panel, uint32_t *px, uint32_t stride_px) {
 	uint32_t w = panel->width, h = panel->height;
 	draw_rect(px, stride_px, w, h, 0, 0, (int)w, (int)h, BG_COLOR);
@@ -437,8 +504,25 @@ static void render(struct novi_panel *panel, uint32_t *px, uint32_t stride_px) {
 
 	int icon_x = btn_x + BUTTON_H_PADDING;
 	int icon_y = btn_y + (btn_h - APPS_ICON_SIZE) / 2;
-	draw_apps_icon(px, stride_px, w, h, icon_x, icon_y,
+	draw_icon(px, stride_px, w, h, icon_x, icon_y,
+		APPS_ICON_SIZE, APPS_ICON_SIZE, novi_apps_icon_coverage, NULL,
 		panel->apps_button_hover ? APPS_ICON_HOVER_COLOR : APPS_ICON_COLOR);
+
+	/* Read once per frame, before anything is laid out against it --
+	 * the clock tick is what drives this redraw, so the indicator is
+	 * refreshed at exactly the rate the panel already repaints. */
+	novi_netstat_read(&panel->net);
+
+	int net_x, net_y, net_w, net_h;
+	net_button_rect(panel, &net_x, &net_y, &net_w, &net_h);
+	if (panel->net_button_hover) {
+		draw_rect(px, stride_px, w, h, net_x, net_y, net_w, net_h,
+			BUTTON_HOVER_BG_COLOR);
+	}
+	draw_net_icon(px, stride_px, w, h,
+		net_x + NET_BUTTON_H_PADDING, net_y + (net_h - NET_ICON_H) / 2,
+		&panel->net,
+		panel->net_button_hover ? NET_ICON_HOVER_COLOR : NET_ICON_COLOR);
 
 	time_t now = time(NULL);
 	struct tm tm_now;
@@ -457,8 +541,7 @@ static void render(struct novi_panel *panel, uint32_t *px, uint32_t stride_px) {
 	static const pixman_color_t clock_color = {
 		.red = 0xe000, .green = 0xe000, .blue = 0xf000, .alpha = 0xffff,
 	};
-	int text_w = novi_text_width(panel->font, clock_str);
-	int text_x = (int)w - text_w - 12;
+	int text_x = (int)w - panel->clock_w - PANEL_EDGE_PADDING;
 	int baseline_y = ((int)h + panel->font->ascent - panel->font->descent) / 2;
 	novi_text_draw(dest, panel->font, text_x, baseline_y, clock_str, clock_color);
 
@@ -481,6 +564,10 @@ static void render(struct novi_panel *panel, uint32_t *px, uint32_t stride_px) {
 	layout_taskbar(panel);
 	struct taskbar_entry *entry;
 	wl_list_for_each(entry, &panel->taskbar_entries, link) {
+		/* Laid out past the status area -- see layout_taskbar(). */
+		if (entry->w <= 0) {
+			continue;
+		}
 		/* A minimized entry blends into the bar background instead of
 		 * getting its own button chrome -- "put away," reads visually
 		 * different from "open but not focused" (BUTTON_BG_COLOR). */
@@ -580,9 +667,14 @@ static void update_pointer_position(struct novi_panel *panel,
 		wl_fixed_t surface_x, wl_fixed_t surface_y) {
 	panel->pointer_x = wl_fixed_to_double(surface_x);
 	panel->pointer_y = wl_fixed_to_double(surface_y);
-	bool hover = point_in_apps_button(panel, panel->pointer_x, panel->pointer_y);
-	if (hover != panel->apps_button_hover) {
-		panel->apps_button_hover = hover;
+	bool apps = point_in_apps_button(panel, panel->pointer_x, panel->pointer_y);
+	bool net = point_in_net_button(panel, panel->pointer_x, panel->pointer_y);
+	/* One redraw for both, not one each: they cannot both change in a
+	 * single motion event, but two calls would be two frames if they
+	 * ever could. */
+	if (apps != panel->apps_button_hover || net != panel->net_button_hover) {
+		panel->apps_button_hover = apps;
+		panel->net_button_hover = net;
 		surface_draw_frame(panel);
 	}
 }
@@ -599,9 +691,11 @@ static void pointer_leave(void *data, struct wl_pointer *pointer,
 	(void)pointer; (void)serial; (void)surface;
 	struct novi_panel *panel = data;
 	panel->apps_button_pressed = false;
+	panel->net_button_pressed = false;
 	panel->taskbar_pressed = NULL;
-	if (panel->apps_button_hover) {
+	if (panel->apps_button_hover || panel->net_button_hover) {
 		panel->apps_button_hover = false;
+		panel->net_button_hover = false;
 		surface_draw_frame(panel);
 	}
 }
@@ -667,6 +761,8 @@ static void pointer_button(void *data, struct wl_pointer *pointer,
 		 * instead of a bool since there are several of them. */
 		panel->apps_button_pressed =
 			point_in_apps_button(panel, panel->pointer_x, panel->pointer_y);
+		panel->net_button_pressed =
+			point_in_net_button(panel, panel->pointer_x, panel->pointer_y);
 		panel->taskbar_pressed =
 			find_taskbar_entry_at(panel, panel->pointer_x, panel->pointer_y);
 		return;
@@ -678,6 +774,19 @@ static void pointer_button(void *data, struct wl_pointer *pointer,
 			point_in_apps_button(panel, panel->pointer_x, panel->pointer_y)) {
 		spawn(getenv("NOVI_LAUNCHER") ?
 			getenv("NOVI_LAUNCHER") : NOVI_DEFAULT_LAUNCHER);
+	}
+
+	/* The indicator reports; Settings changes things. Clicking it opens
+	 * novi-settings, which is where scanning, joining and forgetting
+	 * networks already live (RFC 0017) -- the panel deliberately grows
+	 * no network UI of its own, for the same reason novi-shell owns no
+	 * UI: one place per job. */
+	bool net_was_pressed = panel->net_button_pressed;
+	panel->net_button_pressed = false;
+	if (net_was_pressed &&
+			point_in_net_button(panel, panel->pointer_x, panel->pointer_y)) {
+		spawn(getenv("NOVI_SETTINGS") ?
+			getenv("NOVI_SETTINGS") : NOVI_DEFAULT_SETTINGS);
 	}
 
 	struct taskbar_entry *pressed = panel->taskbar_pressed;
@@ -923,6 +1032,14 @@ int main(void) {
 	 * right padding. */
 	panel.apps_button_w = 2 * BUTTON_H_PADDING + APPS_ICON_SIZE +
 		APPS_ICON_TEXT_GAP + novi_text_width(panel.font, "Apps");
+	/* Same argument for the right-hand side. The clock's text changes
+	 * every second and its WIDTH never does -- JetBrains Mono is
+	 * monospace and the format is fixed -- so measuring "00:00:00" once
+	 * gives every later frame a stable right edge to lay out against.
+	 * Measuring the live string instead would make the whole status
+	 * area shift by a pixel whenever the glyphs happened to differ. */
+	panel.clock_w = novi_text_width(panel.font, "00:00:00");
+	panel.net_button_w = 2 * NET_BUTTON_H_PADDING + NET_ICON_W;
 
 	panel.surface = wl_compositor_create_surface(panel.compositor);
 	panel.layer_surface = zwlr_layer_shell_v1_get_layer_surface(
@@ -997,6 +1114,7 @@ int main(void) {
 	}
 
 	close(timer_fd);
+	novi_netstat_finish();
 	if (panel.pointer != NULL) {
 		wl_pointer_destroy(panel.pointer);
 	}

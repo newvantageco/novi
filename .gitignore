@@ -25,6 +25,9 @@ build/qemu-qmp.sock
 build/novi-disk.qcow2
 build/vm_stdin.fifo
 
+# Host-side test binaries built by `make check` / scripts/lint.sh
+novi-panel/icons-test
+
 # Disk images, ISOs, and virtual machine drives
 *.iso
 *.img

@@ -767,6 +767,56 @@ passphrase.
   `env -u SOURCES make …`. Any autotools tree with a plain `SOURCES`
   can hit this.
 
+## Architecture: the panel's network indicator
+
+RFC 0009's roadmap item, done. `novi-panel` shows wired / wifi with
+signal bars / offline, and clicking it opens `novi-settings`.
+
+- **`/proc/net/wireless` does not exist on this system.** It is
+  created by cfg80211's wireless-extensions compatibility layer and
+  `CONFIG_CFG80211_WEXT` is off — checked in `kernel/config-x86_64`,
+  not assumed, because the failure mode is an indicator that silently
+  shows no signal on every machine forever. nl80211
+  (`NL80211_CMD_GET_STATION` → `NL80211_STA_INFO_SIGNAL`) is the
+  interface that exists. libnl was already in the base image for
+  wpa_supplicant, so this is a new *link*, not a new dependency, and
+  pkgsplit leaves the library in the base and derives nothing extra
+  for the package.
+- **The panel reads the interface the service PUBLISHED, never its
+  own walk of `/sys/class/net`.** `/run/novi/network.device` and
+  `network.wifi.device` hold the resolved name each service actually
+  chose (not the `auto` spec — that is `network.interface`, a
+  different file for a different question). A second walk would be a
+  second answer to a question that has one, and RFC 0009's
+  `pick_interface()` has real rules (wired first; a radio is a
+  `phy80211` link, not a name) that a panel reimplementing them would
+  drift from.
+- **`carrier`, not `operstate`.** `operstate` reports "unknown" for
+  plenty of working interfaces. Reading `carrier` on an
+  administratively down interface fails with EINVAL rather than
+  returning 0 — the kernel refusing to guess — which lands as "no
+  link", the right answer either way.
+- **The netlink call is synchronous, with a 200 ms `SO_RCVTIMEO`.** A
+  local kernel dump answers in microseconds, so this is not RFC 0017's
+  situation (a child process taking seconds) — but it sits on the
+  Wayland event loop, and "no reason to hang" is not a guarantee.
+- **`novi-panel/icons.c` is pure geometry with a HOST test
+  (`make -C novi-panel check`, run by `scripts/lint.sh`), and that
+  split exists because of a specific blind spot.** The fan's lit-element
+  mask is `(1u << bars) - 1u`; mac80211_hwsim reports −30 dBm and
+  nothing else, so a live boot only ever draws four bars — and a mask
+  bug draws four bars correctly anyway, since `0xF` is `0xF` however
+  you got there. The host test renders every state and asserts the
+  invariants; it immediately found the fan's origin dot being clipped
+  flat by the icon box, which the live screenshot did not show.
+- **Get the sign right on icon-local Y.** The RJ45 glyph's first
+  version passed `cy + 1.5` where the SDF wanted a centre, drawing a
+  perfectly clean jack upside down with its latch tab off the top.
+  Screenshotting it is what found it — the repo's standing advice
+  about GUI bugs, applied to a five-line function.
+- **Battery is deliberately absent, not forgotten.** QEMU emulates
+  none, so it could be written and could not be verified.
+
 ## Architecture: a GUI that runs something slow
 
 RFC 0017 (`docs/rfcs/0017-wifi-in-the-desktop.md`). `novi-settings`'

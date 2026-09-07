@@ -64,9 +64,26 @@ if [ "${#FILES[@]}" -eq 0 ]; then
 fi
 
 echo ">>> shellcheck: ${#FILES[@]} file(s), severity=error, excluding ${EXCLUDE}"
-if shellcheck -S error -e "${EXCLUDE}" "${FILES[@]}"; then
-    echo ">>> clean"
-    exit 0
+if ! shellcheck -S error -e "${EXCLUDE}" "${FILES[@]}"; then
+    echo ">>> shellcheck reported error-severity findings (above)" >&2
+    exit 1
 fi
-echo ">>> shellcheck reported error-severity findings (above)" >&2
-exit 1
+echo ">>> clean"
+
+# novi-panel's icon geometry is pure math with no Wayland in it, so
+# every state it can draw can be rendered and asserted right here --
+# see novi-panel/icons-test.c for why the states a test VM can produce
+# are not enough (hwsim reports one signal strength and nothing else).
+# It builds with the HOST compiler and links only libm, so it belongs
+# in the lint pass rather than in a build stage.
+if command -v cc >/dev/null 2>&1; then
+    echo ">>> novi-panel icon geometry"
+    if ! make -s -C novi-panel check >/dev/null; then
+        echo ">>> icon geometry checks failed -- run: make -C novi-panel check" >&2
+        exit 1
+    fi
+    echo ">>> clean"
+else
+    echo ">>> no host cc -- skipping novi-panel icon geometry checks" >&2
+fi
+exit 0

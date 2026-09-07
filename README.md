@@ -648,6 +648,8 @@ BUG_REPORT_URL="https://github.com/newvantageco/novi/issues"
       WPA3, verified against an SAE-only access point (RFC 0021)
 - [x] `pkg install openssh-server` — a daemon whose host key is made on
       the machine, and a firewall hole you have to declare (RFC 0022)
+- [x] A network indicator in the panel — wired, wifi with signal bars, or
+      offline, with the icon geometry testable without booting anything
 - [ ] **Boot it on real hardware** ← next, and nothing here replaces it
 - [ ] A published repository + offline release key
 - [ ] A Microsoft-signed shim (real Secure Boot); OWE and SAE-PK
