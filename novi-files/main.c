@@ -35,6 +35,7 @@
 #define _GNU_SOURCE
 #include <dirent.h>
 #include <errno.h>
+#include <linux/input-event-codes.h>
 #include <poll.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -82,6 +83,7 @@
 #define SIDEBAR_BG      0xff13131bu
 #define SIDEBAR_RULE    0xff2a2a38u
 #define SIDEBAR_SEL_BG  0xff23303cu
+#define HOVER_BG        0xff1e1e2au
 #define SIDEBAR_HEAD_H  22
 #define ICON_PLACE_COLOR 0xff8b8fa3u
 #define ICON_VOL_COLOR   0xff7aa2f7u
@@ -181,6 +183,41 @@ struct novi_files {
 	int place_sel;
 	bool focus_sidebar;
 	int mounts_fd; /* poll()ed for mount-table changes; see places.c */
+
+	/* Where each place's row landed on screen, as of the last
+	 * layout_places(). -1 means it did not fit and is therefore
+	 * neither drawn nor clickable. Cached rather than recomputed in
+	 * the hit-test for the same reason novi-panel caches its taskbar
+	 * pills: geometry worked out in two places is geometry that
+	 * eventually disagrees, and here the disagreement would mean
+	 * clicking eject on the wrong volume. */
+	int place_y[PLACES_MAX];
+	int devices_head_y; /* -1 when there are no volumes */
+
+	/* Pointer. This program was keyboard-only for its whole life;
+	 * everything below is additive and none of the keyboard paths
+	 * changed. */
+	struct wl_pointer *pointer;
+	double ptr_x, ptr_y;
+	bool ptr_in;
+	int hover_place; /* index into places[], or -1 */
+	int hover_row;   /* index into entries[], or -1 */
+	bool hover_eject;
+
+	/* Press-then-release-in-bounds, the same convention novi-panel
+	 * uses: a press that started elsewhere and drags onto a row must
+	 * not activate it. */
+	int press_place;
+	int press_row;
+	bool press_eject;
+
+	/* Double-click detection. wl_pointer.button carries the
+	 * compositor's own millisecond timestamp, which is the right clock
+	 * for this -- a client reading its own monotonic time would be
+	 * measuring when it got round to processing the event, not when
+	 * the button went down. */
+	uint32_t last_click_ms;
+	int last_click_row;
 };
 
 static void set_status(struct novi_files *s, bool err, const char *fmt, ...)
@@ -988,6 +1025,44 @@ static void scroll_to_sel(struct novi_files *s) {
 
 /* ── The places sidebar ────────────────────────────────────────── */
 
+/* Recomputes where every place's row lands. Called at the top of
+ * render(); the pointer hit-test reads the cached `place_y` rather
+ * than working it out again. Same single-source-of-truth arrangement
+ * as novi-panel's layout_taskbar(), and for a sharper reason here:
+ * two copies of this arithmetic that disagreed by one row would mean
+ * clicking eject on a volume you were not pointing at.
+ *
+ * A place that does not fit gets y = -1, and nothing draws or
+ * hit-tests it. */
+static void layout_places(struct novi_files *s) {
+	int side_bot = (int)s->height - STATUS_H;
+	int y = HEADER_H + 6 + SIDEBAR_HEAD_H; /* past the PLACES heading */
+	bool devices_seen = false;
+
+	s->devices_head_y = -1;
+	for (int i = 0; i < PLACES_MAX; i++) {
+		s->place_y[i] = -1;
+	}
+
+	for (int i = 0; i < s->nplaces; i++) {
+		if (s->places[i].kind == PLACE_VOLUME && !devices_seen) {
+			devices_seen = true;
+			y += 6;
+			if (y + SIDEBAR_HEAD_H + ROW_H > side_bot) {
+				return;
+			}
+			s->devices_head_y = y;
+			y += SIDEBAR_HEAD_H;
+		}
+		if (y + ROW_H > side_bot) {
+			return;
+		}
+		s->place_y[i] = y;
+		y += ROW_H;
+	}
+}
+
+
 /* Re-read the mount table and keep the selection pointing at the same
  * PLACE it was pointing at, not at the same index. A stick unmounting
  * shifts everything below it up by one, and an index-preserving
@@ -1083,6 +1158,57 @@ static void do_eject(struct novi_files *s) {
 	leave_if_gone(s);
 }
 
+/* ── Pointer ───────────────────────────────────────────────────────
+ *
+ * novi-files was keyboard-only for its whole life, which was
+ * defensible while it was a list and a path bar and stopped being so
+ * the moment it grew a sidebar with an eject button in it. Everything
+ * here is additive: no keyboard path changed, and the program is still
+ * completely usable with no pointer at all.
+ */
+
+/* Which place is under (x, y), or -1. `on_eject` says whether the
+ * pointer is over that row's eject glyph rather than its label --
+ * a second answer from the same hit-test, because computing the row
+ * twice is how the two end up disagreeing about which volume. */
+static int place_at(const struct novi_files *s, double x, double y,
+		bool *on_eject) {
+	if (on_eject != NULL) {
+		*on_eject = false;
+	}
+	if (x < 0 || x >= SIDEBAR_W) {
+		return -1;
+	}
+	for (int i = 0; i < s->nplaces; i++) {
+		int ry = s->place_y[i];
+		if (ry < 0 || y < ry || y >= ry + ROW_H) {
+			continue;
+		}
+		if (on_eject != NULL && s->places[i].kind == PLACE_VOLUME &&
+				x >= SIDEBAR_W - PAD - ICON_SIZE) {
+			*on_eject = true;
+		}
+		return i;
+	}
+	return -1;
+}
+
+/* Which entry is under (x, y), or -1. The list scrolls, so this is
+ * `top` plus the row offset -- and it must reject a y past the last
+ * entry, or clicking the empty space below a short listing would
+ * select whatever index that arithmetic produced. */
+static int row_at(const struct novi_files *s, double x, double y) {
+	if (x < LIST_X || y < HEADER_H || y >= (int)s->height - STATUS_H) {
+		return -1;
+	}
+	int r = (int)((y - HEADER_H) / ROW_H);
+	int i = s->top + r;
+	if (r < 0 || i < 0 || i >= s->nentries) {
+		return -1;
+	}
+	return i;
+}
+
 static void render(struct novi_files *s, uint32_t *px, uint32_t stride_px) {
 	uint32_t w = s->width, h = s->height;
 	pixman_image_t *dest = pixman_image_create_bits(PIXMAN_x8r8g8b8,
@@ -1096,6 +1222,7 @@ static void render(struct novi_files *s, uint32_t *px, uint32_t stride_px) {
 	novi_text_draw(dest, s->font, PAD, hbase, s->cwd, PATH_PIX);
 
 	/* ── Sidebar ───────────────────────────────────────────────── */
+	layout_places(s);
 	int side_top = HEADER_H;
 	int side_bot = (int)h - STATUS_H;
 	draw_rect(px, stride_px, w, h, 0, side_top, SIDEBAR_W,
@@ -1104,29 +1231,23 @@ static void render(struct novi_files *s, uint32_t *px, uint32_t stride_px) {
 		side_bot - side_top, SIDEBAR_RULE);
 
 	{
-		int y = side_top + 6;
-		bool devices_header_drawn = false;
 		int hb = (SIDEBAR_HEAD_H - s->font_small->height) / 2 +
 			s->font_small->ascent;
-		novi_text_draw(dest, s->font_small, PAD, y + hb, "PLACES",
-			PLACE_HEAD_PIX);
-		y += SIDEBAR_HEAD_H;
+		novi_text_draw(dest, s->font_small, PAD, side_top + 6 + hb,
+			"PLACES", PLACE_HEAD_PIX);
+		/* One heading, present only when there is something under it,
+		 * so a machine with nothing plugged in has no empty DEVICES
+		 * section sitting there looking broken. */
+		if (s->devices_head_y >= 0) {
+			novi_text_draw(dest, s->font_small, PAD,
+				s->devices_head_y + hb, "DEVICES", PLACE_HEAD_PIX);
+		}
 
-		for (int i = 0; i < s->nplaces && y + ROW_H <= side_bot; i++) {
+		for (int i = 0; i < s->nplaces; i++) {
 			struct place *p = &s->places[i];
-
-			/* One heading, drawn lazily at the first volume, so a
-			 * machine with nothing plugged in has no empty DEVICES
-			 * section sitting there looking broken. */
-			if (p->kind == PLACE_VOLUME && !devices_header_drawn) {
-				devices_header_drawn = true;
-				y += 6;
-				if (y + SIDEBAR_HEAD_H + ROW_H > side_bot) {
-					break;
-				}
-				novi_text_draw(dest, s->font_small, PAD, y + hb, "DEVICES",
-					PLACE_HEAD_PIX);
-				y += SIDEBAR_HEAD_H;
+			int y = s->place_y[i];
+			if (y < 0) {
+				continue;
 			}
 
 			bool selected = s->focus_sidebar && i == s->place_sel;
@@ -1135,6 +1256,12 @@ static void render(struct novi_files *s, uint32_t *px, uint32_t stride_px) {
 				draw_rect(px, stride_px, w, h, 0, y, SIDEBAR_W - 1, ROW_H,
 					SIDEBAR_SEL_BG);
 				draw_rect(px, stride_px, w, h, 0, y, 3, ROW_H, SEL_BAR);
+			} else if (i == s->hover_place) {
+				draw_rect(px, stride_px, w, h, 0, y, SIDEBAR_W - 1, ROW_H,
+					HOVER_BG);
+				if (current) {
+					draw_rect(px, stride_px, w, h, 0, y, 3, ROW_H, SEL_BAR);
+				}
 			} else if (current) {
 				/* Where you actually are, marked even when the
 				 * keyboard is over in the file list. Without this the
@@ -1176,7 +1303,6 @@ static void render(struct novi_files *s, uint32_t *px, uint32_t stride_px) {
 				label, sizeof(label));
 			novi_text_draw(dest, s->font_small, label_x, base, label,
 				(selected || current) ? NAME_PIX : PLACE_PIX);
-			y += ROW_H;
 		}
 	}
 
@@ -1190,6 +1316,10 @@ static void render(struct novi_files *s, uint32_t *px, uint32_t stride_px) {
 		int y = HEADER_H + r * ROW_H;
 		bool selected = (i == s->sel);
 
+		if (!selected && i == s->hover_row) {
+			draw_rect(px, stride_px, w, h, LIST_X, y, (int)w - LIST_X,
+				ROW_H, HOVER_BG);
+		}
 		/* Dimmed rather than hidden when the keyboard is over in the
 		 * sidebar: the row you were on is still where Tab will put you
 		 * back, and a list with no visible cursor reads as having lost
@@ -1273,8 +1403,8 @@ static void render(struct novi_files *s, uint32_t *px, uint32_t stride_px) {
 		char right[sizeof(s->status) + 96];
 		snprintf(right, sizeof(right), "%s", s->status[0] ? s->status :
 			(s->focus_sidebar
-				? "Enter go  ^E eject  Tab back to files  ^Q quit"
-				: "Enter open  Bksp up  Tab places  F2 rename  Del delete  ^N folder  ^Q quit"));
+				? "Enter/click go  ^E eject  Tab back to files  ^Q quit"
+				: "Dbl-click or Enter open  Bksp up  Tab places  F2 rename  Del delete  ^Q quit"));
 		int rw = novi_text_width(s->font_small, right);
 		novi_text_draw(dest, s->font_small, (int)w - PAD - rw, sbase, right,
 			s->status_is_error ? ERROR_PIX : STATUS_PIX);
@@ -1575,11 +1705,206 @@ static const struct wl_keyboard_listener keyboard_listener = {
 	.repeat_info = keyboard_repeat_info,
 };
 
+/* ── Pointer listener ──────────────────────────────────────────── */
+
+#define DOUBLE_CLICK_MS 400
+
+static void pointer_update_hover(struct novi_files *s) {
+	bool eject = false;
+	int place = s->ptr_in ? place_at(s, s->ptr_x, s->ptr_y, &eject) : -1;
+	int row = s->ptr_in ? row_at(s, s->ptr_x, s->ptr_y) : -1;
+	if (place == s->hover_place && row == s->hover_row &&
+			eject == s->hover_eject) {
+		return;
+	}
+	s->hover_place = place;
+	s->hover_row = row;
+	s->hover_eject = eject;
+	surface_draw_frame(s);
+}
+
+static void pointer_enter(void *data, struct wl_pointer *p, uint32_t serial,
+		struct wl_surface *surface, wl_fixed_t sx, wl_fixed_t sy) {
+	struct novi_files *s = data;
+	s->ptr_in = true;
+	s->ptr_x = wl_fixed_to_double(sx);
+	s->ptr_y = wl_fixed_to_double(sy);
+	pointer_update_hover(s);
+}
+
+static void pointer_leave(void *data, struct wl_pointer *p, uint32_t serial,
+		struct wl_surface *surface) {
+	struct novi_files *s = data;
+	s->ptr_in = false;
+	/* Disarm: a press that leaves the window has been abandoned, and
+	 * bringing the pointer back to fire it later would be a click
+	 * nobody made. */
+	s->press_place = -1;
+	s->press_row = -1;
+	pointer_update_hover(s);
+}
+
+static void pointer_motion(void *data, struct wl_pointer *p, uint32_t time,
+		wl_fixed_t sx, wl_fixed_t sy) {
+	struct novi_files *s = data;
+	s->ptr_x = wl_fixed_to_double(sx);
+	s->ptr_y = wl_fixed_to_double(sy);
+	pointer_update_hover(s);
+}
+
+static void pointer_button(void *data, struct wl_pointer *p, uint32_t serial,
+		uint32_t time, uint32_t button, uint32_t state) {
+	struct novi_files *s = data;
+	if (button != BTN_LEFT) {
+		return;
+	}
+	/* A prompt owns the whole program while it is up -- the same rule
+	 * the keyboard follows. Answering "delete this?" by clicking
+	 * somewhere else is not an answer. */
+	if (s->prompt != PROMPT_NONE) {
+		return;
+	}
+
+	if (state == WL_POINTER_BUTTON_STATE_PRESSED) {
+		s->press_place = place_at(s, s->ptr_x, s->ptr_y, &s->press_eject);
+		s->press_row = row_at(s, s->ptr_x, s->ptr_y);
+		return;
+	}
+
+	/* Released: fire only if the release is over the same thing the
+	 * press was. */
+	int was_place = s->press_place;
+	int was_row = s->press_row;
+	bool was_eject = s->press_eject;
+	s->press_place = -1;
+	s->press_row = -1;
+	s->press_eject = false;
+
+	bool eject_now = false;
+	if (was_place >= 0 && place_at(s, s->ptr_x, s->ptr_y, &eject_now) == was_place) {
+		s->place_sel = was_place;
+		/* Focus goes to the sidebar and stays: the next thing anybody
+		 * does after clicking a volume is often ^E, and it would be an
+		 * unkind surprise for that to say "Tab to Places" when Places
+		 * is exactly where they just clicked. */
+		s->focus_sidebar = true;
+		s->status[0] = '\0';
+		if (was_eject && eject_now) {
+			do_eject(s);
+		} else {
+			go_to(s, s->places[was_place].path);
+		}
+		surface_draw_frame(s);
+		return;
+	}
+
+	if (was_row >= 0 && row_at(s, s->ptr_x, s->ptr_y) == was_row) {
+		bool same = (was_row == s->last_click_row) &&
+			(time - s->last_click_ms) < DOUBLE_CLICK_MS;
+		s->sel = was_row;
+		s->focus_sidebar = false;
+		s->status[0] = '\0';
+		if (same) {
+			/* A double click is one open, not two. Clearing the
+			 * timestamp stops a third click inside the window from
+			 * counting as a second double click and opening again. */
+			s->last_click_ms = 0;
+			s->last_click_row = -1;
+			open_selected(s);
+		} else {
+			s->last_click_ms = time;
+			s->last_click_row = was_row;
+		}
+		scroll_to_sel(s);
+		surface_draw_frame(s);
+	}
+}
+
+static void pointer_axis(void *data, struct wl_pointer *p, uint32_t time,
+		uint32_t axis, wl_fixed_t value) {
+	struct novi_files *s = data;
+	if (axis != WL_POINTER_AXIS_VERTICAL_SCROLL) {
+		return;
+	}
+	/* Scrolling moves the VIEW, not the selection -- the convention
+	 * every list has. `top` is clamped so the last screenful cannot be
+	 * scrolled off the bottom into empty space. */
+	int rows = visible_rows(s);
+	int step = wl_fixed_to_double(value) > 0 ? 3 : -3;
+	int max_top = s->nentries - rows;
+	if (max_top < 0) {
+		max_top = 0;
+	}
+	int want = s->top + step;
+	if (want > max_top) {
+		want = max_top;
+	}
+	if (want < 0) {
+		want = 0;
+	}
+	if (want == s->top) {
+		return;
+	}
+	s->top = want;
+	pointer_update_hover(s); /* the row under the pointer just changed */
+	surface_draw_frame(s);
+}
+
+/* wl_pointer version 5 added frame/axis_source/axis_stop/axis_discrete,
+ * and libwayland does not treat a missing handler as "not interested":
+ * it aborts the client with "listener function for opcode 5 of
+ * wl_pointer is NULL" the first time the compositor sends one. Which it
+ * does immediately -- `frame` follows every pointer event group -- so
+ * the window vanished on the first mouse move, with the message on
+ * stderr where nobody was looking.
+ *
+ * This client binds wl_seat at 5 because the KEYBOARD wants it
+ * (repeat_info arrived in 4). novi-panel binds 1 and needs none of
+ * this, which is why its five-entry listener is not the example to
+ * copy. The four below are genuinely no-ops here: scroll is handled
+ * per-axis-event, and nothing needs the frame boundary to batch
+ * against.
+ */
+static void pointer_frame(void *data, struct wl_pointer *p) {
+	(void)data; (void)p;
+}
+
+static void pointer_axis_source(void *data, struct wl_pointer *p,
+		uint32_t axis_source) {
+	(void)data; (void)p; (void)axis_source;
+}
+
+static void pointer_axis_stop(void *data, struct wl_pointer *p,
+		uint32_t time, uint32_t axis) {
+	(void)data; (void)p; (void)time; (void)axis;
+}
+
+static void pointer_axis_discrete(void *data, struct wl_pointer *p,
+		uint32_t axis, int32_t discrete) {
+	(void)data; (void)p; (void)axis; (void)discrete;
+}
+
+static const struct wl_pointer_listener pointer_listener = {
+	.enter = pointer_enter,
+	.leave = pointer_leave,
+	.motion = pointer_motion,
+	.button = pointer_button,
+	.axis = pointer_axis,
+	.frame = pointer_frame,
+	.axis_source = pointer_axis_source,
+	.axis_stop = pointer_axis_stop,
+	.axis_discrete = pointer_axis_discrete,
+};
+
 static void seat_capabilities(void *data, struct wl_seat *seat, uint32_t caps) {
 	struct novi_files *s = data;
 	if ((caps & WL_SEAT_CAPABILITY_KEYBOARD) && s->keyboard == NULL) {
 		s->keyboard = wl_seat_get_keyboard(seat);
 		wl_keyboard_add_listener(s->keyboard, &keyboard_listener, s);
+	}
+	if ((caps & WL_SEAT_CAPABILITY_POINTER) && s->pointer == NULL) {
+		s->pointer = wl_seat_get_pointer(seat);
+		wl_pointer_add_listener(s->pointer, &pointer_listener, s);
 	}
 }
 
@@ -1714,6 +2039,13 @@ int main(int argc, char **argv) {
 	xdg_toplevel_set_title(s.xdg_toplevel, "Files");
 	xdg_toplevel_set_app_id(s.xdg_toplevel, "novi-files");
 
+	s.hover_place = -1;
+	s.hover_row = -1;
+	s.press_place = -1;
+	s.press_row = -1;
+	s.last_click_row = -1;
+	s.devices_head_y = -1;
+
 	places_refresh(&s);
 
 	wl_surface_commit(s.surface);
@@ -1796,6 +2128,9 @@ int main(int argc, char **argv) {
 		close(s.mounts_fd);
 	}
 
+	if (s.pointer != NULL) {
+		wl_pointer_destroy(s.pointer);
+	}
 	free(s.entries);
 	if (s.xkb_state != NULL) {
 		xkb_state_unref(s.xkb_state);

@@ -272,9 +272,8 @@ saying what to mount it as.
 - ~~**No file-manager integration.**~~ Done. `novi-files` has a places
   sidebar — Home, Filesystem, and a DEVICES section that appears and
   disappears as media comes and goes, with `^E` to eject. It is
-  keyboard-driven (Tab moves between the two lists) because that
-  program has never had a pointer; adding one is its own change.
-  See the addendum below.
+  keyboard-driven *and* clickable — the pointer landed in the same
+  work; see the addendum below.
 - **No desktop notification** that something was mounted, because
   there is no notification system.
 - **No per-user mounts.** Everything is mounted as root; see the
@@ -334,6 +333,46 @@ this RFC visible to somebody who is not on a console.
   `novi_text_truncate()`, because two clients now need it and two
   copies is how they end up truncating differently.
 
+### And a pointer
+
+`novi-files` had been keyboard-only for its whole life, which was
+defensible while it was a list and a path bar and stopped being so the
+moment it grew a sidebar with an eject button in it. Single click
+selects, double click opens, the wheel scrolls, a sidebar click
+navigates, and the eject glyph is a button. Every keyboard path is
+unchanged and the program is still completely usable with no pointer
+at all.
+
+- **The sidebar's row geometry moved out of `render()` into
+  `layout_places()`**, cached per place, because the hit-test needs the
+  same arithmetic — and two copies that disagreed by one row would mean
+  clicking eject on a volume you were not pointing at. Same
+  single-source-of-truth arrangement as novi-panel's
+  `layout_taskbar()`, with sharper consequences.
+- **`wl_pointer` version 5 added `frame`, `axis_source`, `axis_stop`
+  and `axis_discrete`, and libwayland does not treat a missing handler
+  as "not interested"** — it aborts the client with *"listener function
+  for opcode 5 of wl_pointer is NULL"* the first time one arrives,
+  which is immediately, because `frame` follows every pointer event
+  group. The window vanished on the first mouse move with the message
+  on stderr where nobody was looking. This client binds `wl_seat` at 5
+  because the *keyboard* wants it (`repeat_info` arrived in 4);
+  novi-panel binds 1 and needs none of them, which is why its
+  five-entry listener was the wrong example to copy.
+- **`row_at()` rejects a y past the last entry.** Without that, a click
+  in the empty space below a short listing selects whatever index the
+  arithmetic produced.
+- **A click while a prompt is open is ignored**, the same rule the
+  keyboard follows: answering "delete this?" by clicking somewhere else
+  is not an answer.
+- Press-then-release-in-bounds, and a press that leaves the window is
+  disarmed — bringing the pointer back to fire it later would be a
+  click nobody made.
+- Double-click uses the compositor's own millisecond timestamp from
+  `wl_pointer.button`, not a clock read in the client: the latter
+  measures when the client got round to processing the event, not when
+  the button went down.
+
 Verified on a booted desktop, driven by real keystrokes through QMP:
 the DEVICES section appears within a second of a stick being plugged
 in and grows a second row when another arrives, both while the window
@@ -343,3 +382,13 @@ saying *"ejected NOVI_FAT — safe to unplug"*; `^E` on a busy volume
 refuses with *"NOVI_EXT4 is busy — close what is using it"* and leaves
 it mounted; and `^E` on Filesystem says *"Filesystem is not a
 removable volume"* rather than doing something clever.
+
+The pointer was verified the same way, with a `usb-tablet` (absolute
+coordinates, so a test points at a pixel instead of accumulating
+relative motion and hoping): hovering highlights the row under the
+cursor; a single click selects and does **not** open (`novi-edit` never
+starts); a double click opens the directory; clicking a device in the
+sidebar navigates into it and clicking its eject glyph ejects it; the
+wheel scrolls and clamps at both ends, with the last screenful staying
+put rather than scrolling off into empty space; and a click below the
+last row does nothing.

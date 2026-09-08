@@ -655,11 +655,13 @@ BUG_REPORT_URL="https://github.com/newvantageco/novi/issues"
       because that is what sticks actually are (`novi-eject`, RFC 0023)
 - [x] A places sidebar in the file manager — volumes appear and vanish
       live, with eject, while the window is open
+- [x] A mouse in the file manager — click to select, double-click to open,
+      wheel to scroll, click a device to open it or its glyph to eject
 - [ ] **Boot it on real hardware** ← next, and nothing here replaces it
 - [ ] A published repository + offline release key
 - [ ] A Microsoft-signed shim (real Secure Boot); OWE and SAE-PK
       (compiled in, untested)
-- [ ] Idle-suspend and low-battery; Mesa; a pointer in the file manager
+- [ ] Idle-suspend and low-battery; Mesa; desktop notifications
 - [ ] More state domains: keybindings, static IP
 - [ ] Boot splash
 

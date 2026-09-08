@@ -295,6 +295,24 @@ section that appears and vanishes as media comes and goes.
   renamed `home` to `house`: `icons/home.svg` is a 404 at that commit.
 - `novi_text_truncate()` lives in `common/text.c` now — two clients
   need it, and two copies is how they end up truncating differently.
+- **`wl_pointer` v5 aborts the client on a NULL listener slot.**
+  Version 5 added `frame`, `axis_source`, `axis_stop` and
+  `axis_discrete`; libwayland does not treat a missing handler as "not
+  interested", it kills the client with *"listener function for opcode
+  5 of wl_pointer is NULL"* — immediately, because `frame` follows
+  every pointer event group. novi-files binds `wl_seat` at 5 for the
+  KEYBOARD (`repeat_info` arrived in 4); novi-panel binds 1 and needs
+  none of them, so its five-entry listener is the wrong thing to copy.
+- **The sidebar's row geometry lives in `layout_places()`, not in
+  `render()`**, because the hit-test needs the same arithmetic and two
+  copies disagreeing by one row means clicking eject on a volume you
+  were not pointing at.
+- **`row_at()` must reject a y past the last entry**, or a click in the
+  empty space below a short listing selects whatever index the
+  arithmetic produced.
+- Double-click uses the timestamp `wl_pointer.button` carries, not a
+  clock read in the client — the latter measures when the client got
+  round to the event, not when the button went down.
 
 ## Architecture: removable media
 
