@@ -30,6 +30,8 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #include <wayland-server-core.h>
 #include <wlr/backend.h>
@@ -95,6 +97,38 @@
  * Until this existed there was NO WAY to turn the machine off from the
  * desktop -- not a button, not a menu, not a binding. You switched to
  * a TTY and typed poweroff. */
+/* Idle blanking. Until this existed the screen stayed lit forever --
+ * on a laptop that is the panel and the battery, and every operating
+ * system in the world turns the display off eventually.
+ *
+ * The timeout is DECLARED (`power.blank` in system.conf, seconds or
+ * `off`) and READ AT USE TIME, which is the same shape power.lid and
+ * storage.automount already have: nothing holds it, so it cannot
+ * drift and `apply` has nothing to converge. "Use time" here is the
+ * moment the idle period elapses -- at most once per period, which is
+ * why forking novi-state for it is affordable when doing so on every
+ * keystroke would not be. The screen is about to go dark anyway. */
+#define NOVI_BLANK_DEFAULT_SECONDS 600
+#define NOVI_BLANK_KEY "power.blank"
+#define NOVI_STATE_FILE "/etc/novi/system.conf"
+/* How often the idle clock advances and the declared timeout is
+ * re-read. Five seconds is the granularity of blanking and the worst
+ * case for a change taking effect; it costs one small file read. */
+#define NOVI_IDLE_TICK_MS 5000
+/* What the compositor is doing about idling, published for anything
+ * that wants to know -- the same arrangement the network service uses
+ * for the interface it chose (RFC 0009), and for the same reason: a
+ * second party guessing at a fact this process already holds is a
+ * second answer to a question with one.
+ *
+ * It also makes the feature TESTABLE, which turned out to matter more
+ * than expected. A screendump cannot see blanking (QEMU captures the
+ * framebuffer, so a dark connector looks identical to a lit one), and
+ * a connector's `dpms` attribute under /sys/class/drm reports the
+ * legacy property, which an atomic
+ * modeset need not touch. Two observables that both look like the
+ * feature is broken when it is fine are worse than none. */
+#define NOVI_IDLE_FILE "/run/novi/idle"
 #define NOVI_DEFAULT_POWER_MENU "novi-launcher --power"
 #define NOVI_DEFAULT_LOCK "novi-lockscreen"
 /* The zwlr_layer_surface_v1 namespace novi-lockscreen identifies itself
@@ -240,6 +274,15 @@ struct novi_server {
 	struct wlr_output_layout *output_layout;
 	struct wl_list outputs;
 	struct wl_listener new_output;
+
+	/* Idle blanking. `blank_after` is seconds, 0 meaning never; it is
+	 * re-read from the document each time the timer fires, so changing
+	 * it takes effect at the next idle period rather than needing the
+	 * session restarted. */
+	struct wl_event_source *idle_timer;
+	int blank_after;
+	int idle_ms;
+	bool blanked;
 
 	/* Layer-shell (RFC 0001 decision 5: the panel/launcher UI layer is
 	 * built as a client of this protocol, not baked into the
@@ -420,6 +463,166 @@ static void unminimize_toplevel(struct novi_toplevel *toplevel);
  * the same way minimize_toplevel()/unminimize_toplevel() own .minimized). */
 static void switch_workspace(struct novi_server *server, int workspace);
 static void move_focused_to_workspace(struct novi_server *server, int workspace);
+
+/* ── Idle blanking ─────────────────────────────────────────────────
+ *
+ * The screen never turned itself off. On a laptop that is the panel
+ * and the battery, and it is the one thing every operating system in
+ * the world does that this one did not.
+ *
+ * Blanking is `wlr_output_state_set_enabled(false)`, which on the DRM
+ * backend puts the connector into DPMS off and on the Wayland/X11
+ * backends is a no-op the compositor survives. Deliberately NOT a
+ * black rectangle over the scene: that leaves the backlight on, which
+ * is most of what there was to save.
+ */
+
+/* Logs the COMMIT RESULT, not the intent, and that is the whole point
+ * of the line. A screendump cannot see this: QEMU captures the
+ * framebuffer, so a connector in DPMS off looks exactly like one that
+ * is lit, and the only honest evidence that blanking happened is the
+ * compositor saying the atomic commit was accepted. This is the
+ * "s6-rc said up" mistake in a new place -- calling a function is not
+ * the same as the hardware doing what it was asked. */
+static void idle_set_outputs(struct novi_server *server, bool on) {
+	struct novi_output *output;
+	wl_list_for_each(output, &server->outputs, link) {
+		struct wlr_output_state state;
+		wlr_output_state_init(&state);
+		wlr_output_state_set_enabled(&state, on);
+		bool ok = wlr_output_commit_state(output->wlr_output, &state);
+		wlr_output_state_finish(&state);
+		wlr_log(ok ? WLR_INFO : WLR_ERROR,
+			"idle: output %s %s %s", output->wlr_output->name,
+			on ? "on" : "off", ok ? "committed" : "REFUSED BY THE BACKEND");
+	}
+}
+
+/* The declared timeout in seconds, 0 meaning never, read straight out
+ * of the document. NOT by forking `novi-state get`: that is a shell
+ * script, and running one on the compositor's event loop stalls every
+ * window on the screen for as long as it takes. Reading the file
+ * breaks no invariant -- novi-settings' System panel reads it directly
+ * for the same reason, and only WRITES have to go through
+ * `novi-state set` (CLAUDE.md).
+ *
+ * A few hundred bytes, parsed every tick, with no process created. The
+ * first version of this forked once per idle period instead, and the
+ * cost was not the fork: it was that the value could then only be
+ * re-read when the period elapsed, so changing 600 to 10 took ten
+ * minutes to take effect. That is not "read at use time", it is read
+ * at the least useful time available. */
+static int idle_read_timeout(void) {
+	FILE *f = fopen(NOVI_STATE_FILE, "r");
+	if (f == NULL) {
+		return NOVI_BLANK_DEFAULT_SECONDS;
+	}
+	char line[512];
+	int result = NOVI_BLANK_DEFAULT_SECONDS;
+	while (fgets(line, sizeof(line), f) != NULL) {
+		char *hash = strchr(line, '#');
+		if (hash != NULL) {
+			*hash = '\0';
+		}
+		char *eq = strchr(line, '=');
+		if (eq == NULL) {
+			continue;
+		}
+		*eq = '\0';
+		char *key = line;
+		while (*key == ' ' || *key == '\t') {
+			key++;
+		}
+		char *kend = key + strlen(key);
+		while (kend > key && (kend[-1] == ' ' || kend[-1] == '\t')) {
+			*--kend = '\0';
+		}
+		if (strcmp(key, NOVI_BLANK_KEY) != 0) {
+			continue;
+		}
+		char *val = eq + 1;
+		while (*val == ' ' || *val == '\t') {
+			val++;
+		}
+		char *vend = val + strlen(val);
+		while (vend > val && (vend[-1] == ' ' || vend[-1] == '\t' ||
+				vend[-1] == '\n' || vend[-1] == '\r')) {
+			*--vend = '\0';
+		}
+		if (strcmp(val, "off") == 0) {
+			result = 0;
+		} else {
+			char *num_end = NULL;
+			long v = strtol(val, &num_end, 10);
+			/* An unusable value falls back to the default rather than
+			 * to "never": a typo in this key should not silently
+			 * disable the thing it configures. novi-state's observer
+			 * reports it as drift, which is where a person finds out. */
+			if (num_end != val && *num_end == '\0' && v >= 0 && v <= 86400) {
+				result = (int)v;
+			}
+		}
+		break;
+	}
+	fclose(f);
+	return result;
+}
+
+/* The timer is a plain TICK, not "fire once after the timeout". That
+ * is what lets the declared value be re-read on a schedule of its own
+ * -- a change takes effect within one tick instead of at the end of
+ * however long the OLD timeout was. */
+/* `<blanked> <idle seconds> <timeout seconds>` on one line, rewritten
+ * each tick. Written to a temp name and renamed so a reader on its own
+ * schedule never sees half of it, the same rule the health service
+ * follows. */
+static void idle_publish(const struct novi_server *server) {
+	char tmp[] = NOVI_IDLE_FILE ".tmp";
+	FILE *f = fopen(tmp, "w");
+	if (f == NULL) {
+		return;
+	}
+	fprintf(f, "%d %d %d\n", server->blanked ? 1 : 0,
+		server->idle_ms / 1000, server->blank_after);
+	fclose(f);
+	if (rename(tmp, NOVI_IDLE_FILE) != 0) {
+		unlink(tmp);
+	}
+}
+
+static void idle_arm(struct novi_server *server) {
+	if (server->idle_timer == NULL) {
+		return;
+	}
+	wl_event_source_timer_update(server->idle_timer, NOVI_IDLE_TICK_MS);
+}
+
+/* Any input at all. Called from the keyboard and pointer paths rather
+ * than from a wlr_idle_notifier, because this compositor already sees
+ * every event and an extra protocol object to re-derive that would be
+ * a second answer to a question with one. */
+static void idle_notify_activity(struct novi_server *server) {
+	server->idle_ms = 0;
+	if (server->blanked) {
+		server->blanked = false;
+		idle_set_outputs(server, true);
+		idle_publish(server);
+	}
+}
+
+static int idle_timer_fire(void *data) {
+	struct novi_server *server = data;
+	server->idle_ms += NOVI_IDLE_TICK_MS;
+	server->blank_after = idle_read_timeout();
+	if (!server->blanked && server->blank_after > 0 &&
+			server->idle_ms >= server->blank_after * 1000) {
+		server->blanked = true;
+		idle_set_outputs(server, false);
+	}
+	idle_publish(server);
+	idle_arm(server);
+	return 0;
+}
 
 static void focus_toplevel(struct novi_toplevel *toplevel, struct wlr_surface *surface) {
 	/* Note: this function only deals with keyboard focus. */
@@ -750,6 +953,13 @@ static void keyboard_handle_key(
 	struct novi_server *server = keyboard->server;
 	struct wlr_keyboard_key_event *event = data;
 	struct wlr_seat *seat = server->seat;
+
+	/* Any key at all wakes the screen, INCLUDING one that goes on to
+	 * be swallowed as a keybinding or dropped because the session is
+	 * locked. Pressing a key is the user being present, whatever the
+	 * key turns out to mean -- and waking on a locked session is
+	 * exactly right: the lock screen is what you came back to see. */
+	idle_notify_activity(server);
 
 	/* Translate libinput keycode -> xkbcommon */
 	uint32_t keycode = event->keycode + 8;
@@ -1483,6 +1693,7 @@ static void process_cursor_resize(struct novi_server *server, uint32_t time) {
 }
 
 static void process_cursor_motion(struct novi_server *server, uint32_t time) {
+	idle_notify_activity(server);
 	/* If the mode is non-passthrough, delegate to those functions. */
 	if (server->cursor_mode == NOVI_CURSOR_MOVE) {
 		process_cursor_move(server, time);
@@ -1587,6 +1798,7 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
 	struct novi_server *server =
 		wl_container_of(listener, server, cursor_button);
 	struct wlr_pointer_button_event *event = data;
+	idle_notify_activity(server);
 	/* Notify the client with pointer focus that a button press has occurred */
 	wlr_seat_pointer_notify_button(server->seat,
 			event->time_msec, event->button, event->state);
@@ -3139,6 +3351,24 @@ int main(int argc, char *argv[]) {
 	spawn(getenv("NOVI_PANEL") ? getenv("NOVI_PANEL") : NOVI_DEFAULT_PANEL);
 	spawn(getenv("NOVI_NOTIFYD") ? getenv("NOVI_NOTIFYD") : NOVI_DEFAULT_NOTIFYD);
 	spawn(getenv("NOVI_BG") ? getenv("NOVI_BG") : NOVI_DEFAULT_BG);
+
+	/* Idle blanking. Armed after the backend is up, so the first
+	 * period is measured from a session that actually exists, and read
+	 * once here so a machine that never sees input still blanks. */
+	mkdir("/run/novi", 0755);
+	server.blank_after = idle_read_timeout();
+	idle_publish(&server);
+	server.idle_timer = wl_event_loop_add_timer(
+		wl_display_get_event_loop(server.wl_display), idle_timer_fire, &server);
+	if (server.idle_timer == NULL) {
+		wlr_log(WLR_ERROR, "could not create the idle timer -- "
+			"the screen will never blank");
+	} else {
+		idle_arm(&server);
+		wlr_log(WLR_INFO, "idle blanking: %d second(s)%s", server.blank_after,
+			server.blank_after > 0 ? "" : " (never)");
+	}
+
 	/* Run the Wayland event loop. This does not return until you exit the
 	 * compositor. Starting the backend rigged up all of the necessary event
 	 * loop configuration to listen to libinput events, DRM events, generate

@@ -1878,6 +1878,7 @@ that matters first: software can now be built *for* Novi *on* Novi.
 | 35 | The design language, implemented | ✅ `common/theme.h` is GUI-DESIGN-LANGUAGE.md §1–§3 as C constants and every client includes it; Inter for language, JetBrains Mono for machine values. Real window chrome in `novi-shell/decoration.c` (titles, radius-lg top corners, hover-lit control dots, a nine-slice elevation-1 shadow, drag-to-move). A launcher that lists what is installed instead of showing nothing until you type. A settings panel that edits values, not just switches. **And a power menu — until it existed there was no way to turn this machine off from its own desktop** |
 
 | 36 | Health, consumed | ✅ `init/services/health` samples `novi-state health` every 30s, publishes a verdict to `/run/novi/health`, and notifies on the TRANSITION only; novi-panel draws an amber warning glyph while it is degraded. A service rather than a panel timer, because the check forks ~20 processes and the panel repaints once a second. Verified by breaking a service for real — `mv /sbin/acpid` and restart — and watching `ok` → `degraded acpid` → the glyph appear → the fix → `ok` and the glyph clear, with both notifications in the log |
+| 37 | The screen turns itself off | ✅ `power.blank` in `system.conf` (seconds, or `off`), read by novi-shell each 5s tick so a change takes effect at the next period rather than needing the session restarted. Blanking is `wlr_output_state_set_enabled(false)` — DPMS off, so the backlight goes with it — never a black rectangle over the scene, which would save nothing. A screendump **cannot see this**: QEMU captures the framebuffer, so a dark connector looks exactly like a lit one; the honest evidence is the compositor logging that the atomic commit was accepted, plus `/run/novi/idle`. Verified by watching `off committed` at the timeout and `on committed` from one keypress. **And it found a real bug in `cmd_apply`:** one key that could not converge abandoned every key sorted after it, which is how a live desktop boot ended at a console login prompt five times |
 
 **Next concrete step: still to write the ISO to a USB stick and boot a
 real machine.** This is no longer a development task, and that is the point.
@@ -1912,10 +1913,11 @@ Ordered honestly, what is left after that:
    call an install finished, and a way to see the failing service's
    own last log lines without opening a terminal, are still open — the
    indicator says something is wrong and cannot yet say what.
-5. **The rest of the laptop's decisions** — idle-suspend, screen
-   blanking, brightness and volume keys, low-battery actions. The lid
-   and power button are done (§23) and the power menu (§35) gives
-   suspend a deliberate front door, but nothing happens on its own yet.
+5. **The rest of the laptop's decisions** — idle-suspend, brightness
+   and volume keys, low-battery actions. The lid and power button are
+   done (§23), the power menu (§35) gives suspend a deliberate front
+   door, and the screen now blanks on its own (§37) — but suspending
+   on its own, and the keys above the number row, still do nothing.
 6. **Mesa**, for GPU acceleration. The compositor renders in software,
    which will show on a high-resolution panel.
 7. **Policy for who may halt the machine.** §35's power menu runs as

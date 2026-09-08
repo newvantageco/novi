@@ -572,6 +572,24 @@ observe_key() {
                 *) printf 'unsupported' ;;
             esac
             ;;
+        # power.blank is the same shape again -- novi-shell re-reads it
+        # when the idle period elapses, so nothing holds it, it cannot
+        # drift, and `apply` has nothing to converge. Seconds, or `off`.
+        #
+        # An unusable value is reported as drift for the same reason as
+        # power.lid: converge_key never runs for these keys, so the
+        # observer is the only place a typo can surface. novi-shell
+        # falls back to its built-in default on a bad value rather than
+        # to "never" -- a typo in this key should not silently disable
+        # the thing it configures -- and this is where a person finds
+        # out that is what happened.
+        power.blank)
+            case "$(state_get "$key")" in
+                off) printf 'off' ;;
+                ''|*[!0-9]*) printf 'unsupported' ;;
+                *) state_get "$key" ;;
+            esac
+            ;;
         # storage.automount is the same shape as power.lid, for the
         # same reason: novi-mount reads it when a device arrives, so
         # there is no daemon holding it, it cannot drift, and `apply`
@@ -898,6 +916,15 @@ converge_key() {
                 *) die "$key: must be 'suspend', 'poweroff' or 'ignore', got '$want'" ;;
             esac
             ;;
+        # Read when the idle period elapses, by novi-shell. Nothing to
+        # converge; `apply` is where the typo is reported.
+        power.blank)
+            case "$want" in
+                off) : ;;
+                ''|*[!0-9]*) die "$key: must be a number of seconds or 'off', got '$want'" ;;
+                *) : ;;
+            esac
+            ;;
         # Read at event time by novi-mount, like power.lid -- nothing
         # to converge, everything to check.
         storage.automount)
@@ -1118,11 +1145,33 @@ cmd_apply() {
     # one special case in the sort order. Bounded, because a converger
     # that never satisfies its own observer would otherwise spin
     # forever, and saying so is more useful than hanging.
-    local pass=0 total=0
+    # A key that CANNOT converge must not take the rest of the document
+    # with it, and this is the third safeguard on the list below rather
+    # than a nicety. `converge_key` reports an impossible value by
+    # calling `die`, which ends the script -- so a single unusable key
+    # abandoned every key sorted after it, silently, with an exit status
+    # nobody was reading.
+    #
+    # It cost five boots to find. `power.governor = schedutil` was
+    # declared on a machine with no cpufreq driver; `power` sorts before
+    # `services`, so `services.graphical` was never converged and the
+    # desktop simply did not start. The machine came up to a console
+    # login prompt with one ERROR line in a boot log, and nothing
+    # connecting the two -- the failure was three sections of the
+    # document away from the symptom.
+    #
+    # So: each converge runs in a SUBSHELL, whose exit status is a
+    # value instead of the end of the program. `converge_key` sets no
+    # globals (its effects are on the system -- files, s6-rc), so
+    # nothing is lost by isolating it. A key that fails is recorded and
+    # SKIPPED in later passes, or a document with one bad key would
+    # print the same error three times over.
+    local pass=0 total=0 failed="" failed_n=0
     while [ "$pass" -lt 3 ]; do
         pass=$((pass + 1))
         changed=0
         for key in $(state_keys); do
+            case " $failed " in *" $key "*) continue ;; esac
             # Re-primed each iteration because the previous converge may
             # have moved more than the one service it named: s6-rc brings
             # up a service's declared dependencies with it (novi-shell
@@ -1133,7 +1182,13 @@ cmd_apply() {
             have="$(observe_key "$key")"
             [ "$want" = "$have" ] && continue
             info "$key: $have -> $want"
-            converge_key "$key" "$want"
+            if ! ( converge_key "$key" "$want" ); then
+                failed="$failed $key"
+                failed_n=$((failed_n + 1))
+                warn "$key could not be applied -- continuing with the rest"
+                SERVICE_LIST_LOADED=0
+                continue
+            fi
             SERVICE_LIST_LOADED=0
             changed=$((changed + 1))
         done
@@ -1146,6 +1201,15 @@ cmd_apply() {
     fi
     msg "applied $total change(s)"
     firewall_hole_note
+    # Said again at the end, because the per-key ERROR scrolled past
+    # several sections ago and this is the line a person is still
+    # looking at. Non-zero exit: the document was not reached in full,
+    # and a caller that checks (boot convergence does not -- it must
+    # always exit 0) should hear about it.
+    if [ "$failed_n" -ne 0 ]; then
+        warn "$failed_n key(s) could not be applied:$failed"
+        return 1
+    fi
 }
 
 # Converge at boot, so the document is what the machine actually boots
@@ -1332,6 +1396,7 @@ Keys:
   users.<name>.shell              /bin/sh | absent  (declares the account)
   users.<name>.groups             wheel,video,input | none
   packages.<name>                 present | absent
+  power.blank                     <seconds> | off  (idle screen blank)
   power.governor                  performance | powersave | schedutil | ...
   storage.automount               on | off  (removable media -> /run/media)
   state.apply_on_boot             on | off  (converge on every boot)

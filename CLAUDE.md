@@ -121,6 +121,12 @@ Two invariants worth not breaking:
   file must stay pleasant to hand-edit, or the "GUI and text editor
   write the same document" claim collapses and it becomes another
   machine-owned blob.
+  The same care applies to editing the *shipped* `system.conf` by hand:
+  most of that file is commented-out examples, and a patch that lands
+  one line off turns an example into a declaration. That is how
+  `power.governor = schedutil` — documented right there as *"not set by
+  default"* — became live on every image. Read a `system.conf` diff for
+  what it **uncomments**, not only for what it adds.
 - **Generations snapshot *observed* state, not the state file.** By the
   time `apply` runs, the file already holds the new values, so copying
   it would save the change instead of what the change replaced, and
@@ -203,6 +209,29 @@ Three smaller things worth knowing before extending this:
   function: callers use `have="$(observe_key …)"`, and a command
   substitution is a subshell, so the assignment would be discarded.
   Same subshell trap `packages/pkg` hit for real.
+- **One key that cannot converge must not take the rest of the document
+  with it.** `converge_key` reports an impossible value by calling
+  `die`, which ends the script — so `cmd_apply` abandoned every key
+  sorted *after* the failure, silently, with an exit status nobody read.
+  It cost five boots. `power.governor = schedutil` was declared on a VM
+  with no cpufreq driver; `power` sorts before `services`, and
+  `novi-live-desktop` brings the desktop up by setting
+  `services.novi-shell on` and running `novi-state boot` — so the
+  desktop packages installed, the keys were declared on, and nothing
+  started them. The machine came up to a console login prompt with one
+  ERROR line three sections of the document away from the symptom, and
+  `novi-live-desktop` printed "desktop ready" regardless because every
+  step of it ends in `|| true`. Each converge runs in a **subshell**
+  now, so a failure is a value rather than the end of the program, and
+  a failed key is skipped in later passes (or one bad key prints the
+  same error three times). `apply` returns non-zero; boot convergence
+  still always exits 0.
+- **A key that is *read at use time* is validated in the observer and
+  nowhere else** (`power.blank`, `power.lid`, `power.button`,
+  `storage.automount`). Nothing holds them, so they cannot drift and
+  `apply` has nothing to converge — which also means `converge_key`
+  never runs to reject a typo. `power.blank = ten` reports as
+  `unsupported`, i.e. as drift, which is where a person finds out.
 - **`bash build/16-s6-rc-db.sh` after ANY change under `init/`.** Both
   the s6-rc database and the s6-linux-init scripts are *generated*; the
   running system reads the generated copies, never `init/`, so an
