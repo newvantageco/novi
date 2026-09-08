@@ -22,19 +22,52 @@
 # detection oneshot is the real long-term fix for "load whatever GPU
 # module this machine actually needs."
 modprobe virtio_gpu 2>/dev/null || true
-# wlroots' renderer auto-detection skips pixman whenever the DRM
-# backend reports a render node (assuming GLES2/Vulkan will succeed,
-# then never falling back) -- confirmed by reading
-# render/wlr_renderer.c: the pixman branch is gated on
-# `!has_render_node(backend)` in auto mode, so with a render node
-# present (virtio_gpu provides one, /dev/dri/renderD128) it's skipped
-# entirely, and since this build has no GLES2/Vulkan renderer
-# (deliberately Mesa-free, see build/06-wayland.sh), auto-detection
-# finds nothing and fails with "Could not initialize renderer" even
-# though the DRM backend itself came up correctly. Force pixman
-# explicitly rather than relying on a heuristic tuned for GPU-
-# accelerated builds this one isn't.
-export WLR_RENDERER=pixman
+# WHICH RENDERER, and why it is declared rather than auto-detected.
+#
+# wlroots builds both now (build/06-wayland.sh section 16): pixman,
+# which is mandatory, and gles2 on top of Mesa. Its own auto-detection
+# picks gles2 whenever the DRM backend reports a render node --
+# confirmed by reading render/wlr_renderer.c, where the pixman branch
+# is gated on `!has_render_node(backend)`. That heuristic assumes a
+# render node means hardware acceleration. It does not: virtio_gpu
+# offers /dev/dri/renderD128 in a plain QEMU with no host GL, and what
+# answers there is softpipe, Mesa's pure-software rasteriser.
+#
+# MEASURED, on a booted machine, same load (a terminal flooding output
+# for 20 seconds), novi-shell's own CPU time:
+#
+#     pixman            363 ticks
+#     gles2 (softpipe) 1998 ticks     -- 5.5x more
+#
+# Which is not surprising once stated: software rasterisation THROUGH a
+# GL API is strictly more work than pixman drawing 2D directly. So
+# auto-detection gets this exactly backwards on every machine this
+# project can currently test on.
+#
+# On real hardware with a real driver the answer inverts, and by a much
+# larger factor. Nobody here can measure that, so the default is the
+# one that is measured -- and it is a KEY, not a hardcoded guess, so a
+# machine with a GPU flips one line instead of patching an init script:
+#
+#     novi-state set display.renderer gles2
+#
+# `auto` hands the decision back to wlroots.
+NOVI_RENDERER=pixman
+if [ -r /etc/novi/system.conf ]; then
+    _r=$(sed -n 's/^[[:space:]]*display\.renderer[[:space:]]*=[[:space:]]*\([^#[:space:]]*\).*/\1/p' \
+         /etc/novi/system.conf | tail -1)
+    case "${_r}" in
+        pixman|gles2|auto) NOVI_RENDERER="${_r}" ;;
+        "") : ;;
+        # An unusable value is NOT silently ignored down here, because
+        # down here nobody would ever see it. It falls back to the
+        # measured default and novi-state's observer reports the key as
+        # drift, which is where a person finds out -- the same
+        # arrangement power.blank and storage.automount use.
+        *) echo "novi-shell: display.renderer='${_r}' is not pixman, gles2 or auto -- using pixman" >&2 ;;
+    esac
+fi
+[ "${NOVI_RENDERER}" = auto ] || export WLR_RENDERER="${NOVI_RENDERER}"
 # libwayland-server refuses to create its socket without a valid
 # XDG_RUNTIME_DIR (must exist, be owned by the caller, mode 0700) --
 # confirmed live: with the pixman fix above the DRM backend, renderer

@@ -429,6 +429,59 @@ that wanted none is not there to ask.
   two pixels into the terminal. Measure the geometry off a screendump
   before concluding the code is wrong.
 
+## Architecture: Mesa, and a default chosen by measurement
+
+RFC 0025 (`docs/rfcs/0025-mesa.md`). EGL, GLESv2 and GBM, softpipe and
+virgl, no LLVM. Before this there was no GL stack at all -- not a slow
+one, none -- and no program wanting OpenGL could run here in principle.
+
+- **Both renderers ship and the default is MEASURED.** wlroots'
+  auto-detection picks gles2 whenever the DRM backend reports a render
+  node (`render/wlr_renderer.c` gates the pixman branch on
+  `!has_render_node`), on the assumption that a render node means
+  hardware acceleration. In a plain QEMU it does not: virtio_gpu offers
+  `/dev/dri/renderD128` and what answers is softpipe. Measured under
+  identical load, novi-shell's own CPU over 20s: **pixman 363 ticks,
+  gles2/softpipe 1998 -- 5.5x more.** Software rasterisation THROUGH a
+  GL API is strictly more work than pixman drawing 2D directly. The
+  default is `display.renderer = pixman` and it is a KEY, because on
+  real hardware the answer inverts and nobody here can measure that.
+- **`libgallium` is invisible to the dependency graph.** libEGL loads
+  it by name at runtime, so nothing NEEDs it and `closure()` cannot
+  reach it -- the same dlopen blind spot as libdrm_amdgpu. It is
+  claimed by `PACKAGE_TABLE`, which is exactly why that table exists
+  beside the graph.
+- **Mesa is the first C++ in this image**, so libgallium names
+  `libstdc++.so.6` and `libgcc_s.so.1` and nothing shipped them. They
+  live in the toolchain's `lib64`, which musl's loader never searches
+  (RFC 0015's trap again). RFC 0015's `gcc` package already shipped
+  those exact paths, so they became their own `gcc-libs` package and
+  `gcc` depends on it -- one path, one owner.
+- **zlib moved from stage 21 into the library stage**, because
+  libgallium links it and Mesa has to precede wlroots. A library built
+  after its consumer is invisible in a warm tree and fatal in a clean
+  one: the novi-launcher/fcft bug and the novi-panel/libnl bug, for a
+  THIRD time. `21-imagelibs.sh` now fails loudly if zlib is missing.
+- **`needs_exe_wrapper = true` in the meson cross file.** Meson
+  otherwise auto-detects, correctly concludes it can run target
+  binaries directly (this host has `/lib/ld-musl-x86_64.so.1` symlinked
+  at the sysroot's libc), and runs them without the wrapper's
+  `LD_LIBRARY_PATH` -- so a C++ target binary died on "Error loading
+  shared library libstdc++.so.6" while g++ worked perfectly, reported
+  as "Executables created by cpp compiler ... are not runnable".
+  Exporting `LD_LIBRARY_PATH` globally was rejected: it would apply to
+  the host's own glibc-linked meson, ninja and python.
+- **Mesa's build needs Python `mako` on the BUILD HOST.** Checked up
+  front, like `05-kernel.sh` checks for `depmod`.
+- **`-Dglx=disabled` means no desktop `libGL`.** EGL + GLESv2 is what
+  wlroots wants and is NOT enough for most existing OpenGL games. Do
+  not let the word "Mesa" imply a gaming stack.
+- **`$14` in POSIX sh is `$1` followed by `4`.** A benchmark reading
+  utime+stime out of `/proc/<pid>/stat` with `set --` and `$14`
+  silently measured the pid minus itself and reported 0 CPU ticks
+  twice, which read as "the load never reached the compositor".
+  `${14}`.
+
 ## Architecture: the keys, and the sheet that lists them
 
 `common/keybindings.h` is every keyboard shortcut this desktop has,

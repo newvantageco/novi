@@ -170,10 +170,129 @@ LIBDRM_DIR="$(compgen -G "libdrm-libdrm-${LIBDRM_VERSION}-*")"
 build_meson drm-libdrm "${LIBDRM_VERSION}" -d "${LIBDRM_DIR}" \
     -Dcairo-tests=disabled -Dman-pages=disabled -Dvalgrind=disabled -Dtests=false
 
-# ── 12. libdisplay-info (EDID parsing for the DRM backend) ──────────
+# ── 12. zlib ───────────────────────────────────────────────────────
+#
+# Moved here from 21-imagelibs.sh, where it used to live beside libpng.
+# Mesa links it (libgallium's DT_NEEDED names libz.so.1) and Mesa has
+# to be built before wlroots, so a zlib that only appears at stage 21
+# is a library built AFTER its consumer -- invisible in a warm tree and
+# fatal in a clean one. That is the novi-launcher/fcft bug and the
+# novi-panel/libnl bug for a third time; the rule is that a library
+# more than one thing links belongs in the library stage, and this is
+# the library stage.
+#
+# zlib's configure is hand-written, not autotools: it has no --host and
+# reads CHOST from the environment instead. Passing --host would be
+# silently accepted and ignored -- the same catchall trap the skarnet
+# packages have -- and the build would succeed and produce HOST
+# binaries.
+echo "==> [12/wayland stack] zlib-${ZLIB_VERSION}"
+cd "${SOURCES}"
+rm -rf "zlib-${ZLIB_VERSION}"
+tar -xf "zlib-${ZLIB_VERSION}.tar.gz"
+(
+    cd "zlib-${ZLIB_VERSION}"
+    CHOST="${TARGET_TRIPLE}" \
+    CC="${TARGET_TRIPLE}-gcc" AR="${TARGET_TRIPLE}-ar" \
+    RANLIB="${TARGET_TRIPLE}-ranlib" \
+        ./configure --prefix=/usr >/dev/null
+    make -j"${NPROC}" >/dev/null
+    make DESTDIR="${ROOTFS}" install >/dev/null
+)
+
+# ── 13. Mesa (EGL, GLESv2, GBM) ────────────────────────────────────
+#
+# The GL stack. Until this existed there was none at all: novi-shell
+# rendered through wlroots' pixman software renderer, and no program
+# that wanted OpenGL could run on this system even in principle.
+#
+# WHICH DRIVERS, and why so few:
+#
+#   softpipe  pure software rasterisation and no LLVM. The only driver
+#             guaranteed to work in QEMU without host GL, which makes
+#             it the one the whole pipeline can be VERIFIED on rather
+#             than reasoned about.
+#   virgl     the accelerated path inside a VM -- QEMU's virtio-gpu-gl
+#             passes GL through to the host. Small, and no LLVM either.
+#
+# NOT radeonsi and NOT llvmpipe: both need LLVM, which is an enormous
+# cross-build in its own right. Intel's `iris` needs no LLVM and is the
+# obvious next one, but it could not be verified here -- QEMU emulates
+# no Intel GPU -- so it is deliberately absent rather than shipped
+# untested, the same call as the panel's battery indicator.
+#
+# `-Dglx=disabled` costs desktop libGL: this ships EGL + GLESv2 only.
+# That is exactly what wlroots' gles2 renderer wants, and it is NOT
+# enough for most existing OpenGL games, which want full GL through
+# libglvnd. Worth stating plainly rather than letting "Mesa" imply a
+# gaming stack.
+#
+# `-Dshader-cache=disabled` avoids zstd; zlib is linked regardless,
+# which is why section 12 above exists.
+python3 -c 'import mako' 2>/dev/null || {
+    echo "ERROR: Mesa's build needs the Python 'mako' template engine on" >&2
+    echo "       the BUILD HOST (pip install mako)." >&2
+    echo "       Checked up front rather than left to fail deep inside a" >&2
+    echo "       generated-source rule -- same reason 05-kernel.sh checks" >&2
+    echo "       for depmod before trusting modules_install." >&2
+    exit 1
+}
+echo "==> [13/wayland stack] mesa-${MESA_VERSION}"
+cd "${SOURCES}"
+rm -rf "mesa-${MESA_VERSION}"
+tar -xf "mesa-${MESA_VERSION}.tar.xz"
+cd "mesa-${MESA_VERSION}"
+MESA_SCANNER_PC="$(find "${NATIVE_PREFIX}" -name 'wayland-scanner.pc' -printf '%h' -quit)"
+PKG_CONFIG_PATH_FOR_BUILD="${MESA_SCANNER_PC}" \
+meson_cross build --prefix=/usr --libdir=/usr/lib \
+    -Dgallium-drivers=softpipe,virgl -Dvulkan-drivers= \
+    -Dplatforms=wayland -Degl=enabled -Dgbm=enabled \
+    -Dgles1=disabled -Dgles2=enabled -Dopengl=true \
+    -Dglx=disabled -Dglvnd=disabled \
+    -Dllvm=disabled -Ddraw-use-llvm=false \
+    -Dshader-cache=disabled -Dzstd=disabled -Dosmesa=false \
+    -Dgallium-va=disabled -Dgallium-vdpau=disabled \
+    -Dgallium-xa=disabled -Dgallium-nine=false \
+    -Dgallium-opencl=disabled -Dgallium-rusticl=false \
+    -Dvideo-codecs= -Dvalgrind=disabled -Dlibunwind=disabled \
+    -Dlmsensors=disabled -Dselinux=false -Dperfetto=false \
+    -Dbuild-tests=false -Dtools=
+ninja -C build
+DESTDIR="${ROOTFS}" ninja -C build install
+# 75 of the 82 MB installed is debug info, nearly all in one megadriver.
+"${TARGET_TRIPLE}-strip" "${ROOTFS}"/usr/lib/libgallium-*.so \
+    "${ROOTFS}"/usr/lib/libEGL.so.*.* "${ROOTFS}"/usr/lib/libGLESv2.so.*.* \
+    "${ROOTFS}"/usr/lib/libgbm.so.*.* "${ROOTFS}"/usr/lib/libglapi.so.*.* \
+    2>/dev/null || true
+
+# ── 13b. The C++ runtime ───────────────────────────────────────────
+#
+# Mesa is the first thing in this image with any C++ in it, so
+# libgallium names libstdc++.so.6 and libgcc_s.so.1 in its DT_NEEDED
+# and NOTHING shipped them. They exist only in the cross toolchain, and
+# there in `lib64` -- which musl's loader never searches, since it
+# looks in /lib:/usr/local/lib:/usr/lib and nowhere else. RFC 0015
+# records the identical trap for the native toolchain: C worked
+# perfectly and C++ died at exec.
+#
+# Copied from the toolchain rather than rebuilt: it is the runtime for
+# the exact compiler that produced these objects, and a separate build
+# of it is an ABI risk for no gain.
+echo "==> [13b/wayland stack] libstdc++ / libgcc_s"
+for lib in "${TOOLS}/${TARGET_TRIPLE}/lib64/libstdc++.so.6."* \
+           "${TOOLS}/${TARGET_TRIPLE}/lib64/libgcc_s.so.1"; do
+    case "${lib}" in *-gdb.py) continue ;; esac
+    [ -f "${lib}" ] || continue
+    install -m 755 "${lib}" "${ROOTFS}/usr/lib/$(basename "${lib}")"
+done
+"${TARGET_TRIPLE}-strip" "${ROOTFS}"/usr/lib/libstdc++.so.6.* \
+    "${ROOTFS}"/usr/lib/libgcc_s.so.1 2>/dev/null || true
+( cd "${ROOTFS}/usr/lib" && ln -sfn "$(basename "$(ls libstdc++.so.6.*)")" libstdc++.so.6 )
+
+# ── 14. libdisplay-info (EDID parsing for the DRM backend) ──────────
 build_meson libdisplay-info "${LIBDISPLAY_INFO_VERSION}"
 
-# ── 13. seatd (logind-free seat/session management) ─────────────────
+# ── 15. seatd (logind-free seat/session management) ─────────────────
 #
 # libseat-logind=disabled: no systemd-logind, no elogind, matching
 # RFC 0001's "no systemd anywhere" decision explicitly, not just by
@@ -182,18 +301,26 @@ build_meson seatd "${SEATD_VERSION}" \
     -Dlibseat-logind=disabled -Dlibseat-seatd=enabled -Dserver=enabled \
     -Dman-pages=disabled
 
-# ── 14. wlroots ────────────────────────────────────────────────────
+# ── 16. wlroots ────────────────────────────────────────────────────
 #
-# First milestone is "a compositor can come up and render," not "full
-# hardware acceleration" -- so this deliberately stays Mesa-free:
-#   - renderers=[] : only the mandatory pixman (software) renderer
-#     builds; wlroots' optional gles2/vulkan renderers are skipped.
-#   - allocators=[]: only wlroots' always-built-in shm + DRM dumb-buffer
-#     allocators are used; the optional gbm allocator (needs libgbm,
-#     i.e. Mesa) is skipped. Confirmed by reading
-#     render/allocator/meson.build directly: allocator.c, shm.c and
-#     drm_dumb.c are unconditional sources, gbm.c is added only if the
-#     'gbm' feature is requested.
+# This used to be built deliberately Mesa-free -- `renderers=[]` and
+# `allocators=[]`, so only the mandatory pixman software renderer and
+# the built-in shm / DRM-dumb-buffer allocators existed. That was the
+# right call while the first milestone was "a compositor can come up
+# and render at all" and there was no GL stack to link against. Mesa
+# (section 13) is that stack, so:
+#
+#   - renderers=gles2 : builds the GL renderer ALONGSIDE pixman, which
+#     is mandatory and always present. Both ship, and wlroots picks at
+#     runtime -- `WLR_RENDERER=pixman` or `=gles2` forces either. That
+#     is deliberate: in QEMU there is no host GL, so gles2 runs on
+#     softpipe, and software rasterisation through a GL API is not
+#     obviously faster than pixman drawing directly. Shipping both is
+#     what makes it possible to MEASURE that rather than assume it.
+#   - allocators=gbm : the GL renderer needs buffers it can render
+#     into. Confirmed by reading render/allocator/meson.build:
+#     allocator.c, shm.c and drm_dumb.c are unconditional sources,
+#     gbm.c is added only if the 'gbm' feature is requested.
 #   - xwayland=disabled, xcb-errors=disabled: no X11 anywhere yet.
 #   - backends=drm,libinput: no x11 backend (nested-in-X11 testing
 #     backend, irrelevant here).
@@ -202,11 +329,11 @@ build_meson seatd "${SEATD_VERSION}" \
 # both missing on the first configure attempt -- added after reading
 # the actual meson.build dependency() calls, not guessed.
 build_meson wlroots "${WLROOTS_VERSION}" \
-    -Drenderers=[] -Dbackends=drm,libinput -Dallocators=[] \
+    -Drenderers=gles2 -Dbackends=drm,libinput -Dallocators=gbm \
     -Dxwayland=disabled -Dexamples=false -Dcolor-management=disabled \
     -Dlibliftoff=disabled -Dxcb-errors=disabled
 
-# ── 15. xkeyboard-config (runtime keyboard layout database) ───────
+# ── 17. xkeyboard-config (runtime keyboard layout database) ───────
 #
 # libxkbcommon (step 5) builds and links fine on its own, but it does
 # not embed any keyboard layout data -- xkb_keymap_new_from_names()

@@ -1882,6 +1882,7 @@ that matters first: software can now be built *for* Novi *on* Novi.
 | 38 | The volume keys | ✅ `novi-volume` over amixer in the base image, the XF86Audio* keysyms bound by novi-shell, and a speaker glyph in the panel fed by `/run/novi/volume` — no fork in a once-a-second repaint, the same published-state arrangement as the network interface. Never hardcodes `Master`: it picks the first control ALSA reports with `pvolume`, because QEMU's card invents its own names and a tool assuming the standard one fails on the only machine this project can test on. Volume-up unmutes and volume-down does not. **Media keys fire while the session is locked** — and the proof is not that the level changed, it is that the *plain* password then unlocked on the first try, so the keys were swallowed rather than typed into the field |
 | 39 | The keys, and a sheet that lists them | ✅ `common/keybindings.h` is every shortcut once: novi-shell dispatches from it, `novi-launcher --keys` (Super+/) displays it, so the sheet cannot tell you a key that does not work. Until this, every binding lived only in a switch statement and a person who booted the ISO could not discover Alt+Space or Super+L short of reading the source. Reachable BOTH by Super+/ and as an ordinary Apps entry, because a list of keyboard shortcuts reachable only by a keyboard shortcut is a bootstrapping paradox. All sixteen bindings re-verified live after the refactor |
 | 40 | Nothing reaped the compositor's children | ✅ `spawn()` forked and never waited and novi-shell had no SIGCHLD handler, so every launcher, screenshot and terminal left a zombie for the life of the session — under a comment that said setsid() made reaping unnecessary, which is wrong. Invisible until the volume keys made it one zombie per keystroke: measured, twelve presses gave twelve zombies, and none after the fix |
+| 41 | Mesa | ✅ RFC 0025. EGL, GLESv2 and GBM with softpipe and virgl and no LLVM, in the library stage; wlroots rebuilt with its gles2 renderer and gbm allocator. Before this there was no GL stack at all. Both renderers ship and the default is **measured, not assumed**: wlroots' auto-detection picks gles2 whenever a render node exists, and in a VM what answers there is softpipe — pixman 363 CPU ticks against gles2's 1998 under identical load, 5.5x. So `display.renderer` is a declared key defaulting to pixman, because on real hardware the answer inverts and nobody here can measure that |
 
 **Next concrete step: still to write the ISO to a USB stick and boot a
 real machine.** This is no longer a development task, and that is the point.
@@ -1925,8 +1926,14 @@ Ordered honestly, what is left after that:
    backlight, so `/sys/class/backlight` is empty and the code could be
    written and could not be verified. Same call as the panel's absent
    battery indicator.
-6. **Mesa**, for GPU acceleration. The compositor renders in software,
-   which will show on a high-resolution panel.
+6. **The rest of Mesa.** §41 built the stack — EGL, GLESv2, GBM,
+   softpipe and virgl — so a GL program can run here at all now. What
+   is left is the part that makes it fast: `iris` for Intel (no LLVM,
+   and the largest real-world win available, but unverifiable here),
+   LLVM and with it llvmpipe and radeonsi, and libglvnd for desktop
+   `libGL`, without which most existing OpenGL software cannot run.
+   And re-measuring on metal: every number behind the current default
+   is software rasterisation in a VM.
 7. **Policy for who may halt the machine.** §35's power menu runs as
    whoever runs the desktop, which today is root. With real user
    accounts, "can this person shut down the system" is a question this

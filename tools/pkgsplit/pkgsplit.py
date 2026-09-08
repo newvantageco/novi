@@ -170,6 +170,27 @@ PACKAGE_TABLE = [
      [r"^novi-notifyd$"]),
     ("novi-bg",          "OS",            "Desktop background",
      [r"^novi-bg$"]),
+    # Mesa. libgallium is the reason this entry cannot be left to the
+    # dependency graph: libEGL loads it by NAME at runtime, so nothing
+    # NEEDs it and closure() cannot see it -- the same dlopen blind
+    # spot as libdrm_amdgpu/nouveau/radeon, which is why the table
+    # claims what is ours rather than trusting reachability alone.
+    ("mesa",             "MESA",          "OpenGL ES and EGL implementation (softpipe, virgl)",
+     [r"^libEGL\.so", r"^libGLESv2\.so", r"^libgbm\.so",
+      r"^libglapi\.so", r"^libgallium-"]),
+    # The GCC runtime, as its OWN package rather than part of either
+    # mesa or the toolchain.
+    #
+    # Mesa is the first thing in the image with C++ in it, and RFC
+    # 0015's `gcc` package was already shipping these exact paths --
+    # /usr/lib/libstdc++.so.6* and /usr/lib/libgcc_s.so.1 -- so
+    # claiming them here without changing that would give one path two
+    # owners. 28-native-toolchain.sh drops them from `gcc` and depends
+    # on this instead. Splitting the runtime out from the compiler is
+    # what every distribution does, for exactly this reason: things
+    # need to RUN C++ far more often than they need to compile it.
+    ("gcc-libs",         "GCC",           "GCC runtime libraries (libstdc++, libgcc_s)",
+     [r"^libstdc\+\+\.so", r"^libgcc_s\.so"]),
 ]
 
 # Data directories that belong to a package but contain no ELF, so the

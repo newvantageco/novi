@@ -42,6 +42,12 @@ LIBEVDEV_VERSION="1.13.3"
 MTDEV_VERSION="1.1.7"
 LIBINPUT_VERSION="1.26.2"
 LIBDRM_VERSION="2.4.122"
+# Mesa: the GL stack. 24.2 is the release contemporary with wlroots
+# 0.18 / libdrm 2.4.122 / Wayland 1.23 above -- and the era matters
+# more than newness here, because Mesa's driver set has been moving
+# toward a hard Rust dependency and toward LLVM for more of itself,
+# and neither is a thing this cross-toolchain has.
+MESA_VERSION="24.2.8"
 SEATD_VERSION="0.9.3"
 LIBDISPLAY_INFO_VERSION="0.2.0"
 WLROOTS_VERSION="0.18.0"

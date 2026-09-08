@@ -28,23 +28,22 @@ CROSS="${TOOLS}/bin/${TARGET_TRIPLE}"
 WORK="${BUILD_DIR}/imagelibs-build"
 rm -rf "${WORK}"; mkdir -p "${WORK}"
 
-# ── zlib ──────────────────────────────────────────────────────────────
+# zlib is NOT built here any more -- it moved to 06-wayland.sh.
 #
-# zlib's configure is hand-written, not autotools: it has no --host and
-# reads CHOST from the environment instead. Passing --host would be
-# silently accepted and ignored, which is the same catchall trap the
-# skarnet packages have (see CLAUDE.md) -- the build would succeed and
-# produce host binaries.
-echo ">>> Building zlib ${ZLIB_VERSION} ..."
-tar -xf "${SOURCES}/zlib-${ZLIB_VERSION}.tar.gz" -C "${WORK}"
-(
-    cd "${WORK}/zlib-${ZLIB_VERSION}"
-    CHOST="${TARGET_TRIPLE}" \
-    CC="${CROSS}-gcc" AR="${CROSS}-ar" RANLIB="${CROSS}-ranlib" \
-        ./configure --prefix=/usr >/dev/null
-    make -j"$(nproc)" >/dev/null
-    make DESTDIR="${ROOTFS}" install >/dev/null
-)
+# Mesa links it (libgallium's DT_NEEDED names libz.so.1), and Mesa has
+# to exist before wlroots so wlroots can be built with the gles2
+# renderer. A library built at stage 21 and linked by stage 06 is
+# invisible in a warm tree and fatal in a clean one -- exactly the
+# novi-launcher/fcft and novi-panel/libnl bug, which this repository
+# has now had three times. The rule it keeps rediscovering: a library
+# more than one thing links belongs in the library stage.
+#
+# This stage still needs zlib for libpng below; by the time it runs,
+# 06 has installed it.
+if [ ! -f "${ROOTFS}/usr/lib/libz.so.1" ]; then
+    echo "ERROR: zlib is missing from ${ROOTFS} -- run build/06-wayland.sh." >&2
+    exit 1
+fi
 
 # ── libpng ────────────────────────────────────────────────────────────
 echo ">>> Building libpng ${LIBPNG_VERSION} ..."
