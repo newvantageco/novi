@@ -92,9 +92,14 @@
 #define ROW_H 40
 #define MAX_ROWS 6
 #define LIST_PAD NOVI_SP_SM
+/* A strip under the list, present only when there are matches the list
+ * could not fit. See rebuild_results(): a list that shows six of
+ * nineteen and says nothing is the same defect the System panel had,
+ * and this file had it too. */
+#define MORE_H 20
 /* Header + its hairline + padded list. The tallest the card can get,
  * and therefore how much buffer has to exist. */
-#define CARD_MAX_HEIGHT (HEADER_H + 1 + 2 * LIST_PAD + MAX_ROWS * ROW_H)
+#define CARD_MAX_HEIGHT (HEADER_H + 1 + 2 * LIST_PAD + MAX_ROWS * ROW_H + MORE_H)
 
 /* Every colour here used to be a local hex literal -- including a
  * result row in 0xff8ab4f8, which is Google's blue and belongs to no
@@ -257,6 +262,9 @@ struct novi_launcher {
 	 * contents. */
 	struct result results[MAX_ROWS];
 	size_t result_count;
+	/* Every match, not just the ones that fit. The difference is what
+	 * the "more" strip reports. */
+	size_t match_total;
 	size_t selected;
 	int card_h;
 };
@@ -675,7 +683,11 @@ static void copy_to_clipboard(struct novi_launcher *state, const char *utf8) {
  * calculator is one more row in the same list rather than a separate
  * display mode. */
 
+/* Counts every match and keeps the first MAX_ROWS of them. The count
+ * is the point: a launcher that silently shows six of nineteen leaves
+ * you believing the other thirteen are not installed. */
 static void push_result(struct novi_launcher *state, const struct result *r) {
+	state->match_total++;
 	if (state->result_count < MAX_ROWS) {
 		state->results[state->result_count++] = *r;
 	}
@@ -683,10 +695,13 @@ static void push_result(struct novi_launcher *state, const struct result *r) {
 
 static void rebuild_results(struct novi_launcher *state) {
 	state->result_count = 0;
+	state->match_total = 0;
 
 	if (state->symbol_mode) {
-		for (size_t i = 0; i < sizeof(SYMBOLS) / sizeof(SYMBOLS[0]) &&
-				state->result_count < MAX_ROWS; i++) {
+		/* Runs over the whole table rather than stopping at MAX_ROWS:
+		 * push_result() keeps only what fits, but the total has to be
+		 * counted to be reported. */
+		for (size_t i = 0; i < sizeof(SYMBOLS) / sizeof(SYMBOLS[0]); i++) {
 			if (state->input_len > 0 &&
 					!app_name_matches(SYMBOLS[i].name, state->input)) {
 				continue;
@@ -699,8 +714,7 @@ static void rebuild_results(struct novi_launcher *state) {
 			push_result(state, &r);
 		}
 	} else {
-		for (size_t i = 0; i < state->app_count &&
-				state->result_count < MAX_ROWS; i++) {
+		for (size_t i = 0; i < state->app_count; i++) {
 			/* id as well as name: someone typing the binary or package
 			 * name they already know ("foot") should find it even
 			 * though its display name ("Terminal") contains no part of
@@ -740,6 +754,9 @@ static void rebuild_results(struct novi_launcher *state) {
 	if (state->result_count > 0) {
 		state->card_h += 1 + 2 * LIST_PAD +
 			(int)state->result_count * ROW_H;
+	}
+	if (state->match_total > state->result_count) {
+		state->card_h += MORE_H;
 	}
 }
 
@@ -1068,6 +1085,19 @@ static void render(struct novi_launcher *state, uint32_t *px,
 				r->meta, NOVI_PIX(NOVI_TEXT_MUTED));
 		}
 	}
+	if (state->match_total > state->result_count) {
+		/* Said out loud, in the same words the System panel uses for
+		 * the same situation: rows exist that are not on screen. */
+		char more[64];
+		snprintf(more, sizeof(more), "%zu more -- keep typing to narrow",
+			state->match_total - state->result_count);
+		int my = list_top + (int)state->result_count * ROW_H;
+		novi_text_draw(card, state->font_meta, TEXT_X,
+			my + (MORE_H - state->font_meta->height) / 2 +
+				state->font_meta->ascent,
+			more, NOVI_PIX(NOVI_TEXT_MUTED));
+	}
+
 	pixman_image_unref(card);
 
 	/* Corners last, so anything drawn near one is masked with it. */

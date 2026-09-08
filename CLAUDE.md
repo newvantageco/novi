@@ -171,6 +171,18 @@ Three smaller things worth knowing before extending this:
   modal when you come back), and a value containing `#` is REFUSED —
   it would start a comment when the file is read back, so the GUI
   would corrupt the document it is a view of.
+- **A list that shows a subset without saying so is a bug class, not
+  an instance.** Having fixed it once, the same sweep found it in two
+  more places -- the launcher stopped at six matches silently (its own
+  symbol table produces nineteen more on a one-letter query), and the
+  Network panel both stopped drawing at the window edge and dropped
+  every SSID past its 24-entry cap. Where it was already handled it was
+  handled loudly: novi-files reports a truncated listing in its status
+  bar, novi-edit opens a too-large file read-only with the reason. The
+  one deliberate elision left is novi-panel's taskbar, which gives an
+  entry that will not fit `w = 0` so that render and hit-test agree it
+  is absent -- Alt+Tab still reaches those windows, and the comment
+  there says why.
 - **The panel could only ever show its first fourteen keys.** No
   scrolling, a hard `break` at the window's bottom edge — so
   `network.firewall.allow` and everything after it was in the

@@ -254,6 +254,17 @@ struct novi_settings {
 	bool wifi_declared_on;
 	struct net_entry nets[NET_MAX];
 	int net_count;
+	/* SSIDs a scan found that would not fit in nets[]. Reported for
+	 * the same reason the System panel reports its skipped lines: a
+	 * list that shows twenty-four of forty and says nothing tells you
+	 * the other sixteen networks are not there. A dense flat or an
+	 * office reaches forty easily. */
+	int net_dropped;
+	/* First visible network row. Same reason the System panel has one:
+	 * without it the list drew from index 0 and stopped at the window's
+	 * edge, so with thirty saved networks you could select NET25 with
+	 * the arrow keys and never see it. */
+	int net_top;
 	int net_selected;
 
 	bool pass_prompt;
@@ -803,7 +814,11 @@ static struct net_entry *net_intern(struct novi_settings *state, const char *ssi
 	if (e != NULL) {
 		return e;
 	}
-	if (state->net_count >= NET_MAX || ssid[0] == '\0') {
+	if (ssid[0] == '\0') {
+		return NULL;
+	}
+	if (state->net_count >= NET_MAX) {
+		state->net_dropped++;
 		return NULL;
 	}
 	e = &state->nets[state->net_count++];
@@ -869,6 +884,12 @@ static void refresh_network(struct novi_settings *state) {
 		state->wifi_declared_on = strcmp(buf, "on") == 0;
 	}
 
+	/* Counted per refresh, not accumulated: nets[] is a persistent
+	 * union of saved and seen networks that is never emptied, so a
+	 * running tally would climb on every scan that re-found the same
+	 * networks it could not fit. The honest number is "this pass had N
+	 * it could not hold". */
+	state->net_dropped = 0;
 	for (int i = 0; i < state->net_count; i++) {
 		state->nets[i].saved = false;
 		state->nets[i].connected = false;
@@ -1087,6 +1108,7 @@ static void job_finish(struct novi_settings *state, int exit_code) {
 			for (int i = 0; i < state->net_count; i++) {
 				state->nets[i].seen = false;
 			}
+			state->net_dropped = 0;
 			char copy[JOB_BUF];
 			snprintf(copy, sizeof(copy), "%s", state->job_out);
 			for (char *line = strtok(copy, "\n"); line != NULL;
@@ -1403,12 +1425,26 @@ static void render_network(struct novi_settings *state, uint32_t *px,
 			box_y + FIELD_HEIGHT + 14 + state->font_small->ascent,
 			"Enter joins, Esc cancels", LABEL_PIX);
 	} else {
-		for (int i = 0; i < state->net_count; i++) {
+		int rows = ((int)h - 46 - y) / ROW_HEIGHT;
+		if (rows < 1) {
+			rows = 1;
+		}
+		if (state->net_selected < state->net_top) {
+			state->net_top = state->net_selected;
+		}
+		if (state->net_selected >= state->net_top + rows) {
+			state->net_top = state->net_selected - rows + 1;
+		}
+		if (state->net_top > state->net_count - rows) {
+			state->net_top = state->net_count - rows;
+		}
+		if (state->net_top < 0) {
+			state->net_top = 0;
+		}
+		for (int i = state->net_top;
+				i < state->net_count && i < state->net_top + rows; i++) {
 			struct net_entry *e = &state->nets[i];
-			int ry = y + i * ROW_HEIGHT;
-			if (ry + ROW_HEIGHT > (int)h - 46) {
-				break;
-			}
+			int ry = y + (i - state->net_top) * ROW_HEIGHT;
 			if (i == state->net_selected) {
 				draw_rect(px, stride_px, w, h, CONTENT_X - 8, ry - 3,
 					FIELD_WIDTH + 16, ROW_HEIGHT, ROW_SELECTED_COLOR);
@@ -1450,6 +1486,17 @@ static void render_network(struct novi_settings *state, uint32_t *px,
 		novi_text_draw(dest, state->font_small, CONTENT_X,
 			footer_y + state->font_small->ascent, state->status,
 			state->status_is_error ? ERROR_PIX : SUCCESS_PIX);
+	} else if (state->net_dropped > 0) {
+		/* Instead of the key hint, not beside it: the footer is one
+		 * line and the first version drew both, straight through each
+		 * other. News beats a reminder -- someone who has seen the
+		 * keys once still has them the rest of the time. */
+		char buf[96];
+		snprintf(buf, sizeof(buf),
+			"%d more network(s) than fit -- `novi-wifi list` has them all",
+			state->net_dropped);
+		novi_text_draw(dest, state->font_small, CONTENT_X,
+			footer_y + state->font_small->ascent, buf, ERROR_PIX);
 	} else {
 		novi_text_draw(dest, state->font_small, CONTENT_X,
 			footer_y + state->font_small->ascent,
