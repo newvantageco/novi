@@ -28,6 +28,7 @@ icon here was vendored.
 | `wifi.svg` | `wifi` | status bar |
 | `battery.svg` | `battery` | status bar |
 | `power.svg` | `power` | status bar |
+| `keyboard.svg` | `keyboard` | launcher: the keyboard-shortcut sheet |
 | `chevron-right.svg` | `chevron-right` | disclosure (collapsed) |
 | `chevron-down.svg` | `chevron-down` | disclosure (expanded) |
 | `house.svg` | `house` | files: the home place |

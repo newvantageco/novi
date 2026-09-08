@@ -75,6 +75,10 @@ static const struct icon_job JOBS[] = {
 	 * is for. */
 	{ "ICON_SEARCH",        "icon_search_px",        "svg/search.svg",        16 },
 	{ "ICON_CALCULATOR",    "icon_calculator_px",    "svg/calculator.svg",    24 },
+	/* The shortcut sheet's own entry in the app list. 24 px for the
+	 * same reason the calculator is: it appears as a RESULT ROW beside
+	 * app icons, not as chrome. */
+	{ "ICON_KEYBOARD",      "icon_keyboard_px",      "svg/keyboard.svg",      24 },
 };
 
 /* nanosvg parses colors from a fixed keyword/hex table and has no notion

@@ -60,6 +60,10 @@
 #include <xkbcommon/xkbcommon.h>
 
 #include "wlr-layer-shell-unstable-v1-protocol.h"
+/* The one list of keyboard shortcuts, shared with novi-shell, which
+ * dispatches from it. A sheet kept separately from the bindings it
+ * documents drifts, and a drifted sheet is worse than none. */
+#include "../common/keybindings.h"
 #include "../common/clipboard.h"
 #include "../common/text.h"
 #include "../common/theme.h"
@@ -90,7 +94,26 @@
  * it, the magnifier sharing that band. */
 #define HEADER_H 52
 #define ROW_H 40
+/* The sheet's rows are tighter than a search result's, and that is a
+ * size constraint rather than a taste: sixteen 40px rows plus the
+ * header and the shadow margins come to ~780px, which does not fit a
+ * 1366x768 laptop -- a very common panel and one nobody would think to
+ * test on before shipping. At 32 the whole sheet is ~580px and fits
+ * with room to spare. A reference list is also meant to be denser than
+ * a search result; the constraint and the design agree here. */
+#define ROW_H_KEYS 32
 #define MAX_ROWS 6
+/* The shortcut sheet shows every binding at once, because it is a
+ * reference rather than a search: six of sixteen with "10 more -- keep
+ * typing to narrow" is useless to somebody who does not know what to
+ * type, which is the entire audience for a list of keyboard shortcuts.
+ * Searching still works and still narrows; it just is not the only way
+ * to see the thing.
+ *
+ * Derived from the table's own length rather than written down, so
+ * adding a binding cannot silently push one off the bottom. */
+#define MAX_ROWS_KEYS ((int)NOVI_BINDINGS_COUNT)
+#define MAX_ROWS_ANY (MAX_ROWS_KEYS > MAX_ROWS ? MAX_ROWS_KEYS : MAX_ROWS)
 #define LIST_PAD NOVI_SP_SM
 /* A strip under the list, present only when there are matches the list
  * could not fit. See rebuild_results(): a list that shows six of
@@ -99,7 +122,15 @@
 #define MORE_H 20
 /* Header + its hairline + padded list. The tallest the card can get,
  * and therefore how much buffer has to exist. */
-#define CARD_MAX_HEIGHT (HEADER_H + 1 + 2 * LIST_PAD + MAX_ROWS * ROW_H + MORE_H)
+/* The tallest list any mode can produce, and therefore how much buffer
+ * has to exist. Taken over BOTH modes rather than from whichever has
+ * more rows: the sheet has more rows and shorter ones, so neither
+ * count nor height alone gives the right answer. */
+#define LIST_H_SEARCH (MAX_ROWS * ROW_H)
+#define LIST_H_KEYS (MAX_ROWS_KEYS * ROW_H_KEYS)
+#define LIST_H_MAX (LIST_H_KEYS > LIST_H_SEARCH ? LIST_H_KEYS : LIST_H_SEARCH)
+#define CARD_MAX_HEIGHT \
+	(HEADER_H + 1 + 2 * LIST_PAD + LIST_H_MAX + MORE_H)
 
 /* Every colour here used to be a local hex literal -- including a
  * result row in 0xff8ab4f8, which is Google's blue and belongs to no
@@ -174,6 +205,7 @@ static int resolve_icon_name(const char *name) {
 		{"package", ICON_PACKAGE},
 		{"settings", ICON_SETTINGS},
 		{"shield", ICON_SHIELD},
+		{"keyboard", ICON_KEYBOARD},
 	};
 	for (size_t i = 0; i < sizeof(NAMES) / sizeof(NAMES[0]); i++) {
 		if (strcmp(NAMES[i].name, name) == 0) {
@@ -193,6 +225,7 @@ enum result_kind {
 	RESULT_CALC,
 	RESULT_SYMBOL,
 	RESULT_POWER,
+	RESULT_KEY,
 };
 
 struct result {
@@ -252,6 +285,11 @@ struct novi_launcher {
 	 * wl-copy stays resident), not specific to this client. */
 	bool symbol_mode;
 	bool power_mode;
+	/* --keys mode: the shortcut sheet. Rows come from
+	 * common/keybindings.h, which is the same table novi-shell
+	 * dispatches from -- see that header for why a sheet maintained
+	 * separately from the bindings was not acceptable. */
+	bool keys_mode;
 	struct novi_clipboard *clipboard;
 	uint32_t last_key_serial;
 
@@ -265,7 +303,12 @@ struct novi_launcher {
 	 * clamped there, so nothing else has to range-check it. card_h is
 	 * derived from result_count -- the card is as tall as its
 	 * contents. */
-	struct result results[MAX_ROWS];
+	struct result results[MAX_ROWS_ANY];
+	/* How many of them this mode shows -- MAX_ROWS while
+	 * searching, every binding in the shortcut sheet -- and how tall
+	 * each one is. Both are set once in main(), from the mode. */
+	int row_cap;
+	int row_h;
 	size_t result_count;
 	/* Every match, not just the ones that fit. The difference is what
 	 * the "more" strip reports. */
@@ -725,12 +768,12 @@ static const struct {
  * calculator is one more row in the same list rather than a separate
  * display mode. */
 
-/* Counts every match and keeps the first MAX_ROWS of them. The count
+/* Counts every match and keeps the first row_cap of them. The count
  * is the point: a launcher that silently shows six of nineteen leaves
  * you believing the other thirteen are not installed. */
 static void push_result(struct novi_launcher *state, const struct result *r) {
 	state->match_total++;
-	if (state->result_count < MAX_ROWS) {
+	if ((int)state->result_count < state->row_cap) {
 		state->results[state->result_count++] = *r;
 	}
 }
@@ -750,6 +793,28 @@ static void rebuild_results(struct novi_launcher *state) {
 			r.command = POWER_ACTIONS[i].command;
 			snprintf(r.primary, sizeof(r.primary), "%s", POWER_ACTIONS[i].name);
 			snprintf(r.meta, sizeof(r.meta), "%s", POWER_ACTIONS[i].meta);
+			push_result(state, &r);
+		}
+	} else if (state->keys_mode) {
+		/* Straight off the shared table, in its own order -- the sheet
+		 * reads by group (Windows, then Workspaces, and so on) and the
+		 * table is written in that order for this reason.
+		 *
+		 * Matched against the group and the key text as well as the
+		 * description, so "super" narrows to the Super bindings and
+		 * "window" finds the window group even though the word appears
+		 * in only some of its descriptions. */
+		for (size_t i = 0; i < NOVI_BINDINGS_COUNT; i++) {
+			const struct novi_binding *b = &NOVI_BINDINGS[i];
+			if (state->input_len > 0 &&
+					!app_name_matches(b->what, state->input) &&
+					!app_name_matches(b->keys, state->input) &&
+					!app_name_matches(b->group, state->input)) {
+				continue;
+			}
+			struct result r = { .kind = RESULT_KEY, .icon_id = -1 };
+			snprintf(r.primary, sizeof(r.primary), "%s", b->what);
+			snprintf(r.meta, sizeof(r.meta), "%s", b->keys);
 			push_result(state, &r);
 		}
 	} else if (state->symbol_mode) {
@@ -808,7 +873,7 @@ static void rebuild_results(struct novi_launcher *state) {
 	state->card_h = HEADER_H;
 	if (state->result_count > 0) {
 		state->card_h += 1 + 2 * LIST_PAD +
-			(int)state->result_count * ROW_H;
+			(int)state->result_count * state->row_h;
 	}
 	if (state->match_total > state->result_count) {
 		state->card_h += MORE_H;
@@ -835,6 +900,13 @@ static bool activate_selected(struct novi_launcher *state) {
 	case RESULT_SYMBOL:
 		copy_to_clipboard(state, r->copy);
 		return true;
+	case RESULT_KEY:
+		/* Nothing to activate: the sheet is a reference, and the row
+		 * IS the answer. Enter closes it, which is what a person who
+		 * has just read the key they wanted wants next. Deliberately
+		 * not "perform this shortcut" -- half of them act on the
+		 * focused window, and the overlay is the focused window. */
+		return false;
 	}
 	return false;
 }
@@ -1050,10 +1122,10 @@ static void render(struct novi_launcher *state, uint32_t *px,
 			if (i != state->selected) {
 				continue;
 			}
-			int y = list_top + (int)i * ROW_H;
-			draw_rect(card_buf, cw, cw, card_h, 1, y, (int)cw - 2, ROW_H,
+			int y = list_top + (int)i * state->row_h;
+			draw_rect(card_buf, cw, cw, card_h, 1, y, (int)cw - 2, state->row_h,
 				NOVI_ACCENT_SUBTLE);
-			draw_rect(card_buf, cw, cw, card_h, 1, y, 2, ROW_H, NOVI_ACCENT);
+			draw_rect(card_buf, cw, cw, card_h, 1, y, 2, state->row_h, NOVI_ACCENT);
 		}
 	}
 
@@ -1069,10 +1141,10 @@ static void render(struct novi_launcher *state, uint32_t *px,
 		if (r->icon_id < 0) {
 			continue;
 		}
-		int y = list_top + (int)i * ROW_H;
+		int y = list_top + (int)i * state->row_h;
 		draw_icon(card_buf, cw, cw, (uint32_t)card_h,
 			ICON_CENTER_X - RESULT_ICON_SIZE / 2,
-			y + (ROW_H - RESULT_ICON_SIZE) / 2,
+			y + (state->row_h - RESULT_ICON_SIZE) / 2,
 			(enum novi_icon_id)r->icon_id,
 			i == state->selected ? NOVI_ACCENT : NOVI_TEXT_SECONDARY);
 	}
@@ -1095,7 +1167,8 @@ static void render(struct novi_launcher *state, uint32_t *px,
 			input_baseline,
 			state->power_mode ? "End this session" :
 				state->symbol_mode ? "Search symbols" :
-					"Search apps, or type a sum",
+					state->keys_mode ? "Search shortcuts" :
+						"Search apps, or type a sum",
 			NOVI_PIX(NOVI_TEXT_MUTED));
 	} else {
 		int end_x = novi_text_draw(card, state->font, TEXT_X, input_baseline,
@@ -1107,8 +1180,8 @@ static void render(struct novi_launcher *state, uint32_t *px,
 	/* ── The rows ───────────────────────────────────────────────── */
 	for (size_t i = 0; i < state->result_count; i++) {
 		const struct result *r = &state->results[i];
-		int y = list_top + (int)i * ROW_H;
-		int baseline = y + (ROW_H - state->font_row->height) / 2 +
+		int y = list_top + (int)i * state->row_h;
+		int baseline = y + (state->row_h - state->font_row->height) / 2 +
 			state->font_row->ascent;
 
 		/* A symbol has no icon and does not want one: the glyph itself
@@ -1119,7 +1192,7 @@ static void render(struct novi_launcher *state, uint32_t *px,
 			utf8_encode(r->codepoint, glyph);
 			int gw = novi_text_width(state->font, glyph);
 			novi_text_draw(card, state->font, ICON_CENTER_X - gw / 2,
-				y + (ROW_H - state->font->height) / 2 + state->font->ascent,
+				y + (state->row_h - state->font->height) / 2 + state->font->ascent,
 				glyph, i == state->selected
 					? NOVI_PIX(NOVI_ACCENT) : NOVI_PIX(NOVI_TEXT_PRIMARY));
 		}
@@ -1140,7 +1213,7 @@ static void render(struct novi_launcher *state, uint32_t *px,
 			 * competing names. */
 			novi_text_draw(card, state->font_meta,
 				(int)cw - NOVI_SP_LG - meta_w,
-				y + (ROW_H - state->font_meta->height) / 2 +
+				y + (state->row_h - state->font_meta->height) / 2 +
 					state->font_meta->ascent,
 				r->meta, NOVI_PIX(NOVI_TEXT_MUTED));
 		}
@@ -1151,7 +1224,7 @@ static void render(struct novi_launcher *state, uint32_t *px,
 		char more[64];
 		snprintf(more, sizeof(more), "%zu more -- keep typing to narrow",
 			state->match_total - state->result_count);
-		int my = list_top + (int)state->result_count * ROW_H;
+		int my = list_top + (int)state->result_count * state->row_h;
 		novi_text_draw(card, state->font_meta, TEXT_X,
 			my + (MORE_H - state->font_meta->height) / 2 +
 				state->font_meta->ascent,
@@ -1485,8 +1558,20 @@ int main(int argc, char *argv[]) {
 	 * list, same keys -- the only thing that differs is what the rows
 	 * are, which is why this is a mode rather than a second client. */
 	state.power_mode = argc > 1 && strcmp(argv[1], "--power") == 0;
+	/* --keys: every keyboard shortcut this desktop has, from the table
+	 * novi-shell dispatches from. The fourth mode on the same overlay.
+	 *
+	 * It is reachable BOTH by Super+/ and as an ordinary entry in the
+	 * app list (usr/share/novi/apps/shortcuts.app), and the second one
+	 * is not redundant: a list of keyboard shortcuts reachable only by
+	 * a keyboard shortcut is a bootstrapping paradox, useful to
+	 * everyone except the person who does not yet know any of them --
+	 * which is exactly who it is for. */
+	state.keys_mode = argc > 1 && strcmp(argv[1], "--keys") == 0;
+	state.row_cap = state.keys_mode ? MAX_ROWS_KEYS : MAX_ROWS;
+	state.row_h   = state.keys_mode ? ROW_H_KEYS : ROW_H;
 
-	if (!state.symbol_mode && !state.power_mode) {
+	if (!state.symbol_mode && !state.power_mode && !state.keys_mode) {
 		load_apps(&state);
 	}
 

@@ -45,6 +45,25 @@ make \
     DESTDIR="${ROOTFS}" PREFIX=/usr install
 make clean
 
+# The shortcut sheet, as an ordinary entry in the app list.
+#
+# It is ALSO on Super+/ (novi-shell's NOVI_ACT_SHORTCUTS), and this is
+# not a duplicate of that: a list of keyboard shortcuts reachable only
+# by a keyboard shortcut is a bootstrapping paradox -- useful to
+# everyone except somebody who does not yet know any of them, who is
+# exactly the person it is for. Apps is a button on the panel, so this
+# is reachable with a mouse and nothing else.
+echo "==> Registering the keyboard-shortcut sheet as a launchable app"
+APPS_DIR="${ROOTFS}/usr/share/novi/apps"
+mkdir -p "${APPS_DIR}"
+cat > "${APPS_DIR}/shortcuts.app" <<'EOF'
+name=Keyboard Shortcuts
+exec=/usr/bin/novi-launcher --keys
+icon=keyboard
+description=Every keyboard shortcut this desktop has
+EOF
+echo "   done: ${APPS_DIR}/shortcuts.app"
+
 echo ""
 echo "novi-launcher installed:"
 ls -la "${ROOTFS}/usr/bin/novi-launcher"

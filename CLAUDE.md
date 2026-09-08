@@ -429,6 +429,103 @@ that wanted none is not there to ask.
   two pixels into the terminal. Measure the geometry off a screendump
   before concluding the code is wrong.
 
+## Architecture: the keys, and the sheet that lists them
+
+`common/keybindings.h` is every keyboard shortcut this desktop has,
+once. novi-shell DISPATCHES from it; `novi-launcher --keys` (Super+/)
+DISPLAYS it.
+
+- **Undiscoverable keys are unusable keys.** Every binding lived only
+  in novi-shell's own switch statement, so a person who booted this
+  image had no way to learn Alt+Space, Super+L or Super+Escape short of
+  reading the source. GNOME and Pop!_OS both ship exactly this window;
+  it was the most conspicuous thing missing from this desktop.
+- **A sheet maintained separately from the bindings drifts, and a
+  drifted sheet is worse than none** -- it is a document that
+  confidently tells you the wrong key. Same argument as
+  `restore-build-inputs.sh` restoring what the MANIFEST names rather
+  than "everything except a blocklist": a derived answer cannot rot.
+  So there is no display-only row. The two workspace rows carry
+  `NOVI_BIND_DIGIT_RANGE` and drive dispatch like every other row,
+  rather than sitting beside a hand-written special case.
+- **A shortcut sheet reachable only by a shortcut is a bootstrapping
+  paradox.** It is also `usr/share/novi/apps/shortcuts.app`, so the
+  Apps button reaches it with a mouse and no prior knowledge -- which
+  is the entire audience. That is the KDE lesson (never hide a feature
+  behind only the thing it documents); the grouping and type discipline
+  are elementary's; the sheet itself is GNOME's and Pop!_OS's.
+- **Matching is exact-modifiers-then-subset, and neither pass alone
+  works.** Subset alone cannot tell Super+3 from Super+Shift+3, so
+  moving a window to a workspace would merely switch to it. Exact alone
+  breaks Alt+Shift+Tab, which most layouts deliver as `ISO_Left_Tab`
+  with the shift bit ALSO set. Letters are compared through
+  `xkb_keysym_to_lower()` so Caps Lock does not need a second row.
+- **`NOVI_BIND_WHEN_LOCKED` is on the row, not in a branch.** "Which
+  keys work on the lock screen" is a security question, and one
+  answered by control flow three functions away is one nobody re-reads.
+- **The header may depend only on what BOTH binaries have.**
+  novi-launcher links xkbcommon and no wlroots, so the modifier bits
+  are ours and novi-shell maps them onto `WLR_MODIFIER_*` at the point
+  of comparison.
+- **The sheet's rows are 32px, not the launcher's 40.** Sixteen 40px
+  rows plus header and shadows come to ~780px, which does not fit a
+  1366x768 laptop -- a very common panel nobody would think to test on.
+  `CARD_MAX_HEIGHT` is taken over BOTH modes, because the sheet has
+  more rows and shorter ones, so neither count nor height alone gives
+  the right answer.
+
+## Architecture: nothing reaped the compositor's children
+
+`spawn()` forked and never waited, and novi-shell installed no SIGCHLD
+handler, so **every** launcher, symbol picker, screenshot, power menu
+and terminal left a zombie for the life of the session. The comment in
+`spawn()` actively said otherwise -- that `setsid()` meant the child's
+"lifetime isn't tied to being a direct child novi-shell has to reap" --
+which is wrong: setsid changes the SESSION, not the parent. A comment
+asserting the bug away is how it survived.
+
+Invisible while spawning was a rare, deliberate act. The volume keys
+changed the arithmetic: they spawn on every press, so the leak went
+from a handful per session to one per keystroke. **Measured on a booted
+machine: twelve presses of volume-up produced exactly twelve zombies;
+after the fix, fifteen presses produced none.**
+
+- **A handler with `waitpid(WNOHANG)`, not `signal(SIGCHLD, SIG_IGN)`.**
+  SIG_IGN is shorter and also works, but it makes every future
+  `waitpid()` in the process fail with ECHILD -- a trap laid for
+  whoever next wants a child's exit status.
+- **The handler LOOPS.** Signals are not queued, so several children
+  exiting together deliver one SIGCHLD; reaping a single child leaks
+  the rest, which for a key that repeats is the same bug more slowly.
+- `SA_RESTART` so the event loop's `poll()` resumes instead of
+  returning EINTR, and `errno` is saved and restored around the reap.
+
+## Architecture: the QEMU test harness lies quietly
+
+`send-key` returns an error for an unknown QKeyCode and **the harness
+was discarding the response**, so an invalid keycode pressed NOTHING
+while the test read an unchanged screen as "the feature is broken".
+That produced three separate false failures on bindings that were fine,
+and cost more time than any real bug in the same session.
+
+- **The names are not the obvious ones**: `shift`, `ctrl`, `alt` (NOT
+  `shift_l`/`ctrl_l`/`alt_l`), `dot` (NOT `period`), `meta_l` (NOT
+  `super`, which CLAUDE.md already recorded and which is the same trap
+  a second time). `spc`, `ret`, `esc`, `print`.
+- **Make the harness raise on a QMP error.** This is the fix that
+  generalises; the keycode list will be got wrong again.
+- **Modifiers do not persist across separate QMP commands.** Holding
+  one in `input-send-event` and pressing the key in a second call
+  delivers an unmodified keypress -- verified by watching plain `2`s
+  arrive in a terminal where `@` was expected. Send the whole chord in
+  one command, or use `send-key` with all its keys at once.
+- **Check the observable answers the question.** "Did the window move
+  to another workspace" was first tested by looking at the TASKBAR,
+  which lists every toplevel regardless of workspace and therefore
+  could not have shown the difference either way.
+- The screenshot key writes `/root/screenshot-*.bmp`, not `.png` --
+  a test that globbed `*.png` reported a working binding as broken.
+
 ## Architecture: a launcher has to answer "what is installed"
 
 `novi-launcher` showed nothing on an empty query and exactly one match
