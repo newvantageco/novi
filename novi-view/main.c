@@ -64,11 +64,14 @@
  * swap. 8000x8000 is 256 MB, which is already generous. */
 #define MAX_DIM 8000
 
-#define BG_COLOR      0xff101016u
-#define STATUS_BG     0xff232430u
+/* bg-base behind the image, deliberately the darkest step in the
+ * palette: this is the one window whose content is somebody else's
+ * colours, and the frame around it should get out of their way. */
+#define BG_COLOR      NOVI_BG_BASE
+#define STATUS_BG     NOVI_BG_PANEL
 
-static const pixman_color_t STATUS_PIX = {0xa3a3, 0xa7a7, 0xb7b7, 0xffff};
-static const pixman_color_t ERROR_PIX  = {0xf0f0, 0x7a7a, 0x7a7a, 0xffff};
+static const pixman_color_t STATUS_PIX = NOVI_PIX(NOVI_TEXT_SECONDARY);
+static const pixman_color_t ERROR_PIX  = NOVI_PIX(NOVI_STATUS_ERROR);
 
 struct novi_view {
 	struct wl_display *display;

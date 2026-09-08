@@ -82,22 +82,30 @@
 #define MAX_LINES     200000
 #define MAX_LINE_LEN  8192
 
-/* Palette: the panel's, so the desktop reads as one system. */
-#define BG_COLOR        0xff16161eu
-#define GUTTER_BG_COLOR 0xff1b1b26u
-#define STATUS_BG_COLOR 0xff232430u
-#define CURSOR_COLOR    0xff2dd4bfu
-#define CURLINE_COLOR   0xff1e1e2au
+/* Palette: tokens, read as elevation. The text you are editing is the
+ * card; the gutter and the status bar are chrome beside it, so they
+ * take the panel step below; the cursor's line is a row lifted off
+ * that card, which is the same thing bg-card-raised means everywhere
+ * else. These values were within a few counts of the tokens already --
+ * that is exactly the drift theme.h exists to end, because "nearly
+ * bg-card" in six files is how a palette stops being one. */
+#define BG_COLOR        NOVI_BG_CARD
+#define GUTTER_BG_COLOR NOVI_BG_PANEL
+#define STATUS_BG_COLOR NOVI_BG_PANEL
+#define CURSOR_COLOR    NOVI_ACCENT
+#define CURLINE_COLOR   NOVI_BG_CARD_RAISED
 
 /* Sits under the text, so it has to stay dark enough for TEXT_PIX to
- * read against it -- this is the cursor-line tint, deepened. */
-#define SEL_COLOR      0xff2c3a55u
-static const pixman_color_t TEXT_PIX      = {0xc8c8, 0xcccc, 0xd8d8, 0xffff};
-static const pixman_color_t GUTTER_PIX    = {0x5555, 0x5858, 0x6a6a, 0xffff};
-static const pixman_color_t GUTTER_CUR_PIX= {0x9a9a, 0xa0a0, 0xb4b4, 0xffff};
-static const pixman_color_t STATUS_PIX    = {0xa3a3, 0xa7a7, 0xb7b7, 0xffff};
-static const pixman_color_t MODIFIED_PIX  = {0xf0f0, 0xc0c0, 0x6a6a, 0xffff};
-static const pixman_color_t ERROR_PIX     = {0xf0f0, 0x7a7a, 0x7a7a, 0xffff};
+ * read against it. accent-subtle is that, and it makes a selection
+ * here mean the same thing it means in novi-files and the launcher --
+ * it used to be a blue of its own. */
+#define SEL_COLOR      NOVI_ACCENT_SUBTLE
+static const pixman_color_t TEXT_PIX      = NOVI_PIX(NOVI_TEXT_PRIMARY);
+static const pixman_color_t GUTTER_PIX    = NOVI_PIX(NOVI_TEXT_MUTED);
+static const pixman_color_t GUTTER_CUR_PIX= NOVI_PIX(NOVI_TEXT_SECONDARY);
+static const pixman_color_t STATUS_PIX    = NOVI_PIX(NOVI_TEXT_SECONDARY);
+static const pixman_color_t MODIFIED_PIX  = NOVI_PIX(NOVI_STATUS_WARNING);
+static const pixman_color_t ERROR_PIX     = NOVI_PIX(NOVI_STATUS_ERROR);
 
 /* One whole-document state, held so undo can put it back. */
 struct snapshot {

@@ -64,19 +64,27 @@
 #define FIELD_MAX 127
 #define FIELD_COUNT 2 /* 0 = new password, 1 = confirm */
 
-#define BG_COLOR 0xff14141cu
-#define SIDEBAR_BG_COLOR 0xff101018u
-#define TEXT_COLOR 0xffe0e0f0u
-#define LABEL_COLOR 0xff8a8aa0u
-#define HINT_COLOR 0xff8a8aa0u
-#define ERROR_COLOR 0xffe08a8au
-#define SUCCESS_COLOR 0xff8ae0a0u
-#define FIELD_BG_COLOR 0xff1e1e28u
-#define FIELD_BORDER_COLOR 0xff3a3a4au
-#define FIELD_BORDER_FOCUS_COLOR 0xff8ab4f8u
-#define ROW_SELECTED_COLOR 0xff232334u
-#define ACCENT_COLOR 0xff8ab4f8u
-#define DOT_COLOR 0xffe0e0f0u
+/* Tokens, not literals. This client had a palette of its own -- and,
+ * worse, a SECOND ACCENT: FIELD_BORDER_FOCUS_COLOR and ACCENT_COLOR
+ * were both 0xff8ab4f8, which is Google's blue. So the desktop said
+ * "this is the active thing" in teal everywhere and in blue here, and
+ * a person moving between Settings and anything else had to learn two
+ * answers to the same question. That is exactly the drift
+ * common/theme.h exists to prevent (CLAUDE.md's design-system
+ * section). */
+#define BG_COLOR NOVI_BG_BASE
+#define SIDEBAR_BG_COLOR NOVI_BG_PANEL
+#define TEXT_COLOR NOVI_TEXT_PRIMARY
+#define LABEL_COLOR NOVI_TEXT_SECONDARY
+#define HINT_COLOR NOVI_TEXT_MUTED
+#define ERROR_COLOR NOVI_STATUS_ERROR
+#define SUCCESS_COLOR NOVI_STATUS_SUCCESS
+#define FIELD_BG_COLOR NOVI_BG_CARD
+#define FIELD_BORDER_COLOR NOVI_BORDER_STRONG
+#define FIELD_BORDER_FOCUS_COLOR NOVI_ACCENT
+#define ROW_SELECTED_COLOR NOVI_ACCENT_SUBTLE
+#define ACCENT_COLOR NOVI_ACCENT
+#define DOT_COLOR NOVI_TEXT_PRIMARY
 #define DOT_SIZE 8
 #define DOT_GAP 6
 
@@ -1139,21 +1147,14 @@ static const char *FIELD_LABELS[FIELD_COUNT] = {
 	"New password", "Confirm new password",
 };
 
-static const pixman_color_t TEXT_PIX = {
-	.red = 0xe000, .green = 0xe000, .blue = 0xf000, .alpha = 0xffff,
-};
-static const pixman_color_t LABEL_PIX = {
-	.red = 0x8a00, .green = 0x8a00, .blue = 0xa000, .alpha = 0xffff,
-};
-static const pixman_color_t ERROR_PIX = {
-	.red = 0xe000, .green = 0x8a00, .blue = 0x8a00, .alpha = 0xffff,
-};
-static const pixman_color_t SUCCESS_PIX = {
-	.red = 0x8a00, .green = 0xe000, .blue = 0xa000, .alpha = 0xffff,
-};
-static const pixman_color_t ACCENT_PIX = {
-	.red = 0x8a00, .green = 0xb400, .blue = 0xf800, .alpha = 0xffff,
-};
+/* Every one of these was ALSO written with the shift-left-8 bug
+ * NOVI_PIX() exists to rule out: 0xe0 became 0xe000 instead of 0xe0e0,
+ * so nothing here was ever quite the colour it claimed. */
+static const pixman_color_t TEXT_PIX    = NOVI_PIX(NOVI_TEXT_PRIMARY);
+static const pixman_color_t LABEL_PIX   = NOVI_PIX(NOVI_TEXT_SECONDARY);
+static const pixman_color_t ERROR_PIX   = NOVI_PIX(NOVI_STATUS_ERROR);
+static const pixman_color_t SUCCESS_PIX = NOVI_PIX(NOVI_STATUS_SUCCESS);
+static const pixman_color_t ACCENT_PIX  = NOVI_PIX(NOVI_ACCENT);
 
 static void render_sidebar(struct novi_settings *state, uint32_t *px,
 		uint32_t stride_px, pixman_image_t *dest) {

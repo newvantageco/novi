@@ -66,11 +66,14 @@
 #define LOCK_NAMESPACE "novi-lockscreen"
 
 #define PASSWORD_MAX 127
-#define BG_COLOR 0xff14141cu
-#define TEXT_COLOR 0xffe0e0f0u
-#define HINT_COLOR 0xff8a8aa0u
-#define ERROR_COLOR 0xffe08a8au
-#define DOT_COLOR 0xffe0e0f0u
+/* Tokens, not literals -- this client had never been converted. The
+ * lock screen is the first thing a person sees on coming back to the
+ * machine, so it is the last place that should be off-palette. */
+#define BG_COLOR NOVI_BG_BASE
+#define TEXT_COLOR NOVI_TEXT_PRIMARY
+#define HINT_COLOR NOVI_TEXT_MUTED
+#define ERROR_COLOR NOVI_STATUS_ERROR
+#define DOT_COLOR NOVI_TEXT_PRIMARY
 #define DOT_SIZE 10
 #define DOT_GAP 8
 
@@ -234,15 +237,12 @@ static void render(struct novi_lockscreen *state, uint32_t *px,
 	pixman_image_t *dest = pixman_image_create_bits_no_clear(
 		PIXMAN_a8r8g8b8, (int)w, (int)h, px, (int)stride_px * 4);
 
-	static const pixman_color_t text_color = {
-		.red = 0xe000, .green = 0xe000, .blue = 0xf000, .alpha = 0xffff,
-	};
-	static const pixman_color_t hint_color = {
-		.red = 0x8a00, .green = 0x8a00, .blue = 0xa000, .alpha = 0xffff,
-	};
-	static const pixman_color_t error_color = {
-		.red = 0xe000, .green = 0x8a00, .blue = 0x8a00, .alpha = 0xffff,
-	};
+	/* Written with the shift-left-8 bug NOVI_PIX() exists to rule out
+	 * (0xe0 -> 0xe000 rather than 0xe0e0), on top of not being palette
+	 * colours in the first place. */
+	static const pixman_color_t text_color = NOVI_PIX(NOVI_TEXT_PRIMARY);
+	static const pixman_color_t hint_color = NOVI_PIX(NOVI_TEXT_MUTED);
+	static const pixman_color_t error_color = NOVI_PIX(NOVI_STATUS_ERROR);
 
 	const char *label = "Locked";
 	int label_w = novi_text_width(state->font, label);
