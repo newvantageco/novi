@@ -340,37 +340,6 @@ static void layout_taskbar(struct novi_panel *panel) {
 	}
 }
 
-/* Copies `title` into `out`, shortened with a trailing "…" if it's
- * wider than max_w -- shrinks one real UTF-8 codepoint at a time (not
- * one byte), so a multi-byte character is never cut in half into
- * invalid UTF-8. "…" itself (U+2026) was confirmed present in
- * JetBrainsMono-Regular.ttf's own cmap before relying on it here (the
- * same fontTools check ICON-PIPELINE.md's symbol picker used), not
- * assumed. */
-static void truncate_title(struct fcft_font *font, const char *title,
-		int max_w, char *out, size_t out_size) {
-	if (novi_text_width(font, title) <= max_w) {
-		snprintf(out, out_size, "%s", title);
-		return;
-	}
-	size_t len = strlen(title);
-	while (len > 0) {
-		len--;
-		while (len > 0 && (title[len] & 0xC0) == 0x80) {
-			len--;
-		}
-		char candidate[TASKBAR_TITLE_MAX + 4];
-		size_t copy_len = len < sizeof(candidate) - 4 ? len : sizeof(candidate) - 4;
-		memcpy(candidate, title, copy_len);
-		memcpy(candidate + copy_len, "\xE2\x80\xA6", 4); /* U+2026, NUL-terminated */
-		if (len == 0 || novi_text_width(font, candidate) <= max_w) {
-			snprintf(out, out_size, "%s", candidate);
-			return;
-		}
-	}
-	snprintf(out, out_size, "\xE2\x80\xA6");
-}
-
 static int allocate_shm_file(size_t size) {
 	char name[] = "/novi-panel-XXXXXX";
 	struct timespec ts;
@@ -576,7 +545,7 @@ static void render(struct novi_panel *panel, uint32_t *px, uint32_t stride_px) {
 		draw_rect(px, stride_px, w, h, entry->x, btn_y, entry->w, btn_h, bg);
 
 		char label[TASKBAR_TITLE_MAX + 4];
-		truncate_title(panel->font, entry->title[0] ? entry->title : "(untitled)",
+		novi_text_truncate(panel->font, entry->title[0] ? entry->title : "(untitled)",
 			entry->w - 2 * TASKBAR_ENTRY_H_PADDING, label, sizeof(label));
 		novi_text_draw(dest, panel->font, entry->x + TASKBAR_ENTRY_H_PADDING,
 			baseline_y, label,

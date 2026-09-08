@@ -653,11 +653,13 @@ BUG_REPORT_URL="https://github.com/newvantageco/novi/issues"
       offline, with the icon geometry testable without booting anything
 - [x] Removable media — plug in a stick and it is there; exFAT and NTFS
       because that is what sticks actually are (`novi-eject`, RFC 0023)
+- [x] A places sidebar in the file manager — volumes appear and vanish
+      live, with eject, while the window is open
 - [ ] **Boot it on real hardware** ← next, and nothing here replaces it
 - [ ] A published repository + offline release key
 - [ ] A Microsoft-signed shim (real Secure Boot); OWE and SAE-PK
       (compiled in, untested)
-- [ ] Idle-suspend and low-battery; Mesa; a places sidebar in the file manager
+- [ ] Idle-suspend and low-battery; Mesa; a pointer in the file manager
 - [ ] More state domains: keybindings, static IP
 - [ ] Boot splash
 

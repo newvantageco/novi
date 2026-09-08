@@ -260,6 +260,42 @@ RFC 0012 (`docs/rfcs/0012-hotplug.md`).
   interface at start. Per-interface DHCP is RFC 0009's work; reaching
   into the network service from a uevent handler is split-brain.
 
+## Architecture: the places sidebar, and polling /proc/mounts
+
+RFC 0023's addendum. `novi-files` shows Home, Filesystem and a DEVICES
+section that appears and vanishes as media comes and goes.
+
+- **`poll()` on `/proc/self/mounts` has two traps stacked.** It reports
+  **POLLPRI**, never POLLIN — a poll set up for POLLIN waits forever
+  while the sidebar silently never updates. And **POLLPRI stays
+  asserted until the file is read again**, so a loop that wakes,
+  redraws and polls again without re-reading spins at 100% CPU:
+  silent, and visible only as a hot laptop.
+  `novi_places_watch_drain()` is that read; every wake calls it first.
+- **Volumes come from `/proc/mounts`, not from listing `/run/media`.**
+  A directory can be there with nothing mounted on it, and the sidebar
+  would offer a place that is an empty directory.
+- **Mount points are octal-escaped in `/proc/mounts`** (`\040` and
+  three others). `My\040Stick` is not a path, and this code does not
+  get to assume novi-mount's `safe_name()` is the only thing that ever
+  mounts anything under `/run/media`.
+- **The sidebar selection is preserved by PATH, not by index.** A
+  volume unmounting shifts everything below it up one, and an
+  index-preserving refresh moves the cursor onto a *different* volume
+  — which matters when the next keystroke might eject it.
+- **Ejecting the volume you are standing in leaves it first.**
+  novi-eject refuses a busy mount and the window's own cwd is what
+  makes it busy, so without this a file manager could never eject the
+  stick it was showing and would blame the user's own window.
+- **`^E` works only from the sidebar**: from the file list it would
+  have to guess which volume was meant, and a key that ejects
+  something you were not looking at is not a convenience.
+- **New icons go through `shared/icons/tools/svg2icon`**, vendored at
+  the same pinned Lucide commit, never hand-transcribed. Lucide
+  renamed `home` to `house`: `icons/home.svg` is a 404 at that commit.
+- `novi_text_truncate()` lives in `common/text.c` now — two clients
+  need it, and two copies is how they end up truncating differently.
+
 ## Architecture: removable media
 
 RFC 0023 (`docs/rfcs/0023-removable-media.md`). Plug in a stick, it

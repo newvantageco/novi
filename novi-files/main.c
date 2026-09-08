@@ -35,6 +35,7 @@
 #define _GNU_SOURCE
 #include <dirent.h>
 #include <errno.h>
+#include <poll.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <stdarg.h>
@@ -54,6 +55,7 @@
 #include <xkbcommon/xkbcommon.h>
 
 #include "icons.h"
+#include "places.h"
 #include "icon_blit.h"
 #include "text.h"
 #include "xdg-shell-client-protocol.h"
@@ -67,6 +69,22 @@
 #define ICON_GAP   10
 #define HEADER_H   40
 #define STATUS_H   28
+
+/* The places sidebar (RFC 0023). Fixed width: the labels are a
+ * filesystem label or one of two fixed words, all short, and a column
+ * that resized itself as volumes came and went would make the file
+ * list jump under the cursor every time somebody plugged something in.
+ */
+#define SIDEBAR_W       184
+/* Where the file list starts. One name, so the sidebar cannot be made
+ * wider without the list moving with it. */
+#define LIST_X          SIDEBAR_W
+#define SIDEBAR_BG      0xff13131bu
+#define SIDEBAR_RULE    0xff2a2a38u
+#define SIDEBAR_SEL_BG  0xff23303cu
+#define SIDEBAR_HEAD_H  22
+#define ICON_PLACE_COLOR 0xff8b8fa3u
+#define ICON_VOL_COLOR   0xff7aa2f7u
 
 /* A directory with more entries than this lists the first MAX_ENTRIES
  * and says so in the status bar. The cap exists so that pointing this
@@ -90,6 +108,8 @@ static const pixman_color_t SIZE_PIX    = {0x6a6a, 0x6e6e, 0x8080, 0xffff};
 static const pixman_color_t PATH_PIX    = {0xa3a3, 0xa7a7, 0xb7b7, 0xffff};
 static const pixman_color_t STATUS_PIX  = {0x8b8b, 0x8f8f, 0xa3a3, 0xffff};
 static const pixman_color_t ERROR_PIX   = {0xf0f0, 0x7a7a, 0x7a7a, 0xffff};
+static const pixman_color_t PLACE_PIX   = {0xa3a3, 0xa7a7, 0xb7b7, 0xffff};
+static const pixman_color_t PLACE_HEAD_PIX = {0x5a5a, 0x5e5e, 0x7070, 0xffff};
 
 /* A prompt takes over the status bar and the keyboard until it is
  * answered. There is exactly one at a time and it is never nested. */
@@ -150,6 +170,17 @@ struct novi_files {
 
 	char status[256];
 	bool status_is_error;
+
+	/* The sidebar. `place_sel` indexes places[]; `focus_sidebar` says
+	 * which of the two lists the arrow keys drive. Tab moves between
+	 * them -- this program has no pointer (it never has), so a panel
+	 * you cannot reach from the keyboard is a panel that is not there.
+	 */
+	struct place places[PLACES_MAX];
+	int nplaces;
+	int place_sel;
+	bool focus_sidebar;
+	int mounts_fd; /* poll()ed for mount-table changes; see places.c */
 };
 
 static void set_status(struct novi_files *s, bool err, const char *fmt, ...)
@@ -955,6 +986,103 @@ static void scroll_to_sel(struct novi_files *s) {
 	}
 }
 
+/* ── The places sidebar ────────────────────────────────────────── */
+
+/* Re-read the mount table and keep the selection pointing at the same
+ * PLACE it was pointing at, not at the same index. A stick unmounting
+ * shifts everything below it up by one, and an index-preserving
+ * refresh would silently move the cursor to a different volume --
+ * which matters, because the next thing the cursor does might be
+ * ejecting it. Matched on the path, which is unique by construction:
+ * it is a mount point. */
+static void places_refresh(struct novi_files *s) {
+	char was[PATH_MAX];
+	was[0] = '\0';
+	if (s->place_sel >= 0 && s->place_sel < s->nplaces) {
+		snprintf(was, sizeof(was), "%s", s->places[s->place_sel].path);
+	}
+
+	s->nplaces = novi_places_read(s->places, PLACES_MAX);
+
+	s->place_sel = 0;
+	if (was[0] != '\0') {
+		for (int i = 0; i < s->nplaces; i++) {
+			if (strcmp(s->places[i].path, was) == 0) {
+				s->place_sel = i;
+				return;
+			}
+		}
+		/* The place it was on is gone. Focus follows it out: staying
+		 * in a sidebar whose selected row just vanished puts the
+		 * cursor on whatever moved up into that slot, which is the
+		 * one thing this function exists to prevent. */
+		if (s->focus_sidebar) {
+			s->focus_sidebar = false;
+		}
+	}
+}
+
+/* The volume under the cursor was unmounted out from under this
+ * process, or by it. Either way the current directory may no longer
+ * exist -- so check, and leave rather than sit in a dead path.
+ * `access` on the cwd is the honest test: a lazily-detached mount
+ * leaves the path resolvable-but-empty on some kernels and gone on
+ * others, and this program should behave the same either way. */
+static void leave_if_gone(struct novi_files *s) {
+	if (access(s->cwd, F_OK) == 0) {
+		return;
+	}
+	const char *home = getenv("HOME");
+	go_to(s, (home != NULL && home[0] == '/') ? home : "/");
+	set_status(s, false, "that volume went away");
+}
+
+static void do_eject(struct novi_files *s) {
+	if (s->place_sel < 0 || s->place_sel >= s->nplaces) {
+		return;
+	}
+	struct place *p = &s->places[s->place_sel];
+	if (p->kind != PLACE_VOLUME) {
+		set_status(s, true, "%s is not a removable volume", p->label);
+		return;
+	}
+
+    /* Out of the volume BEFORE ejecting it, if that is where we are.
+     * novi-eject refuses a busy mount, and this program's own cwd is
+     * what would make it busy -- so a file manager sitting on a stick
+     * could never eject it and would report the user's own window as
+     * the thing in the way. */
+	if (strncmp(s->cwd, p->path, strlen(p->path)) == 0) {
+		const char *home = getenv("HOME");
+		go_to(s, (home != NULL && home[0] == '/') ? home : "/");
+	}
+
+	/* Synchronous, and that is a real decision rather than a shortcut.
+	 * novi-eject is a sync and an unmount: fast on an idle volume,
+	 * seconds on one with writes still in flight -- and during those
+	 * seconds this window is frozen, which is the trap RFC 0017
+	 * documents. It is accepted here because the alternative is worse:
+	 * an asynchronous eject would have to report its result into a
+	 * sidebar whose contents may have changed by the time it lands,
+	 * and "did my stick actually eject" is exactly the question a
+	 * person needs answered before they pull it out. A frozen window
+	 * for two seconds says "working"; a silent one says nothing.
+	 */
+	char cmd[PATH_MAX + 64];
+	snprintf(cmd, sizeof(cmd), "novi-eject '%s' >/dev/null 2>&1", p->path);
+	int rc = system(cmd);
+
+	if (rc == 0) {
+		set_status(s, false, "ejected %s -- safe to unplug", p->label);
+	} else {
+		/* The overwhelmingly common failure, and the only one worth
+		 * naming: something still has a file open on it. */
+		set_status(s, true, "%s is busy -- close what is using it", p->label);
+	}
+	places_refresh(s);
+	leave_if_gone(s);
+}
+
 static void render(struct novi_files *s, uint32_t *px, uint32_t stride_px) {
 	uint32_t w = s->width, h = s->height;
 	pixman_image_t *dest = pixman_image_create_bits(PIXMAN_x8r8g8b8,
@@ -967,6 +1095,91 @@ static void render(struct novi_files *s, uint32_t *px, uint32_t stride_px) {
 	int hbase = (HEADER_H - s->font->height) / 2 + s->font->ascent;
 	novi_text_draw(dest, s->font, PAD, hbase, s->cwd, PATH_PIX);
 
+	/* ── Sidebar ───────────────────────────────────────────────── */
+	int side_top = HEADER_H;
+	int side_bot = (int)h - STATUS_H;
+	draw_rect(px, stride_px, w, h, 0, side_top, SIDEBAR_W,
+		side_bot - side_top, SIDEBAR_BG);
+	draw_rect(px, stride_px, w, h, SIDEBAR_W - 1, side_top, 1,
+		side_bot - side_top, SIDEBAR_RULE);
+
+	{
+		int y = side_top + 6;
+		bool devices_header_drawn = false;
+		int hb = (SIDEBAR_HEAD_H - s->font_small->height) / 2 +
+			s->font_small->ascent;
+		novi_text_draw(dest, s->font_small, PAD, y + hb, "PLACES",
+			PLACE_HEAD_PIX);
+		y += SIDEBAR_HEAD_H;
+
+		for (int i = 0; i < s->nplaces && y + ROW_H <= side_bot; i++) {
+			struct place *p = &s->places[i];
+
+			/* One heading, drawn lazily at the first volume, so a
+			 * machine with nothing plugged in has no empty DEVICES
+			 * section sitting there looking broken. */
+			if (p->kind == PLACE_VOLUME && !devices_header_drawn) {
+				devices_header_drawn = true;
+				y += 6;
+				if (y + SIDEBAR_HEAD_H + ROW_H > side_bot) {
+					break;
+				}
+				novi_text_draw(dest, s->font_small, PAD, y + hb, "DEVICES",
+					PLACE_HEAD_PIX);
+				y += SIDEBAR_HEAD_H;
+			}
+
+			bool selected = s->focus_sidebar && i == s->place_sel;
+			bool current = strcmp(p->path, s->cwd) == 0;
+			if (selected) {
+				draw_rect(px, stride_px, w, h, 0, y, SIDEBAR_W - 1, ROW_H,
+					SIDEBAR_SEL_BG);
+				draw_rect(px, stride_px, w, h, 0, y, 3, ROW_H, SEL_BAR);
+			} else if (current) {
+				/* Where you actually are, marked even when the
+				 * keyboard is over in the file list. Without this the
+				 * sidebar stops telling you anything the moment you
+				 * Tab away from it. */
+				draw_rect(px, stride_px, w, h, 0, y, 3, ROW_H, SEL_BAR);
+			}
+
+			enum novi_icon_id icon = ICON_HARD_DRIVE;
+			uint32_t icol = ICON_VOL_COLOR;
+			if (p->kind == PLACE_HOME) {
+				icon = ICON_HOUSE;
+				icol = ICON_PLACE_COLOR;
+			} else if (p->kind == PLACE_ROOT) {
+				icon = ICON_FOLDER;
+				icol = ICON_PLACE_COLOR;
+			}
+			draw_icon(px, stride_px, w, h, PAD,
+				y + (ROW_H - ICON_SIZE) / 2, icon, icol);
+
+			int base = y + (ROW_H - s->font_small->height) / 2 +
+				s->font_small->ascent;
+			int label_x = PAD + ICON_SIZE + ICON_GAP;
+			int label_w = SIDEBAR_W - label_x - PAD;
+
+			/* A volume gets an eject glyph on the right, and the label
+			 * has to stop before it -- an unmounted-looking half-glyph
+			 * under a long label is worse than a shortened label. */
+			if (p->kind == PLACE_VOLUME) {
+				label_w -= ICON_SIZE + 4;
+				draw_icon(px, stride_px, w, h,
+					SIDEBAR_W - PAD - ICON_SIZE,
+					y + (ROW_H - ICON_SIZE) / 2, ICON_EJECT,
+					selected ? SEL_BAR : ICON_PLACE_COLOR);
+			}
+
+			char label[PLACE_LABEL_MAX + 4];
+			novi_text_truncate(s->font_small, p->label, label_w,
+				label, sizeof(label));
+			novi_text_draw(dest, s->font_small, label_x, base, label,
+				(selected || current) ? NAME_PIX : PLACE_PIX);
+			y += ROW_H;
+		}
+	}
+
 	int rows = visible_rows(s);
 	for (int r = 0; r < rows; r++) {
 		int i = s->top + r;
@@ -977,9 +1190,15 @@ static void render(struct novi_files *s, uint32_t *px, uint32_t stride_px) {
 		int y = HEADER_H + r * ROW_H;
 		bool selected = (i == s->sel);
 
+		/* Dimmed rather than hidden when the keyboard is over in the
+		 * sidebar: the row you were on is still where Tab will put you
+		 * back, and a list with no visible cursor reads as having lost
+		 * your place. */
 		if (selected) {
-			draw_rect(px, stride_px, w, h, 0, y, (int)w, ROW_H, SEL_BG);
-			draw_rect(px, stride_px, w, h, 0, y, 3, ROW_H, SEL_BAR);
+			draw_rect(px, stride_px, w, h, LIST_X, y, (int)w - LIST_X,
+				ROW_H, SEL_BG);
+			draw_rect(px, stride_px, w, h, LIST_X, y, 3, ROW_H,
+				s->focus_sidebar ? SIDEBAR_RULE : SEL_BAR);
 		}
 
 		/* The icon answers the same question Enter does, from the
@@ -1001,12 +1220,13 @@ static void render(struct novi_files *s, uint32_t *px, uint32_t stride_px) {
 		} else if (has_ext(e->name, EXT_IMAGE)) {
 			icon = ICON_IMAGE;
 		}
-		draw_icon(px, stride_px, w, h, PAD, y + (ROW_H - ICON_SIZE) / 2,
+		draw_icon(px, stride_px, w, h, LIST_X + PAD,
+			y + (ROW_H - ICON_SIZE) / 2,
 			icon, e->is_dir ? ICON_DIR_COLOR : ICON_FILE_COLOR);
 
 		int baseline = y + (ROW_H - s->font->height) / 2 + s->font->ascent;
-		novi_text_draw(dest, s->font, PAD + ICON_SIZE + ICON_GAP, baseline,
-			e->name, e->is_dir ? DIR_PIX : NAME_PIX);
+		novi_text_draw(dest, s->font, LIST_X + PAD + ICON_SIZE + ICON_GAP,
+			baseline, e->name, e->is_dir ? DIR_PIX : NAME_PIX);
 
 		if (!e->is_dir) {
 			char sz[32];
@@ -1019,7 +1239,8 @@ static void render(struct novi_files *s, uint32_t *px, uint32_t stride_px) {
 
 	if (s->nentries == 0) {
 		int baseline = HEADER_H + ROW_H + s->font->ascent;
-		novi_text_draw(dest, s->font, PAD + ICON_SIZE + ICON_GAP, baseline,
+		novi_text_draw(dest, s->font,
+			LIST_X + PAD + ICON_SIZE + ICON_GAP, baseline,
 			"(empty)", SIZE_PIX);
 	}
 
@@ -1051,7 +1272,9 @@ static void render(struct novi_files *s, uint32_t *px, uint32_t stride_px) {
 
 		char right[sizeof(s->status) + 96];
 		snprintf(right, sizeof(right), "%s", s->status[0] ? s->status :
-			"Enter open  Bksp up  F2 rename  Del delete  ^N folder  ^H hidden  ^Q quit");
+			(s->focus_sidebar
+				? "Enter go  ^E eject  Tab back to files  ^Q quit"
+				: "Enter open  Bksp up  Tab places  F2 rename  Del delete  ^N folder  ^Q quit"));
 		int rw = novi_text_width(s->font_small, right);
 		novi_text_draw(dest, s->font_small, (int)w - PAD - rw, sbase, right,
 			s->status_is_error ? ERROR_PIX : STATUS_PIX);
@@ -1136,6 +1359,18 @@ static void handle_key(struct novi_files *s, xkb_keysym_t sym, bool ctrl,
 		case XKB_KEY_q: case XKB_KEY_Q:
 			s->running = false;
 			return;
+		case XKB_KEY_e: case XKB_KEY_E:
+			/* Only from the sidebar, and deliberately: ^E from the
+			 * file list would have to guess which volume was meant --
+			 * the one you are inside, or the one the sidebar cursor
+			 * happens to be on. A key that ejects something you were
+			 * not looking at is not a convenience. */
+			if (s->focus_sidebar) {
+				do_eject(s);
+			} else {
+				set_status(s, true, "Tab to Places, then ^E to eject");
+			}
+			return;
 		case XKB_KEY_n: case XKB_KEY_N:
 			prompt_open(s, PROMPT_MKDIR);
 			return;
@@ -1151,6 +1386,53 @@ static void handle_key(struct novi_files *s, xkb_keysym_t sym, bool ctrl,
 			s->status[0] = '\0';
 			read_dir(s);
 			set_status(s, false, "refreshed");
+			return;
+		default:
+			return;
+		}
+	}
+
+	/* Tab moves between the two lists. This program has no pointer and
+	 * never has, so a sidebar with no keyboard route into it would be
+	 * decoration. */
+	if (sym == XKB_KEY_Tab || sym == XKB_KEY_ISO_Left_Tab) {
+		s->focus_sidebar = !s->focus_sidebar;
+		s->status[0] = '\0';
+		return;
+	}
+
+	/* The sidebar owns the arrows while it has focus. Escape leaves it
+	 * rather than quitting -- Escape quitting out of a panel someone
+	 * just Tabbed into would be a nasty surprise, and there is still
+	 * ^Q. */
+	if (s->focus_sidebar) {
+		switch (sym) {
+		case XKB_KEY_Escape:
+			s->focus_sidebar = false;
+			return;
+		case XKB_KEY_Up:
+			if (s->place_sel > 0) { s->place_sel--; }
+			return;
+		case XKB_KEY_Down:
+			if (s->place_sel < s->nplaces - 1) { s->place_sel++; }
+			return;
+		case XKB_KEY_Home:
+			s->place_sel = 0;
+			return;
+		case XKB_KEY_End:
+			s->place_sel = s->nplaces > 0 ? s->nplaces - 1 : 0;
+			return;
+		case XKB_KEY_Return: case XKB_KEY_KP_Enter: case XKB_KEY_Right:
+			if (s->place_sel >= 0 && s->place_sel < s->nplaces) {
+				go_to(s, s->places[s->place_sel].path);
+				/* Focus follows the navigation into the list: the
+				 * next thing anybody does after picking a place is
+				 * look at what is in it. */
+				s->focus_sidebar = false;
+			}
+			return;
+		case XKB_KEY_Left:
+			s->focus_sidebar = false;
 			return;
 		default:
 			return;
@@ -1432,9 +1714,74 @@ int main(int argc, char **argv) {
 	xdg_toplevel_set_title(s.xdg_toplevel, "Files");
 	xdg_toplevel_set_app_id(s.xdg_toplevel, "novi-files");
 
+	places_refresh(&s);
+
 	wl_surface_commit(s.surface);
 
-	while (s.running && wl_display_dispatch(s.display) != -1) {
+	/* Watching the mount table, which is what makes the sidebar live
+	 * rather than a snapshot from startup. That needed a real poll()
+	 * loop: this program used to be a plain wl_display_dispatch(),
+	 * which has nowhere to put a second file descriptor.
+	 *
+	 * prepare_read/read_events/cancel_read is the only correct way to
+	 * poll() the display fd -- dispatch() does its own internal read
+	 * and racing it loses events. cancel_read() on EVERY path that
+	 * does not read, poll errors included, or the next prepare_read()
+	 * blocks forever (RFC 0017 learned that one the hard way).
+	 */
+	s.mounts_fd = novi_places_watch_open();
+
+	while (s.running) {
+		while (wl_display_prepare_read(s.display) != 0) {
+			if (wl_display_dispatch_pending(s.display) < 0) {
+				s.running = false;
+				break;
+			}
+		}
+		if (!s.running) {
+			wl_display_cancel_read(s.display);
+			break;
+		}
+		wl_display_flush(s.display);
+
+		struct pollfd fds[2] = {
+			{.fd = wl_display_get_fd(s.display), .events = POLLIN},
+			/* POLLPRI, not POLLIN: /proc/self/mounts never becomes
+			 * "readable" in the ordinary sense, and a poll set up for
+			 * POLLIN here waits forever while the sidebar quietly
+			 * never updates. */
+			{.fd = s.mounts_fd, .events = POLLPRI},
+		};
+		int nfds = s.mounts_fd >= 0 ? 2 : 1;
+		int ret = poll(fds, (nfds_t)nfds, -1);
+		if (ret < 0) {
+			wl_display_cancel_read(s.display);
+			if (errno == EINTR) {
+				continue;
+			}
+			break;
+		}
+
+		if (fds[0].revents & POLLIN) {
+			wl_display_read_events(s.display);
+		} else {
+			wl_display_cancel_read(s.display);
+		}
+		if (wl_display_dispatch_pending(s.display) < 0) {
+			break;
+		}
+
+		if (nfds == 2 && (fds[1].revents & (POLLPRI | POLLERR))) {
+			/* Drain FIRST. POLLPRI stays asserted until the file is
+			 * read again, so a wake that redraws and polls again
+			 * without this spins at 100% CPU forever -- silent, and
+			 * only visible as a hot laptop. */
+			novi_places_watch_drain(s.mounts_fd);
+			places_refresh(&s);
+			leave_if_gone(&s);
+			surface_draw_frame(&s);
+		}
+
 		/* Reap any editor we launched, so a long-lived Files window
 		 * does not accumulate zombies. WNOHANG in the loop rather than
 		 * a SIGCHLD handler: there is nothing to do with the status,
@@ -1443,6 +1790,10 @@ int main(int argc, char **argv) {
 		while (waitpid(-1, NULL, WNOHANG) > 0) {
 			;
 		}
+	}
+
+	if (s.mounts_fd >= 0) {
+		close(s.mounts_fd);
 	}
 
 	free(s.entries);

@@ -30,6 +30,17 @@ icon here was vendored.
 | `power.svg` | `power` | status bar |
 | `chevron-right.svg` | `chevron-right` | disclosure (collapsed) |
 | `chevron-down.svg` | `chevron-down` | disclosure (expanded) |
+| `house.svg` | `house` | files: the home place |
+| `hard-drive.svg` | `hard-drive` | files: a mounted volume |
+| `eject.svg` | `eject` | files: take a volume out |
+
+The last three were fetched at the same pinned commit as everything
+above, on 2026-09-08, for `novi-files`' places sidebar (RFC 0023).
+Lucide renamed `home` to `house` at some point between then and now --
+`icons/home.svg` is a 404 at this commit and `icons/house.svg` is not,
+which is worth recording because "the icon is called what you expect"
+is exactly the kind of assumption that turns into a hand-transcribed
+path nobody can audit.
 
 `layout-grid` (the apps button) is deliberately **not** here — per
 `ICON-PIPELINE.md`'s "First icon shipped" section, that one stayed a

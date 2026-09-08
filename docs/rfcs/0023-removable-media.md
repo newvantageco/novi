@@ -269,10 +269,12 @@ saying what to mount it as.
 
 ## Still not done
 
-- **No file-manager integration.** `novi-files` has no places sidebar,
-  so a mounted volume is discoverable by typing a path or running
-  `novi-mount list`. That is the obvious next piece and it is a UI
-  change, not a plumbing one.
+- ~~**No file-manager integration.**~~ Done. `novi-files` has a places
+  sidebar — Home, Filesystem, and a DEVICES section that appears and
+  disappears as media comes and goes, with `^E` to eject. It is
+  keyboard-driven (Tab moves between the two lists) because that
+  program has never had a pointer; adding one is its own change.
+  See the addendum below.
 - **No desktop notification** that something was mounted, because
   there is no notification system.
 - **No per-user mounts.** Everything is mounted as root; see the
@@ -282,3 +284,62 @@ saying what to mount it as.
   uevent handler, which is a design question, not an omission.
 - **Never run on physical hardware**, like everything else here. The
   USB path is emulated xhci with emulated mass storage.
+
+---
+
+## Addendum: the sidebar
+
+`novi-files` gained a places sidebar, which is what makes the rest of
+this RFC visible to somebody who is not on a console.
+
+- **Volumes come from `/proc/self/mounts`, not from listing
+  `/run/media`.** A directory can be there with nothing mounted on it —
+  `novi-mount` leaves one behind if a mount fails between `mkdir` and
+  `mount` — and the sidebar would then offer a place that is an empty
+  directory. `/proc/mounts` is the kernel's answer to "what is
+  mounted", which is the question being asked.
+- **`poll()` on `/proc/self/mounts` is what makes it live**, and it has
+  two traps stacked on each other. It reports **POLLPRI**, never
+  POLLIN — a poll set up for POLLIN waits forever while the sidebar
+  silently never updates. And **POLLPRI stays asserted until the file
+  is read again**, so a loop that wakes, redraws and polls again
+  without re-reading spins at 100% CPU: silent, and visible only as a
+  hot laptop. `novi_places_watch_drain()` is that read, and every wake
+  calls it first.
+- **Mount points are octal-escaped in `/proc/mounts`** (`\040` for a
+  space, and three others). Unescaping is not politeness: `My\040Stick`
+  is not a path, and this file does not get to assume `novi-mount`'s
+  `safe_name()` is the only thing that ever mounts anything under
+  `/run/media`.
+- **The selection is preserved by PATH, not by index.** A volume
+  unmounting shifts everything below it up by one, and an
+  index-preserving refresh would silently move the cursor onto a
+  different volume — which matters when the next keystroke might eject
+  it.
+- **Ejecting the volume you are standing in works**, because the
+  program leaves it first: `novi-eject` refuses a busy mount, and this
+  window's own cwd is exactly what would make it busy. A file manager
+  that could never eject the stick it was showing, and blamed the
+  user's own window for it, would be a small disaster.
+- **`^E` only works from the sidebar.** From the file list it would
+  have to guess which volume was meant — the one you are inside, or
+  the one the sidebar cursor happens to be on — and a key that ejects
+  something you were not looking at is not a convenience.
+- Three icons were vendored through the existing pipeline
+  (`house`, `hard-drive`, `eject`) at the same pinned Lucide commit as
+  the rest. Lucide has renamed `home` to `house` since: `icons/home.svg`
+  is a 404 at that commit, which is the kind of assumption that
+  otherwise turns into a hand-transcribed path nobody can audit.
+- `truncate_title()` moved from `novi-panel` into `common/text.c` as
+  `novi_text_truncate()`, because two clients now need it and two
+  copies is how they end up truncating differently.
+
+Verified on a booted desktop, driven by real keystrokes through QMP:
+the DEVICES section appears within a second of a stick being plugged
+in and grows a second row when another arrives, both while the window
+is open; Tab/Down/Enter navigates into `/run/media/NOVI_FAT` and shows
+its files; `^E` on a volume ejects it and the window returns to Home
+saying *"ejected NOVI_FAT — safe to unplug"*; `^E` on a busy volume
+refuses with *"NOVI_EXT4 is busy — close what is using it"* and leaves
+it mounted; and `^E` on Filesystem says *"Filesystem is not a
+removable volume"* rather than doing something clever.

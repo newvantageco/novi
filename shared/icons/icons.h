@@ -29,6 +29,9 @@ enum novi_icon_id {
 	ICON_POWER,          /* status bar */
 	ICON_CHEVRON_RIGHT,  /* disclosure, collapsed */
 	ICON_CHEVRON_DOWN,   /* disclosure, expanded */
+	ICON_HOUSE,          /* files: the home place */
+	ICON_HARD_DRIVE,     /* files: a mounted volume */
+	ICON_EJECT,          /* files: take a volume out */
 	NOVI_ICON_COUNT,
 };
 

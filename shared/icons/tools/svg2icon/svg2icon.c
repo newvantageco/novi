@@ -58,6 +58,12 @@ static const struct icon_job JOBS[] = {
 	{ "ICON_POWER",         "icon_power_px",         "svg/power.svg",         16 },
 	{ "ICON_CHEVRON_RIGHT", "icon_chevron_right_px", "svg/chevron-right.svg", 16 },
 	{ "ICON_CHEVRON_DOWN",  "icon_chevron_down_px",  "svg/chevron-down.svg",  16 },
+	/* novi-files' places sidebar (RFC 0023). 16 px, like the other
+	 * chrome glyphs and unlike the 24 px app-grid set: these sit on a
+	 * 26 px row beside 12 pt text, not in a launcher tile. */
+	{ "ICON_HOUSE",         "icon_house_px",         "svg/house.svg",         16 },
+	{ "ICON_HARD_DRIVE",    "icon_hard_drive_px",    "svg/hard-drive.svg",    16 },
+	{ "ICON_EJECT",         "icon_eject_px",         "svg/eject.svg",         16 },
 };
 
 /* nanosvg parses colors from a fixed keyword/hex table and has no notion
