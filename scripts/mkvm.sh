@@ -233,6 +233,16 @@ case "${DISPLAY}" in
         ;;
     none)
         DISPLAY_ARGS=(-display none -nographic)
+        # A sound card even with no display, backed by QEMU's NULL audio
+        # backend. The other modes attach one so you can hear it; this
+        # one attaches it so the mixer EXISTS -- `novi-volume`, the
+        # XF86Audio* keys and the panel's volume indicator are all
+        # testable headlessly, and none of them needs a sound to come
+        # out. Without a card the only thing a headless run can check is
+        # that the code says "no sound card", which is the one answer
+        # that proves nothing.
+        AUDIO_ARGS=(-audiodev none,id=audio0
+            -device ich9-intel-hda -device hda-output,audiodev=audio0)
         ;;
     *)
         echo "ERROR: Unknown display mode '${DISPLAY}'" >&2

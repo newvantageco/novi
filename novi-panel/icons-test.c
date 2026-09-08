@@ -96,6 +96,19 @@ int main(void) {
 		novi_net_wifi_coverage, &(struct net_fan){ .mask = 0u, .slash = 1 },
 		NET_ICON_W, NET_ICON_H);
 
+	struct vol_glyph vol[3];
+	for (int n = 0; n < 3; n++) {
+		vol[n].arcs = n > 0 ? (1u << n) - 1u : 0u;
+		vol[n].muted = 0;
+		char label[64];
+		snprintf(label, sizeof(label), "volume, %d arc(s)  arcs=0x%x",
+			n, vol[n].arcs);
+		show(label, novi_volume_coverage, &vol[n], VOL_ICON_W, VOL_ICON_H);
+	}
+	struct vol_glyph vol_muted = { .arcs = 0u, .muted = 1 };
+	show("volume, muted", novi_volume_coverage, &vol_muted,
+		VOL_ICON_W, VOL_ICON_H);
+
 	puts("checks:");
 
 	{
@@ -197,6 +210,88 @@ int main(void) {
 	check("the offline slash draws something",
 		ink(novi_net_wifi_coverage, &off, NET_ICON_W, NET_ICON_H) >
 		ink(novi_net_wifi_coverage, &all, NET_ICON_W, NET_ICON_H) + 5.0);
+
+	/* The volume glyph. Its states differ only in a few pixels at the
+	 * right-hand end, so every one of these is a thing a screenshot
+	 * would not settle. */
+	{
+		/* The body is drawn in EVERY state, muted included. An
+		 * indicator that disappears at zero volume cannot tell you the
+		 * volume is at zero -- and the muted branch returns early, so
+		 * it is exactly the branch that could drop the body. */
+		double body_only = ink(novi_volume_coverage, &vol[0],
+			VOL_ICON_W, VOL_ICON_H);
+		check("volume: the speaker body is drawn with no arcs",
+			body_only > 10.0);
+		/* Left of the cone's tip is body and nothing else, in every
+		 * state -- so it is the body's own ink, isolated. */
+		int tip_col = (int)(VOL_ICON_W / 2.0 + VOL_TIP_X);
+		double body_muted = 0.0, body_loud = 0.0;
+		for (int y = 0; y < VOL_ICON_H; y++) {
+			for (int x = 0; x < tip_col; x++) {
+				body_muted += novi_volume_coverage(x + 0.5, y + 0.5, &vol_muted);
+				body_loud  += novi_volume_coverage(x + 0.5, y + 0.5, &vol[2]);
+			}
+		}
+		check("volume: muted and loud draw the identical body",
+			fabs(body_muted - body_loud) < 1e-9 && body_muted > 8.0);
+
+		/* The polygon is CLOSED. Leaving the last segment out opens
+		 * the speaker's flat left end into a C -- which at this size
+		 * reads as a slightly thin speaker, not as a bug. */
+		double left_edge = novi_volume_coverage(
+			VOL_ICON_W / 2.0 - 7.8, VOL_ICON_H / 2.0, &vol[0]);
+		check("volume: the body's flat left end is closed", left_edge > 0.7);
+
+		/* Each arc count lights strictly more than the one below --
+		 * the wifi mask lesson, in a glyph with two elements instead
+		 * of four. */
+		double a0 = ink(novi_volume_coverage, &vol[0], VOL_ICON_W, VOL_ICON_H);
+		double a1 = ink(novi_volume_coverage, &vol[1], VOL_ICON_W, VOL_ICON_H);
+		double a2 = ink(novi_volume_coverage, &vol[2], VOL_ICON_W, VOL_ICON_H);
+		check("volume: one arc draws more than none", a1 > a0 + 1.0);
+		check("volume: two arcs draw more than one", a2 > a1 + 1.0);
+
+		/* Muted is the cross INSTEAD of the arcs, never as well:
+		 * both together are two statements about one thing and at
+		 * 16px they smudge into each other. */
+		double muted_all = ink(novi_volume_coverage, &vol_muted,
+			VOL_ICON_W, VOL_ICON_H);
+		check("volume: muted draws more than the bare body",
+			muted_all > a0 + 1.0);
+		/* Probed at 45 degrees around the arc, NOT at its rightmost
+		 * point: the cross reaches that far too, so a probe there
+		 * cannot tell an arc from the cross and the check passes
+		 * whatever the code does. It failed here first, which is the
+		 * assertion doing its job on the test rather than the glyph. */
+		double at_arc = novi_volume_coverage(
+			VOL_ICON_W / 2.0 + VOL_TIP_X + VOL_ARC2 * 0.7071,
+			VOL_ICON_H / 2.0 + VOL_ARC2 * 0.7071, &vol_muted);
+		check("volume: muted draws no arc where the outer arc would be",
+			at_arc < 0.05);
+		double at_cross = novi_volume_coverage(VOL_ICON_W / 2.0 + VOL_X_CX,
+			VOL_ICON_H / 2.0, &vol_muted);
+		check("volume: the muted cross meets at its centre", at_cross > 0.5);
+
+		/* Nothing touches the icon box's border. Same assertion the
+		 * warning triangle carries, for the same reason: the outer
+		 * arc plus half a stroke is exactly the quantity that gets
+		 * clipped flat when a radius grows. */
+		double edge = 0.0;
+		for (int x = 0; x < VOL_ICON_W; x++) {
+			edge += novi_volume_coverage(x + 0.5, 0.5, &vol[2]);
+			edge += novi_volume_coverage(x + 0.5, VOL_ICON_H - 0.5, &vol[2]);
+			edge += novi_volume_coverage(x + 0.5, 0.5, &vol_muted);
+			edge += novi_volume_coverage(x + 0.5, VOL_ICON_H - 0.5, &vol_muted);
+		}
+		for (int y = 0; y < VOL_ICON_H; y++) {
+			edge += novi_volume_coverage(0.5, y + 0.5, &vol[2]);
+			edge += novi_volume_coverage(VOL_ICON_W - 0.5, y + 0.5, &vol[2]);
+			edge += novi_volume_coverage(0.5, y + 0.5, &vol_muted);
+			edge += novi_volume_coverage(VOL_ICON_W - 0.5, y + 0.5, &vol_muted);
+		}
+		check("volume: nothing touches the icon box's border", edge < 0.05);
+	}
 
 	/* The jack's tab is below its body. The upside-down version passed
 	 * every other check there is.

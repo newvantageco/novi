@@ -24,6 +24,10 @@
 # ============================================================
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Computed, never derived from BUILD_DIR: /build is a hardcoded absolute
+# path unrelated to wherever this checkout lives, so "${BUILD_DIR}/.."
+# reaches / rather than the repository.
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 source "${SCRIPT_DIR}/00-versions.sh"
 
 CROSS="${TOOLS}/bin/${TARGET_TRIPLE}"
@@ -88,6 +92,17 @@ done
 
 # alsactl needs somewhere to keep the mixer state it restores at boot.
 mkdir -p "${ROOTFS}/var/lib/alsa"
+
+# novi-volume lives here rather than with the other shell tools in
+# 03-base.sh, because it is a front end to `amixer` and this is the
+# stage that puts amixer in the image. A tool installed by a stage that
+# runs before the binary it drives is inert in exactly the window
+# between the two, which is a state no build should be able to reach.
+#
+# Base content: a machine with no desktop still has a volume, and the
+# XF86Audio* keys novi-shell binds to this are only one of its callers.
+install -D -m 755 "${REPO_ROOT}/packages/novi-volume" \
+    "${ROOTFS}/usr/bin/novi-volume"
 
 echo ""
 echo "ALSA installed:"

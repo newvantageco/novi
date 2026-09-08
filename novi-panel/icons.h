@@ -85,6 +85,52 @@ struct net_fan {
 #define WARN_DOT_Y 9.5
 #define WARN_DOT_HALF 0.9
 
+/* ── The volume glyph (Lucide "volume-2" / "volume-x") ────────────── */
+/* 20 wide and 16 tall, both larger than the network glyph's box, and
+ * both because this glyph genuinely is larger: a speaker plus two
+ * waves spans more than a fan does, and squeezing it into the
+ * neighbouring icon's box just clips the ends off. The border
+ * assertion in icons-test.c found each edge in turn. */
+#define VOL_ICON_W 20
+/* 16, not 14, and the two extra rows are the speaker's own. The cone's
+ * mouth spans +/-5.5 about the centre; half a stroke and a pixel of
+ * antialiasing put ink at 0.15 and 13.85 in a 14-row box, so the glyph
+ * bled into both border rows. Caught by the same border assertion the
+ * warning triangle carries -- at this size a mouth clipped flat top
+ * and bottom just reads as a slightly boxy speaker. */
+#define VOL_ICON_H 16
+#define VOL_ICON_STROKE 1.7
+/* Lucide's speaker polygon, scaled from its 24px box into this one and
+ * expressed as offsets from the icon's centre. Six points, closed --
+ * the throat is the flat left end, the cone flares right. Kept as a
+ * traced polygon rather than "a box and a triangle" because the two
+ * meet at a shoulder, and a union of two shapes draws that seam. */
+#define VOL_BODY_POINTS 6
+/* Where the sound comes out: the arcs are centred on the cone's tip,
+ * not on the icon, so they stay concentric with the thing making them
+ * whatever the radii become. */
+#define VOL_TIP_X (-0.8)
+#define VOL_ARC1 3.0
+#define VOL_ARC2 5.6
+/* How far off the horizontal the arcs open, mirroring NET_FAN_SLOPE:
+ * a point is on an arc only where dx >= VOL_FAN_SLOPE * r, which at
+ * 0.55 opens roughly 113 degrees to the right. */
+#define VOL_FAN_SLOPE 0.55
+/* The muted cross, in place of the arcs rather than on top of them.
+ * A speaker with both waves AND a cross is two statements about the
+ * same thing, and at 16px they simply overlap into a smudge. */
+#define VOL_X_CX 4.2
+#define VOL_X_HALF 2.2
+
+/* Which arcs this pass draws: bit 0 is the inner, bit 1 the outer.
+ * `muted` replaces them entirely. The body is always drawn -- an
+ * indicator that vanishes at zero volume is one that cannot tell you
+ * the volume is at zero. */
+struct vol_glyph {
+	unsigned arcs;
+	int muted;
+};
+
 /* A per-pixel coverage mask, in icon-local coordinates. `ctx` carries
  * whatever the particular glyph needs (which arcs are lit, for the
  * wifi fan) and is ignored by glyphs that need nothing. */
@@ -99,5 +145,6 @@ double novi_net_wifi_coverage(double x, double y, const void *ctx);
 double novi_net_wired_coverage(double x, double y, const void *ctx);
 double novi_power_coverage(double x, double y, const void *ctx);
 double novi_warn_coverage(double x, double y, const void *ctx);
+double novi_volume_coverage(double x, double y, const void *ctx);
 
 #endif

@@ -81,6 +81,17 @@
  * keyboard_handle_key()'s separate check below), matching what every
  * PrintScreen key on real keyboards already means. */
 #define NOVI_DEFAULT_SCREENSHOT "novi-screenshot"
+/* The keys above the number row. `novi-volume` is a base-image shell
+ * tool over amixer (RFC 0011's ALSA userland), so the compositor
+ * neither links libasound nor knows what a mixer control is -- the
+ * same front-end arrangement every other binding here uses.
+ *
+ * Three commands rather than one taking a direction, because the
+ * argument would then be the only thing distinguishing them and a
+ * typo in it is a key that silently does nothing. */
+#define NOVI_DEFAULT_VOLUME_UP   "novi-volume up"
+#define NOVI_DEFAULT_VOLUME_DOWN "novi-volume down"
+#define NOVI_DEFAULT_VOLUME_MUTE "novi-volume mute"
 /* RFC 0001 decision 7: Super+L session lock -- another separate
  * client (novi-lockscreen/), not compositor code, same split as every
  * other binding above. Unlike those, a lock is a real security
@@ -970,6 +981,32 @@ static void keyboard_handle_key(
 
 	bool handled = false;
 	uint32_t modifiers = wlr_keyboard_get_modifiers(keyboard->wlr_keyboard);
+
+	/* Media keys run EVEN WHILE LOCKED, and that is a decision rather
+	 * than an oversight -- every binding below this is refused while
+	 * locked, on purpose. Changing the volume discloses nothing and
+	 * unlocks nothing; refusing it means you cannot silence a machine
+	 * you have just locked and walked away from, which is precisely
+	 * when you want to. macOS and GNOME both make this call. They take
+	 * no modifier either, so like PrintScreen they cannot live in the
+	 * Alt/Super-gated block below. */
+	if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
+		for (int i = 0; i < nsyms; i++) {
+			const char *env = NULL, *def = NULL;
+			switch (syms[i]) {
+			case XKB_KEY_XF86AudioRaiseVolume:
+				env = "NOVI_VOLUME_UP";   def = NOVI_DEFAULT_VOLUME_UP;   break;
+			case XKB_KEY_XF86AudioLowerVolume:
+				env = "NOVI_VOLUME_DOWN"; def = NOVI_DEFAULT_VOLUME_DOWN; break;
+			case XKB_KEY_XF86AudioMute:
+				env = "NOVI_VOLUME_MUTE"; def = NOVI_DEFAULT_VOLUME_MUTE; break;
+			default:
+				continue;
+			}
+			spawn(getenv(env) ? getenv(env) : def);
+			handled = true;
+		}
+	}
 	/* While locked, no compositor keybinding fires at all -- every key
 	 * just falls through to the final wlr_seat_keyboard_notify_key()
 	 * below, which delivers only to whatever holds seat keyboard focus.

@@ -549,6 +549,68 @@ base image, `novi-notifyd` drawing toasts on the desktop.
   on fourteen unrelated libraries: a correct error pointing nowhere
   near the cause.
 
+## Architecture: the keys above the number row
+
+`novi-volume` (base image) over `amixer`, bound to the XF86Audio*
+keysyms by novi-shell, with a speaker glyph in the panel. ALSA had
+been in this image since RFC 0011 and the only way to change the
+volume was to type a mixer control name at a shell.
+
+- **NEVER hardcode `Master`.** This file already recorded that QEMU's
+  emulated USB audio card invents `Audio Output Volume Control` where
+  `alsactl init` expects `Master Playback Volume`. A tool assuming the
+  standard name works on every real machine and fails on the only one
+  this project can test on, which is the worst way round.
+  `pick_control()` prefers Master/PCM/Speaker/Headphone and otherwise
+  takes the first control ALSA reports with `pvolume` in its
+  Capabilities — a control with only `pswitch` is a mute toggle with
+  nothing to turn.
+- **`amixer` inside the `while read` loop needs `</dev/null`.** Any
+  child that reads stdin inside a loop fed by a pipe eats the loop's
+  own input; the symptom is a control list that ends early for no
+  visible reason.
+- **Volume-up unmutes; volume-down does not.** Pressing the loud key
+  on a muted machine means "I want to hear this"; pressing the quiet
+  key does not, and unmuting on the way down makes the quiet key
+  briefly loud. Verified both ways.
+- **`set N` does not always read back N, and that is ALSA.** A
+  percentage is a position in the card's own raw range, so `set 40` on
+  a 64-step control lands on 41. `refresh` prints what the card holds,
+  never what was asked for.
+- **Media keys fire WHILE LOCKED**, unlike every other binding in
+  `handle_keybinding()`. Changing the volume discloses nothing and
+  unlocks nothing; refusing it means you cannot silence a machine you
+  have just locked and walked away from. Both halves were tested, and
+  the second is the one that could have gone wrong quietly: three
+  volume presses on the lock screen, then the **plain** password
+  unlocked on the first try — so the keys were swallowed, not typed
+  into the password field.
+- **The panel reads `/run/novi/volume`, and never forks amixer.** Same
+  published-state arrangement as the network interface (RFC 0009) and
+  the health verdict (RFC 0014); the panel repaints once a second and
+  a fork per repaint is what that pattern exists to avoid. The cost is
+  that `amixer` run by hand is not reflected until the next
+  `novi-volume` call. `rc.init` publishes once after `alsactl restore`
+  so the indicator exists before the first keypress — without it the
+  glyph appears the first time somebody changes the volume, which
+  reads as a bug in the indicator rather than as the absence of a
+  reading.
+- **Display only, like the health glyph.** Every click on this bar
+  OPENS something (Apps, settings, the power menu); a click that
+  toggled mute would be the one control there that changes the machine
+  instead of showing it.
+- **`mkvm.sh --display none` now attaches a sound card** on QEMU's
+  null audio backend. Without one the only thing a headless run can
+  check is that the code correctly says "no sound card", which is the
+  one answer that proves nothing.
+- **The icon host test earned its keep again**, and on both axes this
+  time: the glyph bled into the top and bottom border rows, then into
+  the left column, and the border assertion caught each in turn — a
+  speaker clipped flat just reads as a boxy speaker. It also failed on
+  a *bad probe of mine*: the muted cross reaches as far right as the
+  outer arc, so "muted draws no arc" probed at the arc's rightmost
+  point can never fail. Probe at 45 degrees instead.
+
 ## Architecture: the places sidebar, and polling /proc/mounts
 
 RFC 0023's addendum. `novi-files` shows Home, Filesystem and a DEVICES
