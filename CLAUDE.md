@@ -260,6 +260,69 @@ RFC 0012 (`docs/rfcs/0012-hotplug.md`).
   interface at start. Per-interface DHCP is RFC 0009's work; reaching
   into the network service from a uevent handler is split-brain.
 
+## Architecture: removable media
+
+RFC 0023 (`docs/rfcs/0023-removable-media.md`). Plug in a stick, it
+appears at `/run/media/<label>`; `novi-eject` takes it out.
+
+- **The kernel could not read most sticks, and that was the real
+  blocker.** `CONFIG_EXFAT_FS` and `CONFIG_NTFS3_FS` were off. Windows
+  and macOS format anything over 32 GB as exFAT, and any drive that
+  has lived on Windows is NTFS — so automount without them fails on
+  most media that exists, with "unknown filesystem type", which reads
+  as a broken stick. NTFS3 is Paragon's read-write driver, not the
+  ancient read-only `ntfs` upstream removed in 6.9; the two are one
+  letter apart in Kconfig.
+- **`blkid` says `ntfs`; the driver is `ntfs3`.** The allowlist said
+  `ntfs3` and the detected type said `ntfs`, so every NTFS volume
+  would have been refused *by code whose list claimed to support it*.
+  Found by running `blkid` over a real `mkfs.ntfs` image while
+  building the test media — not by reading the code, twice.
+  `mount_type()` returns the mount type from the same function that
+  decides support, so the two cannot drift.
+- **Almost all of `novi-mount` is deciding whether to touch the device
+  at all**, because every wrong answer there is serious. Removable is
+  two tests, not one (a USB hard disk reports `removable=0` — the
+  *medium* is not removable, the *device* is). "Already mounted"
+  covers root, `/boot`, the ESP and the live medium in one check with
+  no list to keep in sync. `/etc/fstab` is matched on the device node,
+  `LABEL=` **and** `UUID=`, because fstab may use any of the three.
+- **A filesystem label is attacker-controlled text about to become a
+  directory name.** Filtered to `[A-Za-z0-9._-]`, truncated, and a
+  leading dot is *rejected rather than stripped* — `..` survives the
+  character filter because dots are in the keep set. Verified with an
+  ext4 image whose superblock label reads `../../etc`: it mounts as
+  `/run/media/sdd`. Same call as novi-wifi on an SSID.
+- **An allowlist of filesystems, never `mount -t auto`.** A filesystem
+  driver parsing a hostile image is one of the larger attack surfaces
+  a kernel has.
+- **`nosuid,nodev` always; `noexec` deliberately not.** `noexec` would
+  block running a script from a stick — which this project's own
+  installer does from the live medium — and the attack it stops needs
+  the attacker already running code here. udisks2 makes the same call.
+- **`novi-mount remove` is lazy and `novi-eject` is not, and that is
+  the entire difference between them.** `remove` runs when the device
+  is already gone, where a plain `umount` blocks on writeback to
+  hardware that is not there. `eject` runs while it is still present,
+  where a busy mount means a program is genuinely still writing and
+  detaching the tree underneath it would lose exactly the data the
+  command exists to protect. It refuses instead.
+- **`storage.automount` has no converger**, like `power.lid`:
+  novi-mount reads it at event time. So `converge_key` never runs to
+  reject a typo and the *observer* has to — an unusable value reports
+  as drift rather than sitting in the document looking converged while
+  sticks silently failed to mount.
+- **The uevent handler backgrounds the call** (RFC 0012's rule —
+  mounting is exactly the thing that can block), which makes two
+  partitions on one stick race. `novi-mount` takes an `mkdir` lock;
+  there is no `flock` in BusyBox ash. The stale-lock case checks
+  whether the PID inside still exists rather than using a timeout, or
+  a handler killed mid-mount would wedge automount until reboot,
+  silently.
+- **`CONFIG_ISO9660_FS` is now stated in the curated config** instead
+  of being force-enabled by `05-kernel.sh` behind its back. A symbol
+  the build has to repair is a symbol the config should state.
+
 ## Architecture: shutdown, and why it used to hang
 
 RFC 0013 (`docs/rfcs/0013-power-events.md`).

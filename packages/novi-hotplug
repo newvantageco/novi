@@ -58,6 +58,33 @@ case "$ACTION" in
                 ;;
         esac
 
+        # Removable media (RFC 0023). A partition appearing is the
+        # kernel saying somebody plugged something in; novi-mount
+        # decides whether it is ours to mount and where it goes. That
+        # decision does NOT live here, on purpose: this handler is one
+        # rule per event source, and "is this device removable, does
+        # fstab already claim it, what filesystem is on it, is the
+        # label safe to use as a directory name" is a program, not a
+        # case arm.
+        #
+        # Backgrounded, for the same reason as alsactl below: mounting
+        # a filesystem is the one thing in this handler that can take
+        # real time (a slow stick, a dirty NTFS volume, a device that
+        # has stopped answering), and `uevent` runs handlers with
+        # spawn_and_wait. Nothing here depends on the result.
+        # novi-mount takes a lock, so two partitions arriving together
+        # do not race.
+        case "$SUBSYSTEM" in
+            block)
+                case "${DEVTYPE:-}" in
+                    partition|disk)
+                        [ -n "${DEVNAME:-}" ] &&
+                            (novi-mount add "${DEVNAME##*/}" >/dev/null 2>&1 || true) &
+                        ;;
+                esac
+                ;;
+        esac
+
         # A sound card that arrives after boot has never been through
         # `alsactl init`, and ALSA's default state on a fresh card is
         # *muted*. That is RFC 0011's trap reached by a different road:
@@ -88,6 +115,16 @@ case "$ACTION" in
         case "$SUBSYSTEM" in
             block|net|sound|input)
                 note "removed ${SUBSYSTEM}/${DEVPATH##*/}"
+                ;;
+        esac
+
+        # The device is already gone by the time this runs, so this can
+        # only clean up after it -- see novi-mount's own comment on why
+        # that unmount is lazy and novi-eject's is not.
+        case "$SUBSYSTEM" in
+            block)
+                [ -n "${DEVNAME:-}" ] &&
+                    (novi-mount remove "${DEVNAME##*/}" >/dev/null 2>&1 || true) &
                 ;;
         esac
         ;;

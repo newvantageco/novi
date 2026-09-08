@@ -179,6 +179,37 @@ CONFIG_NLS=y
 CONFIG_NLS_CODEPAGE_437=y
 CONFIG_NLS_ISO8859_1=y
 CONFIG_NLS_UTF8=y
+
+# The filesystems that are actually on removable media (RFC 0023).
+#
+# Automount that can only read ext4 and FAT is automount that fails on
+# most of the sticks people own: Windows and macOS format anything over
+# 32 GB as exFAT, and any external drive that has lived on a Windows
+# machine is NTFS. Refusing to mount those is not a security posture,
+# it is a distribution that does not work with the hardware in
+# someone's pocket -- and the mount would be refused with "unknown
+# filesystem type", which reads as a broken stick.
+#
+# NTFS3 is Paragon's driver, in-tree since 5.15 and read-write. It is
+# not the ancient `ntfs` driver (read-only, unmaintained, removed in
+# 6.9), and it is worth naming the difference here because the two are
+# one letter apart in Kconfig.
+#
+# ISO9660 is listed here rather than only being force-enabled by
+# 05-kernel.sh. It had been in the "boot-critical symbols this curated
+# config leaves unmentioned" category -- the live medium is an ISO --
+# and a symbol the build has to repair behind the config's back is a
+# symbol the config should state.
+CONFIG_EXFAT_FS=y
+CONFIG_EXFAT_DEFAULT_IOCHARSET="utf8"
+CONFIG_NTFS3_FS=y
+CONFIG_NTFS3_64BIT_CLUSTER=y
+CONFIG_NTFS3_LZX_XPRESS=y
+CONFIG_NTFS3_FS_POSIX_ACL=y
+CONFIG_ISO9660_FS=y
+CONFIG_JOLIET=y
+CONFIG_ZISOFS=y
+CONFIG_UDF_FS=y
 CONFIG_PROC_FS=y
 CONFIG_PROC_SYSCTL=y
 CONFIG_SYSFS=y

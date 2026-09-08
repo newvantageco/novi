@@ -587,6 +587,7 @@ small static GPT writer) and e2fsprogs' `mke2fs`. See
 | Compiler | GCC 14.2 + musl | Full C/C++ cross-compiler |
 | Packages | pkg / .pkg.tar.gz | Custom minimal format |
 | Firewall | nftables 1.0.9 | One declared key, one policy file, no daemon |
+| Removable media | novi-mount / novi-eject | ext4/FAT/exFAT/NTFS3/UDF, no udisks, no D-Bus |
 | Encryption | LUKS2 (cryptsetup 2.7.5) | One static binary, kernel AF_ALG crypto, no OpenSSL |
 | Dev tools | git 2.47.1 + OpenSSH 9.9p2 | Packages, not base; ssh built without OpenSSL |
 | TLS | mbedTLS 3.6.2 + curl 8.11.1 | Packages, not base; CA bundle hash-pinned |
@@ -650,11 +651,13 @@ BUG_REPORT_URL="https://github.com/newvantageco/novi/issues"
       the machine, and a firewall hole you have to declare (RFC 0022)
 - [x] A network indicator in the panel — wired, wifi with signal bars, or
       offline, with the icon geometry testable without booting anything
+- [x] Removable media — plug in a stick and it is there; exFAT and NTFS
+      because that is what sticks actually are (`novi-eject`, RFC 0023)
 - [ ] **Boot it on real hardware** ← next, and nothing here replaces it
 - [ ] A published repository + offline release key
 - [ ] A Microsoft-signed shim (real Secure Boot); OWE and SAE-PK
       (compiled in, untested)
-- [ ] Automount + `novi-eject`; idle-suspend and low-battery; Mesa
+- [ ] Idle-suspend and low-battery; Mesa; a places sidebar in the file manager
 - [ ] More state domains: keybindings, static IP
 - [ ] Boot splash
 

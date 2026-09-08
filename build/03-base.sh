@@ -117,6 +117,11 @@ install -D -m 644 "${REPO_ROOT}/rootfs/etc/profile" "${ROOTFS}/etc/profile"
 # install a package to fix that.
 install -D -m 755 "${REPO_ROOT}/packages/novi-hwdetect" "${ROOTFS}/sbin/novi-hwdetect"
 install -D -m 755 "${REPO_ROOT}/packages/novi-hotplug" "${ROOTFS}/sbin/novi-hotplug"
+# Removable media (RFC 0023). novi-mount is in /sbin because its only
+# automatic caller is a uevent handler that also lives there and runs
+# as root; novi-eject is in /usr/bin because a person types it.
+install -D -m 755 "${REPO_ROOT}/packages/novi-mount" "${ROOTFS}/sbin/novi-mount"
+install -D -m 755 "${REPO_ROOT}/packages/novi-eject" "${ROOTFS}/usr/bin/novi-eject"
 
 # The live-boot desktop helper (RFC 0007): the base image is
 # console-only, so a live boot that wants a desktop installs one from
