@@ -225,3 +225,66 @@ double novi_power_coverage(double x, double y, const void *ctx) {
 	}
 	return best;
 }
+
+/* ── The health warning glyph ─────────────────────────────────────────
+ *
+ * A rounded triangle with an exclamation in it. Drawn as the distance
+ * to each of its three edges rather than as a filled shape, so the
+ * outline has the same stroke weight as every other glyph on this bar.
+ */
+static double seg_distance(double px, double py, double ax, double ay,
+		double bx, double by) {
+	double vx = bx - ax, vy = by - ay;
+	double wx = px - ax, wy = py - ay;
+	double len2 = vx * vx + vy * vy;
+	double t = len2 > 0.0 ? (wx * vx + wy * vy) / len2 : 0.0;
+	if (t < 0.0) {
+		t = 0.0;
+	} else if (t > 1.0) {
+		t = 1.0;
+	}
+	double dx = wx - t * vx, dy = wy - t * vy;
+	return sqrt(dx * dx + dy * dy);
+}
+
+double novi_warn_coverage(double x, double y, const void *ctx) {
+	(void)ctx;
+	double half_stroke = WARN_ICON_STROKE / 2.0;
+	/* Corners pulled in by the corner radius, so the rounded joins sit
+	 * inside the icon box instead of being clipped by it -- the same
+	 * mistake the wifi fan's outermost arc made before NET_ARC3 was
+	 * checked against NET_ICON_H. */
+	double inset = half_stroke + WARN_TRI_RADIUS;
+	double apex_x = WARN_ICON_W / 2.0;
+	double apex_y = inset;
+	double left_x = inset, right_x = WARN_ICON_W - inset;
+	double base_y = WARN_ICON_H - inset;
+
+	double d = seg_distance(x, y, apex_x, apex_y, left_x, base_y);
+	double d2 = seg_distance(x, y, apex_x, apex_y, right_x, base_y);
+	double d3 = seg_distance(x, y, left_x, base_y, right_x, base_y);
+	if (d2 < d) {
+		d = d2;
+	}
+	if (d3 < d) {
+		d = d3;
+	}
+	double best = novi_stroke_coverage(d, half_stroke);
+
+	/* The exclamation. */
+	double bar = seg_distance(x, y, apex_x, WARN_BAR_TOP, apex_x, WARN_BAR_BOTTOM);
+	double bar_cov = novi_stroke_coverage(bar, half_stroke * 0.85);
+    if (bar_cov > best) {
+		best = bar_cov;
+	}
+	/* A FILLED disc, not a ring: a zero-radius "segment" with a round
+	 * cap, the same shape the power glyph's stem end uses. Drawn as a
+	 * ring it was 1.5px of ink either side of a hole nothing could
+	 * see, which is how it ran into the base line below it. */
+	double dx = x - apex_x, dy = y - WARN_DOT_Y;
+	double dot = novi_stroke_coverage(sqrt(dx * dx + dy * dy), WARN_DOT_HALF);
+	if (dot > best) {
+		best = dot;
+	}
+	return best;
+}

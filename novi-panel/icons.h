@@ -67,6 +67,24 @@ struct net_fan {
 #define POWER_STEM_TOP 6.6
 #define POWER_STEM_BOTTOM 0.6
 
+/* ── The health warning glyph (Lucide "triangle-alert") ───────────── */
+#define WARN_ICON_W 16
+#define WARN_ICON_H 14
+#define WARN_ICON_STROKE 1.7
+#define WARN_TRI_RADIUS 1.2
+/* The exclamation inside it: a stroke and a dot, both on the vertical
+ * centre line. The stroke's span and the dot's centre are y offsets
+ * from the icon's top. */
+/* These four are tight against the triangle's own base line, and the
+ * first attempt had the dot merged into it -- no dot, no gap, just a
+ * bar, which reads as a completely different symbol. Caught by the
+ * host test, not by looking: at 16px a swallowed dot and a short bar
+ * are the same handful of pixels. */
+#define WARN_BAR_TOP 4.0
+#define WARN_BAR_BOTTOM 7.3
+#define WARN_DOT_Y 9.5
+#define WARN_DOT_HALF 0.9
+
 /* A per-pixel coverage mask, in icon-local coordinates. `ctx` carries
  * whatever the particular glyph needs (which arcs are lit, for the
  * wifi fan) and is ignored by glyphs that need nothing. */
@@ -80,5 +98,6 @@ double novi_apps_icon_coverage(double x, double y, const void *ctx);
 double novi_net_wifi_coverage(double x, double y, const void *ctx);
 double novi_net_wired_coverage(double x, double y, const void *ctx);
 double novi_power_coverage(double x, double y, const void *ctx);
+double novi_warn_coverage(double x, double y, const void *ctx);
 
 #endif

@@ -1863,7 +1863,7 @@ that matters first: software can now be built *for* Novi *on* Novi.
 | 21 | Hardware enablement | ✅ Generic modalias-driven driver loading (`novi-hwdetect`, in the initramfs before the root search), 699 MB of curated firmware + `regulatory.db` + Intel SOF, ALSA with `alsactl init` at boot, `novi-power` and a `power.governor` state domain, a laptop-oriented kernel config, and a self-signed `bootx64.efi`. Verified in QEMU on drivers no list names (three virtio modules + an e1000 lease) — **but never once on physical hardware**, which is the whole subject. Firmware-as-packages, a real shim, hotplug, lid/hotkeys and Mesa are roadmap |
 | 22 | Hotplug | ✅ Supervised uevent listener (busybox `uevent`, 128 MB netlink buffer) + `novi-hotplug`: §21's modalias rule against the kernel's event stream, syslog notes, `alsactl init` for late-arriving sound cards. QMP-verified at runtime — a driver in no list loading on plug, a USB stick mounting and reading back, clean removal. Automount landed in §33 and the desktop notices in §34; per-interface DHCP is still roadmap |
 | 23 | Power events & shutdown | ✅ acpid wired to lid and power button, `power.lid`/`power.button` declared and read at event time (with invalid values surfacing as drift, since these keys cannot drift and so are never converged). Found and fixed a bug present since the beginning: **the machine could not shut down while anyone was logged in** — an interactive shell ignores SIGTERM and `timeout-down` was unset, so s6-rc waited forever and shutdownd's `wait_pid()` never returned. Suspend/resume now proven. Power-button-after-S3 is broken in QEMU, traced to a latched ACPI status bit below all of our code |
-| 24 | Service health | ✅ `novi-state health` — `DOWN`/`CRASHLOOP`/`NOTREADY` from `s6-svstat` + `s6-svdt`, closing a blind spot that had hidden four bugs across §14/§19/§23. Deliberately NOT folded into `diff`: a crash-looping service matches the document, and `apply` cannot fix a run script, so drift and health are separate questions with separate exit codes. All four states verified by reproducing the original bugs on a booted machine. Nothing consumes the signal yet (panel, installer, log excerpts) |
+| 24 | Service health | ✅ `novi-state health` — `DOWN`/`CRASHLOOP`/`NOTREADY` from `s6-svstat` + `s6-svdt`, closing a blind spot that had hidden four bugs across §14/§19/§23. Deliberately NOT folded into `diff`: a crash-looping service matches the document, and `apply` cannot fix a run script, so drift and health are separate questions with separate exit codes. All four states verified by reproducing the original bugs on a booted machine. **Consumed since §36** — it was the oldest unclaimed item on this document's own list |
 | 25 | Native toolchain | ✅ `pkg install novi-devel` → gcc 14.2 + binutils 2.43 + make 4.4.1 + musl headers, cross-native built, installed offline from the medium's own signed repo; C and C++ compiled and run on a booted Novi, `make` drives a Makefile. Four bugs found, including §24's `NOTREADY` firing on every service that never declares readiness. **Not** self-rebuilding yet: autotools, git, Python and a kernel build are unpackaged. `-dev` packages for the existing libraries, and gdb, are roadmap |
 
 | 26 | Declarative firewall | ✅ RFC 0016. `network.firewall = on`, one nftables ruleset at `/etc/novi/firewall.nft`, converged by `novi-state` with no daemon — the kernel holds the ruleset. Found that `CONFIG_STATIC_USERMODEHELPER=y` was set with no `/sbin/usermode-helper` in existence, so **no kernel-initiated `request_module()` had ever worked**, for the life of the project; `novi-umh` is the missing half, an allowlist of one. Verified by making the kernel want a module and reading three refusals out of `dmesg` with no `/tmp/PWNED` |
@@ -1876,6 +1876,8 @@ that matters first: software can now be built *for* Novi *on* Novi.
 | 33 | Removable media | ✅ RFC 0023. Plug in a stick, it appears at `/run/media/<label>`; `novi-eject` takes it out. The real blocker was the kernel: exFAT and NTFS3 were off, so automount would have failed on most media that exists. A filesystem label is attacker-controlled text about to become a directory name. `novi-files` grew a places sidebar and a mouse |
 | 34 | Notifications | ✅ RFC 0024. A UNIX **datagram** socket — not a FIFO, whose `open(O_WRONLY)` with no reader blocks forever, and the largest caller is a uevent handler where that stalls the kernel's hotplug queue. Sender in the base image (it always syslogs too, which is the whole feature on a console-only machine), toast daemon as a package. Everything on that socket is untrusted text |
 | 35 | The design language, implemented | ✅ `common/theme.h` is GUI-DESIGN-LANGUAGE.md §1–§3 as C constants and every client includes it; Inter for language, JetBrains Mono for machine values. Real window chrome in `novi-shell/decoration.c` (titles, radius-lg top corners, hover-lit control dots, a nine-slice elevation-1 shadow, drag-to-move). A launcher that lists what is installed instead of showing nothing until you type. A settings panel that edits values, not just switches. **And a power menu — until it existed there was no way to turn this machine off from its own desktop** |
+
+| 36 | Health, consumed | ✅ `init/services/health` samples `novi-state health` every 30s, publishes a verdict to `/run/novi/health`, and notifies on the TRANSITION only; novi-panel draws an amber warning glyph while it is degraded. A service rather than a panel timer, because the check forks ~20 processes and the panel repaints once a second. Verified by breaking a service for real — `mv /sbin/acpid` and restart — and watching `ok` → `degraded acpid` → the glyph appear → the fix → `ok` and the glyph clear, with both notifications in the log |
 
 **Next concrete step: still to write the ISO to a USB stick and boot a
 real machine.** This is no longer a development task, and that is the point.
@@ -1905,12 +1907,11 @@ Ordered honestly, what is left after that:
    with a development key the image trusts.
 3. **A Microsoft-signed shim** — `bootx64.efi` is signed now, but by a
    key nothing trusts. An organisational step before a technical one.
-4. **Something should consume `novi-state health`.** The signal exists
-   (§24) and *still* nothing reads it — this is the oldest unclaimed
-   item on the list. The panel showing a failing service, the installer
-   refusing to call an install finished, and the failing service's own
-   last log lines are what would make it visible without someone
-   thinking to ask.
+4. **The rest of what should consume `novi-state health`.** §36 gave
+   it a panel indicator and a notification. The installer refusing to
+   call an install finished, and a way to see the failing service's
+   own last log lines without opening a terminal, are still open — the
+   indicator says something is wrong and cannot yet say what.
 5. **The rest of the laptop's decisions** — idle-suspend, screen
    blanking, brightness and volume keys, low-battery actions. The lid
    and power button are done (§23) and the power menu (§35) gives

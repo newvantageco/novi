@@ -165,6 +165,20 @@
  * indicator opens novi-settings: the panel grows no menu of its own,
  * for the same reason novi-shell owns no UI. One place per job. */
 #define POWER_BUTTON_H_PADDING 8
+/* The health indicator, left of the network one. RFC 0014's
+ * `novi-state health` has existed since it shipped and nothing had
+ * ever read it -- the roadmap has listed "something should consume
+ * this" ever since. The `health` service samples it and publishes a
+ * verdict here; this reads the file, which is the same arrangement
+ * the network indicator uses for the interface each service chose.
+ *
+ * DELIBERATELY NOT CLICKABLE, unlike the two buttons beside it. There
+ * is no service UI to open, and a panel item that opens a terminal is
+ * not a thing this desktop does. The notification the health service
+ * sends on the transition carries which services; this carries "still
+ * true". When somewhere exists for it to lead, it should lead there. */
+#define HEALTH_FILE "/run/novi/health"
+#define HEALTH_GAP 10
 #define POWER_GAP 8
 #define NOVI_DEFAULT_POWER_MENU "novi-launcher --power"
 #define CLOCK_GAP 12 /* between the status area and the clock */
@@ -239,6 +253,9 @@ struct novi_panel {
 	bool apps_button_pressed; /* press happened inside the button */
 	bool net_button_hover;
 	bool power_button_hover;
+	/* Read once per repaint from HEALTH_FILE, like the clock reads the
+	 * time: cheap, and the panel already repaints every second. */
+	bool health_degraded;
 	bool net_button_pressed;
 	bool power_button_pressed;
 	/* Same press-then-release-in-bounds convention as apps_button_
@@ -521,6 +538,23 @@ static void render(struct novi_panel *panel, uint32_t *px, uint32_t stride_px) {
 	 * refreshed at exactly the rate the panel already repaints. */
 	novi_netstat_read(&panel->net);
 
+	/* A one-line file the health service rewrites atomically, so this
+	 * can never read half of it. Absent (the service off, or the first
+	 * sample not taken yet) means "nothing to say", not "broken" --
+	 * an indicator that lights up because a file has not appeared yet
+	 * would fire on every boot. */
+	panel->health_degraded = false;
+	{
+		FILE *hf = fopen(HEALTH_FILE, "r");
+		if (hf != NULL) {
+			char line[128];
+			if (fgets(line, sizeof(line), hf) != NULL) {
+				panel->health_degraded = strncmp(line, "degraded", 8) == 0;
+			}
+			fclose(hf);
+		}
+	}
+
 	int pw_x, pw_y, pw_w, pw_h;
 	power_button_rect(panel, &pw_x, &pw_y, &pw_w, &pw_h);
 	if (panel->power_button_hover) {
@@ -542,6 +576,17 @@ static void render(struct novi_panel *panel, uint32_t *px, uint32_t stride_px) {
 		net_x + NET_BUTTON_H_PADDING, net_y + (net_h - NET_ICON_H) / 2,
 		&panel->net,
 		panel->net_button_hover ? NET_ICON_HOVER_COLOR : NET_ICON_COLOR);
+
+	/* Only when there is something to say. A status area that always
+	 * shows a warning glyph, greyed out, teaches people to stop
+	 * looking at it. */
+	if (panel->health_degraded) {
+		draw_icon(px, stride_px, w, h,
+			net_x - HEALTH_GAP - WARN_ICON_W,
+			(int)h / 2 - WARN_ICON_H / 2,
+			WARN_ICON_W, WARN_ICON_H, novi_warn_coverage, NULL,
+			NOVI_STATUS_WARNING);
+	}
 
 	time_t now = time(NULL);
 	struct tm tm_now;

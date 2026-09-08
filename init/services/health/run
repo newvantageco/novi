@@ -1,0 +1,81 @@
+#!/bin/sh
+# ============================================================
+# health service — run script
+#
+# `novi-state health` has existed since RFC 0014 and NOTHING HAS EVER
+# READ IT. It is the one signal on this machine that can tell a
+# supervised service apart from a working one -- the distinction that
+# had already hidden four separate bugs (RFC 0004's syslog and its
+# network readiness race, RFC 0009's wpa_supplicant, RFC 0013's acpid
+# after a resume), every one of them on a machine `novi-state diff`
+# called converged. The roadmap has listed "something should consume
+# it" since the day it shipped. This is that.
+#
+# WHY A SERVICE AND NOT A PANEL TIMER. The check forks s6-svstat and
+# s6-svdt once per supervised service -- roughly twenty processes.
+# That is nothing on a shell prompt and far too much on a Wayland
+# client's event loop, which novi-panel repaints from once a second
+# (CLAUDE.md: the GUI's novi-state calls block the loop). So the same
+# arrangement RFC 0009 uses for the network interface: the service
+# does the work and publishes the answer, the panel reads a file. A
+# second observer written in C inside a client is exactly the parallel
+# truth novi-state exists to abolish.
+#
+# WHY POLLING IS SAFE HERE. service_health() will not call anything
+# CRASHLOOP unless it has actually died, nor NOTREADY until it has
+# been up a minute without signalling the readiness it declares. So a
+# sample every 30 seconds cannot catch a healthy service mid-start and
+# report it broken -- which is the failure this whole feature exists
+# to avoid committing itself.
+#
+# No notification-fd: nothing observes this service's readiness, and
+# declaring one we never signal would make it NOTREADY to its own
+# check after a minute. That is not a joke -- RFC 0015 found exactly
+# that firing on every service that never declares readiness.
+# ============================================================
+
+RUN_DIR=/run/novi
+mkdir -p "$RUN_DIR"
+STATE="${RUN_DIR}/health"
+INTERVAL=30
+
+last=""
+while :; do
+    # Only the per-service lines: `<name> <STATE> <detail>`. The
+    # summary line novi-state prints after them says "a service is
+    # supervised but not doing its job", whose second field is
+    # "service" and so cannot match.
+    bad="$(novi-state health 2>/dev/null | awk '
+        $2 == "DOWN" || $2 == "CRASHLOOP" || $2 == "NOTREADY" {
+            printf "%s%s", sep, $1; sep = " "
+        }')"
+
+    # Written to a temp file and renamed, so a reader polling this on
+    # its own schedule never sees half a line. The panel reads it once
+    # a second.
+    if [ -n "$bad" ]; then
+        printf 'degraded %s\n' "$bad" > "${STATE}.tmp"
+    else
+        printf 'ok\n' > "${STATE}.tmp"
+    fi
+    mv -f "${STATE}.tmp" "$STATE"
+
+    # Say something only when the answer CHANGES. A toast is "this
+    # just happened"; the panel indicator is "this is still true", and
+    # re-announcing an unchanged problem every thirty seconds is how a
+    # notification stops being read. Normal urgency, not critical:
+    # critical never expires (RFC 0024), and the persistent signal is
+    # the panel's job.
+    now="degraded"
+    [ -n "$bad" ] || now="ok"
+    if [ "$now" != "$last" ]; then
+        if [ "$now" = degraded ]; then
+            novi-notify -i shield "Service problem" "$bad" 2>/dev/null || true
+        elif [ -n "$last" ]; then
+            novi-notify -u low -i shield "Services recovered" 2>/dev/null || true
+        fi
+        last="$now"
+    fi
+
+    sleep "$INTERVAL"
+done

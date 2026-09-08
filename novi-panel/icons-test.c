@@ -76,6 +76,7 @@ int main(void) {
 	show("wired (RJ45)", novi_net_wired_coverage, NULL,
 		NET_ICON_W, NET_ICON_H);
 	show("power", novi_power_coverage, NULL, POWER_ICON_W, POWER_ICON_H);
+	show("health warning", novi_warn_coverage, NULL, WARN_ICON_W, WARN_ICON_H);
 
 	struct net_fan fan[6];
 	for (int bars = 0; bars <= 4; bars++) {
@@ -96,6 +97,40 @@ int main(void) {
 		NET_ICON_W, NET_ICON_H);
 
 	puts("checks:");
+
+	{
+		/* The warning triangle. Its failure mode is being clipped by
+		 * its own icon box -- the mistake the wifi fan's outermost arc
+		 * made -- which reads as a flat-topped or flat-sided shape and
+		 * is nearly invisible at 16px. Assert the box's border rows
+		 * and columns are empty, so a clipped glyph fails here rather
+		 * than looking slightly wrong on screen forever. */
+		double edge = 0.0;
+		for (int x = 0; x < WARN_ICON_W; x++) {
+			edge += novi_warn_coverage(x + 0.5, 0.5, NULL);
+			edge += novi_warn_coverage(x + 0.5, WARN_ICON_H - 0.5, NULL);
+		}
+		for (int y = 0; y < WARN_ICON_H; y++) {
+			edge += novi_warn_coverage(0.5, y + 0.5, NULL);
+			edge += novi_warn_coverage(WARN_ICON_W - 0.5, y + 0.5, NULL);
+		}
+		check("warn: nothing touches the icon box's border", edge < 0.05);
+		/* The exclamation has to be there: a bare triangle is a
+		 * different symbol. */
+		double bar = novi_warn_coverage(WARN_ICON_W / 2.0,
+			(WARN_BAR_TOP + WARN_BAR_BOTTOM) / 2.0, NULL);
+		double dot = novi_warn_coverage(WARN_ICON_W / 2.0, WARN_DOT_Y, NULL);
+		double gap = novi_warn_coverage(WARN_ICON_W / 2.0,
+			(WARN_BAR_BOTTOM + WARN_DOT_Y) / 2.0, NULL);
+		check("warn: the exclamation's bar is drawn", bar > 0.7);
+		check("warn: its dot is drawn", dot > 0.7);
+		check("warn: there is a gap between the bar and the dot", gap < 0.35);
+		/* Wider at the bottom than the top -- it is a triangle. */
+		double top_ink = ink(novi_warn_coverage, NULL, WARN_ICON_W, 4);
+		double all_ink = ink(novi_warn_coverage, NULL, WARN_ICON_W, WARN_ICON_H);
+		check("warn: most of its ink is below the top quarter",
+			top_ink < all_ink * 0.25);
+	}
 
 	/* The power glyph. Its two failure modes are both invisible in a
 	 * screenshot at 16px -- a gap that has closed up reads as a plain

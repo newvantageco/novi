@@ -709,6 +709,50 @@ one of them on a machine `novi-state diff` called converged.
   change` returns, so a service about to crash-loop may not have died
   yet. It reports what is already true, not what is about to be.
 
+## Architecture: something finally reads the health signal
+
+RFC 0014 built `novi-state health` and **nothing read it for the rest
+of the project's life** — the roadmap listed "something should consume
+this" from the day it shipped, and it survived every round of work
+since, including several that went looking for gaps. `init/services/health`
+is that consumer.
+
+- **A service, not a panel timer.** The check forks `s6-svstat` and
+  `s6-svdt` once per supervised service — about twenty processes. That
+  is nothing at a shell prompt and far too much on a Wayland client's
+  event loop, which novi-panel repaints from once a second. So the same
+  arrangement RFC 0009 uses for the network interface: the service does
+  the work and publishes to `/run/novi/health`, the panel reads a file.
+  A second observer written in C inside a client is the parallel truth
+  novi-state exists to abolish.
+- **Polling is safe here, and that is a property of the checker rather
+  than luck.** `service_health()` will not say CRASHLOOP unless a
+  service has actually died, nor NOTREADY until it has been up a minute
+  without signalling readiness it declares. So a 30-second sample
+  cannot catch a healthy service mid-start and call it broken — which
+  is precisely the mistake this whole feature exists to stop making.
+- **The file is written to a temp name and renamed.** A reader on its
+  own schedule must never see half a line.
+- **The service declares no `notification-fd`.** Nothing observes its
+  readiness, and declaring one it never signals would make it NOTREADY
+  to its own check after sixty seconds. RFC 0015 found exactly that
+  firing on every service that never declares readiness.
+- **A toast on the TRANSITION, an indicator while it is true.** The
+  toast says "this just happened"; re-announcing an unchanged problem
+  every thirty seconds is how a notification stops being read. Normal
+  urgency, not critical — critical never expires (RFC 0024) and the
+  persistent signal is the panel's job.
+- **The indicator is deliberately not clickable**, unlike the two
+  buttons beside it. There is no service UI to open, and a panel item
+  that opens a terminal is not a thing this desktop does. When
+  somewhere exists for it to lead, it should lead there.
+- **Recovery is not instant, and a test that expects it to be is
+  wrong.** A service that has just come back from dying reads
+  CRASHLOOP for sixty seconds by design, so the indicator clears about
+  a minute and a half after the fix, not immediately. The first
+  recovery test waited 36 seconds, saw `degraded`, and would have been
+  read as the indicator sticking forever.
+
 ## Architecture: the native toolchain
 
 RFC 0015 (`docs/rfcs/0015-native-toolchain.md`). `pkg install
