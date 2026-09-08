@@ -201,7 +201,16 @@ DATA_FILES = [
 
     ("fontconfig", "etc/fonts"),
     ("fontconfig", "usr/share/fontconfig"),
-    ("fonts-jetbrains-mono", "usr/share/fonts"),
+    # Two font families, two packages, and the directories are named
+    # rather than the parent swept: "usr/share/fonts" as one entry
+    # put Inter inside a package called fonts-jetbrains-mono, so
+    # `pkg install fonts-jetbrains-mono` silently delivered a font
+    # its name says nothing about. A package's name has to describe
+    # what is in it or the index stops being an answer to "what do I
+    # have". The cost is that a third family needs a line here --
+    # which is the right amount of friction for adding a font.
+    ("fonts-jetbrains-mono", "usr/share/fonts/jetbrains-mono"),
+    ("fonts-inter", "usr/share/fonts/inter"),
     ("foot", "usr/share/terminfo"),
     ("novi-launcher", "usr/share/novi"),
 ]
@@ -210,11 +219,13 @@ DATA_FILES = [
 META_PACKAGES = [
     ("novi-desktop", "OS", "The Novi desktop: compositor, panel, launcher, terminal",
      ["novi-shell", "novi-panel", "novi-launcher", "novi-settings", "novi-edit", "novi-files", "novi-view",
-      "novi-lockscreen", "novi-screenshot", "novi-notifyd", "novi-bg", "foot", "fonts-jetbrains-mono"]),
+      "novi-lockscreen", "novi-screenshot", "novi-notifyd", "novi-bg", "foot",
+      "fonts-jetbrains-mono", "fonts-inter"]),
 ]
 
 EXTRA_PACKAGE_DESCRIPTIONS = {
     "fonts-jetbrains-mono": ("JETBRAINS_MONO", "JetBrains Mono, the default terminal font"),
+    "fonts-inter": ("INTER", "Inter, the UI sans every Novi client labels itself with"),
     "novi-headers": ("OS", "Headers and pkg-config files for the libraries Novi ships"),
 }
 

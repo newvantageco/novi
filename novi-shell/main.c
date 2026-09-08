@@ -54,6 +54,9 @@
 #include <wlr/util/log.h>
 #include <xkbcommon/xkbcommon.h>
 
+#include "decoration.h"
+#include "../common/theme.h"
+
 /* RFC 0001 decision 6: novi-shell defaults to a small wlroots-native
  * terminal (foot) with no GTK/Qt dependency chain, spawned on
  * Super+Return. Overridable via NOVI_TERMINAL so this doesn't need a
@@ -157,34 +160,11 @@
 #define DESKTOP_BG_COLOR_G (0x0au / 255.0f)
 #define DESKTOP_BG_COLOR_B (0x0fu / 255.0f)
 
-#define DECO_HEIGHT 32
-#define DECO_DOT_SIZE 8
-#define DECO_DOT_PADDING 12
-/* The design doc's literal "8px gap between centers" would put two
- * 8px-diameter dots overlapping by a full diameter (center spacing
- * less than the diameter itself) -- clearly a spec error, not
- * something to implement literally. Using 8px of edge-to-edge
- * clearance instead (16px center-to-center), the conventional reading
- * of "an 8px gap" between same-sized elements. */
-#define DECO_DOT_GAP 16
-/* bg-card (GUI-DESIGN-LANGUAGE.md's window-content-chrome token) and
- * text-muted at full strength -- all three dots (close/maximize/
- * minimize) are real and functional now, so none gets a "dimmed"
- * treatment, which would misleadingly signal non-interactive. As
- * wlr_scene_rect's normalized-float RGBA rather than this codebase's
- * usual packed 0xRRGGBB hex, since that's the format the scene-graph
- * rect API actually takes.
- *
- * Note for whoever adds the next translucent decoration element: a
- * wlr_scene_rect's R/G/B must be pre-multiplied by its own alpha --
- * struct wlr_render_color (wlr/render/pass.h) documents this
- * explicitly. Getting it wrong is silent, not a crash: this file used
- * to have a dimmed (40%-alpha) minimize dot, and passing straight
- * (non-premultiplied) color with alpha=0.4 rendered it BRIGHTER than
- * the full-strength dots next to it, confirmed via a pixel readback --
- * the opposite of "dimmed". */
-static const float DECO_BG_COLOR[4] = {0x1B / 255.0f, 0x1C / 255.0f, 0x26 / 255.0f, 1.0f};
-static const float DECO_DOT_COLOR[4] = {0x6B / 255.0f, 0x6F / 255.0f, 0x80 / 255.0f, 1.0f};
+/* The title bar's height, and the only thing this file needs to know
+ * about the decoration: it is the vertical space a window has to give
+ * up at the top. Everything else about the chrome -- the dots, the
+ * colours, the shadow's reach -- lives in decoration.c, which is why
+ * this file no longer carries a palette of its own. */
 
 /* For brevity's sake, struct members are annotated where they are used. */
 enum novi_cursor_mode {
@@ -339,18 +319,19 @@ struct novi_toplevel {
 	struct novi_server *server;
 	struct wlr_xdg_toplevel *xdg_toplevel;
 	struct wlr_scene_tree *scene_tree;
-	/* Server-side decoration -- all children of scene_tree, positioned
+	/* Server-side decoration: title bar, three control dots and a
+	 * nine-slice drop shadow, all children of scene_tree, positioned
 	 * in the negative-y space above the content (see server_new_xdg_
-	 * toplevel()'s initial-placement comment for why the content itself
-	 * is now placed DECO_HEIGHT lower than before, to leave room). Kept
-	 * as direct pointers, not walked from the scene tree, so xdg_
-	 * toplevel_commit() can resize the bar and all three dots'
-	 * decoration_rect_toplevel_at() hit-test can identify a click
-	 * without re-deriving them. */
-	struct wlr_scene_rect *titlebar;
-	struct wlr_scene_rect *close_dot;
-	struct wlr_scene_rect *maximize_dot;
-	struct wlr_scene_rect *minimize_dot;
+	 * toplevel()'s initial-placement comment for why the content
+	 * itself is placed NOVI_DECO_HEIGHT lower than before, to leave
+	 * room). decoration.c owns every pixel of it; this file owns when
+	 * it changes and what a click on it means.
+	 *
+	 * NULL when the UI font would not load -- unlabelled, undecorated
+	 * windows beat refusing to start a desktop. Every novi_decor_*
+	 * entry point tolerates NULL, so there is no guard at the call
+	 * sites. */
+	struct novi_decor *decor;
 	/* Maximize state, toggled by maximize_toplevel()/unmaximize_
 	 * toplevel() -- both the maximize dot and a client's own request
 	 * (xdg_toplevel_request_maximize()) go through the same two
@@ -512,6 +493,14 @@ static void focus_toplevel(struct novi_toplevel *toplevel, struct wlr_surface *s
 			wlr_foreign_toplevel_handle_v1_set_activated(
 				activated_iter->foreign_handle, activated_iter == toplevel);
 		}
+		/* The chrome carries focus too -- the title's colour, the
+		 * dots' strength, the shadow's depth -- and a window losing
+		 * focus does not commit a frame just because it lost it. So
+		 * the redraw has to happen here, on the same sweep, or the
+		 * window that just lost focus would keep looking focused
+		 * until it next drew something of its own. */
+		novi_decor_set_focused(activated_iter->decor,
+			activated_iter == toplevel);
 	}
 	/*
 	 * Tell the seat to have the keyboard enter this surface. wlroots will keep
@@ -1315,47 +1304,53 @@ static struct novi_toplevel *desktop_toplevel_at(
 	 * layer-shell surface's own content correctly reaches this same
 	 * path via *surface, even though the discriminator below rejects
 	 * it as a *novi_toplevel; novi-panel's apps button relies on
-	 * exactly that split. novi-shell's own title bar/close-dot
-	 * decorations, added later, are WLR_SCENE_NODE_RECT and never reach
-	 * here at all -- see close_dot_toplevel_at() for their own,
-	 * separate hit-test.) */
+	 * exactly that split. novi-shell's own decorations are buffer nodes
+	 * too, but their buffers are not surfaces, so
+	 * wlr_scene_surface_try_from_buffer() above answers NULL for them
+	 * and they never reach here -- see decoration_node_toplevel_at()
+	 * for their own, separate hit-test.) */
 	if (tree->node.parent != server->layer_tree_toplevels) {
 		return NULL;
 	}
 	return tree->node.data;
 }
 
-/* Separate from desktop_toplevel_at() above: that function only ever
- * resolves WLR_SCENE_NODE_BUFFER nodes (real client surface content),
- * so it correctly returns NULL for the title bar or any of its dots --
- * all plain WLR_SCENE_NODE_RECT nodes with no wlr_surface behind them.
- * Clicking a dot still needs its owning toplevel resolved, so this
- * walks the scene separately for that case, handing back which exact
- * rect was hit (the title bar backdrop itself is a legal, common
- * answer -- not clickable in this pass, see DECO_HEIGHT's comment on
- * no drag-to-move yet -- so callers must compare *rect_out themselves
- * against the specific dot(s) they care about, same as this function
- * doesn't privilege any one dot over another). */
-static struct novi_toplevel *decoration_rect_toplevel_at(
+/* Separate from desktop_toplevel_at() above: that function only
+ * resolves nodes with a wlr_surface behind them (real client
+ * content), so it correctly answers NULL for the title bar, the
+ * control dots and the shadow -- decoration.c's buffers are plain
+ * memory, not surfaces. Clicking a dot still needs its owning
+ * toplevel resolved, so this walks the scene separately for that
+ * case, handing back which exact node was hit; callers ask
+ * novi_decor_control_at()/novi_decor_is_bar() what it was, rather
+ * than this function privileging one piece of chrome over another.
+ *
+ * It accepts RECT nodes as well as BUFFER ones even though no
+ * decoration is a rect any more: nothing else in a toplevel's tree is
+ * a rect today, and the check is one comparison against the day
+ * something is. */
+static struct novi_toplevel *decoration_node_toplevel_at(
 		struct novi_server *server, double lx, double ly,
-		struct wlr_scene_rect **rect_out) {
+		struct wlr_scene_node **node_out) {
 	double sx, sy;
 	struct wlr_scene_node *node = wlr_scene_node_at(
 		&server->scene->tree.node, lx, ly, &sx, &sy);
-	if (node == NULL || node->type != WLR_SCENE_NODE_RECT) {
+	if (node == NULL ||
+			(node->type != WLR_SCENE_NODE_RECT &&
+			 node->type != WLR_SCENE_NODE_BUFFER)) {
 		return NULL;
 	}
 	if (node->parent == NULL || node->parent->node.data == NULL) {
 		return NULL;
 	}
 	/* Same structural check desktop_toplevel_at() uses: only trust
-	 * .data if this rect's immediate parent is actually a toplevel's
+	 * .data if this node's immediate parent is actually a toplevel's
 	 * own scene_tree (a direct child of layer_tree_toplevels), not
 	 * some other tree that happens to have non-NULL .data. */
 	if (node->parent->node.parent != server->layer_tree_toplevels) {
 		return NULL;
 	}
-	*rect_out = wlr_scene_rect_from_node(node);
+	*node_out = node;
 	return node->parent->node.data;
 }
 
@@ -1365,12 +1360,57 @@ static void reset_cursor_mode(struct novi_server *server) {
 	server->grabbed_toplevel = NULL;
 }
 
+/* How much of a dragged window has to stay reachable. Dragging is now
+ * something a person does with the pointer on the title bar, not only
+ * something a client asks for, so it is now possible to put a window
+ * somewhere there is no way to get it back from: drag it off the left
+ * edge and its title bar -- the only handle it has -- is gone with it.
+ * Every desktop constrains this; none of them constrain it to the
+ * whole window, because dragging a window mostly off-screen on purpose
+ * is a legitimate thing to do. So: enough width to grab, and the title
+ * bar never above the top bar or below the bottom of the screen. */
+#define MOVE_KEEP_ONSCREEN 96
+
 static void process_cursor_move(struct novi_server *server, uint32_t time) {
 	/* Move the grabbed toplevel to the new position. */
 	struct novi_toplevel *toplevel = server->grabbed_toplevel;
-	wlr_scene_node_set_position(&toplevel->scene_tree->node,
-		server->cursor->x - server->grab_x,
-		server->cursor->y - server->grab_y);
+	double x = server->cursor->x - server->grab_x;
+	double y = server->cursor->y - server->grab_y;
+
+	if (!wl_list_empty(&server->outputs)) {
+		struct novi_output *output =
+			wl_container_of(server->outputs.next, output, link);
+		struct wlr_box layout_box = {0};
+		wlr_output_layout_get_box(server->output_layout,
+			output->wlr_output, &layout_box);
+		struct wlr_box geo_box;
+		wlr_xdg_surface_get_geometry(toplevel->xdg_toplevel->base, &geo_box);
+
+		int left = layout_box.x + output->usable_area.x;
+		int top = layout_box.y + output->usable_area.y;
+		int right = left + output->usable_area.width;
+		int bottom = top + output->usable_area.height;
+
+		int keep = geo_box.width < MOVE_KEEP_ONSCREEN
+			? geo_box.width : MOVE_KEEP_ONSCREEN;
+		if (x > right - keep) {
+			x = right - keep;
+		}
+		if (x < left + keep - geo_box.width) {
+			x = left + keep - geo_box.width;
+		}
+		/* y is the CONTENT's top; the title bar sits above it, so the
+		 * bar's own top is y - NOVI_DECO_HEIGHT and that is what must
+		 * stay below the panel. */
+		if (y < top + NOVI_DECO_HEIGHT) {
+			y = top + NOVI_DECO_HEIGHT;
+		}
+		if (y > bottom) {
+			y = bottom;
+		}
+	}
+
+	wlr_scene_node_set_position(&toplevel->scene_tree->node, x, y);
 }
 
 static void process_cursor_resize(struct novi_server *server, uint32_t time) {
@@ -1433,6 +1473,30 @@ static void process_cursor_motion(struct novi_server *server, uint32_t time) {
 	} else if (server->cursor_mode == NOVI_CURSOR_RESIZE) {
 		process_cursor_resize(server, time);
 		return;
+	}
+
+	/* Hover feedback on the window controls. A dot that does not
+	 * react to the pointer reads as decoration rather than as a
+	 * button, which is most of why this chrome looked inert -- and
+	 * hover is also the only thing that tells you the 16px target is
+	 * bigger than the 8px dot before you click it.
+	 *
+	 * A plain sweep over every toplevel rather than remembering which
+	 * one was hovered last: the window count here is always small (an
+	 * everyday desktop, not hundreds of toplevels), novi_decor_set_
+	 * hover() returns immediately when nothing changed, and one loop
+	 * cannot leave a stale highlight on a window the pointer left --
+	 * which a remembered pointer can, the first time a window is
+	 * destroyed out from under it. */
+	struct wlr_scene_node *deco_node = NULL;
+	struct novi_toplevel *deco_hit = decoration_node_toplevel_at(
+		server, server->cursor->x, server->cursor->y, &deco_node);
+	struct novi_toplevel *hover_iter;
+	wl_list_for_each(hover_iter, &server->toplevels, link) {
+		novi_decor_set_hover(hover_iter->decor,
+			hover_iter == deco_hit
+				? novi_decor_control_at(hover_iter->decor, deco_node)
+				: NOVI_DECO_CONTROL_NONE);
 	}
 
 	/* Otherwise, find the toplevel under the pointer and send the event along. */
@@ -1517,19 +1581,58 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
 	 * focus below has always acted on press alone). */
 	if (event->button == BTN_LEFT &&
 			event->state == WL_POINTER_BUTTON_STATE_PRESSED) {
-		struct wlr_scene_rect *hit_rect = NULL;
-		struct novi_toplevel *hit = decoration_rect_toplevel_at(
-			server, server->cursor->x, server->cursor->y, &hit_rect);
-		if (hit != NULL && hit_rect == hit->close_dot) {
-			wlr_xdg_toplevel_send_close(hit->xdg_toplevel);
-		} else if (hit != NULL && hit_rect == hit->maximize_dot) {
-			if (hit->maximized) {
-				unmaximize_toplevel(hit);
-			} else {
-				maximize_toplevel(hit);
+		struct wlr_scene_node *hit_node = NULL;
+		struct novi_toplevel *hit = decoration_node_toplevel_at(
+			server, server->cursor->x, server->cursor->y, &hit_node);
+		if (hit != NULL) {
+			switch (novi_decor_control_at(hit->decor, hit_node)) {
+			case NOVI_DECO_CLOSE:
+				wlr_xdg_toplevel_send_close(hit->xdg_toplevel);
+				break;
+			case NOVI_DECO_MAXIMIZE:
+				if (hit->maximized) {
+					unmaximize_toplevel(hit);
+				} else {
+					maximize_toplevel(hit);
+				}
+				break;
+			case NOVI_DECO_MINIMIZE:
+				minimize_toplevel(hit);
+				break;
+			case NOVI_DECO_CONTROL_NONE:
+				if (novi_decor_is_bar(hit->decor, hit_node)) {
+					/* Drag to move, which every desktop has and this
+					 * one did not: the bar was inert chrome you could
+					 * look at and not use. Focus first -- dragging a
+					 * window is a way of choosing it -- and then start
+					 * the grab directly rather than through
+					 * begin_interactive(), which refuses a toplevel
+					 * whose SURFACE does not hold pointer focus. That
+					 * check is right for a client asking to be moved
+					 * (it stops a background window grabbing the
+					 * pointer) and wrong here: the pointer is over the
+					 * compositor's own decoration, so the client's
+					 * surface never has pointer focus, and honouring
+					 * it would make the title bar undraggable in
+					 * exactly the case it is meant for.
+					 *
+					 * A maximized window is left alone: dragging one
+					 * has to unmaximize-and-follow to make sense, and
+					 * a drag that silently does nothing is better than
+					 * one that tears the window off the screen edge. */
+					focus_toplevel(hit, hit->xdg_toplevel->base->surface);
+					if (!hit->maximized) {
+						server->grabbed_toplevel = hit;
+						server->cursor_mode = NOVI_CURSOR_MOVE;
+						server->grab_x = server->cursor->x -
+							hit->scene_tree->node.x;
+						server->grab_y = server->cursor->y -
+							hit->scene_tree->node.y;
+					}
+					return;
+				}
+				break;
 			}
-		} else if (hit != NULL && hit_rect == hit->minimize_dot) {
-			minimize_toplevel(hit);
 		}
 	}
 
@@ -2113,7 +2216,7 @@ static bool default_toplevel_size(struct novi_server *server, int *out_w,
 	struct novi_output *output =
 		wl_container_of(server->outputs.next, output, link);
 	int avail_w = output->usable_area.width;
-	int avail_h = output->usable_area.height - DECO_HEIGHT;
+	int avail_h = output->usable_area.height - NOVI_DECO_HEIGHT;
 	if (avail_w <= 0 || avail_h <= 0) {
 		return false;
 	}
@@ -2167,18 +2270,14 @@ static void xdg_toplevel_commit(struct wl_listener *listener, void *data) {
 	struct wlr_box geo_box;
 	wlr_xdg_surface_get_geometry(toplevel->xdg_toplevel->base, &geo_box);
 	if (geo_box.width > 0) {
-		wlr_scene_rect_set_size(toplevel->titlebar, geo_box.width, DECO_HEIGHT);
-		/* Right-to-left: close (rightmost), then maximize, then
-		 * minimize, each DECO_DOT_GAP further left than the last. */
-		int close_x = geo_box.width - DECO_DOT_PADDING - DECO_DOT_SIZE;
-		int maximize_x = close_x - DECO_DOT_GAP;
-		int minimize_x = maximize_x - DECO_DOT_GAP;
-		wlr_scene_node_set_position(&toplevel->close_dot->node, close_x,
-			toplevel->close_dot->node.y);
-		wlr_scene_node_set_position(&toplevel->maximize_dot->node, maximize_x,
-			toplevel->maximize_dot->node.y);
-		wlr_scene_node_set_position(&toplevel->minimize_dot->node, minimize_x,
-			toplevel->minimize_dot->node.y);
+		/* Each of these is a no-op when the value it carries has not
+		 * changed, which is what makes calling all three from a
+		 * per-frame handler affordable. */
+		novi_decor_set_size(toplevel->decor, geo_box.width, geo_box.height);
+		novi_decor_set_title(toplevel->decor, toplevel->xdg_toplevel->title);
+		novi_decor_set_focused(toplevel->decor,
+			toplevel->server->seat->keyboard_state.focused_surface ==
+				toplevel->xdg_toplevel->base->surface);
 	}
 }
 
@@ -2197,6 +2296,7 @@ static void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
 	wl_list_remove(&toplevel->set_title.link);
 	wl_list_remove(&toplevel->set_app_id.link);
 
+	novi_decor_destroy(toplevel->decor);
 	free(toplevel);
 }
 
@@ -2215,6 +2315,11 @@ static void xdg_toplevel_set_title(struct wl_listener *listener, void *data) {
 		wlr_foreign_toplevel_handle_v1_set_title(toplevel->foreign_handle,
 			toplevel->xdg_toplevel->title ? toplevel->xdg_toplevel->title : "");
 	}
+	/* The decoration bar shows the same string, so it changes here too.
+	 * The commit that follows would catch it anyway; doing it on the
+	 * event that actually carries the new title keeps the two in step
+	 * without depending on that ordering. */
+	novi_decor_set_title(toplevel->decor, toplevel->xdg_toplevel->title);
 }
 
 static void xdg_toplevel_set_app_id(struct wl_listener *listener, void *data) {
@@ -2316,13 +2421,13 @@ static void maximize_toplevel(struct novi_toplevel *toplevel) {
 	toplevel->saved_geometry.width = geo_box.width;
 	toplevel->saved_geometry.height = geo_box.height;
 
-	int max_height = output->usable_area.height - DECO_HEIGHT;
+	int max_height = output->usable_area.height - NOVI_DECO_HEIGHT;
 	if (max_height < 0) {
 		max_height = 0;
 	}
 	wlr_scene_node_set_position(&toplevel->scene_tree->node,
 		layout_box.x + output->usable_area.x,
-		layout_box.y + output->usable_area.y + DECO_HEIGHT);
+		layout_box.y + output->usable_area.y + NOVI_DECO_HEIGHT);
 	wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel,
 		output->usable_area.width, max_height);
 	wlr_xdg_toplevel_set_maximized(toplevel->xdg_toplevel, true);
@@ -2558,37 +2663,14 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
 	toplevel->scene_tree->node.data = toplevel;
 	xdg_toplevel->base->data = toplevel->scene_tree;
 
-	/* Server-side decoration: a title bar strip and three dots, all
-	 * children of scene_tree, positioned in the negative-y space above
-	 * the content (local (0,-DECO_HEIGHT) and up) -- content itself
-	 * stays at local (0,0) exactly as before, so move/resize logic
-	 * elsewhere (process_cursor_move/resize(), both operate on scene_
-	 * tree's own node position) needs no changes; the decoration just
-	 * rides along as sibling children whenever the tree moves. All
-	 * placeholder-positioned at x=0 here since the content's real width
-	 * (needed to right-align them) isn't known until its first commit
-	 * (see xdg_toplevel_commit(), which the client's own initial_commit
-	 * -> ack_configure -> real commit sequence guarantees fires before
-	 * this is visible). Creation order right-to-left (close, maximize,
-	 * minimize) matches their intended screen order, though it isn't
-	 * load-bearing -- xdg_toplevel_commit() repositions all three by
-	 * direct pointer, not by sibling order. */
-	toplevel->titlebar = wlr_scene_rect_create(
-		toplevel->scene_tree, 0, DECO_HEIGHT, DECO_BG_COLOR);
-	wlr_scene_node_set_position(&toplevel->titlebar->node, 0, -DECO_HEIGHT);
-	toplevel->close_dot = wlr_scene_rect_create(
-		toplevel->scene_tree, DECO_DOT_SIZE, DECO_DOT_SIZE, DECO_DOT_COLOR);
-	toplevel->maximize_dot = wlr_scene_rect_create(
-		toplevel->scene_tree, DECO_DOT_SIZE, DECO_DOT_SIZE, DECO_DOT_COLOR);
-	/* Real now, not dimmed -- novi-panel's taskbar (wlr-foreign-toplevel-
-	 * management) is the restore path GUI-DESIGN-LANGUAGE.md's original
-	 * dimmed-placeholder reasoning was waiting on. */
-	toplevel->minimize_dot = wlr_scene_rect_create(
-		toplevel->scene_tree, DECO_DOT_SIZE, DECO_DOT_SIZE, DECO_DOT_COLOR);
-	int dot_y = -DECO_HEIGHT + (DECO_HEIGHT - DECO_DOT_SIZE) / 2;
-	wlr_scene_node_set_position(&toplevel->close_dot->node, 0, dot_y);
-	wlr_scene_node_set_position(&toplevel->maximize_dot->node, 0, dot_y);
-	wlr_scene_node_set_position(&toplevel->minimize_dot->node, 0, dot_y);
+	/* Server-side decoration. Everything about how it looks lives in
+	 * decoration.c; what it needs from here is only its size, which
+	 * is not known until the client's first real commit (see
+	 * xdg_toplevel_commit(), which the client's own initial_commit ->
+	 * ack_configure -> real commit sequence guarantees fires before
+	 * this is visible). Until then it draws nothing, which is right:
+	 * nothing is mapped yet either. */
+	toplevel->decor = novi_decor_create(toplevel->scene_tree);
 
 	/* Initial placement: land the window in the output's usable area
 	 * (below the panel's exclusive zone), not at the scene tree's
@@ -2602,7 +2684,7 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
 	 * re-applied on every map, so a window the user has since moved
 	 * doesn't get snapped back if it's ever unmapped and remapped.
 	 *
-	 * The extra "+ DECO_HEIGHT" is new: content now sits DECO_HEIGHT
+	 * The extra "+ NOVI_DECO_HEIGHT" is new: content now sits NOVI_DECO_HEIGHT
 	 * lower than the usable area's own top edge, leaving exactly enough
 	 * room above it (in scene_tree's negative-y space) for the title
 	 * bar to occupy without overlapping the panel above it. Before
@@ -2634,10 +2716,10 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
 		 * the size we asked for rather than assumed to be exact. */
 		int want_w = 0, want_h = 0;
 		int x = layout_box.x + output->usable_area.x;
-		int y = layout_box.y + output->usable_area.y + DECO_HEIGHT;
+		int y = layout_box.y + output->usable_area.y + NOVI_DECO_HEIGHT;
 		if (default_toplevel_size(server, &want_w, &want_h)) {
 			x += (output->usable_area.width - want_w) / 2;
-			y += (output->usable_area.height - DECO_HEIGHT - want_h) / 2;
+			y += (output->usable_area.height - NOVI_DECO_HEIGHT - want_h) / 2;
 		}
 		wlr_scene_node_set_position(&toplevel->scene_tree->node, x, y);
 	}
@@ -2815,6 +2897,17 @@ int main(int argc, char *argv[]) {
 	if (optind < argc) {
 		printf("Usage: %s [-s startup command]\n", argv[0]);
 		return 0;
+	}
+
+	/* Loads the UI font once. A failure here is reported and then
+	 * ignored on purpose: a desktop whose windows have unlabelled
+	 * title bars is a cosmetic problem, and refusing to start the
+	 * compositor over it leaves the user with no desktop at all.
+	 * novi_decor_create() answers NULL from then on and every
+	 * other entry point tolerates that. */
+	if (!novi_decor_init()) {
+		wlr_log(WLR_ERROR, "could not load the UI font (%s) -- "
+			"windows will have no title text", NOVI_FONT_TITLE);
 	}
 
 	struct novi_server server = {0};
@@ -3038,6 +3131,7 @@ int main(int argc, char *argv[]) {
 
 	/* Once wl_display_run returns, we destroy all clients then shut down the
 	 * server. */
+	novi_decor_finish();
 	wl_display_destroy_clients(server.wl_display);
 	wlr_scene_node_destroy(&server.scene->tree.node);
 	wlr_xcursor_manager_destroy(server.cursor_mgr);
