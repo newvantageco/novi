@@ -118,6 +118,11 @@
  * as an s6 service, because a notification daemon with no compositor
  * to draw on has nothing to do. */
 #define NOVI_DEFAULT_NOTIFYD "novi-notifyd"
+/* The wallpaper (RFC 0025). The scene rect below still exists and is
+ * still what an empty desktop shows for the fraction of a second
+ * before this client's first frame arrives -- and on any machine where
+ * novi-bg is not installed, which is why it was not removed. */
+#define NOVI_DEFAULT_BG "novi-bg"
 
 /* Server-side window decorations (GUI-DESIGN-LANGUAGE.md §6): a title
  * bar strip above every toplevel's content, with close and maximize
@@ -148,9 +153,9 @@
  * indistinguishable from a display that is not being driven. This is
  * the panel's own BG_COLOR lifted a little, so the two read as one
  * palette with the panel sitting slightly darker on top of it. */
-#define DESKTOP_BG_COLOR_R (0x1eu / 255.0f)
-#define DESKTOP_BG_COLOR_G (0x1eu / 255.0f)
-#define DESKTOP_BG_COLOR_B (0x28u / 255.0f)
+#define DESKTOP_BG_COLOR_R (0x0au / 255.0f)
+#define DESKTOP_BG_COLOR_G (0x0au / 255.0f)
+#define DESKTOP_BG_COLOR_B (0x0fu / 255.0f)
 
 #define DECO_HEIGHT 32
 #define DECO_DOT_SIZE 8
@@ -3023,6 +3028,7 @@ int main(int argc, char *argv[]) {
 	}
 	spawn(getenv("NOVI_PANEL") ? getenv("NOVI_PANEL") : NOVI_DEFAULT_PANEL);
 	spawn(getenv("NOVI_NOTIFYD") ? getenv("NOVI_NOTIFYD") : NOVI_DEFAULT_NOTIFYD);
+	spawn(getenv("NOVI_BG") ? getenv("NOVI_BG") : NOVI_DEFAULT_BG);
 	/* Run the Wayland event loop. This does not return until you exit the
 	 * compositor. Starting the backend rigged up all of the necessary event
 	 * loop configuration to listen to libinput events, DRM events, generate

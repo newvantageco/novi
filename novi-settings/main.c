@@ -57,6 +57,7 @@
 
 #include "xdg-shell-client-protocol.h"
 #include "../common/text.h"
+#include "../common/theme.h"
 
 #define WINDOW_WIDTH 640
 #define WINDOW_HEIGHT 400
@@ -1935,8 +1936,8 @@ int main(void) {
 		return 1;
 	}
 
-	state.font = novi_text_load_font("JetBrains Mono:size=16");
-	state.font_small = novi_text_load_font("JetBrains Mono:size=13");
+	state.font = novi_text_load_font(NOVI_FONT_TITLE);
+	state.font_small = novi_text_load_font(NOVI_FONT_BODY);
 	if (state.font == NULL || state.font_small == NULL) {
 		fprintf(stderr, "novi-settings: failed to load JetBrains Mono\n");
 		return 1;

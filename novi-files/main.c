@@ -57,6 +57,7 @@
 
 #include "icons.h"
 #include "places.h"
+#include "../common/theme.h"
 #include "icon_blit.h"
 #include "text.h"
 #include "xdg-shell-client-protocol.h"
@@ -64,8 +65,8 @@
 #define WINDOW_WIDTH  860
 #define WINDOW_HEIGHT 600
 
-#define PAD        14
-#define ROW_H      26
+#define PAD        NOVI_SP_LG
+#define ROW_H      NOVI_ROW_H
 #define ICON_SIZE  16
 #define ICON_GAP   10
 #define HEADER_H   40
@@ -80,13 +81,13 @@
 /* Where the file list starts. One name, so the sidebar cannot be made
  * wider without the list moving with it. */
 #define LIST_X          SIDEBAR_W
-#define SIDEBAR_BG      0xff13131bu
-#define SIDEBAR_RULE    0xff2a2a38u
-#define SIDEBAR_SEL_BG  0xff23303cu
-#define HOVER_BG        0xff1e1e2au
+#define SIDEBAR_BG      NOVI_BG_CARD
+#define SIDEBAR_RULE    NOVI_BORDER_SUBTLE
+#define SIDEBAR_SEL_BG  NOVI_ACCENT_SUBTLE
+#define HOVER_BG        NOVI_BG_CARD_RAISED
 #define SIDEBAR_HEAD_H  22
-#define ICON_PLACE_COLOR 0xff8b8fa3u
-#define ICON_VOL_COLOR   0xff7aa2f7u
+#define ICON_PLACE_COLOR NOVI_TEXT_SECONDARY
+#define ICON_VOL_COLOR   NOVI_TEXT_SECONDARY
 
 /* A directory with more entries than this lists the first MAX_ENTRIES
  * and says so in the status bar. The cap exists so that pointing this
@@ -95,23 +96,34 @@
 #define MAX_ENTRIES 20000
 #define NAME_MAX_LEN 255
 
-#define BG_COLOR      0xff16161eu
-#define HEADER_BG     0xff1b1b26u
-#define STATUS_BG     0xff232430u
-#define SEL_BG        0xff23303cu
-#define SEL_BAR       0xff2dd4bfu
+#define BG_COLOR      NOVI_BG_BASE
+#define HEADER_BG     NOVI_BG_PANEL
+#define STATUS_BG     NOVI_BG_PANEL
+#define SEL_BG        NOVI_ACCENT_SUBTLE
+#define SEL_BAR       NOVI_ACCENT
 
-#define ICON_DIR_COLOR  0xff7aa2f7u
-#define ICON_FILE_COLOR 0xff8b8fa3u
+/* Hierarchy by BRIGHTNESS, not by hue.
+ *
+ * The first pass at this made directories accent-coloured -- teal
+ * icon, teal label -- which put the one signal colour in the palette
+ * on every second row, directly beside the accent-tinted selection
+ * that was trying to mean something. §1 says it plainly: accent is a
+ * signal colour, never a large fill. A folder is not a signal.
+ *
+ * So a directory is simply brighter than a file, in both its icon and
+ * its label, and the glyph carries the rest. Accent is left to mean
+ * exactly one thing in this window: this row is selected. */
+#define ICON_DIR_COLOR  NOVI_TEXT_SECONDARY
+#define ICON_FILE_COLOR NOVI_TEXT_MUTED
 
-static const pixman_color_t NAME_PIX    = {0xc8c8, 0xcccc, 0xd8d8, 0xffff};
-static const pixman_color_t DIR_PIX     = {0x7a7a, 0xa2a2, 0xf7f7, 0xffff};
-static const pixman_color_t SIZE_PIX    = {0x6a6a, 0x6e6e, 0x8080, 0xffff};
-static const pixman_color_t PATH_PIX    = {0xa3a3, 0xa7a7, 0xb7b7, 0xffff};
-static const pixman_color_t STATUS_PIX  = {0x8b8b, 0x8f8f, 0xa3a3, 0xffff};
-static const pixman_color_t ERROR_PIX   = {0xf0f0, 0x7a7a, 0x7a7a, 0xffff};
-static const pixman_color_t PLACE_PIX   = {0xa3a3, 0xa7a7, 0xb7b7, 0xffff};
-static const pixman_color_t PLACE_HEAD_PIX = {0x5a5a, 0x5e5e, 0x7070, 0xffff};
+static const pixman_color_t NAME_PIX    = NOVI_PIX(NOVI_TEXT_SECONDARY);
+static const pixman_color_t DIR_PIX     = NOVI_PIX(NOVI_TEXT_PRIMARY);
+static const pixman_color_t SIZE_PIX    = NOVI_PIX(NOVI_TEXT_MUTED);
+static const pixman_color_t PATH_PIX    = NOVI_PIX(NOVI_TEXT_SECONDARY);
+static const pixman_color_t STATUS_PIX  = NOVI_PIX(NOVI_TEXT_SECONDARY);
+static const pixman_color_t ERROR_PIX   = NOVI_PIX(NOVI_STATUS_ERROR);
+static const pixman_color_t PLACE_PIX   = NOVI_PIX(NOVI_TEXT_SECONDARY);
+static const pixman_color_t PLACE_HEAD_PIX = NOVI_PIX(NOVI_TEXT_MUTED);
 
 /* A prompt takes over the status bar and the keyboard until it is
  * answered. There is exactly one at a time and it is never nested. */
@@ -147,6 +159,7 @@ struct novi_files {
 
 	struct fcft_font *font;
 	struct fcft_font *font_small;
+	struct fcft_font *font_mono;
 
 	uint32_t width, height;
 	bool configured;
@@ -1218,8 +1231,8 @@ static void render(struct novi_files *s, uint32_t *px, uint32_t stride_px) {
 
 	/* Header: the current path. */
 	draw_rect(px, stride_px, w, h, 0, 0, (int)w, HEADER_H, HEADER_BG);
-	int hbase = (HEADER_H - s->font->height) / 2 + s->font->ascent;
-	novi_text_draw(dest, s->font, PAD, hbase, s->cwd, PATH_PIX);
+	int hbase = (HEADER_H - s->font_mono->height) / 2 + s->font_mono->ascent;
+	novi_text_draw(dest, s->font_mono, PAD, hbase, s->cwd, PATH_PIX);
 
 	/* ── Sidebar ───────────────────────────────────────────────── */
 	layout_places(s);
@@ -1361,8 +1374,8 @@ static void render(struct novi_files *s, uint32_t *px, uint32_t stride_px) {
 		if (!e->is_dir) {
 			char sz[32];
 			human_size(e->size, sz, sizeof(sz));
-			int sw = novi_text_width(s->font_small, sz);
-			novi_text_draw(dest, s->font_small, (int)w - PAD - sw,
+			int sw = novi_text_width(s->font_mono, sz);
+			novi_text_draw(dest, s->font_mono, (int)w - PAD - sw,
 				baseline, sz, SIZE_PIX);
 		}
 	}
@@ -2024,10 +2037,17 @@ int main(int argc, char **argv) {
 		return 1;
 	}
 
-	s.font = novi_text_load_font("JetBrains Mono:size=14");
-	s.font_small = novi_text_load_font("JetBrains Mono:size=12");
-	if (s.font == NULL || s.font_small == NULL) {
-		fprintf(stderr, "novi-files: failed to load JetBrains Mono\n");
+	/* Three faces, split by what the text IS rather than by where it
+	 * sits (design language §2). A filename is language, so it is
+	 * Inter. A PATH and a SIZE IN BYTES are machine values that people
+	 * read character by character and compare column to column, so
+	 * they stay monospace -- which is also what stops "4 B" and
+	 * "1.2 MB" from wandering as the listing scrolls. */
+	s.font = novi_text_load_font(NOVI_FONT_BODY);
+	s.font_small = novi_text_load_font(NOVI_FONT_CAPTION);
+	s.font_mono = novi_text_load_font(NOVI_FONT_MONO_SM);
+	if (s.font == NULL || s.font_small == NULL || s.font_mono == NULL) {
+		fprintf(stderr, "novi-files: failed to load a font\n");
 		return 1;
 	}
 
@@ -2132,6 +2152,9 @@ int main(int argc, char **argv) {
 		wl_pointer_destroy(s.pointer);
 	}
 	free(s.entries);
+	if (s.font_mono != NULL) {
+		fcft_destroy(s.font_mono);
+	}
 	if (s.xkb_state != NULL) {
 		xkb_state_unref(s.xkb_state);
 	}

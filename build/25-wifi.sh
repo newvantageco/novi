@@ -55,31 +55,16 @@ TESTDIR="${BUILD_DIR}/wifi-test"
 rm -rf "${WORK}"; mkdir -p "${WORK}" "${TESTDIR}"
 
 # ── libnl ─────────────────────────────────────────────────────────────────
-# wpa_supplicant's nl80211 driver talks to the kernel through netlink,
-# and libnl is what it uses to do that. --disable-cli drops nl-* tools
-# nothing here runs.
-echo ">>> Building libnl ${LIBNL_VERSION} ..."
-tar -xf "${SOURCES}/libnl-${LIBNL_VERSION}.tar.gz" -C "${WORK}"
-(
-    cd "${WORK}/libnl-${LIBNL_VERSION}"
-    ./configure --host="${TARGET_TRIPLE}" --prefix=/usr \
-        --disable-static --disable-cli >/dev/null
-    make -j"$(nproc)" >/dev/null
-    make install DESTDIR="${ROOTFS}" >/dev/null
-)
-# libtool leaves .la files that point at build-tree paths; nothing on
-# the target reads them and they are a classic source of confusing
-# link failures later.
-rm -f "${ROOTFS}"/usr/lib/libnl*.la
-
-# libnl builds six libraries; wpa_supplicant and iw link two of them.
-# The other four -- route, nf, xfrm, idiag -- are 3 MB of netlink
-# families nothing in this image speaks. --disable-cli already dropped
-# the tools that would have used them.
-rm -f "${ROOTFS}"/usr/lib/libnl-route-3.so* \
-      "${ROOTFS}"/usr/lib/libnl-nf-3.so* \
-      "${ROOTFS}"/usr/lib/libnl-xfrm-3.so* \
-      "${ROOTFS}"/usr/lib/libnl-idiag-3.so*
+# Built by 06-wayland.sh now, not here. novi-panel (stage 10) links it
+# for the network indicator's nl80211 query, and a library built in a
+# LATER stage than one of its consumers is invisible in a warm tree and
+# fatal in a clean one -- the novi-launcher/fcft trap, exactly (RFC
+# 0005). A library with more than one consumer belongs in the library
+# stage.
+[ -f "${ROOTFS}/usr/lib/pkgconfig/libnl-genl-3.0.pc" ] || {
+    echo "ERROR: libnl not found in ${ROOTFS} -- run build/06-wayland.sh first." >&2
+    exit 1
+}
 
 # ── wolfSSL: the crypto backend that has EC ───────────────────────────────
 #

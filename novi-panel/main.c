@@ -84,16 +84,17 @@
 #include "wlr-layer-shell-unstable-v1-protocol.h"
 #include "wlr-foreign-toplevel-management-unstable-v1-protocol.h"
 #include "../common/text.h"
+#include "../common/theme.h"
 #include "icons.h"
 #include "netstat.h"
 
 #define PANEL_HEIGHT 32
-#define BG_COLOR 0xff181820u /* opaque near-black, XRGB8888 */
-#define BORDER_COLOR 0xff3a3a4au
+#define BG_COLOR NOVI_BG_PANEL
+#define BORDER_COLOR NOVI_BORDER_SUBTLE
 /* GUI-DESIGN-LANGUAGE.md's bg-card-raised / accent-subtle-bg tokens,
  * for the apps button's rest/hover backgrounds. */
-#define BUTTON_BG_COLOR 0xff232430u
-#define BUTTON_HOVER_BG_COLOR 0xff17302cu
+#define BUTTON_BG_COLOR NOVI_BG_CARD
+#define BUTTON_HOVER_BG_COLOR NOVI_ACCENT_SUBTLE
 /* Left edge / apps button internal padding, both from the same doc's
  * §3 spacing scale ("md" = 12px edge padding, button padding
  * 8px horizontal). */
@@ -116,8 +117,8 @@
 /* text-secondary / accent, matching apps_label_color/apps_label_hover_
  * color below exactly (same tokens, packed 0xRRGGBB here since the
  * icon is drawn via plain draw_rect()-style writes, not pixman). */
-#define APPS_ICON_COLOR 0xa3a7b7u
-#define APPS_ICON_HOVER_COLOR 0x2dd4bfu
+#define APPS_ICON_COLOR (NOVI_TEXT_SECONDARY & 0xffffffu)
+#define APPS_ICON_HOVER_COLOR (NOVI_ACCENT & 0xffffffu)
 
 /* RFC 0001 decision 7: Alt+Space already opens novi-launcher via
  * novi-shell directly; this is the same command, run from the panel
@@ -151,9 +152,9 @@
 #define NOVI_DEFAULT_SETTINGS "novi-settings"
 
 
-#define NET_ICON_COLOR 0xa3a7b7u      /* text-secondary, at rest */
-#define NET_ICON_DIM_COLOR 0x4a4d5cu  /* an element that is present but unlit */
-#define NET_ICON_HOVER_COLOR 0x2dd4bfu
+#define NET_ICON_COLOR (NOVI_TEXT_SECONDARY & 0xffffffu)
+#define NET_ICON_DIM_COLOR (NOVI_BORDER_STRONG & 0xffffffu)
+#define NET_ICON_HOVER_COLOR (NOVI_ACCENT & 0xffffffu)
 
 #define NET_BUTTON_H_PADDING 8
 #define CLOCK_GAP 12 /* between the status area and the clock */
@@ -211,6 +212,7 @@ struct novi_panel {
 	struct zwlr_layer_surface_v1 *layer_surface;
 
 	struct fcft_font *font;
+	struct fcft_font *font_clock;
 	int apps_button_w; /* text width of "Apps" + horizontal padding */
 	int clock_w;       /* text width of "00:00:00" -- monospace, so fixed */
 	int net_button_w;  /* the network indicator's clickable width */
@@ -512,7 +514,10 @@ static void render(struct novi_panel *panel, uint32_t *px, uint32_t stride_px) {
 	};
 	int text_x = (int)w - panel->clock_w - PANEL_EDGE_PADDING;
 	int baseline_y = ((int)h + panel->font->ascent - panel->font->descent) / 2;
-	novi_text_draw(dest, panel->font, text_x, baseline_y, clock_str, clock_color);
+	int clock_base = ((int)h + panel->font_clock->ascent -
+		panel->font_clock->descent) / 2;
+	novi_text_draw(dest, panel->font_clock, text_x, clock_base, clock_str,
+		clock_color);
 
 	/* text-secondary at rest, accent on hover -- GUI-DESIGN-LANGUAGE.md
 	 * §7's stated hover treatment for the apps button. */
@@ -989,9 +994,17 @@ int main(void) {
 		return 1;
 	}
 
-	panel.font = novi_text_load_font("JetBrains Mono:size=11");
-	if (panel.font == NULL) {
-		fprintf(stderr, "novi-panel: failed to load JetBrains Mono\n");
+	/* Two faces, and the split is the design language's (§2): Inter
+	 * for anything a person reads as language, JetBrains Mono only for
+	 * literal machine output. The clock is the interesting case -- it
+	 * is digits, which argues for mono, but Inter has genuine tabular
+	 * figures, so it does not jitter as the seconds change AND it
+	 * matches the rest of the bar. Mono here would be a terminal
+	 * wearing a costume, which is exactly what this bar looked like. */
+	panel.font = novi_text_load_font(NOVI_FONT_BODY);
+	panel.font_clock = novi_text_load_font(NOVI_FONT_CAPTION);
+	if (panel.font == NULL || panel.font_clock == NULL) {
+		fprintf(stderr, "novi-panel: failed to load Inter\n");
 		return 1;
 	}
 	/* Computed once: the button's own text never changes, so neither
@@ -1007,7 +1020,7 @@ int main(void) {
 	 * gives every later frame a stable right edge to lay out against.
 	 * Measuring the live string instead would make the whole status
 	 * area shift by a pixel whenever the glyphs happened to differ. */
-	panel.clock_w = novi_text_width(panel.font, "00:00:00");
+	panel.clock_w = novi_text_width(panel.font_clock, "00:00:00");
 	panel.net_button_w = 2 * NET_BUTTON_H_PADDING + NET_ICON_W;
 
 	panel.surface = wl_compositor_create_surface(panel.compositor);
@@ -1098,6 +1111,9 @@ int main(void) {
 	}
 	if (panel.font != NULL) {
 		fcft_destroy(panel.font);
+	}
+	if (panel.font_clock != NULL) {
+		fcft_destroy(panel.font_clock);
 	}
 	wl_display_disconnect(panel.display);
 	return 0;

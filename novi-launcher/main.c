@@ -62,6 +62,7 @@
 #include "wlr-layer-shell-unstable-v1-protocol.h"
 #include "../common/clipboard.h"
 #include "../common/text.h"
+#include "../common/theme.h"
 #include "../shared/icons/icon_blit.h"
 #include "../shared/icons/icons.h"
 
@@ -1246,7 +1247,7 @@ int main(int argc, char *argv[]) {
 	state.clipboard = novi_clipboard_create(state.display,
 		state.data_device_manager, state.seat);
 
-	state.font = novi_text_load_font("JetBrains Mono:size=16");
+	state.font = novi_text_load_font(NOVI_FONT_DISPLAY);
 	if (state.font == NULL) {
 		fprintf(stderr, "novi-launcher: failed to load JetBrains Mono\n");
 		return 1;

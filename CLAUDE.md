@@ -260,6 +260,55 @@ RFC 0012 (`docs/rfcs/0012-hotplug.md`).
   interface at start. Per-interface DHCP is RFC 0009's work; reaching
   into the network service from a uevent handler is split-brain.
 
+## Architecture: the design system, and where it lives
+
+`docs/design/GUI-DESIGN-LANGUAGE.md` has been the adopted reference
+since September 2026 and was only half implemented; `common/theme.h`
+is §1-§3 as C constants and every client includes it.
+
+- **Every colour existed six times before this.** novi-panel called
+  the card background `0xff232430`, novi-files the same, novi-notifyd
+  `0xff1b1b26`, and nothing connected them to the token they were all
+  trying to be. New UI code uses a `NOVI_*` token or adds one; a raw
+  hex literal in a client is the bug this file exists to prevent.
+- **`NOVI_PIX()` expands 8-bit channels by REPLICATION (`0xA3` ->
+  `0xA3A3`), not by shifting left 8.** A shift maps `0xFF` to `0xFF00`,
+  so pure white comes out 0.4% grey and full alpha is very slightly
+  transparent. Several hand-written `pixman_color_t` literals in this
+  repo had exactly that shift.
+- **Inter for language, JetBrains Mono for machine values**, and the
+  split is by what the text IS, not where it sits: a filename is
+  Inter, a path and a size in bytes are mono. novi-edit's *buffer*
+  stays mono because its cursor arithmetic assumes a fixed advance;
+  only its chrome changed.
+- **Static Inter weights, not the variable font** the design doc
+  recommends. Selecting a weight out of a variable font depends on
+  fontconfig's named-instance handling, and a build where that quietly
+  does not work gives Regular everywhere with no error to notice.
+- **Accent is a signal colour and never a large fill**, and getting
+  that wrong is easy: the first pass made every directory row in
+  novi-files teal, beside an accent-tinted selection that was trying
+  to mean something. Hierarchy between kinds of thing is brightness;
+  accent means one thing per window.
+- **`novi-bg` paints the desktop, not the compositor.** A
+  `wlr_scene_rect` is one solid colour by construction, and teaching
+  novi-shell to rasterise a gradient is the UI work RFC 0001 keeps out
+  of it. Generated rather than an image file: no asset, no decoder, no
+  resolution to be wrong at. It sets an EMPTY INPUT REGION -- a
+  full-screen background surface that takes clicks swallows nearly
+  every press on the desktop.
+- **A library linked by more than one client belongs in the library
+  stage**, and this repo has now learned it twice. novi-panel (stage
+  10) started linking libnl, which 25-wifi.sh built at stage 25:
+  invisible in a warm tree, fatal in a clean one, exactly as
+  novi-launcher/fcft was. libnl is built by `06-wayland.sh` now.
+- **One missing `.pc` makes pkg-config blame every package in the
+  query.** Asked for `wayland-client fcft libnl-genl-3.0` in one
+  invocation, it reported all three as not found, and the build died
+  on `wayland-client.h: No such file or directory` with
+  `wayland-client.pc` sitting in the rootfs. Read the whole list
+  before believing the first name in it.
+
 ## Architecture: notifications, and a surface that never came back
 
 RFC 0024 (`docs/rfcs/0024-notifications.md`). `novi-notify` in the

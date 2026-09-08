@@ -517,6 +517,52 @@ component that needs one.
 
 ## 8. Gap From Today, Sequenced by Leverage
 
+> **Update, September 2026 (second pass).** Items 1, 3, 5 and most of
+> 2 are now done, and so is §2's UI sans — the thing this document
+> recommended and explicitly deferred. What shipped, and the two
+> places it deliberately diverges from what is written above:
+>
+> - **Inter is installed** (`build/09-foot.sh`), and every client asks
+>   for it by name. **Static Regular/Medium/SemiBold, not the variable
+>   font §2 recommends.** InterVariable is one 880 KB file against
+>   three static ones at ~1.2 MB, which is not a difference worth
+>   caring about — but selecting a weight out of a variable font
+>   depends on fontconfig's named-instance handling, and a build where
+>   that quietly does not work gives you Regular everywhere with no
+>   error to notice. Static files match by weight through a code path
+>   this image has exercised since it had a terminal.
+> - **`common/theme.h`** is §1–§3 as C constants, and every client now
+>   includes it. Before it, novi-panel called the card background
+>   `0xff232430`, novi-files called it `0xff232430` too, novi-notifyd
+>   called it `0xff1b1b26`, and nothing connected any of them to the
+>   token they were all trying to be. A palette copied into six files
+>   is a palette that drifts, and it had.
+> - **The split between the two families is by what the text IS**, not
+>   by where it sits: a filename is language and is Inter, a *path* and
+>   a *size in bytes* are machine values and stay monospace. novi-edit's
+>   buffer stays monospace for the obvious reason; only its chrome
+>   changed.
+> - **`novi-bg`** paints the desktop, as a layer-shell client rather
+>   than a colour in the compositor — a `wlr_scene_rect` is one solid
+>   colour by construction, and teaching novi-shell to rasterise a
+>   gradient is exactly the UI work RFC 0001 says does not belong
+>   there. Generated, not an image file: no asset, no decoder, no
+>   resolution to be wrong at.
+> - **A correction to §1's application, not to §1 itself.** The first
+>   pass made directories accent-coloured in novi-files — teal icon,
+>   teal label — which put the one signal colour in the palette on
+>   every second row, beside the accent-tinted selection that was
+>   trying to mean something. §1 already says accent is a signal
+>   colour and never a large fill; a folder is not a signal. Hierarchy
+>   between directories and files is by brightness now, and accent
+>   means exactly one thing per window.
+>
+> Still open: **§4 drop shadows** (nothing in `novi-shell` draws one —
+> an earlier note in `CLAUDE.md` claiming it did was wrong), **rounded
+> window corners** (the scene graph draws rects; rounding window
+> content needs a renderer pass), and **§6's title text** — the title
+> bar exists and is empty.
+
 > **Update since this doc was written:** item 1 below (fcft text
 > rendering) is now done — both `novi-panel/main.c` and
 > `novi-launcher/main.c` link `fcft`+`pixman` (see `../../common/text.h`)

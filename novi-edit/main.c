@@ -61,6 +61,7 @@
 
 #include "clipboard.h"
 #include "text.h"
+#include "theme.h"
 
 #include "xdg-shell-client-protocol.h"
 
@@ -1670,7 +1671,7 @@ int main(int argc, char **argv) {
 	e.clipboard = novi_clipboard_create(e.display, e.data_device_manager, e.seat);
 
 	e.font = novi_text_load_font("JetBrains Mono:size=15");
-	e.font_small = novi_text_load_font("JetBrains Mono:size=12");
+	e.font_small = novi_text_load_font(NOVI_FONT_CAPTION);
 	if (e.font == NULL || e.font_small == NULL) {
 		fprintf(stderr, "novi-edit: failed to load JetBrains Mono\n");
 		return 1;

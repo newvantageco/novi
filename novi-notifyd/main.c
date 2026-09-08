@@ -49,6 +49,7 @@
 
 #include "wlr-layer-shell-unstable-v1-protocol.h"
 #include "../common/text.h"
+#include "../common/theme.h"
 #include "icons.h"
 #include "icon_blit.h"
 
@@ -60,29 +61,29 @@
  * never sits on top of the clock. */
 #define TOAST_W       360
 #define TOAST_MIN_H   56
-#define TOAST_GAP     10
+#define TOAST_GAP     NOVI_SP_SM
 #define MARGIN_TOP    44
-#define MARGIN_RIGHT  12
-#define PAD           14
+#define MARGIN_RIGHT  NOVI_SP_MD
+#define PAD           NOVI_SP_LG
 #define ICON_SIZE     24
-#define ICON_GAP      12
+#define ICON_GAP      NOVI_SP_MD
 #define ACCENT_W      3
 
 #define MAX_TOASTS 4
 #define SUMMARY_MAX 200
 #define BODY_MAX 400
 
-#define CARD_RADIUS   10.0
-#define BG_COLOR      0xff1b1b26u
-#define BG_HOVER      0xff23233au
-#define BORDER_COLOR  0xff2f2f3eu
-#define ACCENT_LOW    0xff5a5e70u
-#define ACCENT_NORMAL 0xff2dd4bfu
-#define ACCENT_CRIT   0xfff07a7au
-#define ICON_COLOR    0xffa3a7b7u
+#define CARD_RADIUS   NOVI_RADIUS_LG
+#define BG_COLOR      NOVI_BG_CARD
+#define BG_HOVER      NOVI_BG_CARD_RAISED
+#define BORDER_COLOR  NOVI_BORDER_SUBTLE
+#define ACCENT_LOW    NOVI_TEXT_MUTED
+#define ACCENT_NORMAL NOVI_ACCENT
+#define ACCENT_CRIT   NOVI_STATUS_ERROR
+#define ICON_COLOR    NOVI_TEXT_SECONDARY
 
-static const pixman_color_t SUMMARY_PIX = {0xe000, 0xe000, 0xf000, 0xffff};
-static const pixman_color_t BODY_PIX    = {0x8b8b, 0x8f8f, 0xa3a3, 0xffff};
+static const pixman_color_t SUMMARY_PIX = NOVI_PIX(NOVI_TEXT_PRIMARY);
+static const pixman_color_t BODY_PIX    = NOVI_PIX(NOVI_TEXT_SECONDARY);
 
 enum urgency { URG_LOW = 0, URG_NORMAL, URG_CRITICAL };
 
@@ -828,10 +829,10 @@ int main(void) {
 		return 1;
 	}
 
-	n.font = novi_text_load_font("JetBrains Mono:size=11");
-	n.font_small = novi_text_load_font("JetBrains Mono:size=10");
+	n.font = novi_text_load_font(NOVI_FONT_TITLE);
+	n.font_small = novi_text_load_font(NOVI_FONT_CAPTION);
 	if (n.font == NULL || n.font_small == NULL) {
-		fprintf(stderr, "novi-notifyd: failed to load JetBrains Mono\n");
+		fprintf(stderr, "novi-notifyd: failed to load Inter\n");
 		return 1;
 	}
 

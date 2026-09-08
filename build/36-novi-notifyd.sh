@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-# 36-novi-notifyd.sh — desktop notifications (RFC 0024)
+# 36-novi-notifyd.sh — notifications and the desktop background
 #
 # TWO PROGRAMS, and they land in different halves of the system:
 #
@@ -69,6 +69,29 @@ make \
     DESTDIR="${ROOTFS}" PREFIX=/usr install
 make clean
 
+# ── novi-bg (desktop) ─────────────────────────────────────────────
+#
+# The wallpaper, as a layer-shell client rather than a colour in the
+# compositor -- see novi-bg/main.c. Built here rather than in a stage
+# of its own because it is the same three-line meson-free layer-shell
+# build as the daemon above and shares its protocol vendoring.
+echo ">>> Building novi-bg (desktop) ..."
+cd "${REPO_ROOT}/novi-bg"
+make clean
+make \
+    CC="${TARGET_TRIPLE}-gcc" \
+    PKG_CONFIG="${TARGET_TRIPLE}-pkg-config" \
+    WAYLAND_SCANNER=wayland-scanner \
+    XDG_SHELL_XML="${XDG_SHELL_XML}"
+make \
+    CC="${TARGET_TRIPLE}-gcc" \
+    PKG_CONFIG="${TARGET_TRIPLE}-pkg-config" \
+    WAYLAND_SCANNER=wayland-scanner \
+    XDG_SHELL_XML="${XDG_SHELL_XML}" \
+    DESTDIR="${ROOTFS}" PREFIX=/usr install
+make clean
+
 echo ""
-echo "notifications installed:"
-ls -la "${ROOTFS}/usr/bin/novi-notify" "${ROOTFS}/usr/bin/novi-notifyd"
+echo "installed:"
+ls -la "${ROOTFS}/usr/bin/novi-notify" "${ROOTFS}/usr/bin/novi-notifyd" \
+       "${ROOTFS}/usr/bin/novi-bg"

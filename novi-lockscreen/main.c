@@ -57,6 +57,7 @@
 
 #include "wlr-layer-shell-unstable-v1-protocol.h"
 #include "../common/text.h"
+#include "../common/theme.h"
 
 /* Must match novi-shell/main.c's identical NOVI_LOCK_NAMESPACE -- see
  * that file's comment on why a plain string match, not a new protocol,
@@ -559,8 +560,8 @@ int main(void) {
 		return 1;
 	}
 
-	state.font = novi_text_load_font("JetBrains Mono:size=24");
-	state.font_small = novi_text_load_font("JetBrains Mono:size=14");
+	state.font = novi_text_load_font("Inter:weight=medium:size=44");
+	state.font_small = novi_text_load_font(NOVI_FONT_BODY);
 	if (state.font == NULL || state.font_small == NULL) {
 		fprintf(stderr, "novi-lockscreen: failed to load JetBrains Mono\n");
 		return 1;

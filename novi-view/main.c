@@ -51,6 +51,7 @@
 #include <xkbcommon/xkbcommon.h>
 
 #include "text.h"
+#include "theme.h"
 #include "xdg-shell-client-protocol.h"
 
 #define WINDOW_WIDTH  900
@@ -718,7 +719,7 @@ int main(int argc, char **argv) {
 		return 1;
 	}
 
-	v.font_small = novi_text_load_font("JetBrains Mono:size=12");
+	v.font_small = novi_text_load_font(NOVI_FONT_CAPTION);
 	if (v.font_small == NULL) {
 		fprintf(stderr, "novi-view: failed to load JetBrains Mono\n");
 		return 1;

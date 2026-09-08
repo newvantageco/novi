@@ -298,3 +298,48 @@ build_meson tllist "${TLLIST_VERSION}" -d tllist
 build_meson fcft "${FCFT_VERSION}" -d fcft \
     -Dgrapheme-shaping=disabled -Drun-shaping=disabled \
     -Ddocs=disabled -Dexamples=false -Dtest-text-shaping=false
+
+# ── 5. libnl ──────────────────────────────────────────────────────────
+#
+# HERE, not in 25-wifi.sh where it used to be, and the move is RFC
+# 0005's rule applied to the letter: a library more than one client
+# links belongs in the library stage, not inside whichever application
+# happened to need it first.
+#
+# libnl had exactly one consumer -- wpa_supplicant, built in stage 25 --
+# right up until novi-panel's network indicator started asking the
+# kernel for a WiFi signal over nl80211. novi-panel is stage 10. In a
+# warm tree that is invisible; a clean `bash build.sh` stops at stage
+# 10, which is exactly how novi-launcher/fcft failed before it.
+#
+# The error it gives is worth recording, because it names the wrong
+# thing. pkg-config was asked for `wayland-client fcft libnl-genl-3.0`
+# in one query, and a query with ONE missing package fails as a whole:
+# it reported all three as not found, and the build died on
+# "wayland-client.h: No such file or directory" with wayland-client.pc
+# sitting right there in the rootfs. One missing .pc file, three
+# libraries blamed.
+#
+# --disable-cli drops nl-* tools nothing here runs.
+echo ">>> Building libnl ${LIBNL_VERSION} ..."
+rm -rf "${SOURCES}/libnl-${LIBNL_VERSION}"
+tar -xf "${SOURCES}/libnl-${LIBNL_VERSION}.tar.gz" -C "${SOURCES}"
+(
+    cd "${SOURCES}/libnl-${LIBNL_VERSION}"
+    ./configure --host="${TARGET_TRIPLE}" --prefix=/usr \
+        --disable-static --disable-cli >/dev/null
+    make -j"$(nproc)" >/dev/null
+    make install DESTDIR="${ROOTFS}" >/dev/null
+)
+# libtool leaves .la files pointing at build-tree paths; nothing on the
+# target reads them and they are a classic source of confusing link
+# failures later.
+rm -f "${ROOTFS}"/usr/lib/libnl*.la
+
+# libnl builds six libraries; wpa_supplicant, iw and novi-panel link
+# two of them. The other four -- route, nf, xfrm, idiag -- are 3 MB of
+# netlink families nothing in this image speaks.
+rm -f "${ROOTFS}"/usr/lib/libnl-route-3.so* \
+      "${ROOTFS}"/usr/lib/libnl-nf-3.so* \
+      "${ROOTFS}"/usr/lib/libnl-xfrm-3.so* \
+      "${ROOTFS}"/usr/lib/libnl-idiag-3.so*

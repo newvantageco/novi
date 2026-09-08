@@ -71,6 +71,7 @@ DESKTOP_BINARIES = [
     # The desktop proper
     "usr/bin/novi-shell",
     "usr/bin/novi-notifyd",
+    "usr/bin/novi-bg",
     "usr/bin/novi-panel",
     "usr/bin/novi-launcher",
     "usr/bin/novi-settings",
@@ -167,6 +168,8 @@ PACKAGE_TABLE = [
     # how an unclaimed base file is meant to look.
     ("novi-notifyd",     "OS",            "Desktop notifications (RFC 0024)",
      [r"^novi-notifyd$"]),
+    ("novi-bg",          "OS",            "Desktop background",
+     [r"^novi-bg$"]),
 ]
 
 # Data directories that belong to a package but contain no ELF, so the
@@ -207,7 +210,7 @@ DATA_FILES = [
 META_PACKAGES = [
     ("novi-desktop", "OS", "The Novi desktop: compositor, panel, launcher, terminal",
      ["novi-shell", "novi-panel", "novi-launcher", "novi-settings", "novi-edit", "novi-files", "novi-view",
-      "novi-lockscreen", "novi-screenshot", "novi-notifyd", "foot", "fonts-jetbrains-mono"]),
+      "novi-lockscreen", "novi-screenshot", "novi-notifyd", "novi-bg", "foot", "fonts-jetbrains-mono"]),
 ]
 
 EXTRA_PACKAGE_DESCRIPTIONS = {
