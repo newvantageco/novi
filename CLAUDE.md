@@ -402,20 +402,32 @@ kept private palettes — found by `grep`ing every client for
   beside it), its cursor line is bg-card-raised (a row lifted off that
   sheet). Choosing the token whose *meaning* fits keeps the answer
   stable when a token's value changes.
-- **The audit is one command**, worth re-running whenever a client is
-  added:
+- **The audit is two greps, and the second one exists because the
+  first missed the worst case.** Run both whenever a client is added:
 
   ```sh
-  grep -rn '0x[0-9a-fA-F]\{8\}' --include=*.c --include=*.h \
-      novi-panel novi-files novi-edit novi-view novi-settings \
-      novi-lockscreen novi-launcher novi-notifyd novi-bg \
-      novi-screenshot novi-shell common
+  CLIENTS="novi-panel novi-files novi-edit novi-view novi-settings
+           novi-lockscreen novi-launcher novi-notifyd novi-bg
+           novi-screenshot novi-shell common"
+  # packed 0xAARRGGBB
+  grep -rn '0x[0-9a-fA-F]\{8\}' --include=*.c --include=*.h $CLIENTS
+  # hand-written pixman_color_t, whose channels are only FOUR hex digits
+  grep -rn '\.red *=' --include=*.c --include=*.h $CLIENTS
   ```
 
   Named directories rather than `novi-*/`: that glob also sweeps
   `novi-gpt`, whose eight-hex constants are a CRC polynomial and GPT
   header fields. A hit is a question, not a verdict — an alpha mask or
   a format constant is fine; a colour is not.
+
+  The eight-hex grep alone reported novi-panel clean while it held
+  **five** hand-written `pixman_color_t` literals, every one of them
+  with the shift bug, including the accent for the taskbar's active
+  entry and the Apps button's hover. The panel is the most-looked-at
+  surface on the desktop and its accent had been slightly darker than
+  every other accent for the whole life of the file, under a comment
+  that said "same tokens as the apps label". **A four-hex channel does
+  not look like a colour to a grep for colours.**
 
 ## Architecture: notifications, and a surface that never came back
 

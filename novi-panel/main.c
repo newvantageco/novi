@@ -171,13 +171,16 @@
 #define TASKBAR_START_GAP 16 /* gap between the Apps button and the first entry */
 #define TASKBAR_TITLE_MAX 127
 /* text-secondary / accent -- same tokens as the apps label, since an
- * active taskbar entry is exactly "the thing currently in accent". */
-static const pixman_color_t TASKBAR_LABEL_COLOR = {
-	.red = 0xa300, .green = 0xa700, .blue = 0xb700, .alpha = 0xffff,
-};
-static const pixman_color_t TASKBAR_LABEL_ACTIVE_COLOR = {
-	.red = 0x2d00, .green = 0xd400, .blue = 0xbf00, .alpha = 0xffff,
-};
+ * active taskbar entry is exactly "the thing currently in accent".
+ *
+ * These were hand-written, and every one of them had the shift-left-8
+ * bug NOVI_PIX() exists to rule out: 0xa3 as 0xa300 rather than
+ * 0xa3a3. The comment above has claimed "same tokens" since the day it
+ * was written and it was never true -- the panel's accent has been
+ * very slightly darker than every other accent on this desktop for the
+ * whole life of the file. Never write one of these by hand. */
+static const pixman_color_t TASKBAR_LABEL_COLOR = NOVI_PIX(NOVI_TEXT_SECONDARY);
+static const pixman_color_t TASKBAR_LABEL_ACTIVE_COLOR = NOVI_PIX(NOVI_ACCENT);
 
 struct novi_panel;
 
@@ -509,9 +512,7 @@ static void render(struct novi_panel *panel, uint32_t *px, uint32_t stride_px) {
 	pixman_image_t *dest = pixman_image_create_bits_no_clear(
 		PIXMAN_x8r8g8b8, (int)w, (int)h, px, (int)stride_px * 4);
 
-	static const pixman_color_t clock_color = {
-		.red = 0xe000, .green = 0xe000, .blue = 0xf000, .alpha = 0xffff,
-	};
+	static const pixman_color_t clock_color = NOVI_PIX(NOVI_TEXT_SECONDARY);
 	int text_x = (int)w - panel->clock_w - PANEL_EDGE_PADDING;
 	int baseline_y = ((int)h + panel->font->ascent - panel->font->descent) / 2;
 	int clock_base = ((int)h + panel->font_clock->ascent -
@@ -521,12 +522,8 @@ static void render(struct novi_panel *panel, uint32_t *px, uint32_t stride_px) {
 
 	/* text-secondary at rest, accent on hover -- GUI-DESIGN-LANGUAGE.md
 	 * §7's stated hover treatment for the apps button. */
-	static const pixman_color_t apps_label_color = {
-		.red = 0xa300, .green = 0xa700, .blue = 0xb700, .alpha = 0xffff,
-	};
-	static const pixman_color_t apps_label_hover_color = {
-		.red = 0x2d00, .green = 0xd400, .blue = 0xbf00, .alpha = 0xffff,
-	};
+	static const pixman_color_t apps_label_color = NOVI_PIX(NOVI_TEXT_SECONDARY);
+	static const pixman_color_t apps_label_hover_color = NOVI_PIX(NOVI_ACCENT);
 	int label_x = icon_x + APPS_ICON_SIZE + APPS_ICON_TEXT_GAP;
 	novi_text_draw(dest, panel->font, label_x, baseline_y, "Apps",
 		panel->apps_button_hover ? apps_label_hover_color : apps_label_color);
@@ -996,15 +993,29 @@ int main(void) {
 
 	/* Two faces, and the split is the design language's (§2): Inter
 	 * for anything a person reads as language, JetBrains Mono only for
-	 * literal machine output. The clock is the interesting case -- it
-	 * is digits, which argues for mono, but Inter has genuine tabular
-	 * figures, so it does not jitter as the seconds change AND it
-	 * matches the rest of the bar. Mono here would be a terminal
-	 * wearing a costume, which is exactly what this bar looked like. */
+	 * literal machine output.
+	 *
+	 * The clock was Inter, on the reasoning that "Inter has genuine
+	 * tabular figures, so it does not jitter as the seconds change".
+	 * INTER'S TABULAR FIGURES ARE AN OPENTYPE FEATURE (`tnum`) AND
+	 * THEY ARE NOT ON BY DEFAULT. Selecting them means a
+	 * `fontfeatures=tnum` in the fontconfig pattern, which fcft only
+	 * honours when it is built against harfbuzz -- and this one is not
+	 * (`readelf -d libfcft.so.3`: fontconfig, freetype, pixman, libc,
+	 * no harfbuzz). So the flag would have compiled, changed nothing,
+	 * and looked like a fix.
+	 *
+	 * Measured rather than argued: across four screendumps the
+	 * rendered clock was 82, 82, 83 and 88 pixels wide, so the bar's
+	 * right-hand end moved by up to six pixels every time a digit
+	 * changed shape. JetBrains Mono is tabular by construction, and a
+	 * timestamp is a machine value in exactly the way a byte count is,
+	 * so §2's rule sends it here anyway. */
 	panel.font = novi_text_load_font(NOVI_FONT_BODY);
-	panel.font_clock = novi_text_load_font(NOVI_FONT_CAPTION);
+	panel.font_clock = novi_text_load_font(NOVI_FONT_MONO_SM);
 	if (panel.font == NULL || panel.font_clock == NULL) {
-		fprintf(stderr, "novi-panel: failed to load Inter\n");
+		fprintf(stderr, "novi-panel: failed to load a UI font "
+			"(Inter and JetBrains Mono are both required)\n");
 		return 1;
 	}
 	/* Computed once: the button's own text never changes, so neither
@@ -1014,12 +1025,14 @@ int main(void) {
 	 * right padding. */
 	panel.apps_button_w = 2 * BUTTON_H_PADDING + APPS_ICON_SIZE +
 		APPS_ICON_TEXT_GAP + novi_text_width(panel.font, "Apps");
-	/* Same argument for the right-hand side. The clock's text changes
-	 * every second and its WIDTH never does -- JetBrains Mono is
-	 * monospace and the format is fixed -- so measuring "00:00:00" once
-	 * gives every later frame a stable right edge to lay out against.
-	 * Measuring the live string instead would make the whole status
-	 * area shift by a pixel whenever the glyphs happened to differ. */
+	/* Same argument for the right-hand side, and it is only sound
+	 * because the clock is monospace: the text changes every second
+	 * and its width must not, so measuring "00:00:00" once gives every
+	 * later frame a stable right edge to lay out against. This comment
+	 * had survived unchanged through the clock being switched to a
+	 * PROPORTIONAL face, where it was simply false -- the measured
+	 * width was one particular time's, every other time drew past it,
+	 * and the whole status area to its left moved with the digits. */
 	panel.clock_w = novi_text_width(panel.font_clock, "00:00:00");
 	panel.net_button_w = 2 * NET_BUTTON_H_PADDING + NET_ICON_W;
 
