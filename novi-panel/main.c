@@ -157,6 +157,16 @@
 #define NET_ICON_HOVER_COLOR (NOVI_ACCENT & 0xffffffu)
 
 #define NET_BUTTON_H_PADDING 8
+/* The power button, at the far right of the bar past the clock. It
+ * wires ICON_POWER, which the icon pipeline has generated and nothing
+ * has drawn since the day it shipped -- and, more to the point, it is
+ * the first way to turn this machine off without switching to a TTY.
+ * Clicking it opens `novi-launcher --power`, exactly as the network
+ * indicator opens novi-settings: the panel grows no menu of its own,
+ * for the same reason novi-shell owns no UI. One place per job. */
+#define POWER_BUTTON_H_PADDING 8
+#define POWER_GAP 8
+#define NOVI_DEFAULT_POWER_MENU "novi-launcher --power"
 #define CLOCK_GAP 12 /* between the status area and the clock */
 
 /* Taskbar (wlr-foreign-toplevel-management-unstable-v1): a row of
@@ -228,7 +238,9 @@ struct novi_panel {
 	bool apps_button_hover;
 	bool apps_button_pressed; /* press happened inside the button */
 	bool net_button_hover;
+	bool power_button_hover;
 	bool net_button_pressed;
+	bool power_button_pressed;
 	/* Same press-then-release-in-bounds convention as apps_button_
 	 * pressed, for whichever taskbar entry (if any) the press landed
 	 * on -- NULL means no taskbar press is armed. Re-validated against
@@ -280,11 +292,33 @@ static bool point_in_apps_button(const struct novi_panel *panel,
  * are right-anchored -- same single-source-of-truth reason as
  * apps_button_rect(): render(), the hit-test and layout_taskbar()'s
  * right-hand limit all read this one function. */
+static void power_button_rect(const struct novi_panel *panel,
+		int *x, int *y, int *w, int *h) {
+	*w = POWER_ICON_W + 2 * POWER_BUTTON_H_PADDING;
+	*x = (int)panel->width - PANEL_EDGE_PADDING - *w;
+	*y = BUTTON_V_MARGIN;
+	*h = (int)panel->height - 2 * BUTTON_V_MARGIN;
+}
+
+static bool point_in_power_button(const struct novi_panel *panel,
+		double px, double py) {
+	int x, y, w, h;
+	power_button_rect(panel, &x, &y, &w, &h);
+	return px >= x && px < x + w && py >= y && py < y + h;
+}
+
+/* Everything on the right-hand side is laid out from the right edge
+ * inwards, so adding the power button moved the clock and the network
+ * indicator left by exactly its width -- and layout_taskbar() derives
+ * its limit from net_button_rect(), so the taskbar followed without
+ * being told. That chain is why these are functions and not constants. */
 static void net_button_rect(const struct novi_panel *panel,
 		int *x, int *y, int *w, int *h) {
+	int pw, px_, py_, ph;
+	power_button_rect(panel, &px_, &py_, &pw, &ph);
+	(void)py_; (void)ph;
 	*w = panel->net_button_w;
-	*x = (int)panel->width - PANEL_EDGE_PADDING - panel->clock_w -
-		CLOCK_GAP - *w;
+	*x = px_ - POWER_GAP - panel->clock_w - CLOCK_GAP - *w;
 	*y = BUTTON_V_MARGIN;
 	*h = (int)panel->height - 2 * BUTTON_V_MARGIN;
 }
@@ -487,6 +521,17 @@ static void render(struct novi_panel *panel, uint32_t *px, uint32_t stride_px) {
 	 * refreshed at exactly the rate the panel already repaints. */
 	novi_netstat_read(&panel->net);
 
+	int pw_x, pw_y, pw_w, pw_h;
+	power_button_rect(panel, &pw_x, &pw_y, &pw_w, &pw_h);
+	if (panel->power_button_hover) {
+		draw_rect(px, stride_px, w, h, pw_x, pw_y, pw_w, pw_h,
+			BUTTON_HOVER_BG_COLOR);
+	}
+	draw_icon(px, stride_px, w, h,
+		pw_x + POWER_BUTTON_H_PADDING, pw_y + (pw_h - POWER_ICON_H) / 2,
+		POWER_ICON_W, POWER_ICON_H, novi_power_coverage, NULL,
+		panel->power_button_hover ? NET_ICON_HOVER_COLOR : NET_ICON_COLOR);
+
 	int net_x, net_y, net_w, net_h;
 	net_button_rect(panel, &net_x, &net_y, &net_w, &net_h);
 	if (panel->net_button_hover) {
@@ -513,7 +558,7 @@ static void render(struct novi_panel *panel, uint32_t *px, uint32_t stride_px) {
 		PIXMAN_x8r8g8b8, (int)w, (int)h, px, (int)stride_px * 4);
 
 	static const pixman_color_t clock_color = NOVI_PIX(NOVI_TEXT_SECONDARY);
-	int text_x = (int)w - panel->clock_w - PANEL_EDGE_PADDING;
+	int text_x = pw_x - POWER_GAP - panel->clock_w;
 	int baseline_y = ((int)h + panel->font->ascent - panel->font->descent) / 2;
 	int clock_base = ((int)h + panel->font_clock->ascent -
 		panel->font_clock->descent) / 2;
@@ -643,9 +688,12 @@ static void update_pointer_position(struct novi_panel *panel,
 	/* One redraw for both, not one each: they cannot both change in a
 	 * single motion event, but two calls would be two frames if they
 	 * ever could. */
-	if (apps != panel->apps_button_hover || net != panel->net_button_hover) {
+	bool pwr = point_in_power_button(panel, panel->pointer_x, panel->pointer_y);
+	if (apps != panel->apps_button_hover || net != panel->net_button_hover ||
+			pwr != panel->power_button_hover) {
 		panel->apps_button_hover = apps;
 		panel->net_button_hover = net;
+		panel->power_button_hover = pwr;
 		surface_draw_frame(panel);
 	}
 }
@@ -663,10 +711,13 @@ static void pointer_leave(void *data, struct wl_pointer *pointer,
 	struct novi_panel *panel = data;
 	panel->apps_button_pressed = false;
 	panel->net_button_pressed = false;
+	panel->power_button_pressed = false;
 	panel->taskbar_pressed = NULL;
-	if (panel->apps_button_hover || panel->net_button_hover) {
+	if (panel->apps_button_hover || panel->net_button_hover ||
+			panel->power_button_hover) {
 		panel->apps_button_hover = false;
 		panel->net_button_hover = false;
+		panel->power_button_hover = false;
 		surface_draw_frame(panel);
 	}
 }
@@ -734,6 +785,8 @@ static void pointer_button(void *data, struct wl_pointer *pointer,
 			point_in_apps_button(panel, panel->pointer_x, panel->pointer_y);
 		panel->net_button_pressed =
 			point_in_net_button(panel, panel->pointer_x, panel->pointer_y);
+		panel->power_button_pressed =
+			point_in_power_button(panel, panel->pointer_x, panel->pointer_y);
 		panel->taskbar_pressed =
 			find_taskbar_entry_at(panel, panel->pointer_x, panel->pointer_y);
 		return;
@@ -758,6 +811,14 @@ static void pointer_button(void *data, struct wl_pointer *pointer,
 			point_in_net_button(panel, panel->pointer_x, panel->pointer_y)) {
 		spawn(getenv("NOVI_SETTINGS") ?
 			getenv("NOVI_SETTINGS") : NOVI_DEFAULT_SETTINGS);
+	}
+
+	bool power_was_pressed = panel->power_button_pressed;
+	panel->power_button_pressed = false;
+	if (power_was_pressed &&
+			point_in_power_button(panel, panel->pointer_x, panel->pointer_y)) {
+		spawn(getenv("NOVI_POWER_MENU") ?
+			getenv("NOVI_POWER_MENU") : NOVI_DEFAULT_POWER_MENU);
 	}
 
 	struct taskbar_entry *pressed = panel->taskbar_pressed;

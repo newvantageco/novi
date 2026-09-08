@@ -12,7 +12,8 @@
  * Default keybindings implement part of RFC 0001 decision 7: Alt+Tab /
  * Alt+Shift+Tab (window switching), Alt+Space (search/launcher overlay,
  * novi-launcher/), Super+Return (spawn a terminal), Super+Q (close
- * focused window), Super+. (symbol picker, novi-launcher --symbols --
+ * focused window), Super+Escape (power menu, novi-launcher --power),
+ * Super+. (symbol picker, novi-launcher --symbols --
  * see that file for why "symbol" and not full emoji). Still not
  * implemented: Super+[1-9] workspaces, PrintScreen screenshots, Super+L
  * lock, and moving any of this to the user-editable config file RFC
@@ -87,6 +88,14 @@
  * existing (that alone is exactly what novi-launcher already does,
  * and novi-launcher grabbing keyboard focus was never meant to
  * withstand another keybinding stealing it back). */
+/* Super+Escape: lock, suspend, restart, shut down. The same launcher
+ * binary again, for the same reason --symbols reuses it: the overlay,
+ * the list and the keys are already written, and only the rows differ.
+ *
+ * Until this existed there was NO WAY to turn the machine off from the
+ * desktop -- not a button, not a menu, not a binding. You switched to
+ * a TTY and typed poweroff. */
+#define NOVI_DEFAULT_POWER_MENU "novi-launcher --power"
 #define NOVI_DEFAULT_LOCK "novi-lockscreen"
 /* The zwlr_layer_surface_v1 namespace novi-lockscreen identifies itself
  * with (its get_layer_surface() call's namespace argument) -- how
@@ -710,6 +719,14 @@ static bool handle_keybinding(struct novi_server *server, uint32_t modifiers,
 			 * believe it's locked when no real lock surface exists to
 			 * back that up. */
 			spawn(getenv("NOVI_LOCK") ? getenv("NOVI_LOCK") : NOVI_DEFAULT_LOCK);
+			return true;
+		case XKB_KEY_Escape:
+			/* Escape, not a letter: it is the one key that already
+			 * means "get me out of this" everywhere else in this
+			 * desktop, and no shifted form of it can collide the way
+			 * Super+Shift+digit did (see shifted_digit() above). */
+			spawn(getenv("NOVI_POWER_MENU") ?
+				getenv("NOVI_POWER_MENU") : NOVI_DEFAULT_POWER_MENU);
 			return true;
 		case XKB_KEY_period:
 			/* RFC 0001 decision 7: symbol picker. Same spawn-fresh-

@@ -51,6 +51,22 @@ struct net_fan {
 	int slash; /* the offline diagonal */
 };
 
+/* ── The power glyph (Lucide "power") ─────────────────────────────── */
+#define POWER_ICON_W 16
+#define POWER_ICON_H 16
+#define POWER_ICON_STROKE 1.7
+/* The ring, and the gap at its top the stem passes through. The gap is
+ * an angle rather than a box so it stays centred whatever the radius:
+ * a point is on the ring only where it is outside the wedge
+ * |x| <= POWER_GAP_HALF * -y, which for 0.42 opens roughly 46 degrees. */
+#define POWER_RING_R 5.2
+#define POWER_GAP_HALF 0.42
+/* How far up the stem reaches from the centre. Slightly past the ring,
+ * which is what makes the glyph read as a power symbol rather than a
+ * broken circle. */
+#define POWER_STEM_TOP 6.6
+#define POWER_STEM_BOTTOM 0.6
+
 /* A per-pixel coverage mask, in icon-local coordinates. `ctx` carries
  * whatever the particular glyph needs (which arcs are lit, for the
  * wifi fan) and is ignored by glyphs that need nothing. */
@@ -63,5 +79,6 @@ double novi_stroke_coverage(double d, double half_stroke);
 double novi_apps_icon_coverage(double x, double y, const void *ctx);
 double novi_net_wifi_coverage(double x, double y, const void *ctx);
 double novi_net_wired_coverage(double x, double y, const void *ctx);
+double novi_power_coverage(double x, double y, const void *ctx);
 
 #endif

@@ -183,3 +183,45 @@ double novi_net_wired_coverage(double x, double y, const void *ctx) {
 	return t > best ? t : best;
 }
 
+
+/* ── The power glyph ──────────────────────────────────────────────────
+ *
+ * A ring with a gap at the top and a vertical stem through it. Drawn
+ * parametrically like every other glyph in this file rather than
+ * pulled from shared/icons: those are 8-bit coverage bitmaps behind a
+ * different blitter, and this panel's draw_icon() takes a coverage
+ * FUNCTION so that icons-test.c can render every state on the build
+ * host. A glyph that arrives as a bitmap cannot be asserted about, and
+ * the whole reason this file exists is that the wifi fan's bug was
+ * invisible in the one state a VM can produce.
+ */
+double novi_power_coverage(double x, double y, const void *ctx) {
+	(void)ctx;
+	double cx = POWER_ICON_W / 2.0;
+	double cy = POWER_ICON_H / 2.0;
+	double dx = x - cx;
+	double dy = y - cy;
+	double half_stroke = POWER_ICON_STROKE / 2.0;
+
+	/* The ring, minus the wedge at the top. -dy is "above the centre",
+	 * so the gap test only ever removes material from the top. */
+	double best = 0.0;
+	if (!(-dy > 0.0 && fabs(dx) <= POWER_GAP_HALF * -dy)) {
+		double r = sqrt(dx * dx + dy * dy);
+		best = novi_stroke_coverage(r - POWER_RING_R, half_stroke);
+	}
+
+	/* The stem: a vertical segment from just above the centre up
+	 * through the gap. Distance to a segment, which for a vertical one
+	 * is |dx| inside its span and the distance to the nearer end
+	 * outside it -- so the cap is round, matching the ring's own
+	 * stroke. */
+	double top = -POWER_STEM_TOP;
+	double bottom = -POWER_STEM_BOTTOM;
+	double sy = dy < top ? dy - top : (dy > bottom ? dy - bottom : 0.0);
+	double stem = novi_stroke_coverage(sqrt(dx * dx + sy * sy), half_stroke);
+	if (stem > best) {
+		best = stem;
+	}
+	return best;
+}

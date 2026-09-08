@@ -192,6 +192,7 @@ enum result_kind {
 	RESULT_APP,
 	RESULT_CALC,
 	RESULT_SYMBOL,
+	RESULT_POWER,
 };
 
 struct result {
@@ -210,6 +211,9 @@ struct result {
 	int icon_id;                    /* enum novi_icon_id, or -1 */
 	uint32_t codepoint;             /* symbol rows: drawn in the icon column */
 	const struct app_entry *app;    /* app rows: what Enter launches */
+	/* Power rows: the command Enter runs. A pointer to a string
+	 * literal, so copying a struct result copies it safely. */
+	const char *command;
 };
 
 struct novi_launcher {
@@ -247,6 +251,7 @@ struct novi_launcher {
 	 * standard Wayland clipboard-source lifetime (the same reason
 	 * wl-copy stays resident), not specific to this client. */
 	bool symbol_mode;
+	bool power_mode;
 	struct novi_clipboard *clipboard;
 	uint32_t last_key_serial;
 
@@ -540,9 +545,13 @@ static bool app_name_matches(const char *name, const char *query) {
  * to PID 1 (s6) immediately after, the same as any other orphaned
  * process on this system -- there is no long-running parent here to
  * reap it instead. */
-static void launch_app(const struct app_entry *app) {
+/* Split a command on spaces and fork+exec it. No shell -- see
+ * pkg-format.md's field table: no quoting, globbing or $VAR in v1, so
+ * a path containing a space is not representable. Shared by the app
+ * rows and the power rows, which need exactly the same thing. */
+static void spawn_command(const char *cmd) {
 	char exec_copy[APP_EXEC_MAX + 1];
-	snprintf(exec_copy, sizeof(exec_copy), "%s", app->exec);
+	snprintf(exec_copy, sizeof(exec_copy), "%s", cmd);
 
 	char *argv[16];
 	int argc = 0;
@@ -581,6 +590,10 @@ static void launch_app(const struct app_entry *app) {
 			strerror(errno));
 		_exit(127);
 	}
+}
+
+static void launch_app(const struct app_entry *app) {
+	spawn_command(app->exec);
 }
 
 /* ── Symbol picker (Super+., novi-launcher --symbols) ──────────────
@@ -668,6 +681,35 @@ static void copy_to_clipboard(struct novi_launcher *state, const char *utf8) {
 	}
 }
 
+/* ── Ending the session ────────────────────────────────────────────
+ *
+ * There was no way to turn this machine off from the desktop. Not a
+ * button, not a menu, not a keybinding -- you switched to a TTY and
+ * typed `poweroff`. Every part needed to do it properly already
+ * existed: RFC 0013 made shutdown actually finish, `novi-power
+ * suspend` is real, novi-lockscreen locks, and ICON_POWER has been
+ * generated and wired to nothing since the icon pipeline shipped.
+ *
+ * ORDER IS THE SAFETY MECHANISM, and it is the one design decision
+ * here worth arguing about. The list opens with the selection on row
+ * zero, so row zero is the action a mistaken Enter performs. It is
+ * Lock -- which costs a password -- and the two that lose unsaved work
+ * sit at the bottom, reachable only by deliberately arrowing past the
+ * harmless ones. That is cheaper and clearer than a confirmation
+ * dialog for something the user opened a power menu specifically to
+ * do.
+ */
+static const struct {
+	const char *name;
+	const char *meta;
+	const char *command;
+} POWER_ACTIONS[] = {
+	{ "Lock",      "novi-lockscreen", "/usr/bin/novi-lockscreen" },
+	{ "Suspend",   "novi-power",      "/usr/bin/novi-power suspend" },
+	{ "Restart",   "reboot",          "/sbin/reboot" },
+	{ "Shut down", "poweroff",        "/sbin/poweroff" },
+};
+
 /* ── The result list ───────────────────────────────────────────────
  *
  * This used to be find_app_match(): the FIRST app whose name contained
@@ -697,7 +739,20 @@ static void rebuild_results(struct novi_launcher *state) {
 	state->result_count = 0;
 	state->match_total = 0;
 
-	if (state->symbol_mode) {
+	if (state->power_mode) {
+		for (size_t i = 0;
+				i < sizeof(POWER_ACTIONS) / sizeof(POWER_ACTIONS[0]); i++) {
+			if (state->input_len > 0 &&
+					!app_name_matches(POWER_ACTIONS[i].name, state->input)) {
+				continue;
+			}
+			struct result r = { .kind = RESULT_POWER, .icon_id = ICON_POWER };
+			r.command = POWER_ACTIONS[i].command;
+			snprintf(r.primary, sizeof(r.primary), "%s", POWER_ACTIONS[i].name);
+			snprintf(r.meta, sizeof(r.meta), "%s", POWER_ACTIONS[i].meta);
+			push_result(state, &r);
+		}
+	} else if (state->symbol_mode) {
 		/* Runs over the whole table rather than stopping at MAX_ROWS:
 		 * push_result() keeps only what fits, but the total has to be
 		 * counted to be reported. */
@@ -772,6 +827,9 @@ static bool activate_selected(struct novi_launcher *state) {
 	switch (r->kind) {
 	case RESULT_APP:
 		launch_app(r->app);
+		return false;
+	case RESULT_POWER:
+		spawn_command(r->command);
 		return false;
 	case RESULT_CALC:
 	case RESULT_SYMBOL:
@@ -1035,7 +1093,9 @@ static void render(struct novi_launcher *state, uint32_t *px,
 			20, NOVI_ACCENT);
 		novi_text_draw(card, state->font, TEXT_X + NOVI_SP_SM,
 			input_baseline,
-			state->symbol_mode ? "Search symbols" : "Search apps, or type a sum",
+			state->power_mode ? "End this session" :
+				state->symbol_mode ? "Search symbols" :
+					"Search apps, or type a sum",
 			NOVI_PIX(NOVI_TEXT_MUTED));
 	} else {
 		int end_x = novi_text_draw(card, state->font, TEXT_X, input_baseline,
@@ -1421,8 +1481,12 @@ int main(int argc, char *argv[]) {
 	 * emoji), spawned by novi-shell's own Super+. handler. Plain
 	 * invocation (Alt+Space) stays app search + calculator, unchanged. */
 	state.symbol_mode = argc > 1 && strcmp(argv[1], "--symbols") == 0;
+	/* --power: lock, suspend, restart, shut down. Same overlay, same
+	 * list, same keys -- the only thing that differs is what the rows
+	 * are, which is why this is a mode rather than a second client. */
+	state.power_mode = argc > 1 && strcmp(argv[1], "--power") == 0;
 
-	if (!state.symbol_mode) {
+	if (!state.symbol_mode && !state.power_mode) {
 		load_apps(&state);
 	}
 

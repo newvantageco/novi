@@ -75,6 +75,7 @@ int main(void) {
 		APPS_ICON_SIZE, APPS_ICON_SIZE);
 	show("wired (RJ45)", novi_net_wired_coverage, NULL,
 		NET_ICON_W, NET_ICON_H);
+	show("power", novi_power_coverage, NULL, POWER_ICON_W, POWER_ICON_H);
 
 	struct net_fan fan[6];
 	for (int bars = 0; bars <= 4; bars++) {
@@ -95,6 +96,40 @@ int main(void) {
 		NET_ICON_W, NET_ICON_H);
 
 	puts("checks:");
+
+	/* The power glyph. Its two failure modes are both invisible in a
+	 * screenshot at 16px -- a gap that has closed up reads as a plain
+	 * ring, and a stem that has slipped reads as a slightly thick
+	 * one -- so they are asserted rather than looked at. */
+	{
+		/* Top row of the ring, either side of the stem: there must be
+		 * ink out at the sides and none immediately beside the stem,
+		 * which is what "there is a gap" means at this size. */
+		double cy = POWER_ICON_H / 2.0;
+		double gap_y = cy - POWER_RING_R;
+		double at_stem = novi_power_coverage(POWER_ICON_W / 2.0 + 1.6,
+			gap_y + 0.5, NULL);
+		double at_side = novi_power_coverage(POWER_ICON_W / 2.0 - POWER_RING_R,
+			cy + 0.5, NULL);
+		check("power: nothing drawn just right of the stem, at the gap",
+			at_stem < 0.05);
+		check("power: the ring is drawn at its left extreme",
+			at_side > 0.5);
+		/* The stem must cross the ring's top, not stop short of it. */
+		double above_ring = novi_power_coverage(POWER_ICON_W / 2.0,
+			cy - POWER_RING_R - 0.5, NULL);
+		check("power: the stem reaches past the ring's top", above_ring > 0.5);
+		/* And it must not run out of the bottom. */
+		double below_centre = novi_power_coverage(POWER_ICON_W / 2.0,
+			cy + 2.0, NULL);
+		check("power: the stem does not run below the centre",
+			below_centre < 0.05);
+		/* Ink sits above the middle: a power symbol is top-heavy. */
+		double c = ink_centroid_y(novi_power_coverage, NULL,
+			POWER_ICON_W, 0, POWER_ICON_H);
+		check("power: its ink centroid is above the icon's middle",
+			c > 0.0 && c < POWER_ICON_H / 2.0);
+	}
 
 	/* Each level lights strictly more than the one below it. This is
 	 * what a wrong mask breaks and what four-bars-only cannot see. */
