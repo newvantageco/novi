@@ -51,9 +51,26 @@ import sys
 # libevdev, libmtdev, libexpat, libdisplay-info -- counts as "needed by
 # the base" and can never move. Eight libraries were being held in a
 # console image by eight programs nobody would run on one.
+# The SEED list, and it is not the same list as PACKAGE_TABLE below --
+# a new desktop client has to be added to BOTH.
+#
+# These are the roots of the desktop closure: what is reachable from
+# here moves out, and everything else is base. PACKAGE_TABLE then says
+# which package each moved file belongs to. Adding a client to the
+# table alone leaves it seeded as a BASE binary, so its libraries get
+# pinned into the base while the table's own sweep moves them out --
+# which surfaces as the straddle check firing on fourteen libraries
+# that have nothing to do with the change:
+#
+#   usr/lib/libfcft.so.3 stays, usr/lib/libfcft.so moves
+#
+# A correct error pointing nowhere near the cause. novi-notifyd was
+# added to the table and not to this list, and that is exactly what it
+# printed.
 DESKTOP_BINARIES = [
     # The desktop proper
     "usr/bin/novi-shell",
+    "usr/bin/novi-notifyd",
     "usr/bin/novi-panel",
     "usr/bin/novi-launcher",
     "usr/bin/novi-settings",
@@ -145,6 +162,11 @@ PACKAGE_TABLE = [
      [r"^novi-lockscreen$"]),
     ("novi-screenshot",  "OS",            "PrintScreen screen capture",
      [r"^novi-screenshot$"]),
+    # novi-notifyd only. Its sender, novi-notify, stays in the base
+    # image on purpose (RFC 0024) and matches no pattern here, which is
+    # how an unclaimed base file is meant to look.
+    ("novi-notifyd",     "OS",            "Desktop notifications (RFC 0024)",
+     [r"^novi-notifyd$"]),
 ]
 
 # Data directories that belong to a package but contain no ELF, so the
@@ -185,7 +207,7 @@ DATA_FILES = [
 META_PACKAGES = [
     ("novi-desktop", "OS", "The Novi desktop: compositor, panel, launcher, terminal",
      ["novi-shell", "novi-panel", "novi-launcher", "novi-settings", "novi-edit", "novi-files", "novi-view",
-      "novi-lockscreen", "novi-screenshot", "foot", "fonts-jetbrains-mono"]),
+      "novi-lockscreen", "novi-screenshot", "novi-notifyd", "foot", "fonts-jetbrains-mono"]),
 ]
 
 EXTRA_PACKAGE_DESCRIPTIONS = {

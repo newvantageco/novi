@@ -33,6 +33,20 @@ note() {
     logger -t novi-mount -p daemon.info "$*" 2>/dev/null || true
 }
 
+# A toast, if anybody is looking (RFC 0024). Separate from note(): that
+# is a diagnostic line for whoever is reading the log afterwards
+# ("mounted sda (vfat) at /run/media/X"), this is a sentence for the
+# person who just pushed a stick into a slot. Different audiences,
+# different wording, and neither is a substitute for the other.
+#
+# novi-notify never fails and never blocks -- with no desktop running
+# it writes to syslog and exits 0 -- so this needs no guard and no
+# `|| true` beyond the one that catches it not being installed at all.
+tell() {
+    command -v novi-notify >/dev/null 2>&1 || return 0
+    novi-notify "$@" >/dev/null 2>&1 || true
+}
+
 # ---------------------------------------------------------------------------
 # Is automount even on
 # ---------------------------------------------------------------------------
@@ -295,6 +309,7 @@ cmd_add() {
 
     if mount -t "$mtype" -o "$opts" "/dev/${dev}" "$target" 2>/dev/null; then
         note "mounted ${dev} (${mtype}) at ${target}"
+        tell -i drive "${name} is ready" "$target"
         msg "${dev} -> ${target}"
     else
         # A dirty NTFS or exFAT volume, or a stick pulled mid-write.
@@ -302,6 +317,8 @@ cmd_add() {
         # nothing here is going to make the corruption worse.
         if mount -t "$mtype" -o "ro,nosuid,nodev" "/dev/${dev}" "$target" 2>/dev/null; then
             note "mounted ${dev} (${mtype}) READ-ONLY at ${target} -- it would not mount rw"
+            tell -u critical -i drive "${name} is read-only" \
+                "it would not mount for writing"
             msg "${dev} -> ${target} (read-only)"
         else
             rmdir "$target" 2>/dev/null || true
@@ -341,6 +358,12 @@ cmd_remove() {
     umount -l "$mp" 2>/dev/null || true
     rmdir "$mp" 2>/dev/null || true
     note "unmounted ${dev} from ${mp}"
+    # Critical, and that is not melodrama: this path only runs when a
+    # device went away while still mounted -- somebody pulled it
+    # without ejecting -- and the whole point of saying so is that they
+    # should see it even if they have already looked away.
+    tell -u critical -i drive "${mp##*/} was removed" \
+        "it was unplugged before it was ejected"
     return 0
 }
 

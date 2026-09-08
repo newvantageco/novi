@@ -113,6 +113,11 @@
  * service (novi-shell already owns spawning its own UI pieces, same
  * as the terminal/launcher keybindings). */
 #define NOVI_DEFAULT_PANEL "novi-panel"
+/* Notifications (RFC 0024). Spawned here for the same reason the panel
+ * is -- novi-shell already owns starting its own UI pieces -- and not
+ * as an s6 service, because a notification daemon with no compositor
+ * to draw on has nothing to do. */
+#define NOVI_DEFAULT_NOTIFYD "novi-notifyd"
 
 /* Server-side window decorations (GUI-DESIGN-LANGUAGE.md §6): a title
  * bar strip above every toplevel's content, with close and maximize
@@ -3017,6 +3022,7 @@ int main(int argc, char *argv[]) {
 		}
 	}
 	spawn(getenv("NOVI_PANEL") ? getenv("NOVI_PANEL") : NOVI_DEFAULT_PANEL);
+	spawn(getenv("NOVI_NOTIFYD") ? getenv("NOVI_NOTIFYD") : NOVI_DEFAULT_NOTIFYD);
 	/* Run the Wayland event loop. This does not return until you exit the
 	 * compositor. Starting the backend rigged up all of the necessary event
 	 * loop configuration to listen to libinput events, DRM events, generate

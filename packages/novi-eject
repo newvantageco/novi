@@ -132,6 +132,12 @@ cmd_eject() {
         msg "${disk} could not be powered down; the data is flushed and it is safe to unplug"
     fi
     logger -t novi-eject -p daemon.info "ejected ${dev} from ${mp}" 2>/dev/null || true
+    # The one notification in this program, and the only one that
+    # matters: "safe to unplug" is the sentence somebody is waiting for
+    # before they pull the stick out (RFC 0024).
+    if command -v novi-notify >/dev/null 2>&1; then
+        novi-notify -i eject "${mp##*/} is safe to unplug" >/dev/null 2>&1 || true
+    fi
 }
 
 case "${1:-}" in

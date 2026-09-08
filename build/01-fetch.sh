@@ -209,6 +209,15 @@ done
 # font from its real source (a FontForge/UFO project) would pull in
 # FontForge itself, wildly out of proportion to "install a terminal
 # font."
+INTER_ZIP="inter-${INTER_VERSION}.zip"
+if [ ! -f "${INTER_ZIP}" ]; then
+    echo "[fetch] ${INTER_ZIP}"
+    curl -fL --retry 3 -o "${INTER_ZIP}" \
+        "https://github.com/rsms/inter/releases/download/v${INTER_VERSION}/Inter-${INTER_VERSION}.zip"
+else
+    echo "[skip]  ${INTER_ZIP} already exists"
+fi
+
 JBMONO_ZIP="jetbrains-mono-${JETBRAINS_MONO_VERSION}.zip"
 if [ ! -f "${JBMONO_ZIP}" ]; then
     echo "[fetch] ${JBMONO_ZIP}"

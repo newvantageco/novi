@@ -588,6 +588,7 @@ small static GPT writer) and e2fsprogs' `mke2fs`. See
 | Packages | pkg / .pkg.tar.gz | Custom minimal format |
 | Firewall | nftables 1.0.9 | One declared key, one policy file, no daemon |
 | Removable media | novi-mount / novi-eject | ext4/FAT/exFAT/NTFS3/UDF, no udisks, no D-Bus |
+| Notifications | novi-notify / novi-notifyd | A datagram socket, no message bus |
 | Encryption | LUKS2 (cryptsetup 2.7.5) | One static binary, kernel AF_ALG crypto, no OpenSSL |
 | Dev tools | git 2.47.1 + OpenSSH 9.9p2 | Packages, not base; ssh built without OpenSSL |
 | TLS | mbedTLS 3.6.2 + curl 8.11.1 | Packages, not base; CA bundle hash-pinned |
@@ -657,11 +658,13 @@ BUG_REPORT_URL="https://github.com/newvantageco/novi/issues"
       live, with eject, while the window is open
 - [x] A mouse in the file manager — click to select, double-click to open,
       wheel to scroll, click a device to open it or its glyph to eject
+- [x] Notifications — a datagram socket and a toast, no message bus; the
+      system can finally say one sentence (RFC 0024)
 - [ ] **Boot it on real hardware** ← next, and nothing here replaces it
 - [ ] A published repository + offline release key
 - [ ] A Microsoft-signed shim (real Secure Boot); OWE and SAE-PK
       (compiled in, untested)
-- [ ] Idle-suspend and low-battery; Mesa; desktop notifications
+- [ ] Idle-suspend and low-battery; Mesa; notification history
 - [ ] More state domains: keybindings, static IP
 - [ ] Boot splash
 

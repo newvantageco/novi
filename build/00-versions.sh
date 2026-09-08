@@ -63,6 +63,10 @@ TLLIST_VERSION="1.1.0"
 FCFT_VERSION="2.5.1"
 FOOT_VERSION="1.9.2"
 JETBRAINS_MONO_VERSION="2.304"
+# Inter, the UI sans (RFC 0025). GUI-DESIGN-LANGUAGE.md §2 specified it
+# and explicitly deferred adding it; this is that follow-up. OFL-1.1,
+# the same licence family as JetBrains Mono, so no new review.
+INTER_VERSION="4.1"
 
 # e2fsprogs: real mke2fs and e2fsck. BusyBox's mke2fs writes ext2 with
 # no journal, which on real hardware turns an unclean shutdown into a

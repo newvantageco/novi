@@ -59,6 +59,42 @@ unzip -q -o "jetbrains-mono-${JETBRAINS_MONO_VERSION}.zip" \
 cp jetbrains-mono-extract/fonts/ttf/*.ttf "${FONT_DIR}/"
 echo "   done: JetBrains Mono ($(ls "${FONT_DIR}" | wc -l) files)"
 
+# ── 5b. Inter (the UI sans) ──────────────────────────────────────────
+#
+# RFC 0025. GUI-DESIGN-LANGUAGE.md §2 specified a proportional UI face
+# in September 2026 -- "a monospace UI reads as a terminal wearing a
+# costume, not a desktop" -- recommended Inter, and explicitly deferred
+# actually adding it. Every client shipped with JetBrains Mono for its
+# labels in the meantime, which is exactly the costume the doc warned
+# about.
+#
+# STATIC WEIGHTS, not the variable font the doc recommended, and the
+# divergence is deliberate. InterVariable.ttf is one 880 KB file
+# against three static files at ~1.2 MB, which is not a difference
+# worth caring about -- but selecting a weight out of a variable font
+# depends on fontconfig's named-instance handling, and a build where
+# that silently does not work gives you Regular everywhere with no
+# error to notice. Three static files match by weight the way
+# JetBrains Mono's four already do, through a code path this image has
+# been exercising since it had a terminal.
+#
+# Regular/Medium/SemiBold only: those are the three the type scale in
+# §2 actually names (body/caption at 400, display at 500, title at
+# 600). No italics -- nothing in this UI is italic.
+echo "==> Installing Inter ${INTER_VERSION} (UI sans)"
+INTER_DIR="${ROOTFS}/usr/share/fonts/inter"
+mkdir -p "${INTER_DIR}"
+cd "${SOURCES}"
+rm -rf inter-extract
+mkdir inter-extract
+unzip -q -o "inter-${INTER_VERSION}.zip" \
+    "extras/ttf/Inter-Regular.ttf" \
+    "extras/ttf/Inter-Medium.ttf" \
+    "extras/ttf/Inter-SemiBold.ttf" \
+    -d inter-extract
+cp inter-extract/extras/ttf/*.ttf "${INTER_DIR}/"
+echo "   done: Inter ($(ls "${INTER_DIR}" | wc -l) files)"
+
 # ── 6. Build the fontconfig cache, chrooted ──────────────────────────
 #
 # fc-cache reads /etc/fonts/fonts.conf and scans the ABSOLUTE paths it
@@ -77,6 +113,14 @@ chroot "${ROOTFS}" /usr/bin/fc-list
 echo ""
 echo "Default monospace match (chrooted fc-match monospace):"
 chroot "${ROOTFS}" /usr/bin/fc-match monospace
+echo ""
+# Checked, not assumed: every client asks for "Inter" by name, and a
+# fontconfig that cannot find it answers with whatever it does have --
+# silently, and the UI comes up in the wrong face with nothing to say
+# why.
+echo "UI sans match (chrooted fc-match Inter):"
+chroot "${ROOTFS}" /usr/bin/fc-match Inter
+chroot "${ROOTFS}" /usr/bin/fc-match "Inter:weight=semibold"
 
 # ── 7. foot ───────────────────────────────────────────────────────────
 #

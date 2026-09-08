@@ -260,6 +260,60 @@ RFC 0012 (`docs/rfcs/0012-hotplug.md`).
   interface at start. Per-interface DHCP is RFC 0009's work; reaching
   into the network service from a uevent handler is split-brain.
 
+## Architecture: notifications, and a surface that never came back
+
+RFC 0024 (`docs/rfcs/0024-notifications.md`). `novi-notify` in the
+base image, `novi-notifyd` drawing toasts on the desktop.
+
+- **A UNIX DATAGRAM socket, and specifically not a FIFO.** A FIFO is
+  the one transport a shell script could have used with no C at all —
+  and `open(O_WRONLY)` on a FIFO with no reader blocks FOREVER. The
+  largest caller is a uevent handler, where that stops the kernel's
+  hotplug queue (RFC 0012). Not a stream either: a stream needs
+  `connect()` to succeed, so a daemon mid-startup would make senders
+  block or fail on timing. Datagram means one message is one message.
+- **Not D-Bus, for the third time** — RFC 0009 (iwd), RFC 0023
+  (udisks2), now this. `org.freedesktop.Notifications` is a D-Bus
+  interface; what is needed is "hand a short string to a program that
+  may not be running", which is eighty lines.
+- **The sender is base and the daemon is a package**, because the
+  things with something to say (`novi-mount`, `novi-eject`) are base
+  tools that run on machines with no desktop. `novi-notify` always
+  writes to syslog too: on a console-only machine that line is the
+  whole feature.
+- **A separate client, not a second surface in novi-panel.** A socket
+  bug that kills this process costs a toast; the same bug inside the
+  panel costs the taskbar and the clock.
+- **UNMAPPING A LAYER SURFACE IS A ONE-WAY DOOR.** Attaching a NULL
+  buffer when the stack emptied is the documented way to stop
+  occupying a rectangle, and it does not come back: the surface needs
+  another configure round before the compositor will accept a buffer,
+  so the next toast attached one to a surface that was not ready and
+  wlroots dropped it. Nothing drew, ever, and nothing said so — daemon
+  running, socket bound, syslog full. A screenshot found it. The
+  surface now stays mapped for life and click-through is
+  `wl_surface_set_input_region()` over exactly the cards, which is
+  better than unmapping ever was: the GAPS between cards pass clicks
+  through too.
+- **Everything on that socket is untrusted text.** The biggest sender
+  is novi-mount announcing a volume by its filesystem label — a string
+  off a stranger's stick — and the socket is world-writable by design
+  (an unprivileged program has as much business notifying as root
+  does, and there is no session bus to arbitrate). Control characters
+  are dropped, lengths capped, urgency and icon matched against fixed
+  lists. An unknown icon name is *no icon*, not a fallback and not an
+  error.
+- **Critical never expires.** Something that matters enough to be
+  called critical should not vanish while the person is looking away.
+  novi-mount uses it for exactly one thing: a volume yanked while
+  mounted.
+- **`DESKTOP_BINARIES` in pkgsplit is NOT `PACKAGE_TABLE`** — a new
+  desktop client goes in both. Adding it to the table alone leaves it
+  seeded as a base binary, so its libraries get pinned into the base
+  while the table's sweep moves them out, and the straddle check fires
+  on fourteen unrelated libraries: a correct error pointing nowhere
+  near the cause.
+
 ## Architecture: the places sidebar, and polling /proc/mounts
 
 RFC 0023's addendum. `novi-files` shows Home, Filesystem and a DEVICES
