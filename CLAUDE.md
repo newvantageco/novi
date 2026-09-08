@@ -309,6 +309,114 @@ is §1-§3 as C constants and every client includes it.
   `wayland-client.pc` sitting in the rootfs. Read the whole list
   before believing the first name in it.
 
+## Architecture: the compositor draws exactly one thing
+
+`novi-shell/decoration.c` is the whole of the window chrome — title,
+top corners, hairline, three control dots, nine-slice drop shadow —
+and it is the only place this compositor rasterises anything. That is
+not a crack in RFC 0001's "UI belongs in a client" rule: server-side
+decorations are by definition drawn by the server, because the client
+that wanted none is not there to ask.
+
+- **The scene graph takes rects or buffers, and chrome is neither.**
+  A `wlr_scene_rect` is one solid colour; a rounded corner, an
+  anti-aliased circle, a gradient and text are all "rasterise it
+  yourself and wrap it in a `wlr_buffer`". Five callbacks, two of
+  which do anything — `get_dmabuf`/`get_shm` correctly answer "no"
+  because it is malloc'd memory, and the pixman renderer wants the
+  pointer anyway.
+- **Those buffers are PREMULTIPLIED ARGB8888**, which is why every
+  colour is multiplied by its own coverage before being stored. This
+  file already carried a note about a "dimmed" 40%-alpha scene rect
+  that rendered BRIGHTER than the full-strength ones beside it for
+  exactly this reason.
+- **The shadow is a nine-slice, and its offset is DOWNWARD only.**
+  `SHADOW_OFFSET` gives the bottom slices a lead-in of full-strength
+  rows before their falloff; applying that same lead sideways hangs
+  four columns of solid black off the right edge of every window,
+  symmetric with nothing. It was a real bug in the first draft, and
+  the reason `lead` is a parameter rather than a constant inside the
+  sprite builder.
+- **Shadow slices must reject pointer input**
+  (`point_accepts_input`). Otherwise twenty translucent pixels around
+  every window swallow clicks meant for whatever is behind them.
+- **Focus is redrawn from `focus_toplevel()`, not from the commit
+  handler.** A window that LOSES focus does not commit a frame just
+  because it lost it, so it would keep looking focused until it next
+  drew something of its own.
+- **A control's hit target is its buffer's box**, so the dot sprite is
+  16px with an 8px disc centred in it and the rest transparent. An 8px
+  sprite would mean an 8px target. 16 is also the dot gap, so
+  neighbouring targets meet exactly and never overlap.
+- **Title-bar drag cannot go through `begin_interactive()`.** That
+  function refuses a toplevel whose *surface* does not hold pointer
+  focus — right for a client asking to be moved, and wrong here, since
+  the pointer is over the compositor's own decoration and the client's
+  surface never has pointer focus at all. The move is clamped to keep
+  96px of window and the whole title bar inside the usable area:
+  dragging is a thing a person does now, so putting a window somewhere
+  unrecoverable is a thing a person can do now.
+- **A GUI test that reports "nothing happened" is usually the test.**
+  This one said so twice: QEMU's QKeyCode has `meta_l`, not `super`,
+  so two Super+. runs sent an invalid keycode; and a foot window's
+  title bar sits at y=142..173, not the y=176 the drag test grabbed —
+  two pixels into the terminal. Measure the geometry off a screendump
+  before concluding the code is wrong.
+
+## Architecture: a launcher has to answer "what is installed"
+
+`novi-launcher` showed nothing on an empty query and exactly one match
+once you typed. Its own comment defended that as matching the
+calculator's one-result display, with "exactly one real app (foot) to
+ever produce more than one match against".
+
+- **The count was never the problem.** A launcher that shows nothing
+  until you type cannot tell you what the machine has, and a bare
+  cursor on a bare card is a puzzle rather than an invitation. Empty
+  query lists everything; typing filters.
+- **One kind-tagged `struct result`, not three parallel lists.** The
+  selection is one index, and the keyboard should not have to know
+  whether it is moving through apps, a calculator answer or symbols.
+- **The card grows inside a FIXED surface** rather than resizing its
+  own layer surface per keystroke — that would be a
+  set_size/commit/configure round trip per character, which is both
+  flicker and a protocol dance to get wrong.
+
+## Architecture: the palette drifts unless something checks
+
+`common/theme.h` was adopted by half the clients and the other half
+kept private palettes — found by `grep`ing every client for
+`0x[0-9a-f]{8}` literals, not by looking at screenshots.
+
+- **Two clients had invented a SECOND ACCENT.** `novi-settings`
+  defined its accent and its focus ring as `0xff8ab4f8` (Google's
+  blue), and `novi-launcher` used the same value for result rows. The
+  desktop answered "which thing is active?" in teal everywhere and in
+  blue in those two, and it looked deliberate enough that no
+  screenshot review caught it.
+- **`NOVI_PIX()` exists because hand-written `pixman_color_t` literals
+  get the expansion wrong**, and two more files had it: `0xe0` written
+  as `0xe000` rather than `0xe0e0`. Never write one by hand.
+- **Map by ELEVATION, not by nearest hex.** novi-edit's canvas is
+  bg-card (the sheet), its gutter and status bar are bg-panel (chrome
+  beside it), its cursor line is bg-card-raised (a row lifted off that
+  sheet). Choosing the token whose *meaning* fits keeps the answer
+  stable when a token's value changes.
+- **The audit is one command**, worth re-running whenever a client is
+  added:
+
+  ```sh
+  grep -rn '0x[0-9a-fA-F]\{8\}' --include=*.c --include=*.h \
+      novi-panel novi-files novi-edit novi-view novi-settings \
+      novi-lockscreen novi-launcher novi-notifyd novi-bg \
+      novi-screenshot novi-shell common
+  ```
+
+  Named directories rather than `novi-*/`: that glob also sweeps
+  `novi-gpt`, whose eight-hex constants are a CRC polynomial and GPT
+  header fields. A hit is a question, not a verdict — an alpha mask or
+  a format constant is fine; a colour is not.
+
 ## Architecture: notifications, and a surface that never came back
 
 RFC 0024 (`docs/rfcs/0024-notifications.md`). `novi-notify` in the
