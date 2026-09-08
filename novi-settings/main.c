@@ -14,10 +14,14 @@
  * that would matter for portability to some other compositor, and this
  * app only ever runs under this one.
  *
- * v1 scope is deliberately just one real, useful thing, not a shallow
- * multi-section panel with nothing behind most of it: changing root's
- * password. This system has no password-setup flow with a GUI at all
- * today (novi-lockscreen's own header comment notes the stock
+ * Three panels, each of which does one real thing rather than being a
+ * section with nothing behind it: Account changes root's password,
+ * Network joins WiFi (RFC 0017), System is a front-end to
+ * /etc/novi/system.conf (RFC 0002). Every one of them is a capability
+ * this system did not previously have from a desktop.
+ *
+ * Account came first. This system had no password-setup flow with a
+ * GUI at all (novi-lockscreen's own header comment notes the stock
  * /etc/shadow ships an empty hash -- "no `passwd` flow has ever run"),
  * so this is a real, previously-missing capability, not a demo. Root
  * changing its own password doesn't need the OLD one first (standard
@@ -34,7 +38,10 @@
  * oversight.
  */
 #include <crypt.h>
+#include <ctype.h>
+#include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -50,25 +57,34 @@
 
 #include "xdg-shell-client-protocol.h"
 #include "../common/text.h"
+#include "../common/theme.h"
 
 #define WINDOW_WIDTH 640
 #define WINDOW_HEIGHT 400
 #define FIELD_MAX 127
 #define FIELD_COUNT 2 /* 0 = new password, 1 = confirm */
 
-#define BG_COLOR 0xff14141cu
-#define SIDEBAR_BG_COLOR 0xff101018u
-#define TEXT_COLOR 0xffe0e0f0u
-#define LABEL_COLOR 0xff8a8aa0u
-#define HINT_COLOR 0xff8a8aa0u
-#define ERROR_COLOR 0xffe08a8au
-#define SUCCESS_COLOR 0xff8ae0a0u
-#define FIELD_BG_COLOR 0xff1e1e28u
-#define FIELD_BORDER_COLOR 0xff3a3a4au
-#define FIELD_BORDER_FOCUS_COLOR 0xff8ab4f8u
-#define ROW_SELECTED_COLOR 0xff232334u
-#define ACCENT_COLOR 0xff8ab4f8u
-#define DOT_COLOR 0xffe0e0f0u
+/* Tokens, not literals. This client had a palette of its own -- and,
+ * worse, a SECOND ACCENT: FIELD_BORDER_FOCUS_COLOR and ACCENT_COLOR
+ * were both 0xff8ab4f8, which is Google's blue. So the desktop said
+ * "this is the active thing" in teal everywhere and in blue here, and
+ * a person moving between Settings and anything else had to learn two
+ * answers to the same question. That is exactly the drift
+ * common/theme.h exists to prevent (CLAUDE.md's design-system
+ * section). */
+#define BG_COLOR NOVI_BG_BASE
+#define SIDEBAR_BG_COLOR NOVI_BG_PANEL
+#define TEXT_COLOR NOVI_TEXT_PRIMARY
+#define LABEL_COLOR NOVI_TEXT_SECONDARY
+#define HINT_COLOR NOVI_TEXT_MUTED
+#define ERROR_COLOR NOVI_STATUS_ERROR
+#define SUCCESS_COLOR NOVI_STATUS_SUCCESS
+#define FIELD_BG_COLOR NOVI_BG_CARD
+#define FIELD_BORDER_COLOR NOVI_BORDER_STRONG
+#define FIELD_BORDER_FOCUS_COLOR NOVI_ACCENT
+#define ROW_SELECTED_COLOR NOVI_ACCENT_SUBTLE
+#define ACCENT_COLOR NOVI_ACCENT
+#define DOT_COLOR NOVI_TEXT_PRIMARY
 #define DOT_SIZE 8
 #define DOT_GAP 6
 
@@ -98,16 +114,71 @@
 #define NOVI_STATE_BIN "/usr/bin/novi-state"
 #define STATE_MAX_ENTRIES 32
 #define STATE_KEY_MAX 63
-#define STATE_VAL_MAX 31
+/* Was 31, which a real value could exceed -- `network.firewall.allow`
+ * with five ports, or a DNS list -- and load_state_file() SKIPS a line
+ * it cannot hold, so the row simply vanished from the panel with
+ * nothing said. The skip is still right (see its comment), but it
+ * should be rare and it should be visible, so: a bigger cap, and a
+ * count reported in the footer when it still bites. */
+#define STATE_VAL_MAX 95
 #define ROW_HEIGHT 26
 
 enum novi_panel {
 	PANEL_ACCOUNT = 0,
+	PANEL_NETWORK,
 	PANEL_SYSTEM,
 	PANEL_COUNT,
 };
 
-static const char *PANEL_NAMES[PANEL_COUNT] = { "Account", "System" };
+static const char *PANEL_NAMES[PANEL_COUNT] = { "Account", "Network", "System" };
+
+/* ── The Network panel: WiFi without a terminal ─────────────────────
+ *
+ * RFC 0017. Everything here is a front-end to `novi-wifi` and
+ * `novi-state`, for the same reason the System panel shells out to
+ * novi-state: the rules about what a wireless device is, where a
+ * passphrase may be stored, and how a PSK is derived should exist
+ * once. This panel does not open /etc/novi/wifi.conf, does not walk
+ * /sys/class/net, and does not run wpa_cli.
+ *
+ * The passphrase goes to `novi-wifi add <ssid> --stdin` down a pipe,
+ * never as an argument: /proc/<pid>/cmdline is world-readable.
+ *
+ * And a scan is SLOW -- seconds, because it is a radio doing physics.
+ * Every other subprocess this app runs is a fork and a few
+ * milliseconds, and the file's own comment above already warns that
+ * blocking the Wayland event loop stops being acceptable the moment
+ * something slow shows up. A scan is that moment, so this panel
+ * brought a job runner with it (job_start/job_pump below) and the
+ * main loop polls the child's pipe alongside the Wayland fd. */
+#define NOVI_WIFI_BIN "/usr/bin/novi-wifi"
+#define NET_MAX 24
+#define SSID_MAX 47
+#define PASS_MAX 63          /* WPA-PSK's own upper bound */
+#define JOB_BUF 8192
+
+struct net_entry {
+	char ssid[SSID_MAX + 1];
+	/* dBm, negative. Only meaningful when `seen` -- a saved network
+	 * that is not on the air right now has no signal, which is
+	 * different from a signal of zero. */
+	int signal;
+	bool seen;
+	bool saved;
+	bool connected;
+};
+
+/* One job at a time, deliberately. Two concurrent scans have no
+ * meaning, and a second `add` while the first is in flight would race
+ * on wifi.conf -- a queue here would be machinery in service of a
+ * situation a person cannot create by pressing keys. */
+enum job_kind {
+	JOB_NONE = 0,
+	JOB_SCAN,
+	JOB_ADD,
+	JOB_FORGET,
+	JOB_APPLY,
+};
 
 struct state_entry {
 	char key[STATE_KEY_MAX + 1];
@@ -151,8 +222,68 @@ struct novi_settings {
 
 	struct state_entry entries[STATE_MAX_ENTRIES];
 	int entry_count;
+	/* Lines load_state_file() had to skip because the key or value did
+	 * not fit. Reported rather than swallowed: a settings panel that
+	 * silently omits a row is lying about the document it claims to
+	 * show. */
+	int skipped_count;
 	int selected;
+	/* First visible row. The list used to start at 0 and stop at
+	 * whatever fitted, so on a 400px window everything past
+	 * network.wifi.interface -- the firewall, its open ports, users,
+	 * packages -- was in the document, named in the panel's own
+	 * heading, and unreachable. A settings panel that shows the first
+	 * fourteen of your settings is not showing your settings. */
+	int top;
 
+	/* Inline editing of the selected key's value. The System panel
+	 * could only ever flip on/off, so every key with a VALUE --
+	 * hostname, the DNS list, the firewall's open ports, the automount
+	 * mode -- answered "edit it in the file". That made the GUI a
+	 * viewer with three switches on it, and made "the GUI and a text
+	 * editor write the same document" a claim only half kept. */
+	bool editing;
+	char edit_buf[STATE_VAL_MAX + 1];
+	size_t edit_len;
+
+	/* ── Network panel ── */
+	char wifi_iface[32];             /* "" = no wireless device */
+	char wifi_state[32];             /* wpa_supplicant's wpa_state */
+	char wifi_ssid[SSID_MAX + 1];    /* what it is associated with */
+	char wifi_ip[48];
+	bool wifi_declared_on;
+	struct net_entry nets[NET_MAX];
+	int net_count;
+	/* SSIDs a scan found that would not fit in nets[]. Reported for
+	 * the same reason the System panel reports its skipped lines: a
+	 * list that shows twenty-four of forty and says nothing tells you
+	 * the other sixteen networks are not there. A dense flat or an
+	 * office reaches forty easily. */
+	int net_dropped;
+	/* First visible network row. Same reason the System panel has one:
+	 * without it the list drew from index 0 and stopped at the window's
+	 * edge, so with thirty saved networks you could select NET25 with
+	 * the arrow keys and never see it. */
+	int net_top;
+	int net_selected;
+
+	bool pass_prompt;
+	char pass_ssid[SSID_MAX + 1];
+	char pass[PASS_MAX + 1];
+	size_t pass_len;
+
+	enum job_kind job;
+	pid_t job_pid;
+	int job_fd;
+	char job_ssid[SSID_MAX + 1];
+	char job_out[JOB_BUF];
+	size_t job_len;
+
+	/* A status line that is a copy, not a pointer to a literal.
+	 * Everything the Account and System panels report is a fixed
+	 * string; the Network panel reports things like the last line a
+	 * child process printed, which has to live somewhere. */
+	char status_buf[160];
 	const char *status;
 	bool status_is_error;
 };
@@ -364,6 +495,7 @@ static int run_novi_state(char *const argv[]) {
  * comments, blank lines and indentation allowed. */
 static void load_state_file(struct novi_settings *state) {
 	state->entry_count = 0;
+	state->skipped_count = 0;
 	FILE *f = fopen(STATE_FILE, "r");
 	if (f == NULL) {
 		return;
@@ -409,6 +541,7 @@ static void load_state_file(struct novi_settings *state) {
 		 * is worse than omitting the row. */
 		size_t key_len = strlen(key), value_len = strlen(value);
 		if (key_len > STATE_KEY_MAX || value_len > STATE_VAL_MAX) {
+			state->skipped_count++;
 			continue;
 		}
 
@@ -505,7 +638,7 @@ static void toggle_selected(struct novi_settings *state) {
 	}
 	struct state_entry *e = &state->entries[state->selected];
 	if (!entry_is_toggleable(e)) {
-		set_status(state, "Not a toggle -- edit it in the file", true);
+		set_status(state, "Not a toggle -- press e to edit its value", true);
 		return;
 	}
 	const char *next = strcmp(e->value, "on") == 0 ? "off" : "on";
@@ -523,6 +656,76 @@ static void toggle_selected(struct novi_settings *state) {
 	set_status(state, "Declared -- press Enter to apply", false);
 }
 
+/* ── Editing a declared value ──────────────────────────────────────
+ *
+ * Same rule as every other write in this program: the value goes to
+ * `novi-state set`, never to the file. state_set() is the one edit
+ * that preserves the document's comments and ordering, and a second
+ * writer here would be exactly the parallel truth this whole feature
+ * exists to abolish (CLAUDE.md's novi-state section).
+ */
+
+static void begin_edit(struct novi_settings *state) {
+	if (state->entry_count == 0) {
+		return;
+	}
+	const struct state_entry *e = &state->entries[state->selected];
+	snprintf(state->edit_buf, sizeof(state->edit_buf), "%s", e->value);
+	state->edit_len = strlen(state->edit_buf);
+	state->editing = true;
+	set_status(state, NULL, false);
+}
+
+static void cancel_edit(struct novi_settings *state) {
+	state->editing = false;
+	state->edit_len = 0;
+	state->edit_buf[0] = '\0';
+	set_status(state, NULL, false);
+}
+
+static void commit_edit(struct novi_settings *state) {
+	struct state_entry *e = &state->entries[state->selected];
+	/* Trim, because a trailing space is invisible and `key = value `
+	 * is not the same string as `key = value` to anything comparing
+	 * declared against observed. */
+	while (state->edit_len > 0 && state->edit_buf[state->edit_len - 1] == ' ') {
+		state->edit_buf[--state->edit_len] = '\0';
+	}
+	const char *val = state->edit_buf;
+	while (*val == ' ') {
+		val++;
+	}
+	if (*val == '\0') {
+		/* novi-state set refuses an empty value too; saying so here
+		 * beats forking to be told. */
+		set_status(state, "A value cannot be empty", true);
+		return;
+	}
+	/* A '#' would start a comment when the file is read back, so a
+	 * value containing one truncates its own line -- the GUI would
+	 * have corrupted the document it is meant to be a view of. Refused
+	 * rather than escaped, the same call the package index makes about
+	 * '|'. */
+	if (strchr(val, '#') != NULL) {
+		set_status(state, "A value cannot contain '#'", true);
+		return;
+	}
+	char *const argv[] = {
+		(char *)"novi-state", (char *)"set", e->key, (char *)val, NULL,
+	};
+	if (run_novi_state(argv) != 0) {
+		set_status(state, "Failed to write system.conf", true);
+		return;
+	}
+	state->editing = false;
+	state->edit_len = 0;
+	/* Re-read rather than trusting our own edit, for the same reason
+	 * toggle_selected() does: the file is the truth, and novi-state
+	 * may have normalised what it wrote. */
+	refresh_system(state);
+	set_status(state, "Declared -- press Enter to apply", false);
+}
+
 static void apply_state(struct novi_settings *state) {
 	char *const argv[] = { (char *)"novi-state", (char *)"apply", NULL };
 	int rc = run_novi_state(argv);
@@ -534,25 +737,546 @@ static void apply_state(struct novi_settings *state) {
 	set_status(state, "Applied -- system matches the document", false);
 }
 
+/* ── The Network panel ─────────────────────────────────────────────
+ *
+ * Reading is synchronous; anything that touches the radio is not. See
+ * the enum job_kind comment above for the split.
+ */
+
+/* Run a command and capture its stdout into `out`. Synchronous, and
+ * only ever used for the instant ones: `novi-wifi iface` reads one
+ * sysfs directory, `list` reads a file, `status` talks to a local
+ * socket. A scan does not come through here. */
+static bool capture(const char *path, char *const argv[], char *out, size_t outsz) {
+	int fds[2];
+	out[0] = '\0';
+	if (pipe(fds) < 0) {
+		return false;
+	}
+	pid_t pid = fork();
+	if (pid < 0) {
+		close(fds[0]);
+		close(fds[1]);
+		return false;
+	}
+	if (pid == 0) {
+		close(fds[0]);
+		dup2(fds[1], STDOUT_FILENO);
+		close(fds[1]);
+		/* stderr to /dev/null: novi-wifi's `info`/`die` lines all go
+		 * there, and mixing them into parsed output would turn an
+		 * explanatory sentence into a network named after it. */
+		int devnull = open("/dev/null", O_WRONLY);
+		if (devnull >= 0) {
+			dup2(devnull, STDERR_FILENO);
+			close(devnull);
+		}
+		execv(path, argv);
+		_exit(127);
+	}
+	close(fds[1]);
+	size_t used = 0;
+	ssize_t n;
+	while (used < outsz - 1 &&
+			(n = read(fds[0], out + used, outsz - 1 - used)) > 0) {
+		used += (size_t)n;
+	}
+	out[used] = '\0';
+	close(fds[0]);
+	int status = 0;
+	waitpid(pid, &status, 0);
+	return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+static void chomp(char *s) {
+	size_t n = strlen(s);
+	while (n > 0 && (s[n - 1] == '\n' || s[n - 1] == '\r')) {
+		s[--n] = '\0';
+	}
+}
+
+static struct net_entry *net_find(struct novi_settings *state, const char *ssid) {
+	for (int i = 0; i < state->net_count; i++) {
+		if (strcmp(state->nets[i].ssid, ssid) == 0) {
+			return &state->nets[i];
+		}
+	}
+	return NULL;
+}
+
+/* Adds `ssid` if it is not already listed, and returns the row either
+ * way. Saved networks and scanned networks are ONE list on purpose: a
+ * person thinks about "networks", not about which of two tables a name
+ * came from, and a saved network that is also in range is one thing,
+ * not two rows that happen to share a name. */
+static struct net_entry *net_intern(struct novi_settings *state, const char *ssid) {
+	struct net_entry *e = net_find(state, ssid);
+	if (e != NULL) {
+		return e;
+	}
+	if (ssid[0] == '\0') {
+		return NULL;
+	}
+	if (state->net_count >= NET_MAX) {
+		state->net_dropped++;
+		return NULL;
+	}
+	e = &state->nets[state->net_count++];
+	memset(e, 0, sizeof(*e));
+	snprintf(e->ssid, sizeof(e->ssid), "%s", ssid);
+	return e;
+}
+
+/* What the supplicant is doing right now. `novi-wifi status` is
+ * wpa_cli's own key=value output, so this parses that rather than
+ * running wpa_cli itself -- one place knows the control socket's
+ * path. */
+static void refresh_wifi_status(struct novi_settings *state) {
+	state->wifi_state[0] = '\0';
+	state->wifi_ssid[0] = '\0';
+	state->wifi_ip[0] = '\0';
+
+	char buf[4096];
+	char *const argv[] = { (char *)"novi-wifi", (char *)"status", NULL };
+	if (!capture(NOVI_WIFI_BIN, argv, buf, sizeof(buf))) {
+		return;   /* not running: no state, which is the honest answer */
+	}
+	for (char *line = strtok(buf, "\n"); line != NULL; line = strtok(NULL, "\n")) {
+		char *eq = strchr(line, '=');
+		if (eq == NULL) {
+			continue;
+		}
+		*eq = '\0';
+		const char *k = line, *v = eq + 1;
+		if (strcmp(k, "wpa_state") == 0) {
+			snprintf(state->wifi_state, sizeof(state->wifi_state), "%s", v);
+		} else if (strcmp(k, "ssid") == 0) {
+			snprintf(state->wifi_ssid, sizeof(state->wifi_ssid), "%s", v);
+		} else if (strcmp(k, "ip_address") == 0) {
+			snprintf(state->wifi_ip, sizeof(state->wifi_ip), "%s", v);
+		}
+	}
+}
+
+/* Re-read everything cheap: the interface, the declared key, the saved
+ * list and the live association. The scan results already in
+ * state->nets are kept -- they are the only thing here that costs
+ * seconds to obtain, and throwing them away on every status refresh
+ * would make the list flicker between "eight networks" and "the two
+ * you have saved". */
+static void refresh_network(struct novi_settings *state) {
+	char buf[8192];
+
+	char *const iface_argv[] = { (char *)"novi-wifi", (char *)"iface", NULL };
+	if (capture(NOVI_WIFI_BIN, iface_argv, buf, sizeof(buf))) {
+		chomp(buf);
+		snprintf(state->wifi_iface, sizeof(state->wifi_iface), "%s", buf);
+	} else {
+		state->wifi_iface[0] = '\0';
+	}
+
+	char *const get_argv[] = {
+		(char *)"novi-state", (char *)"get", (char *)"network.wifi", NULL,
+	};
+	state->wifi_declared_on = false;
+	if (capture(NOVI_STATE_BIN, get_argv, buf, sizeof(buf))) {
+		chomp(buf);
+		state->wifi_declared_on = strcmp(buf, "on") == 0;
+	}
+
+	/* Counted per refresh, not accumulated: nets[] is a persistent
+	 * union of saved and seen networks that is never emptied, so a
+	 * running tally would climb on every scan that re-found the same
+	 * networks it could not fit. The honest number is "this pass had N
+	 * it could not hold". */
+	state->net_dropped = 0;
+	for (int i = 0; i < state->net_count; i++) {
+		state->nets[i].saved = false;
+		state->nets[i].connected = false;
+	}
+
+	char *const list_argv[] = { (char *)"novi-wifi", (char *)"list", NULL };
+	if (capture(NOVI_WIFI_BIN, list_argv, buf, sizeof(buf))) {
+		for (char *line = strtok(buf, "\n"); line != NULL;
+				line = strtok(NULL, "\n")) {
+			chomp(line);
+			if (line[0] == '\0') {
+				continue;
+			}
+			struct net_entry *e = net_intern(state, line);
+			if (e != NULL) {
+				e->saved = true;
+			}
+		}
+	}
+
+	refresh_wifi_status(state);
+	if (state->wifi_ssid[0] != '\0' &&
+			strcmp(state->wifi_state, "COMPLETED") == 0) {
+		struct net_entry *e = net_intern(state, state->wifi_ssid);
+		if (e != NULL) {
+			e->connected = true;
+		}
+	}
+
+	/* Drop rows that are neither saved nor currently on the air: a
+	 * network that was in a scan two scans ago and is gone now is not
+	 * information, it is a stale row a person might try to join. */
+	int keep = 0;
+	for (int i = 0; i < state->net_count; i++) {
+		if (state->nets[i].saved || state->nets[i].seen ||
+				state->nets[i].connected) {
+			state->nets[keep++] = state->nets[i];
+		}
+	}
+	state->net_count = keep;
+
+	if (state->net_selected >= state->net_count) {
+		state->net_selected = state->net_count > 0 ? state->net_count - 1 : 0;
+	}
+}
+
+/* ── The job runner ────────────────────────────────────────────────
+ *
+ * fork, read the child's output through a pipe the main loop polls,
+ * dispatch on EOF. `stdin_data` is written to the child before its
+ * output is read; that ordering is safe only because the payload is a
+ * passphrase -- 63 bytes at most, far inside a pipe buffer -- and
+ * would deadlock on anything that could fill one. */
+static void job_finish(struct novi_settings *state, int exit_code);
+
+static bool job_start(struct novi_settings *state, enum job_kind kind,
+		const char *path, char *const argv[], const char *stdin_data,
+		const char *ssid) {
+	if (state->job != JOB_NONE) {
+		set_status(state, "Busy -- one thing at a time", true);
+		return false;
+	}
+	int out_fds[2], in_fds[2] = { -1, -1 };
+	if (pipe(out_fds) < 0) {
+		return false;
+	}
+	if (stdin_data != NULL && pipe(in_fds) < 0) {
+		close(out_fds[0]);
+		close(out_fds[1]);
+		return false;
+	}
+
+	pid_t pid = fork();
+	if (pid < 0) {
+		close(out_fds[0]);
+		close(out_fds[1]);
+		if (in_fds[0] >= 0) {
+			close(in_fds[0]);
+			close(in_fds[1]);
+		}
+		return false;
+	}
+	if (pid == 0) {
+		close(out_fds[0]);
+		dup2(out_fds[1], STDOUT_FILENO);
+		/* stderr into the SAME pipe here, unlike capture(): a job's
+		 * output is shown to the user, and novi-wifi says why it
+		 * refused on stderr. Losing that would leave a failed join
+		 * with no reason on screen. */
+		dup2(out_fds[1], STDERR_FILENO);
+		close(out_fds[1]);
+		if (in_fds[0] >= 0) {
+			close(in_fds[1]);
+			dup2(in_fds[0], STDIN_FILENO);
+			close(in_fds[0]);
+		}
+		execv(path, argv);
+		_exit(127);
+	}
+
+	close(out_fds[1]);
+	if (in_fds[0] >= 0) {
+		close(in_fds[0]);
+		size_t len = strlen(stdin_data), written = 0;
+		while (written < len) {
+			ssize_t n = write(in_fds[1], stdin_data + written, len - written);
+			if (n < 0 && errno == EINTR) {
+				continue;
+			}
+			if (n <= 0) {
+				break;
+			}
+			written += (size_t)n;
+		}
+		(void)!write(in_fds[1], "\n", 1);
+		close(in_fds[1]);
+	}
+
+	/* Non-blocking, and this matters: job_pump() drains in a loop until
+	 * it sees EOF, and on a blocking fd the second read would sleep
+	 * until the child produced more -- freezing the window for exactly
+	 * as long as the scan it was supposed to be running alongside. */
+	int fl = fcntl(out_fds[0], F_GETFL, 0);
+	if (fl >= 0) {
+		fcntl(out_fds[0], F_SETFL, fl | O_NONBLOCK);
+	}
+
+	state->job = kind;
+	state->job_pid = pid;
+	state->job_fd = out_fds[0];
+	state->job_len = 0;
+	state->job_out[0] = '\0';
+	snprintf(state->job_ssid, sizeof(state->job_ssid), "%s", ssid ? ssid : "");
+	return true;
+}
+
+/* Called when the job's pipe is readable. Returns true if the job
+ * ended, which is the main loop's cue to redraw. */
+static bool job_pump(struct novi_settings *state) {
+	if (state->job == JOB_NONE) {
+		return false;
+	}
+	for (;;) {
+		if (state->job_len >= sizeof(state->job_out) - 1) {
+			/* Full. Keep draining so the child is never blocked on a
+			 * write we stopped reading -- discarding the tail is
+			 * correct here (a scan of 24 networks is under 2 KB) and
+			 * hanging the child would not be. */
+			char sink[1024];
+			ssize_t n = read(state->job_fd, sink, sizeof(sink));
+			if (n > 0) {
+				continue;
+			}
+			if (n < 0 && errno == EINTR) {
+				continue;
+			}
+			if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+				return false;
+			}
+			break;
+		}
+		ssize_t n = read(state->job_fd, state->job_out + state->job_len,
+			sizeof(state->job_out) - 1 - state->job_len);
+		if (n > 0) {
+			state->job_len += (size_t)n;
+			state->job_out[state->job_len] = '\0';
+			continue;
+		}
+		if (n < 0 && errno == EINTR) {
+			continue;
+		}
+		if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+			return false;
+		}
+		break;   /* EOF, or a read error we cannot do anything about */
+	}
+
+	close(state->job_fd);
+	state->job_fd = -1;
+	int status = 0;
+	waitpid(state->job_pid, &status, 0);
+	job_finish(state, WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+	return true;
+}
+
+/* novi-wifi's own error lines are `ERROR: ...`; its progress lines are
+ * `  -> ...` and `==> ...`. Show the last thing it said, preferring an
+ * error, so a failure reads as a sentence rather than "exit 1". */
+static void status_from_job(struct novi_settings *state, bool failed,
+		const char *fallback) {
+	char *best = NULL;
+	char copy[JOB_BUF];
+	snprintf(copy, sizeof(copy), "%s", state->job_out);
+	for (char *line = strtok(copy, "\n"); line != NULL; line = strtok(NULL, "\n")) {
+		if (strncmp(line, "ERROR: ", 7) == 0) {
+			best = line + 7;
+			break;
+		}
+	}
+	if (best == NULL && failed) {
+		best = (char *)fallback;
+	}
+	set_status(state, best != NULL ? best : fallback, failed);
+}
+
+static void job_finish(struct novi_settings *state, int exit_code) {
+	enum job_kind kind = state->job;
+	bool failed = exit_code != 0;
+	state->job = JOB_NONE;
+
+	switch (kind) {
+	case JOB_SCAN:
+		if (!failed) {
+			/* A fresh scan replaces the airwaves, not the saved list:
+			 * clear `seen` on everything, then mark what came back. */
+			for (int i = 0; i < state->net_count; i++) {
+				state->nets[i].seen = false;
+			}
+			state->net_dropped = 0;
+			char copy[JOB_BUF];
+			snprintf(copy, sizeof(copy), "%s", state->job_out);
+			for (char *line = strtok(copy, "\n"); line != NULL;
+					line = strtok(NULL, "\n")) {
+				char *tab = strchr(line, '\t');
+				if (tab == NULL) {
+					continue;
+				}
+				*tab = '\0';
+				struct net_entry *e = net_intern(state, tab + 1);
+				if (e == NULL) {
+					continue;
+				}
+				e->seen = true;
+				e->signal = atoi(line);
+			}
+		}
+		refresh_network(state);
+		if (failed) {
+			status_from_job(state, true, "Scan failed");
+		} else {
+			char msg[64];
+			snprintf(msg, sizeof(msg), "%d network(s) in range", state->net_count);
+			set_status(state, msg, false);
+		}
+		break;
+	case JOB_ADD:
+		refresh_network(state);
+		if (failed) {
+			status_from_job(state, true, "Could not add that network");
+		} else {
+			char msg[128];
+			snprintf(msg, sizeof(msg), "Saved \"%s\"%s", state->job_ssid,
+				state->wifi_declared_on ? " -- joining" :
+					" -- turn WiFi on with w");
+			set_status(state, msg, false);
+		}
+		break;
+	case JOB_FORGET:
+		refresh_network(state);
+		status_from_job(state, failed, failed ? "Could not forget that" :
+			"Forgotten");
+		break;
+	case JOB_APPLY:
+		refresh_network(state);
+		refresh_system(state);
+		status_from_job(state, failed, failed ? "Apply failed" :
+			"Applied");
+		break;
+	case JOB_NONE:
+		break;
+	}
+}
+
+static void net_scan(struct novi_settings *state) {
+	if (state->wifi_iface[0] == '\0') {
+		set_status(state, "No wireless interface on this machine", true);
+		return;
+	}
+	char *const argv[] = {
+		(char *)"novi-wifi", (char *)"scan", (char *)"--tsv", NULL,
+	};
+	if (job_start(state, JOB_SCAN, NOVI_WIFI_BIN, argv, NULL, NULL)) {
+		set_status(state, "Scanning...", false);
+	}
+}
+
+static void net_toggle_wifi(struct novi_settings *state) {
+	const char *next = state->wifi_declared_on ? "off" : "on";
+	char *const set_argv[] = {
+		(char *)"novi-state", (char *)"set", (char *)"network.wifi",
+		(char *)next, NULL,
+	};
+	if (run_novi_state(set_argv) != 0) {
+		set_status(state, "Could not write system.conf", true);
+		return;
+	}
+	/* Applying it restarts the supplicant, which takes long enough to
+	 * be worth not freezing the window for. */
+	char *const apply_argv[] = { (char *)"novi-state", (char *)"apply", NULL };
+	if (job_start(state, JOB_APPLY, NOVI_STATE_BIN, apply_argv, NULL, NULL)) {
+		set_status(state, state->wifi_declared_on ?
+			"Turning WiFi off..." : "Turning WiFi on...", false);
+	}
+}
+
+static void net_forget(struct novi_settings *state) {
+	if (state->net_count == 0) {
+		return;
+	}
+	struct net_entry *e = &state->nets[state->net_selected];
+	if (!e->saved) {
+		set_status(state, "Nothing saved for that network", true);
+		return;
+	}
+	char ssid[SSID_MAX + 1];
+	snprintf(ssid, sizeof(ssid), "%s", e->ssid);
+	char *const argv[] = {
+		(char *)"novi-wifi", (char *)"forget", ssid, NULL,
+	};
+	job_start(state, JOB_FORGET, NOVI_WIFI_BIN, argv, NULL, ssid);
+}
+
+static void pass_clear(struct novi_settings *state) {
+	explicit_bzero(state->pass, sizeof(state->pass));
+	state->pass_len = 0;
+	state->pass_prompt = false;
+	state->pass_ssid[0] = '\0';
+}
+
+static void net_activate(struct novi_settings *state) {
+	if (state->net_count == 0) {
+		set_status(state, "Nothing here yet -- press s to scan", false);
+		return;
+	}
+	struct net_entry *e = &state->nets[state->net_selected];
+	if (e->connected) {
+		set_status(state, "Already connected to this one", false);
+		return;
+	}
+	if (e->saved) {
+		/* The supplicant chooses among the networks it knows; there is
+		 * no "connect to this one" to issue that would not be a second
+		 * opinion about which network the machine should be on. Say
+		 * that rather than pretending to do something. */
+		set_status(state, state->wifi_declared_on ?
+			"Saved -- the supplicant joins it when it is in range" :
+			"Saved -- turn WiFi on with w", false);
+		return;
+	}
+	state->pass_prompt = true;
+	snprintf(state->pass_ssid, sizeof(state->pass_ssid), "%s", e->ssid);
+	explicit_bzero(state->pass, sizeof(state->pass));
+	state->pass_len = 0;
+	set_status(state, NULL, false);
+}
+
+static void net_submit_pass(struct novi_settings *state) {
+	if (state->pass_len < 8) {
+		set_status(state, "A WPA passphrase is at least 8 characters", true);
+		return;
+	}
+	char ssid[SSID_MAX + 1];
+	snprintf(ssid, sizeof(ssid), "%s", state->pass_ssid);
+	char *const argv[] = {
+		(char *)"novi-wifi", (char *)"add", ssid, (char *)"--stdin", NULL,
+	};
+	if (job_start(state, JOB_ADD, NOVI_WIFI_BIN, argv, state->pass, ssid)) {
+		set_status(state, "Saving...", false);
+	}
+	/* Wiped whether or not the job started: it is already down the
+	 * pipe if it did, and there is no reason for it to stay here if it
+	 * did not. */
+	pass_clear(state);
+}
+
 static const char *FIELD_LABELS[FIELD_COUNT] = {
 	"New password", "Confirm new password",
 };
 
-static const pixman_color_t TEXT_PIX = {
-	.red = 0xe000, .green = 0xe000, .blue = 0xf000, .alpha = 0xffff,
-};
-static const pixman_color_t LABEL_PIX = {
-	.red = 0x8a00, .green = 0x8a00, .blue = 0xa000, .alpha = 0xffff,
-};
-static const pixman_color_t ERROR_PIX = {
-	.red = 0xe000, .green = 0x8a00, .blue = 0x8a00, .alpha = 0xffff,
-};
-static const pixman_color_t SUCCESS_PIX = {
-	.red = 0x8a00, .green = 0xe000, .blue = 0xa000, .alpha = 0xffff,
-};
-static const pixman_color_t ACCENT_PIX = {
-	.red = 0x8a00, .green = 0xb400, .blue = 0xf800, .alpha = 0xffff,
-};
+/* Every one of these was ALSO written with the shift-left-8 bug
+ * NOVI_PIX() exists to rule out: 0xe0 became 0xe000 instead of 0xe0e0,
+ * so nothing here was ever quite the colour it claimed. */
+static const pixman_color_t TEXT_PIX    = NOVI_PIX(NOVI_TEXT_PRIMARY);
+static const pixman_color_t LABEL_PIX   = NOVI_PIX(NOVI_TEXT_SECONDARY);
+static const pixman_color_t ERROR_PIX   = NOVI_PIX(NOVI_STATUS_ERROR);
+static const pixman_color_t SUCCESS_PIX = NOVI_PIX(NOVI_STATUS_SUCCESS);
+static const pixman_color_t ACCENT_PIX  = NOVI_PIX(NOVI_ACCENT);
 
 static void render_sidebar(struct novi_settings *state, uint32_t *px,
 		uint32_t stride_px, pixman_image_t *dest) {
@@ -629,6 +1353,157 @@ static void render_account(struct novi_settings *state, uint32_t *px,
 		LABEL_PIX);
 }
 
+static void render_network(struct novi_settings *state, uint32_t *px,
+		uint32_t stride_px, pixman_image_t *dest) {
+	uint32_t w = state->width, h = state->height;
+
+	novi_text_draw(dest, state->font, CONTENT_X, 24 + state->font->ascent,
+		"Network", TEXT_PIX);
+
+	/* The subtitle is the machine's actual situation in one line:
+	 * which radio, and what it is doing. "no wireless interface" is a
+	 * real and common answer on the machines this boots on, and saying
+	 * it is better than an empty list that looks broken. */
+	char sub[192];
+	if (state->wifi_iface[0] == '\0') {
+		snprintf(sub, sizeof(sub), "no wireless interface on this machine");
+	} else if (state->wifi_ssid[0] != '\0' &&
+			strcmp(state->wifi_state, "COMPLETED") == 0) {
+		snprintf(sub, sizeof(sub), "%s  connected to \"%s\"%s%s",
+			state->wifi_iface, state->wifi_ssid,
+			state->wifi_ip[0] != '\0' ? "  " : "", state->wifi_ip);
+	} else if (state->wifi_state[0] != '\0') {
+		snprintf(sub, sizeof(sub), "%s  %s", state->wifi_iface, state->wifi_state);
+	} else {
+		snprintf(sub, sizeof(sub), "%s  supplicant not running",
+			state->wifi_iface);
+	}
+	novi_text_draw(dest, state->font_small, CONTENT_X,
+		52 + state->font_small->ascent, sub, LABEL_PIX);
+
+	int y = 84;
+
+	/* The declared key, shown here as well as in System. Two views of
+	 * one value, never two values: this reads network.wifi through
+	 * novi-state and writes it through novi-state set, exactly as the
+	 * System panel does. */
+	novi_text_draw(dest, state->font_small, CONTENT_X,
+		y + state->font_small->ascent, "network.wifi", LABEL_PIX);
+	const char *declared = state->wifi_declared_on ? "on" : "off";
+	int dw = novi_text_width(state->font_small, declared);
+	novi_text_draw(dest, state->font_small,
+		CONTENT_X + FIELD_WIDTH - dw - 8, y + state->font_small->ascent,
+		declared, state->wifi_declared_on ? ACCENT_PIX : LABEL_PIX);
+	y += ROW_HEIGHT + 4;
+	draw_rect(px, stride_px, w, h, CONTENT_X, y, FIELD_WIDTH, 1,
+		FIELD_BORDER_COLOR);
+	y += 10;
+
+	if (state->pass_prompt) {
+		char prompt[128];
+		snprintf(prompt, sizeof(prompt), "Passphrase for \"%s\"",
+			state->pass_ssid);
+		novi_text_draw(dest, state->font_small, CONTENT_X,
+			y + state->font_small->ascent, prompt, TEXT_PIX);
+		int box_y = y + 24;
+		draw_rect(px, stride_px, w, h, CONTENT_X, box_y, FIELD_WIDTH,
+			FIELD_HEIGHT, FIELD_BG_COLOR);
+		draw_rect_border(px, stride_px, w, h, CONTENT_X, box_y, FIELD_WIDTH,
+			FIELD_HEIGHT, FIELD_BORDER_FOCUS_COLOR);
+		int dots_x = CONTENT_X + 12;
+		int dots_y = box_y + (FIELD_HEIGHT - DOT_SIZE) / 2;
+		/* Same fixed-per-character dots as the Account panel, and
+		 * clamped to the box: a 63-character passphrase would
+		 * otherwise draw straight through the window's edge. */
+		int max_dots = (FIELD_WIDTH - 24) / (DOT_SIZE + DOT_GAP);
+		for (size_t d = 0; d < state->pass_len && (int)d < max_dots; d++) {
+			draw_rect(px, stride_px, w, h,
+				dots_x + (int)d * (DOT_SIZE + DOT_GAP), dots_y,
+				DOT_SIZE, DOT_SIZE, DOT_COLOR);
+		}
+		novi_text_draw(dest, state->font_small, CONTENT_X,
+			box_y + FIELD_HEIGHT + 14 + state->font_small->ascent,
+			"Enter joins, Esc cancels", LABEL_PIX);
+	} else {
+		int rows = ((int)h - 46 - y) / ROW_HEIGHT;
+		if (rows < 1) {
+			rows = 1;
+		}
+		if (state->net_selected < state->net_top) {
+			state->net_top = state->net_selected;
+		}
+		if (state->net_selected >= state->net_top + rows) {
+			state->net_top = state->net_selected - rows + 1;
+		}
+		if (state->net_top > state->net_count - rows) {
+			state->net_top = state->net_count - rows;
+		}
+		if (state->net_top < 0) {
+			state->net_top = 0;
+		}
+		for (int i = state->net_top;
+				i < state->net_count && i < state->net_top + rows; i++) {
+			struct net_entry *e = &state->nets[i];
+			int ry = y + (i - state->net_top) * ROW_HEIGHT;
+			if (i == state->net_selected) {
+				draw_rect(px, stride_px, w, h, CONTENT_X - 8, ry - 3,
+					FIELD_WIDTH + 16, ROW_HEIGHT, ROW_SELECTED_COLOR);
+			}
+			novi_text_draw(dest, state->font_small, CONTENT_X,
+				ry + state->font_small->ascent, e->ssid,
+				i == state->net_selected ? TEXT_PIX : LABEL_PIX);
+
+			/* Right-hand column, right-aligned: signal if it is on the
+			 * air, and the word that says what this row IS -- saved,
+			 * or the one we are on. */
+			char right[48];
+			if (e->connected) {
+				snprintf(right, sizeof(right), "connected");
+			} else if (e->seen && e->saved) {
+				snprintf(right, sizeof(right), "saved  %d dBm", e->signal);
+			} else if (e->seen) {
+				snprintf(right, sizeof(right), "%d dBm", e->signal);
+			} else {
+				snprintf(right, sizeof(right), "saved");
+			}
+			int rw = novi_text_width(state->font_small, right);
+			novi_text_draw(dest, state->font_small,
+				CONTENT_X + FIELD_WIDTH - rw - 8, ry + state->font_small->ascent,
+				right, e->connected ? SUCCESS_PIX :
+					(i == state->net_selected ? TEXT_PIX : LABEL_PIX));
+		}
+		if (state->net_count == 0) {
+			novi_text_draw(dest, state->font_small, CONTENT_X,
+				y + state->font_small->ascent,
+				state->wifi_iface[0] != '\0' ?
+					"No networks yet -- press s to scan" :
+					"Nothing to show without a radio", LABEL_PIX);
+		}
+	}
+
+	int footer_y = (int)h - 40;
+	if (state->status != NULL) {
+		novi_text_draw(dest, state->font_small, CONTENT_X,
+			footer_y + state->font_small->ascent, state->status,
+			state->status_is_error ? ERROR_PIX : SUCCESS_PIX);
+	} else if (state->net_dropped > 0) {
+		/* Instead of the key hint, not beside it: the footer is one
+		 * line and the first version drew both, straight through each
+		 * other. News beats a reminder -- someone who has seen the
+		 * keys once still has them the rest of the time. */
+		char buf[96];
+		snprintf(buf, sizeof(buf),
+			"%d more network(s) than fit -- `novi-wifi list` has them all",
+			state->net_dropped);
+		novi_text_draw(dest, state->font_small, CONTENT_X,
+			footer_y + state->font_small->ascent, buf, ERROR_PIX);
+	} else {
+		novi_text_draw(dest, state->font_small, CONTENT_X,
+			footer_y + state->font_small->ascent,
+			"s scans, Enter joins, d forgets, w toggles WiFi", LABEL_PIX);
+	}
+}
+
 static void render_system(struct novi_settings *state, uint32_t *px,
 		uint32_t stride_px, pixman_image_t *dest) {
 	uint32_t w = state->width, h = state->height;
@@ -643,12 +1518,30 @@ static void render_system(struct novi_settings *state, uint32_t *px,
 
 	int list_y = 84;
 	int drifted = 0;
-	for (int i = 0; i < state->entry_count; i++) {
+	/* Scroll window, clamped here rather than in the key handler
+	 * because this is where the height is known -- and clamping on
+	 * every draw means a window resize cannot leave `top` pointing
+	 * somewhere that no longer exists. */
+	int rows = ((int)h - 46 - list_y) / ROW_HEIGHT;
+	if (rows < 1) {
+		rows = 1;
+	}
+	if (state->selected < state->top) {
+		state->top = state->selected;
+	}
+	if (state->selected >= state->top + rows) {
+		state->top = state->selected - rows + 1;
+	}
+	if (state->top > state->entry_count - rows) {
+		state->top = state->entry_count - rows;
+	}
+	if (state->top < 0) {
+		state->top = 0;
+	}
+	for (int i = state->top;
+			i < state->entry_count && i < state->top + rows; i++) {
 		struct state_entry *e = &state->entries[i];
-		int y = list_y + i * ROW_HEIGHT;
-		if (y + ROW_HEIGHT > (int)h - 46) {
-			break;
-		}
+		int y = list_y + (i - state->top) * ROW_HEIGHT;
 		if (i == state->selected) {
 			draw_rect(px, stride_px, w, h, CONTENT_X - 8, y - 3,
 				FIELD_WIDTH + 16, ROW_HEIGHT, ROW_SELECTED_COLOR);
@@ -661,15 +1554,38 @@ static void render_system(struct novi_settings *state, uint32_t *px,
 		 * a marker -- "declared X, actually something else" is
 		 * information no other desktop's settings app can show at all,
 		 * so it gets the emphasis. */
+		if (state->editing && i == state->selected) {
+			/* The row being edited shows the buffer, LEFT-aligned in
+			 * the value column with a caret after it -- right-aligning
+			 * a string that changes on every keystroke would slide the
+			 * text under the cursor as you type. */
+			int box_x = CONTENT_X + FIELD_WIDTH / 2;
+			draw_rect(px, stride_px, w, h, box_x - 6, y - 3,
+				FIELD_WIDTH / 2 + 14, ROW_HEIGHT, FIELD_BG_COLOR);
+			int end_x = novi_text_draw(dest, state->font_small, box_x,
+				y + state->font_small->ascent, state->edit_buf, TEXT_PIX);
+			draw_rect(px, stride_px, w, h, end_x + 1, y - 1, 2,
+				ROW_HEIGHT - 4, ACCENT_COLOR);
+			continue;
+		}
+
 		int val_w = novi_text_width(state->font_small, e->value);
 		int val_x = CONTENT_X + FIELD_WIDTH - val_w - 8;
 		novi_text_draw(dest, state->font_small, val_x,
 			y + state->font_small->ascent, e->value,
 			e->drifted ? ACCENT_PIX : (i == state->selected ? TEXT_PIX : LABEL_PIX));
 		if (e->drifted) {
-			drifted++;
 			novi_text_draw(dest, state->font_small, val_x - 18,
 				y + state->font_small->ascent, "*", ACCENT_PIX);
+		}
+	}
+
+	/* Counted over every entry, not just the visible ones: "3 pending"
+	 * has to mean the document, or scrolling would change the number
+	 * of things wrong with your machine. */
+	for (int i = 0; i < state->entry_count; i++) {
+		if (state->entries[i].drifted) {
+			drifted++;
 		}
 	}
 
@@ -678,16 +1594,32 @@ static void render_system(struct novi_settings *state, uint32_t *px,
 		novi_text_draw(dest, state->font_small, CONTENT_X,
 			footer_y + state->font_small->ascent, state->status,
 			state->status_is_error ? ERROR_PIX : SUCCESS_PIX);
+	} else if (state->editing) {
+		char buf[STATE_KEY_MAX + 64];
+		snprintf(buf, sizeof(buf), "%s -- Enter saves, Esc cancels",
+			state->entries[state->selected].key);
+		novi_text_draw(dest, state->font_small, CONTENT_X,
+			footer_y + state->font_small->ascent, buf, ACCENT_PIX);
 	} else if (drifted > 0) {
 		char buf[96];
 		snprintf(buf, sizeof(buf),
 			"* %d pending -- Enter applies them", drifted);
 		novi_text_draw(dest, state->font_small, CONTENT_X,
 			footer_y + state->font_small->ascent, buf, ACCENT_PIX);
+	} else if (state->skipped_count > 0) {
+		/* Said out loud rather than swallowed: these rows exist in the
+		 * document and are not on screen, and a panel that quietly
+		 * omits them is not showing you your system. */
+		char buf[96];
+		snprintf(buf, sizeof(buf),
+			"%d line(s) too long to show -- edit those in %s",
+			state->skipped_count, STATE_FILE);
+		novi_text_draw(dest, state->font_small, CONTENT_X,
+			footer_y + state->font_small->ascent, buf, ERROR_PIX);
 	} else {
 		novi_text_draw(dest, state->font_small, CONTENT_X,
 			footer_y + state->font_small->ascent,
-			"Space toggles, Enter applies", LABEL_PIX);
+			"Space toggles, e edits, Enter applies", LABEL_PIX);
 	}
 }
 
@@ -699,10 +1631,10 @@ static void render(struct novi_settings *state, uint32_t *px, uint32_t stride_px
 		PIXMAN_a8r8g8b8, (int)w, (int)h, px, (int)stride_px * 4);
 
 	render_sidebar(state, px, stride_px, dest);
-	if (state->panel == PANEL_SYSTEM) {
-		render_system(state, px, stride_px, dest);
-	} else {
-		render_account(state, px, stride_px, dest);
+	switch (state->panel) {
+	case PANEL_NETWORK: render_network(state, px, stride_px, dest); break;
+	case PANEL_SYSTEM:  render_system(state, px, stride_px, dest);  break;
+	default:            render_account(state, px, stride_px, dest); break;
 	}
 
 	pixman_image_unref(dest);
@@ -744,8 +1676,19 @@ static void surface_draw_frame(struct novi_settings *state) {
 	wl_surface_commit(state->surface);
 }
 
+/* Copies rather than storing the pointer. Every caller in the Account
+ * and System panels passes a string literal, which would have been
+ * fine forever; the Network panel reports what a child process just
+ * said, and that lives in a buffer the next job overwrites. One
+ * function, one lifetime rule. NULL clears it. */
 static void set_status(struct novi_settings *state, const char *msg, bool is_error) {
-	state->status = msg;
+	if (msg == NULL) {
+		state->status = NULL;
+		state->status_is_error = false;
+		return;
+	}
+	snprintf(state->status_buf, sizeof(state->status_buf), "%s", msg);
+	state->status = state->status_buf;
 	state->status_is_error = is_error;
 }
 
@@ -815,6 +1758,9 @@ static void keyboard_enter(void *data, struct wl_keyboard *kb, uint32_t serial,
 	if (state->panel == PANEL_SYSTEM) {
 		refresh_system(state);
 		surface_draw_frame(state);
+	} else if (state->panel == PANEL_NETWORK) {
+		refresh_network(state);
+		surface_draw_frame(state);
 	}
 }
 
@@ -843,6 +1789,15 @@ static void keyboard_key(void *data, struct wl_keyboard *kb, uint32_t serial,
 	 * inside the Account form, so the sidebar needs its own key rather
 	 * than overloading that one. */
 	if (sym == XKB_KEY_Left || sym == XKB_KEY_Right) {
+		/* Leaving the panel abandons an edit in progress. This check
+		 * runs BEFORE the modal edit branch below, so without it
+		 * `editing` would survive the switch: come back to System
+		 * later and the panel is still in edit mode, with a stale
+		 * buffer pointed at whatever row `selected` has become. Same
+		 * reasoning as the Network panel clearing its passphrase field
+		 * on the way out -- a mode you cannot see you are in is worse
+		 * than no mode. */
+		cancel_edit(state);
 		state->panel = sym == XKB_KEY_Right ?
 			(state->panel + 1) % PANEL_COUNT :
 			(state->panel + PANEL_COUNT - 1) % PANEL_COUNT;
@@ -853,6 +1808,98 @@ static void keyboard_key(void *data, struct wl_keyboard *kb, uint32_t serial,
 			 * showing a stale view would quietly recreate exactly the
 			 * two-sources-of-truth problem this panel exists to end. */
 			refresh_system(state);
+		} else if (state->panel == PANEL_NETWORK) {
+			pass_clear(state);
+			refresh_network(state);
+		}
+		surface_draw_frame(state);
+		return;
+	}
+
+	if (state->panel == PANEL_NETWORK) {
+		if (state->pass_prompt) {
+			/* A modal prompt, so it eats every key it can use before
+			 * the list bindings below get a look -- otherwise `s` in a
+			 * passphrase would start a scan. */
+			if (sym == XKB_KEY_Escape) {
+				pass_clear(state);
+				set_status(state, NULL, false);
+			} else if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter) {
+				net_submit_pass(state);
+			} else if (sym == XKB_KEY_BackSpace) {
+				if (state->pass_len > 0) {
+					state->pass[--state->pass_len] = '\0';
+				}
+			} else if (sym >= 32 && sym < 127) {
+				if (state->pass_len < PASS_MAX) {
+					state->pass[state->pass_len++] = (char)sym;
+					state->pass[state->pass_len] = '\0';
+				}
+			}
+			surface_draw_frame(state);
+			return;
+		}
+		switch (sym) {
+		case XKB_KEY_Up:
+			if (state->net_selected > 0) {
+				state->net_selected--;
+			}
+			set_status(state, NULL, false);
+			break;
+		case XKB_KEY_Down:
+			if (state->net_selected + 1 < state->net_count) {
+				state->net_selected++;
+			}
+			set_status(state, NULL, false);
+			break;
+		case XKB_KEY_s:
+		case XKB_KEY_S:
+			net_scan(state);
+			break;
+		case XKB_KEY_w:
+		case XKB_KEY_W:
+			net_toggle_wifi(state);
+			break;
+		case XKB_KEY_d:
+		case XKB_KEY_D:
+		case XKB_KEY_Delete:
+			net_forget(state);
+			break;
+		case XKB_KEY_r:
+		case XKB_KEY_R:
+			refresh_network(state);
+			set_status(state, "Refreshed", false);
+			break;
+		case XKB_KEY_Return:
+		case XKB_KEY_KP_Enter:
+			net_activate(state);
+			break;
+		default:
+			break;
+		}
+		surface_draw_frame(state);
+		return;
+	}
+
+	if (state->panel == PANEL_SYSTEM && state->editing) {
+		/* Editing is modal, and this branch runs FIRST so it stays
+		 * that way: Space has to insert a space, not toggle the key
+		 * being edited, and Enter has to save rather than apply the
+		 * whole document. A mode whose keys leak into the mode below
+		 * it is worse than no mode at all. */
+		if (sym == XKB_KEY_Escape) {
+			cancel_edit(state);
+		} else if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter) {
+			commit_edit(state);
+		} else if (sym == XKB_KEY_BackSpace) {
+			if (state->edit_len > 0) {
+				state->edit_buf[--state->edit_len] = '\0';
+			}
+		} else if (sym >= 32 && sym < 127) {
+			if (state->edit_len < STATE_VAL_MAX) {
+				state->edit_buf[state->edit_len++] = (char)sym;
+				state->edit_buf[state->edit_len] = '\0';
+			}
 		}
 		surface_draw_frame(state);
 		return;
@@ -860,6 +1907,10 @@ static void keyboard_key(void *data, struct wl_keyboard *kb, uint32_t serial,
 
 	if (state->panel == PANEL_SYSTEM) {
 		switch (sym) {
+		case XKB_KEY_e:
+		case XKB_KEY_E:
+			begin_edit(state);
+			break;
 		case XKB_KEY_Up:
 			if (state->selected > 0) {
 				state->selected--;
@@ -1101,6 +2152,7 @@ static const struct wl_registry_listener registry_listener = {
 int main(void) {
 	struct novi_settings state = {0};
 	state.running = true;
+	state.job_fd = -1;   /* 0 is stdin, and a zeroed struct would poll it */
 	state.width = WINDOW_WIDTH;
 	/* Load the document up front so the System panel is correct the
 	 * first time it's shown, not one keystroke later. */
@@ -1126,8 +2178,8 @@ int main(void) {
 		return 1;
 	}
 
-	state.font = novi_text_load_font("JetBrains Mono:size=16");
-	state.font_small = novi_text_load_font("JetBrains Mono:size=13");
+	state.font = novi_text_load_font(NOVI_FONT_TITLE);
+	state.font_small = novi_text_load_font(NOVI_FONT_BODY);
 	if (state.font == NULL || state.font_small == NULL) {
 		fprintf(stderr, "novi-settings: failed to load JetBrains Mono\n");
 		return 1;
@@ -1147,10 +2199,81 @@ int main(void) {
 	 * shell client here already follows for its own initial commit). */
 	wl_surface_commit(state.surface);
 
-	while (state.running && wl_display_dispatch(state.display) != -1) {
-		/* All the real work happens in the listener callbacks above. */
+	/* The event loop polls two things, and that is the whole reason it
+	 * is written out rather than being wl_display_dispatch() in a
+	 * while: a WiFi scan is a radio doing physics for several seconds,
+	 * and the window must keep drawing while it happens. Every other
+	 * subprocess this app runs is instant and still runs synchronously.
+	 *
+	 * The prepare_read / read_events dance is libwayland's own
+	 * protocol for waiting on the display fd yourself. Getting it wrong
+	 * is a hang, so: prepare_read until it succeeds (dispatching what
+	 * is already queued in between), flush, poll, then either read the
+	 * events or cancel the read -- cancel on EVERY path that does not
+	 * read, including a poll error, or the next prepare_read blocks
+	 * forever. */
+	while (state.running) {
+		while (wl_display_prepare_read(state.display) != 0) {
+			if (wl_display_dispatch_pending(state.display) < 0) {
+				state.running = false;
+				break;
+			}
+		}
+		if (!state.running) {
+			break;
+		}
+		if (wl_display_flush(state.display) < 0 && errno != EAGAIN) {
+			wl_display_cancel_read(state.display);
+			break;
+		}
+
+		struct pollfd pfds[2];
+		nfds_t n = 1;
+		pfds[0].fd = wl_display_get_fd(state.display);
+		pfds[0].events = POLLIN;
+		pfds[0].revents = 0;
+		if (state.job != JOB_NONE && state.job_fd >= 0) {
+			pfds[1].fd = state.job_fd;
+			pfds[1].events = POLLIN;
+			pfds[1].revents = 0;
+			n = 2;
+		}
+
+		int pr = poll(pfds, n, -1);
+		if (pr < 0) {
+			wl_display_cancel_read(state.display);
+			if (errno == EINTR) {
+				continue;
+			}
+			break;
+		}
+
+		if (pfds[0].revents & (POLLIN | POLLHUP | POLLERR)) {
+			if (wl_display_read_events(state.display) < 0) {
+				break;
+			}
+		} else {
+			wl_display_cancel_read(state.display);
+		}
+		if (wl_display_dispatch_pending(state.display) < 0) {
+			break;
+		}
+
+		/* POLLHUP as well as POLLIN: the child exiting closes the pipe,
+		 * and on a job that printed nothing that is the only event
+		 * there will ever be. Waiting for POLLIN alone would leave the
+		 * job hanging and the window saying "Scanning..." forever. */
+		if (n == 2 && (pfds[1].revents & (POLLIN | POLLHUP | POLLERR))) {
+			if (job_pump(&state)) {
+				surface_draw_frame(&state);
+			}
+		}
 	}
 
+	if (state.job_fd >= 0) {
+		close(state.job_fd);
+	}
+	explicit_bzero(state.pass, sizeof(state.pass));
 	wipe_fields(&state);
 
 	if (state.xdg_toplevel != NULL) {

@@ -39,7 +39,7 @@ wlr-screencopy-unstable-v1-protocol.c: $(SCREENCOPY_XML)
 	$(WAYLAND_SCANNER) private-code $< $@
 
 novi-screenshot: main.c wlr-screencopy-unstable-v1-protocol.c wlr-screencopy-unstable-v1-protocol.h
-	$(CC) $(CFLAGS) -o $@ main.c wlr-screencopy-unstable-v1-protocol.c $(LDLIBS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ main.c wlr-screencopy-unstable-v1-protocol.c $(LDLIBS)
 
 install: novi-screenshot
 	install -D -m 755 novi-screenshot "$(DESTDIR)$(PREFIX)/bin/novi-screenshot"

@@ -1,6 +1,7 @@
 syslog
 klog
 hotplug
+health
 acpid
 getty-tty1
 getty-ttyS0

@@ -29,10 +29,18 @@ LAYER_SHELL_XML ?= ../protocol/wlr-layer-shell-unstable-v1.xml
 DESTDIR ?=
 PREFIX ?= /usr
 
-PKGS = wlroots-0.18 wayland-server xkbcommon
+# fcft/pixman: decoration.c rasterises the window chrome (title bar,
+# control dots, drop shadow) into
+# wlr_buffers (see decoration.h). This is the compositor's only
+# drawing --
+# server-side decorations have no client to ask -- and it reuses
+# ../common/text.c rather than growing a second glyph pipeline.
+# pixman comes in via wlroots' own .pc too; naming it here is what
+# makes the direct pixman_image_create_bits() calls legal to link.
+PKGS = wlroots-0.18 wayland-server xkbcommon fcft pixman-1
 
 CFLAGS += -std=gnu11 -Wall -Wextra -Wno-unused-parameter -DWLR_USE_UNSTABLE \
-	-I. $(shell $(PKG_CONFIG) --cflags $(PKGS))
+	-I. -I../common $(shell $(PKG_CONFIG) --cflags $(PKGS))
 # --allow-shlib-undefined: libwlroots.so's own private transitive deps
 # (libinput -> libevdev/mtdev in particular) aren't fully declared in
 # every upstream .pc's Requires.private -- confirmed by hand: even
@@ -63,8 +71,10 @@ xdg-shell-protocol.c: $(XDG_SHELL_XML)
 wlr-layer-shell-unstable-v1-protocol.h: $(LAYER_SHELL_XML)
 	$(WAYLAND_SCANNER) server-header $< $@
 
-novi-shell: main.c xdg-shell-protocol.c xdg-shell-protocol.h wlr-layer-shell-unstable-v1-protocol.h
-	$(CC) $(CFLAGS) -o $@ main.c xdg-shell-protocol.c $(LDLIBS)
+SRCS = main.c decoration.c ../common/text.c xdg-shell-protocol.c
+
+novi-shell: $(SRCS) xdg-shell-protocol.h wlr-layer-shell-unstable-v1-protocol.h
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(SRCS) $(LDLIBS)
 
 install: novi-shell
 	install -D -m 755 novi-shell "$(DESTDIR)$(PREFIX)/bin/novi-shell"

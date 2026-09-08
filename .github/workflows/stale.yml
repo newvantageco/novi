@@ -25,8 +25,20 @@ jobs:
       # - Closes stale issues after an additional 14 days without activity
       # - Pull requests are exempt and never marked stale
       # - Issues with 'pinned', 'security', or 'roadmap' labels are exempt
+      #
+      # The SHA is the pin; the trailing comment is only a note to
+      # humans. Verify a new one against upstream before committing it:
+      #
+      #   git ls-remote --tags https://github.com/actions/stale | grep v9
+      #
+      # The previous pin here was 5bef64f19d7fafb25b37785144c931b342406300
+      # -- thirteen characters of the real v9.1.0 SHA followed by
+      # plausible-looking noise. It resolved to nothing, so this workflow
+      # failed at "Prepare all required actions" every single day since it
+      # was added, having never once processed an issue. A wrong pin does
+      # not fall back to a tag and does not warn; it just never runs.
       - name: Process Stale Issues
-        uses: actions/stale@5bef64f19d7fafb25b37785144c931b342406300 # v9.1.0
+        uses: actions/stale@5bef64f19d7facfb25b37b414482c7164d639639 # v9.1.0
         with:
           # Message left on an issue when it is flagged as stale
           stale-issue-message: >

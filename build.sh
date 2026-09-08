@@ -60,6 +60,27 @@ for s in "${STAGES[@]}"; do
 done
 STAGES=("${FILTERED[@]}")
 
+# A stage number is an identity, not a sort key: it is what --from and
+# --to name, and what a failed stage tells you to resume from. Two
+# stages sharing one still *runs* -- `sort` breaks the tie by filename
+# and both execute in a sensible order -- which is exactly why a
+# duplicate can sit there unnoticed. It did: 22-novi-view.sh was added
+# next to 22-live-desktop.sh and nothing said a word, leaving
+# "resume with: bash build.sh --from 22" pointing at two different
+# stages.
+declare -A SEEN_STAGE_NUM=()
+DUPES=""
+for s in "${STAGES[@]}"; do
+    n="${s%%-*}"
+    if [[ -n "${SEEN_STAGE_NUM[${n}]:-}" ]]; then
+        DUPES+="  ${n}: ${SEEN_STAGE_NUM[${n}]} and ${s}"$'\n'
+    fi
+    SEEN_STAGE_NUM[${n}]="${s}"
+done
+[[ -z "${DUPES}" ]] || err "two build stages share a number -- --from/--to
+cannot tell them apart:
+${DUPES}Renumber one of them."
+
 if (( LIST_ONLY )); then
     printf '%s\n' "${STAGES[@]}"
     exit 0

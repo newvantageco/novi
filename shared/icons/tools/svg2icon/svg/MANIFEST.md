@@ -20,6 +20,8 @@ icon here was vendored.
 | `folder.svg` | `folder` | app-grid: files |
 | `globe.svg` | `globe` | app-grid: web |
 | `pencil.svg` | `pencil` | app-grid: editor |
+| `file.svg` | `file` | files: a plain file |
+| `image.svg` | `image` | files: a file novi-view can open |
 | `package.svg` | `package` | app-grid: pkg |
 | `settings.svg` | `settings` | app-grid: settings |
 | `shield.svg` | `shield` | app-grid: security tools |
@@ -28,6 +30,22 @@ icon here was vendored.
 | `power.svg` | `power` | status bar |
 | `chevron-right.svg` | `chevron-right` | disclosure (collapsed) |
 | `chevron-down.svg` | `chevron-down` | disclosure (expanded) |
+| `house.svg` | `house` | files: the home place |
+| `hard-drive.svg` | `hard-drive` | files: a mounted volume |
+| `eject.svg` | `eject` | files: take a volume out |
+| `search.svg` | `search` | launcher: the input line |
+| `calculator.svg` | `calculator` | launcher: an expression that evaluated |
+
+`house.svg`, `hard-drive.svg` and `eject.svg` were fetched at the same
+pinned commit as everything above, on 2026-09-08, for `novi-files`'
+places sidebar (RFC 0023). `search.svg` and `calculator.svg` were
+fetched the same way, at the same commit, on the same day, for
+`novi-launcher`'s rebuilt result list.
+Lucide renamed `home` to `house` at some point between then and now --
+`icons/home.svg` is a 404 at this commit and `icons/house.svg` is not,
+which is worth recording because "the icon is called what you expect"
+is exactly the kind of assumption that turns into a hand-transcribed
+path nobody can audit.
 
 `layout-grid` (the apps button) is deliberately **not** here — per
 `ICON-PIPELINE.md`'s "First icon shipped" section, that one stayed a

@@ -12,7 +12,8 @@
  * Default keybindings implement part of RFC 0001 decision 7: Alt+Tab /
  * Alt+Shift+Tab (window switching), Alt+Space (search/launcher overlay,
  * novi-launcher/), Super+Return (spawn a terminal), Super+Q (close
- * focused window), Super+. (symbol picker, novi-launcher --symbols --
+ * focused window), Super+Escape (power menu, novi-launcher --power),
+ * Super+. (symbol picker, novi-launcher --symbols --
  * see that file for why "symbol" and not full emoji). Still not
  * implemented: Super+[1-9] workspaces, PrintScreen screenshots, Super+L
  * lock, and moving any of this to the user-editable config file RFC
@@ -20,6 +21,8 @@
  * milestone.
  */
 #include <assert.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <getopt.h>
 #include <linux/input-event-codes.h>
 #include <stdbool.h>
@@ -27,6 +30,8 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #include <wayland-server-core.h>
 #include <wlr/backend.h>
@@ -51,6 +56,9 @@
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/util/log.h>
 #include <xkbcommon/xkbcommon.h>
+
+#include "decoration.h"
+#include "../common/theme.h"
 
 /* RFC 0001 decision 6: novi-shell defaults to a small wlroots-native
  * terminal (foot) with no GTK/Qt dependency chain, spawned on
@@ -82,6 +90,46 @@
  * existing (that alone is exactly what novi-launcher already does,
  * and novi-launcher grabbing keyboard focus was never meant to
  * withstand another keybinding stealing it back). */
+/* Super+Escape: lock, suspend, restart, shut down. The same launcher
+ * binary again, for the same reason --symbols reuses it: the overlay,
+ * the list and the keys are already written, and only the rows differ.
+ *
+ * Until this existed there was NO WAY to turn the machine off from the
+ * desktop -- not a button, not a menu, not a binding. You switched to
+ * a TTY and typed poweroff. */
+/* Idle blanking. Until this existed the screen stayed lit forever --
+ * on a laptop that is the panel and the battery, and every operating
+ * system in the world turns the display off eventually.
+ *
+ * The timeout is DECLARED (`power.blank` in system.conf, seconds or
+ * `off`) and READ AT USE TIME, which is the same shape power.lid and
+ * storage.automount already have: nothing holds it, so it cannot
+ * drift and `apply` has nothing to converge. "Use time" here is the
+ * moment the idle period elapses -- at most once per period, which is
+ * why forking novi-state for it is affordable when doing so on every
+ * keystroke would not be. The screen is about to go dark anyway. */
+#define NOVI_BLANK_DEFAULT_SECONDS 600
+#define NOVI_BLANK_KEY "power.blank"
+#define NOVI_STATE_FILE "/etc/novi/system.conf"
+/* How often the idle clock advances and the declared timeout is
+ * re-read. Five seconds is the granularity of blanking and the worst
+ * case for a change taking effect; it costs one small file read. */
+#define NOVI_IDLE_TICK_MS 5000
+/* What the compositor is doing about idling, published for anything
+ * that wants to know -- the same arrangement the network service uses
+ * for the interface it chose (RFC 0009), and for the same reason: a
+ * second party guessing at a fact this process already holds is a
+ * second answer to a question with one.
+ *
+ * It also makes the feature TESTABLE, which turned out to matter more
+ * than expected. A screendump cannot see blanking (QEMU captures the
+ * framebuffer, so a dark connector looks identical to a lit one), and
+ * a connector's `dpms` attribute under /sys/class/drm reports the
+ * legacy property, which an atomic
+ * modeset need not touch. Two observables that both look like the
+ * feature is broken when it is fine are worse than none. */
+#define NOVI_IDLE_FILE "/run/novi/idle"
+#define NOVI_DEFAULT_POWER_MENU "novi-launcher --power"
 #define NOVI_DEFAULT_LOCK "novi-lockscreen"
 /* The zwlr_layer_surface_v1 namespace novi-lockscreen identifies itself
  * with (its get_layer_surface() call's namespace argument) -- how
@@ -111,6 +159,16 @@
  * service (novi-shell already owns spawning its own UI pieces, same
  * as the terminal/launcher keybindings). */
 #define NOVI_DEFAULT_PANEL "novi-panel"
+/* Notifications (RFC 0024). Spawned here for the same reason the panel
+ * is -- novi-shell already owns starting its own UI pieces -- and not
+ * as an s6 service, because a notification daemon with no compositor
+ * to draw on has nothing to do. */
+#define NOVI_DEFAULT_NOTIFYD "novi-notifyd"
+/* The wallpaper (RFC 0025). The scene rect below still exists and is
+ * still what an empty desktop shows for the fraction of a second
+ * before this client's first frame arrives -- and on any machine where
+ * novi-bg is not installed, which is why it was not removed. */
+#define NOVI_DEFAULT_BG "novi-bg"
 
 /* Server-side window decorations (GUI-DESIGN-LANGUAGE.md §6): a title
  * bar strip above every toplevel's content, with close and maximize
@@ -130,34 +188,26 @@
  * drawing an actual circle would mean the compositor rendering its own
  * pixel buffer (the same technique novi-panel/novi-launcher use
  * client-side), a materially bigger step not taken in this pass. */
-#define DECO_HEIGHT 32
-#define DECO_DOT_SIZE 8
-#define DECO_DOT_PADDING 12
-/* The design doc's literal "8px gap between centers" would put two
- * 8px-diameter dots overlapping by a full diameter (center spacing
- * less than the diameter itself) -- clearly a spec error, not
- * something to implement literally. Using 8px of edge-to-edge
- * clearance instead (16px center-to-center), the conventional reading
- * of "an 8px gap" between same-sized elements. */
-#define DECO_DOT_GAP 16
-/* bg-card (GUI-DESIGN-LANGUAGE.md's window-content-chrome token) and
- * text-muted at full strength -- all three dots (close/maximize/
- * minimize) are real and functional now, so none gets a "dimmed"
- * treatment, which would misleadingly signal non-interactive. As
- * wlr_scene_rect's normalized-float RGBA rather than this codebase's
- * usual packed 0xRRGGBB hex, since that's the format the scene-graph
- * rect API actually takes.
- *
- * Note for whoever adds the next translucent decoration element: a
- * wlr_scene_rect's R/G/B must be pre-multiplied by its own alpha --
- * struct wlr_render_color (wlr/render/pass.h) documents this
- * explicitly. Getting it wrong is silent, not a crash: this file used
- * to have a dimmed (40%-alpha) minimize dot, and passing straight
- * (non-premultiplied) color with alpha=0.4 rendered it BRIGHTER than
- * the full-strength dots next to it, confirmed via a pixel readback --
- * the opposite of "dimmed". */
-static const float DECO_BG_COLOR[4] = {0x1B / 255.0f, 0x1C / 255.0f, 0x26 / 255.0f, 1.0f};
-static const float DECO_DOT_COLOR[4] = {0x6B / 255.0f, 0x6F / 255.0f, 0x80 / 255.0f, 1.0f};
+/* Floor for the size a new window is asked to take, so the 70%-of-
+ * usable-area rule below cannot produce something unusably small on a
+ * tiny output. On any output big enough these never bind. */
+#define TOPLEVEL_MIN_WIDTH 480
+#define TOPLEVEL_MIN_HEIGHT 320
+
+/* The desktop behind everything. There was no background node at all,
+ * so an empty desktop showed the scene's clear colour -- pure black,
+ * indistinguishable from a display that is not being driven. This is
+ * the panel's own BG_COLOR lifted a little, so the two read as one
+ * palette with the panel sitting slightly darker on top of it. */
+#define DESKTOP_BG_COLOR_R (0x0au / 255.0f)
+#define DESKTOP_BG_COLOR_G (0x0au / 255.0f)
+#define DESKTOP_BG_COLOR_B (0x0fu / 255.0f)
+
+/* The title bar's height, and the only thing this file needs to know
+ * about the decoration: it is the vertical space a window has to give
+ * up at the top. Everything else about the chrome -- the dots, the
+ * colours, the shadow's reach -- lives in decoration.c, which is why
+ * this file no longer carries a palette of its own. */
 
 /* For brevity's sake, struct members are annotated where they are used. */
 enum novi_cursor_mode {
@@ -165,6 +215,8 @@ enum novi_cursor_mode {
 	NOVI_CURSOR_MOVE,
 	NOVI_CURSOR_RESIZE,
 };
+
+struct novi_clip_read;
 
 struct novi_server {
 	struct wl_display *wl_display;
@@ -204,6 +256,14 @@ struct novi_server {
 	struct wl_listener new_input;
 	struct wl_listener request_cursor;
 	struct wl_listener request_set_selection;
+
+	/* Clipboard persistence. See the block comment above
+	 * clip_source_send(). */
+	struct wl_listener set_selection;
+	char *clip_text;                       /* the last text copied, ours to keep */
+	size_t clip_len;
+	struct wlr_data_source *clip_source;   /* our source, while it is the selection */
+	struct novi_clip_read *clip_read;      /* the read in flight, if any */
 	struct wl_list keyboards;
 	enum novi_cursor_mode cursor_mode;
 	struct novi_toplevel *grabbed_toplevel;
@@ -214,6 +274,15 @@ struct novi_server {
 	struct wlr_output_layout *output_layout;
 	struct wl_list outputs;
 	struct wl_listener new_output;
+
+	/* Idle blanking. `blank_after` is seconds, 0 meaning never; it is
+	 * re-read from the document each time the timer fires, so changing
+	 * it takes effect at the next idle period rather than needing the
+	 * session restarted. */
+	struct wl_event_source *idle_timer;
+	int blank_after;
+	int idle_ms;
+	bool blanked;
 
 	/* Layer-shell (RFC 0001 decision 5: the panel/launcher UI layer is
 	 * built as a client of this protocol, not baked into the
@@ -270,6 +339,12 @@ struct novi_output {
 	struct wl_listener destroy;
 	/* layer-shell clients (novi_layer_surface.link) mapped on this output */
 	struct wl_list layer_surfaces;
+	/* Flat desktop background, sized to the whole output (not the
+	 * usable area -- it belongs *behind* the panel, not beside it) and
+	 * resized by arrange_layers() whenever the output geometry changes.
+	 * Lives in layer_tree_background, so a real background layer-shell
+	 * client (a wallpaper program) still draws over it. */
+	struct wlr_scene_rect *background;
 	/* Output-local box left over after layer-shell exclusive zones (the
 	 * top bar's reserved 32px) are subtracted -- set by arrange_layers(),
 	 * read by server_new_xdg_toplevel() so a new window's initial
@@ -296,18 +371,19 @@ struct novi_toplevel {
 	struct novi_server *server;
 	struct wlr_xdg_toplevel *xdg_toplevel;
 	struct wlr_scene_tree *scene_tree;
-	/* Server-side decoration -- all children of scene_tree, positioned
+	/* Server-side decoration: title bar, three control dots and a
+	 * nine-slice drop shadow, all children of scene_tree, positioned
 	 * in the negative-y space above the content (see server_new_xdg_
-	 * toplevel()'s initial-placement comment for why the content itself
-	 * is now placed DECO_HEIGHT lower than before, to leave room). Kept
-	 * as direct pointers, not walked from the scene tree, so xdg_
-	 * toplevel_commit() can resize the bar and all three dots'
-	 * decoration_rect_toplevel_at() hit-test can identify a click
-	 * without re-deriving them. */
-	struct wlr_scene_rect *titlebar;
-	struct wlr_scene_rect *close_dot;
-	struct wlr_scene_rect *maximize_dot;
-	struct wlr_scene_rect *minimize_dot;
+	 * toplevel()'s initial-placement comment for why the content
+	 * itself is placed NOVI_DECO_HEIGHT lower than before, to leave
+	 * room). decoration.c owns every pixel of it; this file owns when
+	 * it changes and what a click on it means.
+	 *
+	 * NULL when the UI font would not load -- unlabelled, undecorated
+	 * windows beat refusing to start a desktop. Every novi_decor_*
+	 * entry point tolerates NULL, so there is no guard at the call
+	 * sites. */
+	struct novi_decor *decor;
 	/* Maximize state, toggled by maximize_toplevel()/unmaximize_
 	 * toplevel() -- both the maximize dot and a client's own request
 	 * (xdg_toplevel_request_maximize()) go through the same two
@@ -387,6 +463,166 @@ static void unminimize_toplevel(struct novi_toplevel *toplevel);
  * the same way minimize_toplevel()/unminimize_toplevel() own .minimized). */
 static void switch_workspace(struct novi_server *server, int workspace);
 static void move_focused_to_workspace(struct novi_server *server, int workspace);
+
+/* ── Idle blanking ─────────────────────────────────────────────────
+ *
+ * The screen never turned itself off. On a laptop that is the panel
+ * and the battery, and it is the one thing every operating system in
+ * the world does that this one did not.
+ *
+ * Blanking is `wlr_output_state_set_enabled(false)`, which on the DRM
+ * backend puts the connector into DPMS off and on the Wayland/X11
+ * backends is a no-op the compositor survives. Deliberately NOT a
+ * black rectangle over the scene: that leaves the backlight on, which
+ * is most of what there was to save.
+ */
+
+/* Logs the COMMIT RESULT, not the intent, and that is the whole point
+ * of the line. A screendump cannot see this: QEMU captures the
+ * framebuffer, so a connector in DPMS off looks exactly like one that
+ * is lit, and the only honest evidence that blanking happened is the
+ * compositor saying the atomic commit was accepted. This is the
+ * "s6-rc said up" mistake in a new place -- calling a function is not
+ * the same as the hardware doing what it was asked. */
+static void idle_set_outputs(struct novi_server *server, bool on) {
+	struct novi_output *output;
+	wl_list_for_each(output, &server->outputs, link) {
+		struct wlr_output_state state;
+		wlr_output_state_init(&state);
+		wlr_output_state_set_enabled(&state, on);
+		bool ok = wlr_output_commit_state(output->wlr_output, &state);
+		wlr_output_state_finish(&state);
+		wlr_log(ok ? WLR_INFO : WLR_ERROR,
+			"idle: output %s %s %s", output->wlr_output->name,
+			on ? "on" : "off", ok ? "committed" : "REFUSED BY THE BACKEND");
+	}
+}
+
+/* The declared timeout in seconds, 0 meaning never, read straight out
+ * of the document. NOT by forking `novi-state get`: that is a shell
+ * script, and running one on the compositor's event loop stalls every
+ * window on the screen for as long as it takes. Reading the file
+ * breaks no invariant -- novi-settings' System panel reads it directly
+ * for the same reason, and only WRITES have to go through
+ * `novi-state set` (CLAUDE.md).
+ *
+ * A few hundred bytes, parsed every tick, with no process created. The
+ * first version of this forked once per idle period instead, and the
+ * cost was not the fork: it was that the value could then only be
+ * re-read when the period elapsed, so changing 600 to 10 took ten
+ * minutes to take effect. That is not "read at use time", it is read
+ * at the least useful time available. */
+static int idle_read_timeout(void) {
+	FILE *f = fopen(NOVI_STATE_FILE, "r");
+	if (f == NULL) {
+		return NOVI_BLANK_DEFAULT_SECONDS;
+	}
+	char line[512];
+	int result = NOVI_BLANK_DEFAULT_SECONDS;
+	while (fgets(line, sizeof(line), f) != NULL) {
+		char *hash = strchr(line, '#');
+		if (hash != NULL) {
+			*hash = '\0';
+		}
+		char *eq = strchr(line, '=');
+		if (eq == NULL) {
+			continue;
+		}
+		*eq = '\0';
+		char *key = line;
+		while (*key == ' ' || *key == '\t') {
+			key++;
+		}
+		char *kend = key + strlen(key);
+		while (kend > key && (kend[-1] == ' ' || kend[-1] == '\t')) {
+			*--kend = '\0';
+		}
+		if (strcmp(key, NOVI_BLANK_KEY) != 0) {
+			continue;
+		}
+		char *val = eq + 1;
+		while (*val == ' ' || *val == '\t') {
+			val++;
+		}
+		char *vend = val + strlen(val);
+		while (vend > val && (vend[-1] == ' ' || vend[-1] == '\t' ||
+				vend[-1] == '\n' || vend[-1] == '\r')) {
+			*--vend = '\0';
+		}
+		if (strcmp(val, "off") == 0) {
+			result = 0;
+		} else {
+			char *num_end = NULL;
+			long v = strtol(val, &num_end, 10);
+			/* An unusable value falls back to the default rather than
+			 * to "never": a typo in this key should not silently
+			 * disable the thing it configures. novi-state's observer
+			 * reports it as drift, which is where a person finds out. */
+			if (num_end != val && *num_end == '\0' && v >= 0 && v <= 86400) {
+				result = (int)v;
+			}
+		}
+		break;
+	}
+	fclose(f);
+	return result;
+}
+
+/* The timer is a plain TICK, not "fire once after the timeout". That
+ * is what lets the declared value be re-read on a schedule of its own
+ * -- a change takes effect within one tick instead of at the end of
+ * however long the OLD timeout was. */
+/* `<blanked> <idle seconds> <timeout seconds>` on one line, rewritten
+ * each tick. Written to a temp name and renamed so a reader on its own
+ * schedule never sees half of it, the same rule the health service
+ * follows. */
+static void idle_publish(const struct novi_server *server) {
+	char tmp[] = NOVI_IDLE_FILE ".tmp";
+	FILE *f = fopen(tmp, "w");
+	if (f == NULL) {
+		return;
+	}
+	fprintf(f, "%d %d %d\n", server->blanked ? 1 : 0,
+		server->idle_ms / 1000, server->blank_after);
+	fclose(f);
+	if (rename(tmp, NOVI_IDLE_FILE) != 0) {
+		unlink(tmp);
+	}
+}
+
+static void idle_arm(struct novi_server *server) {
+	if (server->idle_timer == NULL) {
+		return;
+	}
+	wl_event_source_timer_update(server->idle_timer, NOVI_IDLE_TICK_MS);
+}
+
+/* Any input at all. Called from the keyboard and pointer paths rather
+ * than from a wlr_idle_notifier, because this compositor already sees
+ * every event and an extra protocol object to re-derive that would be
+ * a second answer to a question with one. */
+static void idle_notify_activity(struct novi_server *server) {
+	server->idle_ms = 0;
+	if (server->blanked) {
+		server->blanked = false;
+		idle_set_outputs(server, true);
+		idle_publish(server);
+	}
+}
+
+static int idle_timer_fire(void *data) {
+	struct novi_server *server = data;
+	server->idle_ms += NOVI_IDLE_TICK_MS;
+	server->blank_after = idle_read_timeout();
+	if (!server->blanked && server->blank_after > 0 &&
+			server->idle_ms >= server->blank_after * 1000) {
+		server->blanked = true;
+		idle_set_outputs(server, false);
+	}
+	idle_publish(server);
+	idle_arm(server);
+	return 0;
+}
 
 static void focus_toplevel(struct novi_toplevel *toplevel, struct wlr_surface *surface) {
 	/* Note: this function only deals with keyboard focus. */
@@ -469,6 +705,14 @@ static void focus_toplevel(struct novi_toplevel *toplevel, struct wlr_surface *s
 			wlr_foreign_toplevel_handle_v1_set_activated(
 				activated_iter->foreign_handle, activated_iter == toplevel);
 		}
+		/* The chrome carries focus too -- the title's colour, the
+		 * dots' strength, the shadow's depth -- and a window losing
+		 * focus does not commit a frame just because it lost it. So
+		 * the redraw has to happen here, on the same sweep, or the
+		 * window that just lost focus would keep looking focused
+		 * until it next drew something of its own. */
+		novi_decor_set_focused(activated_iter->decor,
+			activated_iter == toplevel);
 	}
 	/*
 	 * Tell the seat to have the keyboard enter this surface. wlroots will keep
@@ -513,6 +757,20 @@ static void spawn(const char *cmd) {
 		 * lifetime isn't tied to being a direct child novi-shell has
 		 * to reap. */
 		setsid();
+		/* Start in the user's home, not wherever novi-shell happens to
+		 * be running from. s6 starts this compositor with its cwd set
+		 * to its own service directory, and a child inherits that -- so
+		 * every terminal opened from the desktop came up sitting in
+		 * /run/s6-rc:s6-rc-init:XXXXXX/servicedirs/novi-shell, with
+		 * that whole path in the prompt. Visible in a screenshot the
+		 * moment anyone looked. */
+		const char *home = getenv("HOME");
+		if (home == NULL || *home == '\0') {
+			home = "/root";
+		}
+		if (chdir(home) != 0) {
+			(void)chdir("/");
+		}
 		execl("/bin/sh", "/bin/sh", "-c", cmd, (void *)NULL);
 		/* execl only returns on failure. */
 		_exit(127);
@@ -665,6 +923,14 @@ static bool handle_keybinding(struct novi_server *server, uint32_t modifiers,
 			 * back that up. */
 			spawn(getenv("NOVI_LOCK") ? getenv("NOVI_LOCK") : NOVI_DEFAULT_LOCK);
 			return true;
+		case XKB_KEY_Escape:
+			/* Escape, not a letter: it is the one key that already
+			 * means "get me out of this" everywhere else in this
+			 * desktop, and no shifted form of it can collide the way
+			 * Super+Shift+digit did (see shifted_digit() above). */
+			spawn(getenv("NOVI_POWER_MENU") ?
+				getenv("NOVI_POWER_MENU") : NOVI_DEFAULT_POWER_MENU);
+			return true;
 		case XKB_KEY_period:
 			/* RFC 0001 decision 7: symbol picker. Same spawn-fresh-
 			 * overlay pattern as Alt+Space above, just a different
@@ -687,6 +953,13 @@ static void keyboard_handle_key(
 	struct novi_server *server = keyboard->server;
 	struct wlr_keyboard_key_event *event = data;
 	struct wlr_seat *seat = server->seat;
+
+	/* Any key at all wakes the screen, INCLUDING one that goes on to
+	 * be swallowed as a keybinding or dropped because the session is
+	 * locked. Pressing a key is the user being present, whatever the
+	 * key turns out to mean -- and waking on a locked session is
+	 * exactly right: the lock screen is what you came back to see. */
+	idle_notify_activity(server);
 
 	/* Translate libinput keycode -> xkbcommon */
 	uint32_t keycode = event->keycode + 8;
@@ -843,6 +1116,363 @@ static void seat_request_cursor(struct wl_listener *listener, void *data) {
 	}
 }
 
+/* ── Clipboard persistence ─────────────────────────────────────── */
+
+/* A Wayland selection is owned by the client that set it, and it dies
+ * with that client. Copy in the editor, close the editor, paste
+ * anywhere: nothing. That is not a bug in any of those programs -- it
+ * is what the protocol says -- and every desktop that does not feel
+ * broken has something that fixes it. The two ways are a clipboard
+ * manager speaking zwlr_data_control_v1, or the compositor keeping the
+ * text itself. This is the second: the seat is already here, and a
+ * clipboard buffer is not UI, so RFC 0001's "UI belongs in a client"
+ * rule does not reach it.
+ *
+ * The rule is: watch what clients put on the selection, keep a copy,
+ * and when the selection goes away because its owner did, put the copy
+ * back as a source of our own.
+ *
+ * **Neither half may block.** This is PID-1-of-the-desktop code: a
+ * blocking read from a client's pipe freezes every window on the
+ * screen, and so does a blocking write of a megabyte into a 64 KB pipe
+ * whose reader is slow. Both directions therefore run on the
+ * compositor's own event loop, in chunks, which is most of the length
+ * of what follows.
+ */
+
+#define CLIP_MAX_BYTES (1u * 1024u * 1024u)
+
+/* How long a client gets to drain one paste before we give up on it.
+ *
+ * This is a bound on the compositor, not a courtesy to the client.
+ * Every `wl_data_offer.receive` makes a pipe and an event source here,
+ * any client may call it as often as it likes, and a client that asks
+ * and then never reads leaves both armed forever -- so without this,
+ * a buggy program can walk the compositor out of file descriptors, and
+ * a compositor out of file descriptors is a dead desktop. A megabyte
+ * in ten seconds is a reader that has stopped, not a reader that is
+ * slow. */
+#define CLIP_WRITE_TIMEOUT_MS 10000
+
+/* Best first. A client offers what it likes; we ask for the best text
+ * type it named, and offer all three when the text is ours. */
+static const char *const CLIP_MIME[] = {
+	"text/plain;charset=utf-8",
+	"UTF8_STRING",
+	"text/plain",
+};
+#define CLIP_MIME_COUNT ((int)(sizeof(CLIP_MIME) / sizeof(CLIP_MIME[0])))
+
+/* Our own data source. wlr_data_source has no user-data field, so the
+ * server pointer rides along in the enclosing struct. */
+struct novi_clip_source {
+	struct wlr_data_source base;
+	struct novi_server *server;
+};
+
+/* One in-flight read of a client's selection into our buffer. */
+struct novi_clip_read {
+	struct novi_server *server;
+	struct wl_event_source *ev;
+	int fd;
+	char *buf;
+	size_t len, cap;
+};
+
+/* One in-flight write of our buffer to a client's pipe. It owns its own
+ * copy of the text, so a new copy landing mid-paste cannot pull the
+ * bytes out from under a reader. */
+struct novi_clip_write {
+	struct wl_event_source *ev;
+	struct wl_event_source *timeout;
+	int fd;
+	char *data;
+	size_t len, sent;
+};
+
+static void clip_read_finish(struct novi_clip_read *r, bool keep) {
+	struct novi_server *server = r->server;
+	if (keep && r->len > 0) {
+		free(server->clip_text);
+		server->clip_text = r->buf;
+		server->clip_len = r->len;
+		r->buf = NULL;
+	}
+	if (server->clip_read == r) {
+		server->clip_read = NULL;
+	}
+	wl_event_source_remove(r->ev);
+	close(r->fd);
+	free(r->buf);
+	free(r);
+}
+
+static int clip_read_cb(int fd, uint32_t mask, void *data) {
+	struct novi_clip_read *r = data;
+	if (mask & (WL_EVENT_ERROR | WL_EVENT_HANGUP)) {
+		/* HANGUP can arrive with the last bytes still buffered, so
+		 * drain before giving up rather than after. */
+		for (;;) {
+			if (r->len + 1 >= r->cap) {
+				size_t grown = r->cap ? r->cap * 2 : 4096;
+				if (grown > CLIP_MAX_BYTES) {
+					break;
+				}
+				char *p = realloc(r->buf, grown);
+				if (p == NULL) {
+					break;
+				}
+				r->buf = p;
+				r->cap = grown;
+			}
+			ssize_t n = read(fd, r->buf + r->len, r->cap - r->len - 1);
+			if (n <= 0) {
+				break;
+			}
+			r->len += (size_t)n;
+		}
+		if (r->buf != NULL) {
+			r->buf[r->len] = '\0';
+		}
+		clip_read_finish(r, true);
+		return 0;
+	}
+
+	if (r->len + 1 >= r->cap) {
+		size_t grown = r->cap ? r->cap * 2 : 4096;
+		if (grown > CLIP_MAX_BYTES) {
+			/* Too big to keep. Not an error and not worth a log line
+			 * every time somebody copies a large file's contents --
+			 * the selection still works normally while its owner is
+			 * alive, it just will not outlive it. */
+			clip_read_finish(r, false);
+			return 0;
+		}
+		char *p = realloc(r->buf, grown);
+		if (p == NULL) {
+			clip_read_finish(r, false);
+			return 0;
+		}
+		r->buf = p;
+		r->cap = grown;
+	}
+
+	ssize_t n = read(fd, r->buf + r->len, r->cap - r->len - 1);
+	if (n < 0) {
+		if (errno == EAGAIN || errno == EINTR) {
+			return 0;
+		}
+		clip_read_finish(r, false);
+		return 0;
+	}
+	if (n == 0) {
+		r->buf[r->len] = '\0';
+		clip_read_finish(r, true);
+		return 0;
+	}
+	r->len += (size_t)n;
+	return 0;
+}
+
+static void clip_write_finish(struct novi_clip_write *w) {
+	wl_event_source_remove(w->ev);
+	if (w->timeout != NULL) {
+		wl_event_source_remove(w->timeout);
+	}
+	close(w->fd);
+	free(w->data);
+	free(w);
+}
+
+static int clip_write_timeout(void *data) {
+	clip_write_finish(data);
+	return 0;
+}
+
+static int clip_write_cb(int fd, uint32_t mask, void *data) {
+	struct novi_clip_write *w = data;
+	if (mask & (WL_EVENT_ERROR | WL_EVENT_HANGUP)) {
+		clip_write_finish(w);
+		return 0;
+	}
+	while (w->sent < w->len) {
+		ssize_t n = write(fd, w->data + w->sent, w->len - w->sent);
+		if (n < 0) {
+			if (errno == EAGAIN) {
+				return 0;   /* come back when it drains */
+			}
+			if (errno == EINTR) {
+				continue;
+			}
+			break;          /* reader went away */
+		}
+		w->sent += (size_t)n;
+	}
+	clip_write_finish(w);
+	return 0;
+}
+
+static void clip_source_send(struct wlr_data_source *source,
+		const char *mime_type, int32_t fd) {
+	(void)mime_type;
+	struct novi_clip_source *cs = wl_container_of(source, cs, base);
+	struct novi_server *server = cs->server;
+
+	int flags = fcntl(fd, F_GETFL, 0);
+	if (flags >= 0) {
+		fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+	}
+
+	struct novi_clip_write *w = calloc(1, sizeof(*w));
+	if (w == NULL || server->clip_text == NULL) {
+		free(w);
+		close(fd);
+		return;
+	}
+	w->data = malloc(server->clip_len + 1);
+	if (w->data == NULL) {
+		free(w);
+		close(fd);
+		return;
+	}
+	memcpy(w->data, server->clip_text, server->clip_len);
+	w->data[server->clip_len] = '\0';
+	w->len = server->clip_len;
+	w->fd = fd;
+	struct wl_event_loop *loop = wl_display_get_event_loop(server->wl_display);
+	w->ev = wl_event_loop_add_fd(loop, fd, WL_EVENT_WRITABLE, clip_write_cb, w);
+	if (w->ev == NULL) {
+		free(w->data);
+		free(w);
+		close(fd);
+		return;
+	}
+	w->timeout = wl_event_loop_add_timer(loop, clip_write_timeout, w);
+	if (w->timeout != NULL) {
+		wl_event_source_timer_update(w->timeout, CLIP_WRITE_TIMEOUT_MS);
+	}
+}
+
+static void clip_source_destroy(struct wlr_data_source *source) {
+	struct novi_clip_source *cs = wl_container_of(source, cs, base);
+	if (cs->server != NULL && cs->server->clip_source == source) {
+		cs->server->clip_source = NULL;
+	}
+	free(cs);
+}
+
+static const struct wlr_data_source_impl clip_source_impl = {
+	.send = clip_source_send,
+	.destroy = clip_source_destroy,
+};
+
+/* Put our remembered text back on the selection, as a source that
+ * belongs to the compositor and therefore outlives every client. */
+static void clip_offer_ours(struct novi_server *server) {
+	if (server->clip_text == NULL || server->clip_len == 0) {
+		return;
+	}
+	struct novi_clip_source *cs = calloc(1, sizeof(*cs));
+	if (cs == NULL) {
+		return;
+	}
+	/* wlr_data_source_init() overwrites the whole base struct, so
+	 * anything of ours is set after it, never before. */
+	wlr_data_source_init(&cs->base, &clip_source_impl);
+	cs->server = server;
+	struct wlr_data_source *src = &cs->base;
+	for (int i = 0; i < CLIP_MIME_COUNT; i++) {
+		char **slot = wl_array_add(&src->mime_types, sizeof(char *));
+		char *dup = strdup(CLIP_MIME[i]);
+		if (slot == NULL || dup == NULL) {
+			free(dup);
+			wlr_data_source_destroy(src);
+			return;
+		}
+		*slot = dup;
+	}
+	server->clip_source = src;
+	wlr_seat_set_selection(server->seat, src,
+		wl_display_next_serial(server->wl_display));
+}
+
+/* Start reading a client's selection into our buffer. */
+static void clip_capture(struct novi_server *server,
+		struct wlr_data_source *src) {
+	int best = -1;
+	char **mime;
+	wl_array_for_each(mime, &src->mime_types) {
+		for (int i = 0; i < CLIP_MIME_COUNT; i++) {
+			if (strcmp(*mime, CLIP_MIME[i]) == 0 && (best < 0 || i < best)) {
+				best = i;
+			}
+		}
+	}
+	if (best < 0) {
+		/* Not text. We do not persist images or anything else yet, and
+		 * the honest consequence is that the previous *text* stays
+		 * remembered rather than being replaced by something we cannot
+		 * hold. */
+		return;
+	}
+
+	int fds[2];
+	if (pipe(fds) != 0) {
+		return;
+	}
+	if (fcntl(fds[0], F_SETFL, O_NONBLOCK) != 0) {
+		close(fds[0]);
+		close(fds[1]);
+		return;
+	}
+
+	struct novi_clip_read *r = calloc(1, sizeof(*r));
+	if (r == NULL) {
+		close(fds[0]);
+		close(fds[1]);
+		return;
+	}
+	r->server = server;
+	r->fd = fds[0];
+	r->ev = wl_event_loop_add_fd(wl_display_get_event_loop(server->wl_display),
+		fds[0], WL_EVENT_READABLE, clip_read_cb, r);
+	if (r->ev == NULL) {
+		free(r);
+		close(fds[0]);
+		close(fds[1]);
+		return;
+	}
+	server->clip_read = r;
+
+	wlr_data_source_send(src, CLIP_MIME[best], fds[1]);
+	close(fds[1]);
+}
+
+static void seat_set_selection(struct wl_listener *listener, void *data) {
+	(void)data;
+	struct novi_server *server = wl_container_of(listener, server, set_selection);
+	struct wlr_data_source *src = server->seat->selection_source;
+
+	if (src != NULL && src->impl == &clip_source_impl) {
+		return;   /* our own; setting it below is what got us here */
+	}
+
+	/* Whatever we were reading is about to be stale either way. */
+	if (server->clip_read != NULL) {
+		clip_read_finish(server->clip_read, false);
+	}
+
+	if (src != NULL) {
+		clip_capture(server, src);
+		return;
+	}
+
+	/* The selection is empty. Either a client cleared it deliberately
+	 * or -- far more often -- the client that owned it exited, which is
+	 * exactly the case this whole file section exists for. */
+	clip_offer_ours(server);
+}
+
 static void seat_request_set_selection(struct wl_listener *listener, void *data) {
 	/* This event is raised by the seat when a client wants to set the selection,
 	 * usually when the user copies something. wlroots allows compositors to
@@ -901,47 +1531,53 @@ static struct novi_toplevel *desktop_toplevel_at(
 	 * layer-shell surface's own content correctly reaches this same
 	 * path via *surface, even though the discriminator below rejects
 	 * it as a *novi_toplevel; novi-panel's apps button relies on
-	 * exactly that split. novi-shell's own title bar/close-dot
-	 * decorations, added later, are WLR_SCENE_NODE_RECT and never reach
-	 * here at all -- see close_dot_toplevel_at() for their own,
-	 * separate hit-test.) */
+	 * exactly that split. novi-shell's own decorations are buffer nodes
+	 * too, but their buffers are not surfaces, so
+	 * wlr_scene_surface_try_from_buffer() above answers NULL for them
+	 * and they never reach here -- see decoration_node_toplevel_at()
+	 * for their own, separate hit-test.) */
 	if (tree->node.parent != server->layer_tree_toplevels) {
 		return NULL;
 	}
 	return tree->node.data;
 }
 
-/* Separate from desktop_toplevel_at() above: that function only ever
- * resolves WLR_SCENE_NODE_BUFFER nodes (real client surface content),
- * so it correctly returns NULL for the title bar or any of its dots --
- * all plain WLR_SCENE_NODE_RECT nodes with no wlr_surface behind them.
- * Clicking a dot still needs its owning toplevel resolved, so this
- * walks the scene separately for that case, handing back which exact
- * rect was hit (the title bar backdrop itself is a legal, common
- * answer -- not clickable in this pass, see DECO_HEIGHT's comment on
- * no drag-to-move yet -- so callers must compare *rect_out themselves
- * against the specific dot(s) they care about, same as this function
- * doesn't privilege any one dot over another). */
-static struct novi_toplevel *decoration_rect_toplevel_at(
+/* Separate from desktop_toplevel_at() above: that function only
+ * resolves nodes with a wlr_surface behind them (real client
+ * content), so it correctly answers NULL for the title bar, the
+ * control dots and the shadow -- decoration.c's buffers are plain
+ * memory, not surfaces. Clicking a dot still needs its owning
+ * toplevel resolved, so this walks the scene separately for that
+ * case, handing back which exact node was hit; callers ask
+ * novi_decor_control_at()/novi_decor_is_bar() what it was, rather
+ * than this function privileging one piece of chrome over another.
+ *
+ * It accepts RECT nodes as well as BUFFER ones even though no
+ * decoration is a rect any more: nothing else in a toplevel's tree is
+ * a rect today, and the check is one comparison against the day
+ * something is. */
+static struct novi_toplevel *decoration_node_toplevel_at(
 		struct novi_server *server, double lx, double ly,
-		struct wlr_scene_rect **rect_out) {
+		struct wlr_scene_node **node_out) {
 	double sx, sy;
 	struct wlr_scene_node *node = wlr_scene_node_at(
 		&server->scene->tree.node, lx, ly, &sx, &sy);
-	if (node == NULL || node->type != WLR_SCENE_NODE_RECT) {
+	if (node == NULL ||
+			(node->type != WLR_SCENE_NODE_RECT &&
+			 node->type != WLR_SCENE_NODE_BUFFER)) {
 		return NULL;
 	}
 	if (node->parent == NULL || node->parent->node.data == NULL) {
 		return NULL;
 	}
 	/* Same structural check desktop_toplevel_at() uses: only trust
-	 * .data if this rect's immediate parent is actually a toplevel's
+	 * .data if this node's immediate parent is actually a toplevel's
 	 * own scene_tree (a direct child of layer_tree_toplevels), not
 	 * some other tree that happens to have non-NULL .data. */
 	if (node->parent->node.parent != server->layer_tree_toplevels) {
 		return NULL;
 	}
-	*rect_out = wlr_scene_rect_from_node(node);
+	*node_out = node;
 	return node->parent->node.data;
 }
 
@@ -951,12 +1587,57 @@ static void reset_cursor_mode(struct novi_server *server) {
 	server->grabbed_toplevel = NULL;
 }
 
+/* How much of a dragged window has to stay reachable. Dragging is now
+ * something a person does with the pointer on the title bar, not only
+ * something a client asks for, so it is now possible to put a window
+ * somewhere there is no way to get it back from: drag it off the left
+ * edge and its title bar -- the only handle it has -- is gone with it.
+ * Every desktop constrains this; none of them constrain it to the
+ * whole window, because dragging a window mostly off-screen on purpose
+ * is a legitimate thing to do. So: enough width to grab, and the title
+ * bar never above the top bar or below the bottom of the screen. */
+#define MOVE_KEEP_ONSCREEN 96
+
 static void process_cursor_move(struct novi_server *server, uint32_t time) {
 	/* Move the grabbed toplevel to the new position. */
 	struct novi_toplevel *toplevel = server->grabbed_toplevel;
-	wlr_scene_node_set_position(&toplevel->scene_tree->node,
-		server->cursor->x - server->grab_x,
-		server->cursor->y - server->grab_y);
+	double x = server->cursor->x - server->grab_x;
+	double y = server->cursor->y - server->grab_y;
+
+	if (!wl_list_empty(&server->outputs)) {
+		struct novi_output *output =
+			wl_container_of(server->outputs.next, output, link);
+		struct wlr_box layout_box = {0};
+		wlr_output_layout_get_box(server->output_layout,
+			output->wlr_output, &layout_box);
+		struct wlr_box geo_box;
+		wlr_xdg_surface_get_geometry(toplevel->xdg_toplevel->base, &geo_box);
+
+		int left = layout_box.x + output->usable_area.x;
+		int top = layout_box.y + output->usable_area.y;
+		int right = left + output->usable_area.width;
+		int bottom = top + output->usable_area.height;
+
+		int keep = geo_box.width < MOVE_KEEP_ONSCREEN
+			? geo_box.width : MOVE_KEEP_ONSCREEN;
+		if (x > right - keep) {
+			x = right - keep;
+		}
+		if (x < left + keep - geo_box.width) {
+			x = left + keep - geo_box.width;
+		}
+		/* y is the CONTENT's top; the title bar sits above it, so the
+		 * bar's own top is y - NOVI_DECO_HEIGHT and that is what must
+		 * stay below the panel. */
+		if (y < top + NOVI_DECO_HEIGHT) {
+			y = top + NOVI_DECO_HEIGHT;
+		}
+		if (y > bottom) {
+			y = bottom;
+		}
+	}
+
+	wlr_scene_node_set_position(&toplevel->scene_tree->node, x, y);
 }
 
 static void process_cursor_resize(struct novi_server *server, uint32_t time) {
@@ -1012,6 +1693,7 @@ static void process_cursor_resize(struct novi_server *server, uint32_t time) {
 }
 
 static void process_cursor_motion(struct novi_server *server, uint32_t time) {
+	idle_notify_activity(server);
 	/* If the mode is non-passthrough, delegate to those functions. */
 	if (server->cursor_mode == NOVI_CURSOR_MOVE) {
 		process_cursor_move(server, time);
@@ -1019,6 +1701,30 @@ static void process_cursor_motion(struct novi_server *server, uint32_t time) {
 	} else if (server->cursor_mode == NOVI_CURSOR_RESIZE) {
 		process_cursor_resize(server, time);
 		return;
+	}
+
+	/* Hover feedback on the window controls. A dot that does not
+	 * react to the pointer reads as decoration rather than as a
+	 * button, which is most of why this chrome looked inert -- and
+	 * hover is also the only thing that tells you the 16px target is
+	 * bigger than the 8px dot before you click it.
+	 *
+	 * A plain sweep over every toplevel rather than remembering which
+	 * one was hovered last: the window count here is always small (an
+	 * everyday desktop, not hundreds of toplevels), novi_decor_set_
+	 * hover() returns immediately when nothing changed, and one loop
+	 * cannot leave a stale highlight on a window the pointer left --
+	 * which a remembered pointer can, the first time a window is
+	 * destroyed out from under it. */
+	struct wlr_scene_node *deco_node = NULL;
+	struct novi_toplevel *deco_hit = decoration_node_toplevel_at(
+		server, server->cursor->x, server->cursor->y, &deco_node);
+	struct novi_toplevel *hover_iter;
+	wl_list_for_each(hover_iter, &server->toplevels, link) {
+		novi_decor_set_hover(hover_iter->decor,
+			hover_iter == deco_hit
+				? novi_decor_control_at(hover_iter->decor, deco_node)
+				: NOVI_DECO_CONTROL_NONE);
 	}
 
 	/* Otherwise, find the toplevel under the pointer and send the event along. */
@@ -1092,6 +1798,7 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
 	struct novi_server *server =
 		wl_container_of(listener, server, cursor_button);
 	struct wlr_pointer_button_event *event = data;
+	idle_notify_activity(server);
 	/* Notify the client with pointer focus that a button press has occurred */
 	wlr_seat_pointer_notify_button(server->seat,
 			event->time_msec, event->button, event->state);
@@ -1103,19 +1810,58 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
 	 * focus below has always acted on press alone). */
 	if (event->button == BTN_LEFT &&
 			event->state == WL_POINTER_BUTTON_STATE_PRESSED) {
-		struct wlr_scene_rect *hit_rect = NULL;
-		struct novi_toplevel *hit = decoration_rect_toplevel_at(
-			server, server->cursor->x, server->cursor->y, &hit_rect);
-		if (hit != NULL && hit_rect == hit->close_dot) {
-			wlr_xdg_toplevel_send_close(hit->xdg_toplevel);
-		} else if (hit != NULL && hit_rect == hit->maximize_dot) {
-			if (hit->maximized) {
-				unmaximize_toplevel(hit);
-			} else {
-				maximize_toplevel(hit);
+		struct wlr_scene_node *hit_node = NULL;
+		struct novi_toplevel *hit = decoration_node_toplevel_at(
+			server, server->cursor->x, server->cursor->y, &hit_node);
+		if (hit != NULL) {
+			switch (novi_decor_control_at(hit->decor, hit_node)) {
+			case NOVI_DECO_CLOSE:
+				wlr_xdg_toplevel_send_close(hit->xdg_toplevel);
+				break;
+			case NOVI_DECO_MAXIMIZE:
+				if (hit->maximized) {
+					unmaximize_toplevel(hit);
+				} else {
+					maximize_toplevel(hit);
+				}
+				break;
+			case NOVI_DECO_MINIMIZE:
+				minimize_toplevel(hit);
+				break;
+			case NOVI_DECO_CONTROL_NONE:
+				if (novi_decor_is_bar(hit->decor, hit_node)) {
+					/* Drag to move, which every desktop has and this
+					 * one did not: the bar was inert chrome you could
+					 * look at and not use. Focus first -- dragging a
+					 * window is a way of choosing it -- and then start
+					 * the grab directly rather than through
+					 * begin_interactive(), which refuses a toplevel
+					 * whose SURFACE does not hold pointer focus. That
+					 * check is right for a client asking to be moved
+					 * (it stops a background window grabbing the
+					 * pointer) and wrong here: the pointer is over the
+					 * compositor's own decoration, so the client's
+					 * surface never has pointer focus, and honouring
+					 * it would make the title bar undraggable in
+					 * exactly the case it is meant for.
+					 *
+					 * A maximized window is left alone: dragging one
+					 * has to unmaximize-and-follow to make sense, and
+					 * a drag that silently does nothing is better than
+					 * one that tears the window off the screen edge. */
+					focus_toplevel(hit, hit->xdg_toplevel->base->surface);
+					if (!hit->maximized) {
+						server->grabbed_toplevel = hit;
+						server->cursor_mode = NOVI_CURSOR_MOVE;
+						server->grab_x = server->cursor->x -
+							hit->scene_tree->node.x;
+						server->grab_y = server->cursor->y -
+							hit->scene_tree->node.y;
+					}
+					return;
+				}
+				break;
 			}
-		} else if (hit != NULL && hit_rect == hit->minimize_dot) {
-			minimize_toplevel(hit);
 		}
 	}
 
@@ -1300,6 +2046,22 @@ static void arrange_layers(struct novi_output *output) {
 	wlr_output_effective_resolution(output->wlr_output,
 		&full_area.width, &full_area.height);
 	struct wlr_box usable_area = full_area;
+
+	/* Keep the desktop background covering the whole output. Created
+	 * lazily here rather than in server_new_output() because this is
+	 * the one place that already knows the output's effective
+	 * resolution and is already called whenever it changes. */
+	if (output->background == NULL) {
+		float bg[4] = {DESKTOP_BG_COLOR_R, DESKTOP_BG_COLOR_G,
+			DESKTOP_BG_COLOR_B, 1.0f};
+		output->background = wlr_scene_rect_create(
+			output->server->layer_tree_background,
+			full_area.width, full_area.height, bg);
+		wlr_scene_node_lower_to_bottom(&output->background->node);
+	} else {
+		wlr_scene_rect_set_size(output->background,
+			full_area.width, full_area.height);
+	}
 
 	/* wlroots' own scene helper (types/scene/layer_shell_v1.c) already
 	 * implements the protocol's anchor/margin/exclusive-zone math
@@ -1662,16 +2424,66 @@ static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
 	}
 }
 
+/* The size a new window should open at: 70% of the output's usable area
+ * (the space left after the panel's exclusive zone), floored so a tiny
+ * output cannot produce something unusable. Returns false when there is
+ * no output yet, in which case the caller leaves the client to choose.
+ *
+ * Used from two places that must agree: xdg_toplevel_commit()'s
+ * initial_commit branch, which is the point in the xdg-shell handshake
+ * where a compositor's size preference actually reaches the client, and
+ * server_new_xdg_toplevel(), which centres the window on that same
+ * size. They were briefly out of step -- the size was requested at
+ * creation and then overwritten with (0,0) at initial_commit -- which
+ * produced a window at the client's own size sitting off-centre by the
+ * difference. One function, called twice, cannot drift like that. */
+static bool default_toplevel_size(struct novi_server *server, int *out_w,
+		int *out_h) {
+	if (wl_list_empty(&server->outputs)) {
+		return false;
+	}
+	struct novi_output *output =
+		wl_container_of(server->outputs.next, output, link);
+	int avail_w = output->usable_area.width;
+	int avail_h = output->usable_area.height - NOVI_DECO_HEIGHT;
+	if (avail_w <= 0 || avail_h <= 0) {
+		return false;
+	}
+	int w = avail_w * 7 / 10;
+	int h = avail_h * 7 / 10;
+	if (w < TOPLEVEL_MIN_WIDTH) {
+		w = avail_w < TOPLEVEL_MIN_WIDTH ? avail_w : TOPLEVEL_MIN_WIDTH;
+	}
+	if (h < TOPLEVEL_MIN_HEIGHT) {
+		h = avail_h < TOPLEVEL_MIN_HEIGHT ? avail_h : TOPLEVEL_MIN_HEIGHT;
+	}
+	*out_w = w;
+	*out_h = h;
+	return true;
+}
+
 static void xdg_toplevel_commit(struct wl_listener *listener, void *data) {
 	/* Called when a new surface state is committed. */
 	struct novi_toplevel *toplevel = wl_container_of(listener, toplevel, commit);
 
 	if (toplevel->xdg_toplevel->base->initial_commit) {
-		/* When an xdg_surface performs an initial commit, the compositor must
-		 * reply with a configure so the client can map the surface. novi-shell
-		 * configures the xdg_toplevel with 0,0 size to let the client pick the
-		 * dimensions itself. */
-		wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, 0, 0);
+		/* When an xdg_surface performs an initial commit, the compositor
+		 * must reply with a configure so the client can map the surface.
+		 * This is also the only moment a size preference reaches the
+		 * client, so it is where the default goes.
+		 *
+		 * It used to send (0,0) -- "pick your own size" -- and foot
+		 * duly picked its built-in 700x565, which on a 1280x800 screen
+		 * is a small box with two thirds of the desktop empty next to
+		 * it. A compositor that expresses no opinion about window size
+		 * is not being neutral, it is making every application's
+		 * hardcoded default into the desktop's layout policy. */
+		int w = 0, h = 0;
+		if (default_toplevel_size(toplevel->server, &w, &h)) {
+			wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, w, h);
+		} else {
+			wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, 0, 0);
+		}
 	}
 
 	/* Keep the title bar/dots in sync with the content's current width
@@ -1687,18 +2499,14 @@ static void xdg_toplevel_commit(struct wl_listener *listener, void *data) {
 	struct wlr_box geo_box;
 	wlr_xdg_surface_get_geometry(toplevel->xdg_toplevel->base, &geo_box);
 	if (geo_box.width > 0) {
-		wlr_scene_rect_set_size(toplevel->titlebar, geo_box.width, DECO_HEIGHT);
-		/* Right-to-left: close (rightmost), then maximize, then
-		 * minimize, each DECO_DOT_GAP further left than the last. */
-		int close_x = geo_box.width - DECO_DOT_PADDING - DECO_DOT_SIZE;
-		int maximize_x = close_x - DECO_DOT_GAP;
-		int minimize_x = maximize_x - DECO_DOT_GAP;
-		wlr_scene_node_set_position(&toplevel->close_dot->node, close_x,
-			toplevel->close_dot->node.y);
-		wlr_scene_node_set_position(&toplevel->maximize_dot->node, maximize_x,
-			toplevel->maximize_dot->node.y);
-		wlr_scene_node_set_position(&toplevel->minimize_dot->node, minimize_x,
-			toplevel->minimize_dot->node.y);
+		/* Each of these is a no-op when the value it carries has not
+		 * changed, which is what makes calling all three from a
+		 * per-frame handler affordable. */
+		novi_decor_set_size(toplevel->decor, geo_box.width, geo_box.height);
+		novi_decor_set_title(toplevel->decor, toplevel->xdg_toplevel->title);
+		novi_decor_set_focused(toplevel->decor,
+			toplevel->server->seat->keyboard_state.focused_surface ==
+				toplevel->xdg_toplevel->base->surface);
 	}
 }
 
@@ -1717,6 +2525,7 @@ static void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
 	wl_list_remove(&toplevel->set_title.link);
 	wl_list_remove(&toplevel->set_app_id.link);
 
+	novi_decor_destroy(toplevel->decor);
 	free(toplevel);
 }
 
@@ -1735,6 +2544,11 @@ static void xdg_toplevel_set_title(struct wl_listener *listener, void *data) {
 		wlr_foreign_toplevel_handle_v1_set_title(toplevel->foreign_handle,
 			toplevel->xdg_toplevel->title ? toplevel->xdg_toplevel->title : "");
 	}
+	/* The decoration bar shows the same string, so it changes here too.
+	 * The commit that follows would catch it anyway; doing it on the
+	 * event that actually carries the new title keeps the two in step
+	 * without depending on that ordering. */
+	novi_decor_set_title(toplevel->decor, toplevel->xdg_toplevel->title);
 }
 
 static void xdg_toplevel_set_app_id(struct wl_listener *listener, void *data) {
@@ -1836,13 +2650,13 @@ static void maximize_toplevel(struct novi_toplevel *toplevel) {
 	toplevel->saved_geometry.width = geo_box.width;
 	toplevel->saved_geometry.height = geo_box.height;
 
-	int max_height = output->usable_area.height - DECO_HEIGHT;
+	int max_height = output->usable_area.height - NOVI_DECO_HEIGHT;
 	if (max_height < 0) {
 		max_height = 0;
 	}
 	wlr_scene_node_set_position(&toplevel->scene_tree->node,
 		layout_box.x + output->usable_area.x,
-		layout_box.y + output->usable_area.y + DECO_HEIGHT);
+		layout_box.y + output->usable_area.y + NOVI_DECO_HEIGHT);
 	wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel,
 		output->usable_area.width, max_height);
 	wlr_xdg_toplevel_set_maximized(toplevel->xdg_toplevel, true);
@@ -2078,37 +2892,14 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
 	toplevel->scene_tree->node.data = toplevel;
 	xdg_toplevel->base->data = toplevel->scene_tree;
 
-	/* Server-side decoration: a title bar strip and three dots, all
-	 * children of scene_tree, positioned in the negative-y space above
-	 * the content (local (0,-DECO_HEIGHT) and up) -- content itself
-	 * stays at local (0,0) exactly as before, so move/resize logic
-	 * elsewhere (process_cursor_move/resize(), both operate on scene_
-	 * tree's own node position) needs no changes; the decoration just
-	 * rides along as sibling children whenever the tree moves. All
-	 * placeholder-positioned at x=0 here since the content's real width
-	 * (needed to right-align them) isn't known until its first commit
-	 * (see xdg_toplevel_commit(), which the client's own initial_commit
-	 * -> ack_configure -> real commit sequence guarantees fires before
-	 * this is visible). Creation order right-to-left (close, maximize,
-	 * minimize) matches their intended screen order, though it isn't
-	 * load-bearing -- xdg_toplevel_commit() repositions all three by
-	 * direct pointer, not by sibling order. */
-	toplevel->titlebar = wlr_scene_rect_create(
-		toplevel->scene_tree, 0, DECO_HEIGHT, DECO_BG_COLOR);
-	wlr_scene_node_set_position(&toplevel->titlebar->node, 0, -DECO_HEIGHT);
-	toplevel->close_dot = wlr_scene_rect_create(
-		toplevel->scene_tree, DECO_DOT_SIZE, DECO_DOT_SIZE, DECO_DOT_COLOR);
-	toplevel->maximize_dot = wlr_scene_rect_create(
-		toplevel->scene_tree, DECO_DOT_SIZE, DECO_DOT_SIZE, DECO_DOT_COLOR);
-	/* Real now, not dimmed -- novi-panel's taskbar (wlr-foreign-toplevel-
-	 * management) is the restore path GUI-DESIGN-LANGUAGE.md's original
-	 * dimmed-placeholder reasoning was waiting on. */
-	toplevel->minimize_dot = wlr_scene_rect_create(
-		toplevel->scene_tree, DECO_DOT_SIZE, DECO_DOT_SIZE, DECO_DOT_COLOR);
-	int dot_y = -DECO_HEIGHT + (DECO_HEIGHT - DECO_DOT_SIZE) / 2;
-	wlr_scene_node_set_position(&toplevel->close_dot->node, 0, dot_y);
-	wlr_scene_node_set_position(&toplevel->maximize_dot->node, 0, dot_y);
-	wlr_scene_node_set_position(&toplevel->minimize_dot->node, 0, dot_y);
+	/* Server-side decoration. Everything about how it looks lives in
+	 * decoration.c; what it needs from here is only its size, which
+	 * is not known until the client's first real commit (see
+	 * xdg_toplevel_commit(), which the client's own initial_commit ->
+	 * ack_configure -> real commit sequence guarantees fires before
+	 * this is visible). Until then it draws nothing, which is right:
+	 * nothing is mapped yet either. */
+	toplevel->decor = novi_decor_create(toplevel->scene_tree);
 
 	/* Initial placement: land the window in the output's usable area
 	 * (below the panel's exclusive zone), not at the scene tree's
@@ -2122,7 +2913,7 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
 	 * re-applied on every map, so a window the user has since moved
 	 * doesn't get snapped back if it's ever unmapped and remapped.
 	 *
-	 * The extra "+ DECO_HEIGHT" is new: content now sits DECO_HEIGHT
+	 * The extra "+ NOVI_DECO_HEIGHT" is new: content now sits NOVI_DECO_HEIGHT
 	 * lower than the usable area's own top edge, leaving exactly enough
 	 * room above it (in scene_tree's negative-y space) for the title
 	 * bar to occupy without overlapping the panel above it. Before
@@ -2135,9 +2926,31 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
 		struct wlr_box layout_box = {0};
 		wlr_output_layout_get_box(server->output_layout,
 			output->wlr_output, &layout_box);
-		wlr_scene_node_set_position(&toplevel->scene_tree->node,
-			layout_box.x + output->usable_area.x,
-			layout_box.y + output->usable_area.y + DECO_HEIGHT);
+
+		/* Suggest a size, and centre the window on it.
+		 *
+		 * Nothing used to ask for one, so a new window got whatever
+		 * the client picked on its own -- foot's built-in default is
+		 * around 700x565 -- and landed hard against the top-left
+		 * corner of the usable area. On a 1280x800 screen that is a
+		 * small box in the corner with two thirds of the desktop empty
+		 * beside it, which reads as broken rather than as a choice.
+		 *
+		 * Setting the size here, before the client's first commit, is
+		 * the point in the xdg-shell handshake where a compositor is
+		 * meant to express a preference: it goes out in the initial
+		 * configure and the client acks it. A client that insists on
+		 * its own size still wins, and it will simply be off-centre by
+		 * the difference -- which is why the position is computed from
+		 * the size we asked for rather than assumed to be exact. */
+		int want_w = 0, want_h = 0;
+		int x = layout_box.x + output->usable_area.x;
+		int y = layout_box.y + output->usable_area.y + NOVI_DECO_HEIGHT;
+		if (default_toplevel_size(server, &want_w, &want_h)) {
+			x += (output->usable_area.width - want_w) / 2;
+			y += (output->usable_area.height - NOVI_DECO_HEIGHT - want_h) / 2;
+		}
+		wlr_scene_node_set_position(&toplevel->scene_tree->node, x, y);
 	}
 
 	/* Listen to the various events it can emit */
@@ -2166,6 +2979,55 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
 	wl_signal_add(&xdg_toplevel->events.set_app_id, &toplevel->set_app_id);
 }
 
+/* Answering a decoration request means sending a configure, and a
+ * configure cannot go to an xdg_surface the client has not committed
+ * yet. A well-behaved client asks for its decoration mode BEFORE that
+ * first commit -- foot does, and so does everything else -- so
+ * answering immediately is answering too early: wlroots logs
+ *
+ *     [ERROR] A configure is scheduled for an uninitialized xdg_surface
+ *
+ * and drops the configure on the floor. That fired on every single
+ * window this compositor has ever opened. Nothing looked broken,
+ * because the mode is re-sent with the real configure at initial
+ * commit and clients end up server-side decorated anyway -- which is
+ * exactly the problem with it: a per-window ERROR that means nothing
+ * is how a log stops being read.
+ *
+ * So hold the answer until the surface is initialised, then give it. */
+struct novi_decoration {
+	struct wlr_xdg_toplevel_decoration_v1 *decoration;
+	struct wl_listener surface_commit;
+	struct wl_listener destroy;
+};
+
+static void decoration_answer(struct novi_decoration *deco) {
+	if (!deco->decoration->toplevel->base->initialized) {
+		return;
+	}
+	wlr_xdg_toplevel_decoration_v1_set_mode(deco->decoration,
+		WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+	/* Once is enough; stop listening but keep the link valid so the
+	 * destroy handler can remove it unconditionally. */
+	wl_list_remove(&deco->surface_commit.link);
+	wl_list_init(&deco->surface_commit.link);
+}
+
+static void decoration_surface_commit(struct wl_listener *listener, void *data) {
+	(void)data;
+	struct novi_decoration *deco =
+		wl_container_of(listener, deco, surface_commit);
+	decoration_answer(deco);
+}
+
+static void decoration_destroy(struct wl_listener *listener, void *data) {
+	(void)data;
+	struct novi_decoration *deco = wl_container_of(listener, deco, destroy);
+	wl_list_remove(&deco->surface_commit.link);
+	wl_list_remove(&deco->destroy.link);
+	free(deco);
+}
+
 static void server_new_xdg_decoration(struct wl_listener *listener, void *data) {
 	/* Fires when a client explicitly asks (via zxdg_decoration_manager_v1
 	 * .get_toplevel_decoration) whether it should draw its own title bar
@@ -2178,8 +3040,24 @@ static void server_new_xdg_decoration(struct wl_listener *listener, void *data) 
 	 * this answers -- so this path is genuinely exercised today. */
 	(void)listener;
 	struct wlr_xdg_toplevel_decoration_v1 *decoration = data;
-	wlr_xdg_toplevel_decoration_v1_set_mode(decoration,
-		WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+
+	struct novi_decoration *deco = calloc(1, sizeof(*deco));
+	if (deco == NULL) {
+		/* Out of memory for a title-bar preference is not worth
+		 * refusing the window over; the client keeps whatever mode it
+		 * defaults to. */
+		return;
+	}
+	deco->decoration = decoration;
+	deco->surface_commit.notify = decoration_surface_commit;
+	wl_signal_add(&decoration->toplevel->base->surface->events.commit,
+		&deco->surface_commit);
+	deco->destroy.notify = decoration_destroy;
+	wl_signal_add(&decoration->events.destroy, &deco->destroy);
+
+	/* A client that somehow asked after its first commit gets the
+	 * answer straight away rather than waiting for the next one. */
+	decoration_answer(deco);
 }
 
 static void xdg_popup_commit(struct wl_listener *listener, void *data) {
@@ -2248,6 +3126,17 @@ int main(int argc, char *argv[]) {
 	if (optind < argc) {
 		printf("Usage: %s [-s startup command]\n", argv[0]);
 		return 0;
+	}
+
+	/* Loads the UI font once. A failure here is reported and then
+	 * ignored on purpose: a desktop whose windows have unlabelled
+	 * title bars is a cosmetic problem, and refusing to start the
+	 * compositor over it leaves the user with no desktop at all.
+	 * novi_decor_create() answers NULL from then on and every
+	 * other entry point tolerates that. */
+	if (!novi_decor_init()) {
+		wlr_log(WLR_ERROR, "could not load the UI font (%s) -- "
+			"windows will have no title text", NOVI_FONT_TITLE);
 	}
 
 	struct novi_server server = {0};
@@ -2430,6 +3319,11 @@ int main(int argc, char *argv[]) {
 	server.request_set_selection.notify = seat_request_set_selection;
 	wl_signal_add(&server.seat->events.request_set_selection,
 			&server.request_set_selection);
+	/* request_set_selection is a client ASKING; set_selection is the
+	 * selection having actually changed, including to nothing when its
+	 * owner exits. Clipboard persistence needs the second. */
+	server.set_selection.notify = seat_set_selection;
+	wl_signal_add(&server.seat->events.set_selection, &server.set_selection);
 
 	/* Add a Unix socket to the Wayland display. */
 	const char *socket = wl_display_add_socket_auto(server.wl_display);
@@ -2455,6 +3349,26 @@ int main(int argc, char *argv[]) {
 		}
 	}
 	spawn(getenv("NOVI_PANEL") ? getenv("NOVI_PANEL") : NOVI_DEFAULT_PANEL);
+	spawn(getenv("NOVI_NOTIFYD") ? getenv("NOVI_NOTIFYD") : NOVI_DEFAULT_NOTIFYD);
+	spawn(getenv("NOVI_BG") ? getenv("NOVI_BG") : NOVI_DEFAULT_BG);
+
+	/* Idle blanking. Armed after the backend is up, so the first
+	 * period is measured from a session that actually exists, and read
+	 * once here so a machine that never sees input still blanks. */
+	mkdir("/run/novi", 0755);
+	server.blank_after = idle_read_timeout();
+	idle_publish(&server);
+	server.idle_timer = wl_event_loop_add_timer(
+		wl_display_get_event_loop(server.wl_display), idle_timer_fire, &server);
+	if (server.idle_timer == NULL) {
+		wlr_log(WLR_ERROR, "could not create the idle timer -- "
+			"the screen will never blank");
+	} else {
+		idle_arm(&server);
+		wlr_log(WLR_INFO, "idle blanking: %d second(s)%s", server.blank_after,
+			server.blank_after > 0 ? "" : " (never)");
+	}
+
 	/* Run the Wayland event loop. This does not return until you exit the
 	 * compositor. Starting the backend rigged up all of the necessary event
 	 * loop configuration to listen to libinput events, DRM events, generate
@@ -2464,6 +3378,7 @@ int main(int argc, char *argv[]) {
 
 	/* Once wl_display_run returns, we destroy all clients then shut down the
 	 * server. */
+	novi_decor_finish();
 	wl_display_destroy_clients(server.wl_display);
 	wlr_scene_node_destroy(&server.scene->tree.node);
 	wlr_xcursor_manager_destroy(server.cursor_mgr);

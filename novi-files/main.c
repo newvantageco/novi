@@ -1,0 +1,2169 @@
+/* ============================================================
+ * novi-files — a file manager for the Novi desktop
+ *
+ * The second first-party application, and it exists because the first
+ * one made it possible: novi-edit opens anything, so this can hand it
+ * any file it does not understand and always have somewhere to go.
+ * That ordering was the whole reason the editor came first.
+ *
+ * A raw xdg-shell client drawing with pixman and fcft, like every
+ * other GUI program here. Keyboard-driven, because that is what the
+ * rest of this desktop is and a file manager that needs the mouse
+ * while the launcher, the editor and the terminal do not would be the
+ * odd one out.
+ *
+ * What it does: list a directory, walk into it, walk back out, and
+ * open a file with novi-edit. Directories first, then files, both
+ * alphabetically. Sizes in human units. Hidden entries off by default,
+ * ^H to show them.
+ *
+ * What it does NOT do, stated rather than left to be discovered:
+ *
+ *   - No copy, move, rename or delete. Destructive operations need a
+ *     confirmation flow, an undo story, and a progress indicator for
+ *     anything larger than instant -- and a file manager that deletes
+ *     without any of those is worse than one that cannot delete. It is
+ *     the next piece of work here, not an oversight.
+ *   - No multi-select, no drag and drop, no mouse at all yet.
+ *   - No "open with" choice: a directory is navigated, and everything
+ *     else goes to novi-edit. When there is an image viewer, this is
+ *     where the dispatch table goes.
+ *   - No file watching. The listing is read when you enter a directory
+ *     and refreshed on ^R, not when something changes underneath you.
+ * ============================================================ */
+
+#define _GNU_SOURCE
+#include <dirent.h>
+#include <errno.h>
+#include <linux/input-event-codes.h>
+#include <poll.h>
+#include <fcntl.h>
+#include <limits.h>
+#include <stdarg.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <time.h>
+#include <unistd.h>
+
+#include <pixman.h>
+#include <wayland-client.h>
+#include <xkbcommon/xkbcommon.h>
+
+#include "icons.h"
+#include "places.h"
+#include "../common/theme.h"
+#include "icon_blit.h"
+#include "text.h"
+#include "xdg-shell-client-protocol.h"
+
+#define WINDOW_WIDTH  860
+#define WINDOW_HEIGHT 600
+
+#define PAD        NOVI_SP_LG
+#define ROW_H      NOVI_ROW_H
+#define ICON_SIZE  16
+#define ICON_GAP   10
+#define HEADER_H   40
+#define STATUS_H   28
+
+/* The places sidebar (RFC 0023). Fixed width: the labels are a
+ * filesystem label or one of two fixed words, all short, and a column
+ * that resized itself as volumes came and went would make the file
+ * list jump under the cursor every time somebody plugged something in.
+ */
+#define SIDEBAR_W       184
+/* Where the file list starts. One name, so the sidebar cannot be made
+ * wider without the list moving with it. */
+#define LIST_X          SIDEBAR_W
+#define SIDEBAR_BG      NOVI_BG_CARD
+#define SIDEBAR_RULE    NOVI_BORDER_SUBTLE
+#define SIDEBAR_SEL_BG  NOVI_ACCENT_SUBTLE
+#define HOVER_BG        NOVI_BG_CARD_RAISED
+#define SIDEBAR_HEAD_H  22
+#define ICON_PLACE_COLOR NOVI_TEXT_SECONDARY
+#define ICON_VOL_COLOR   NOVI_TEXT_SECONDARY
+
+/* A directory with more entries than this lists the first MAX_ENTRIES
+ * and says so in the status bar. The cap exists so that pointing this
+ * at something pathological cannot exhaust memory; it is reported
+ * rather than silently truncating, same rule as novi-edit's. */
+#define MAX_ENTRIES 20000
+#define NAME_MAX_LEN 255
+
+#define BG_COLOR      NOVI_BG_BASE
+#define HEADER_BG     NOVI_BG_PANEL
+#define STATUS_BG     NOVI_BG_PANEL
+#define SEL_BG        NOVI_ACCENT_SUBTLE
+#define SEL_BAR       NOVI_ACCENT
+
+/* Hierarchy by BRIGHTNESS, not by hue.
+ *
+ * The first pass at this made directories accent-coloured -- teal
+ * icon, teal label -- which put the one signal colour in the palette
+ * on every second row, directly beside the accent-tinted selection
+ * that was trying to mean something. §1 says it plainly: accent is a
+ * signal colour, never a large fill. A folder is not a signal.
+ *
+ * So a directory is simply brighter than a file, in both its icon and
+ * its label, and the glyph carries the rest. Accent is left to mean
+ * exactly one thing in this window: this row is selected. */
+#define ICON_DIR_COLOR  NOVI_TEXT_SECONDARY
+#define ICON_FILE_COLOR NOVI_TEXT_MUTED
+
+static const pixman_color_t NAME_PIX    = NOVI_PIX(NOVI_TEXT_SECONDARY);
+static const pixman_color_t DIR_PIX     = NOVI_PIX(NOVI_TEXT_PRIMARY);
+static const pixman_color_t SIZE_PIX    = NOVI_PIX(NOVI_TEXT_MUTED);
+static const pixman_color_t PATH_PIX    = NOVI_PIX(NOVI_TEXT_SECONDARY);
+static const pixman_color_t STATUS_PIX  = NOVI_PIX(NOVI_TEXT_SECONDARY);
+static const pixman_color_t ERROR_PIX   = NOVI_PIX(NOVI_STATUS_ERROR);
+static const pixman_color_t PLACE_PIX   = NOVI_PIX(NOVI_TEXT_SECONDARY);
+static const pixman_color_t PLACE_HEAD_PIX = NOVI_PIX(NOVI_TEXT_MUTED);
+
+/* A prompt takes over the status bar and the keyboard until it is
+ * answered. There is exactly one at a time and it is never nested. */
+enum prompt_kind {
+	PROMPT_NONE = 0,
+	PROMPT_DELETE,   /* y/n */
+	PROMPT_DELETE_TREE, /* type "yes" -- a directory with things in it */
+	PROMPT_RENAME,   /* text */
+	PROMPT_MKDIR,    /* text */
+};
+
+struct entry {
+	char name[NAME_MAX_LEN + 1];
+	bool is_dir;
+	off_t size;
+};
+
+struct novi_files {
+	struct wl_display *display;
+	struct wl_registry *registry;
+	struct wl_compositor *compositor;
+	struct wl_shm *shm;
+	struct wl_seat *seat;
+	struct wl_keyboard *keyboard;
+	struct wl_surface *surface;
+	struct xdg_wm_base *wm_base;
+	struct xdg_surface *xdg_surface;
+	struct xdg_toplevel *xdg_toplevel;
+
+	struct xkb_context *xkb_context;
+	struct xkb_keymap *xkb_keymap;
+	struct xkb_state *xkb_state;
+
+	struct fcft_font *font;
+	struct fcft_font *font_small;
+	struct fcft_font *font_mono;
+
+	uint32_t width, height;
+	bool configured;
+	bool running;
+
+	char cwd[PATH_MAX];
+	struct entry *entries;
+	int nentries;
+	int entries_cap;
+	int sel;
+	int top;
+	bool show_hidden;
+	bool truncated;
+
+	/* The one modal thing this program has. See the comment above
+	 * prompt_open(). */
+	enum prompt_kind prompt;
+	char prompt_target[NAME_MAX_LEN + 1];  /* what the prompt acts on */
+	char prompt_text[NAME_MAX_LEN + 1];    /* what has been typed */
+	int prompt_len;
+	unsigned long tree_files, tree_dirs;   /* what a recursive delete would take */
+	bool tree_capped;                      /* ...and whether that is a floor */
+
+	char status[256];
+	bool status_is_error;
+
+	/* The sidebar. `place_sel` indexes places[]; `focus_sidebar` says
+	 * which of the two lists the arrow keys drive. Tab moves between
+	 * them -- this program has no pointer (it never has), so a panel
+	 * you cannot reach from the keyboard is a panel that is not there.
+	 */
+	struct place places[PLACES_MAX];
+	int nplaces;
+	int place_sel;
+	bool focus_sidebar;
+	int mounts_fd; /* poll()ed for mount-table changes; see places.c */
+
+	/* Where each place's row landed on screen, as of the last
+	 * layout_places(). -1 means it did not fit and is therefore
+	 * neither drawn nor clickable. Cached rather than recomputed in
+	 * the hit-test for the same reason novi-panel caches its taskbar
+	 * pills: geometry worked out in two places is geometry that
+	 * eventually disagrees, and here the disagreement would mean
+	 * clicking eject on the wrong volume. */
+	int place_y[PLACES_MAX];
+	int devices_head_y; /* -1 when there are no volumes */
+
+	/* Pointer. This program was keyboard-only for its whole life;
+	 * everything below is additive and none of the keyboard paths
+	 * changed. */
+	struct wl_pointer *pointer;
+	double ptr_x, ptr_y;
+	bool ptr_in;
+	int hover_place; /* index into places[], or -1 */
+	int hover_row;   /* index into entries[], or -1 */
+	bool hover_eject;
+
+	/* Press-then-release-in-bounds, the same convention novi-panel
+	 * uses: a press that started elsewhere and drags onto a row must
+	 * not activate it. */
+	int press_place;
+	int press_row;
+	bool press_eject;
+
+	/* Double-click detection. wl_pointer.button carries the
+	 * compositor's own millisecond timestamp, which is the right clock
+	 * for this -- a client reading its own monotonic time would be
+	 * measuring when it got round to processing the event, not when
+	 * the button went down. */
+	uint32_t last_click_ms;
+	int last_click_row;
+};
+
+static void set_status(struct novi_files *s, bool err, const char *fmt, ...)
+	__attribute__((format(printf, 3, 4)));
+
+static void set_status(struct novi_files *s, bool err, const char *fmt, ...) {
+	va_list ap;
+	va_start(ap, fmt);
+	vsnprintf(s->status, sizeof(s->status), fmt, ap);
+	va_end(ap);
+	s->status_is_error = err;
+}
+
+/* ── Listing ───────────────────────────────────────────────────── */
+
+/* Directories before files, then case-insensitive by name. This is the
+ * ordering every file manager uses and the reason is not aesthetic:
+ * directories are the navigable things, so they are what the eye is
+ * looking for when the list is long. */
+static int entry_cmp(const void *a, const void *b) {
+	const struct entry *x = a, *y = b;
+	if (x->is_dir != y->is_dir) {
+		return x->is_dir ? -1 : 1;
+	}
+	return strcasecmp(x->name, y->name);
+}
+
+static bool entries_reserve(struct novi_files *s, int want) {
+	if (want <= s->entries_cap) {
+		return true;
+	}
+	int cap = s->entries_cap ? s->entries_cap * 2 : 128;
+	while (cap < want) {
+		cap *= 2;
+	}
+	struct entry *grown = realloc(s->entries, (size_t)cap * sizeof(*grown));
+	if (grown == NULL) {
+		return false;
+	}
+	s->entries = grown;
+	s->entries_cap = cap;
+	return true;
+}
+
+static void read_dir(struct novi_files *s) {
+	s->nentries = 0;
+	s->truncated = false;
+
+	DIR *d = opendir(s->cwd);
+	if (d == NULL) {
+		set_status(s, true, "cannot open: %s", strerror(errno));
+		return;
+	}
+
+	struct dirent *de;
+	while ((de = readdir(d)) != NULL) {
+		if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) {
+			continue;
+		}
+		if (!s->show_hidden && de->d_name[0] == '.') {
+			continue;
+		}
+		if (s->nentries >= MAX_ENTRIES) {
+			s->truncated = true;
+			break;
+		}
+		if (!entries_reserve(s, s->nentries + 1)) {
+			s->truncated = true;
+			break;
+		}
+
+		struct entry *e = &s->entries[s->nentries];
+		snprintf(e->name, sizeof(e->name), "%s", de->d_name);
+
+		/* stat() rather than trusting d_type: it is not portable
+		 * across filesystems (some return DT_UNKNOWN for everything),
+		 * and a symlink to a directory should navigate like a
+		 * directory, which means following it -- which d_type does
+		 * not do. A stat that fails leaves the entry listed as a file
+		 * rather than hiding it; a broken symlink is still something
+		 * you want to see. */
+		char full[PATH_MAX];
+		int n = snprintf(full, sizeof(full), "%s/%s", s->cwd, de->d_name);
+		struct stat st;
+		if (n > 0 && (size_t)n < sizeof(full) && stat(full, &st) == 0) {
+			e->is_dir = S_ISDIR(st.st_mode);
+			e->size = st.st_size;
+		} else {
+			e->is_dir = false;
+			e->size = 0;
+		}
+		s->nentries++;
+	}
+	closedir(d);
+
+	qsort(s->entries, (size_t)s->nentries, sizeof(*s->entries), entry_cmp);
+	s->sel = 0;
+	s->top = 0;
+	if (s->truncated) {
+		set_status(s, true, "listing truncated at %d entries", MAX_ENTRIES);
+	}
+}
+
+static void human_size(off_t n, char *out, size_t outlen) {
+	const char *unit[] = {"B", "K", "M", "G", "T"};
+	int i = 0;
+	double v = (double)n;
+	while (v >= 1024.0 && i < 4) {
+		v /= 1024.0;
+		i++;
+	}
+	if (i == 0) {
+		snprintf(out, outlen, "%lld B", (long long)n);
+	} else {
+		snprintf(out, outlen, "%.1f %s", v, unit[i]);
+	}
+}
+
+/* ── Navigation ────────────────────────────────────────────────── */
+
+static void go_to(struct novi_files *s, const char *path) {
+	char resolved[PATH_MAX];
+	if (realpath(path, resolved) == NULL) {
+		set_status(s, true, "cannot enter: %s", strerror(errno));
+		return;
+	}
+	/* Confirm it is a directory we can actually list before committing
+	 * to it -- otherwise a permission error leaves the view showing one
+	 * path and the title showing another. */
+	DIR *probe = opendir(resolved);
+	if (probe == NULL) {
+		set_status(s, true, "cannot enter: %s", strerror(errno));
+		return;
+	}
+	closedir(probe);
+
+	snprintf(s->cwd, sizeof(s->cwd), "%s", resolved);
+	s->status[0] = '\0';
+	read_dir(s);
+}
+
+static void go_up(struct novi_files *s) {
+	if (strcmp(s->cwd, "/") == 0) {
+		return;
+	}
+	/* Cut the last component off rather than appending "/..": the
+	 * append can only ever get longer, and at a PATH_MAX cwd it
+	 * truncates -- which does not fail, it just silently names a
+	 * different directory to go to. Cutting can only get shorter.
+	 * (This is also the -Wformat-truncation the build had been
+	 * printing, correctly, and which had been read as noise.) */
+	char parent[PATH_MAX];
+	snprintf(parent, sizeof(parent), "%s", s->cwd);
+	char *cut = strrchr(parent, '/');
+	if (cut == parent) {
+		parent[1] = '\0';        /* "/foo" -> "/" */
+	} else if (cut != NULL) {
+		*cut = '\0';
+	}
+	/* Remember where we came from so the cursor lands on it, which is
+	 * what makes walking back out of a tree feel like undo rather than
+	 * like starting over. */
+	const char *leaf = strrchr(s->cwd, '/');
+	char was[NAME_MAX_LEN + 1] = {0};
+	if (leaf != NULL && leaf[1] != '\0') {
+		snprintf(was, sizeof(was), "%s", leaf + 1);
+	}
+	go_to(s, parent);
+	if (was[0] != '\0') {
+		for (int i = 0; i < s->nentries; i++) {
+			if (strcmp(s->entries[i].name, was) == 0) {
+				s->sel = i;
+				break;
+			}
+		}
+	}
+}
+
+/* Dispatch. This was a single target (the editor) until novi-view
+ * existed; now there are two, so there is a table.
+ *
+ * By extension, not by content. Sniffing the file's magic bytes would
+ * be more correct and is what novi-view itself does -- but that means
+ * opening and reading every file just to draw a list, and the list is
+ * drawn far more often than anything is opened. The cost of being
+ * wrong is bounded and cheap: novi-view decodes before it opens a
+ * window, so a .png that is not one prints a line and exits rather
+ * than flashing up an empty window. The editor is the fallback for
+ * everything else, which is why it had to be written first. */
+static const char *EXT_IMAGE[] = {".png", ".bmp", ".ppm", ".pgm", ".pnm", NULL};
+
+static bool has_ext(const char *name, const char *const *exts) {
+	const char *dot = strrchr(name, '.');
+	if (dot == NULL) {
+		return false;
+	}
+	for (int i = 0; exts[i] != NULL; i++) {
+		if (strcasecmp(dot, exts[i]) == 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static void open_selected(struct novi_files *s) {
+	if (s->nentries == 0) {
+		return;
+	}
+	struct entry *e = &s->entries[s->sel];
+	char full[PATH_MAX];
+	int n = snprintf(full, sizeof(full), "%s/%s", s->cwd, e->name);
+	if (n < 0 || (size_t)n >= sizeof(full)) {
+		set_status(s, true, "path too long");
+		return;
+	}
+
+	if (e->is_dir) {
+		go_to(s, full);
+		return;
+	}
+
+	pid_t pid = fork();
+	if (pid < 0) {
+		set_status(s, true, "fork failed: %s", strerror(errno));
+		return;
+	}
+	const char *app = has_ext(e->name, EXT_IMAGE) ? "novi-view" : "novi-edit";
+	if (pid == 0) {
+		/* Its own session, so it outlives this window being closed --
+		 * the same reasoning novi-shell's spawn() documents. */
+		setsid();
+		execlp(app, app, full, (char *)NULL);
+		_exit(127);
+	}
+	set_status(s, false, "opened %s in %s", e->name, app);
+}
+
+/* ── File operations ───────────────────────────────────────────── */
+
+/* Defined with the rest of the view code below; an operation has to put
+ * the cursor somewhere sensible when it finishes. */
+static void scroll_to_sel(struct novi_files *s);
+
+/* Defined with the other prompts; do_delete() escalates to it when what
+ * it was asked to remove turns out to have things inside. */
+static void prompt_open_tree(struct novi_files *s, const char *name);
+
+
+/* This program can now destroy things, so what it will and will not do
+ * is worth stating plainly:
+ *
+ *   - It deletes a file, and it deletes an EMPTY directory. It refuses
+ *     a directory with anything in it and says so. There is no trash on
+ *     this system and no undo in this program, so a recursive delete
+ *     behind a single keypress is one mis-aimed cursor away from
+ *     unrecoverable -- and a terminal is one keystroke away for anyone
+ *     who means it. Recursive delete needs a confirmation that shows
+ *     what is about to go, which is real work and is not this change.
+ *   - It renames within the current directory only, and refuses a name
+ *     that already exists rather than silently replacing it -- which is
+ *     what a bare rename(2) would do.
+ *   - Every one of them asks first, or types first. Nothing here
+ *     happens on a single keypress.
+ *
+ * Same argument as novi-gpt writing exactly one partition layout: a
+ * tool that can express every operation is a tool that can express the
+ * wrong one.
+ */
+
+static bool child_path(struct novi_files *s, const char *name,
+		char *out, size_t outlen) {
+	int n = snprintf(out, outlen, "%s/%s", s->cwd, name);
+	if (n < 0 || (size_t)n >= outlen) {
+		set_status(s, true, "path too long");
+		return false;
+	}
+	return true;
+}
+
+/* A name typed into a prompt names something in THIS directory and
+ * nothing else -- no traversal, no re-pointing at the parent. */
+static bool name_is_sane(struct novi_files *s, const char *n) {
+	if (n[0] == '\0') {
+		set_status(s, true, "no name given");
+		return false;
+	}
+	if (strchr(n, '/') != NULL) {
+		set_status(s, true, "a name cannot contain '/'");
+		return false;
+	}
+	if (strcmp(n, ".") == 0 || strcmp(n, "..") == 0) {
+		set_status(s, true, "'%s' is not a name", n);
+		return false;
+	}
+	return true;
+}
+
+/* Re-read the directory and put the cursor back on `name` if it is
+ * still there, else on `fallback`. read_dir() resets the selection to
+ * the top, which is right when you navigate somewhere and wrong after
+ * you rename something: the thing you just acted on is where you were
+ * looking. */
+static void reload_selecting(struct novi_files *s, const char *name, int fallback) {
+	read_dir(s);
+	int want = -1;
+	if (name != NULL) {
+		for (int i = 0; i < s->nentries; i++) {
+			if (strcmp(s->entries[i].name, name) == 0) {
+				want = i;
+				break;
+			}
+		}
+	}
+	if (want < 0) {
+		want = fallback;
+	}
+	if (want >= s->nentries) {
+		want = s->nentries - 1;
+	}
+	s->sel = want > 0 ? want : 0;
+	scroll_to_sel(s);
+}
+
+/* Depth is bounded because this recurses on the C stack, and a
+ * directory tree is attacker-controlled input as much as anything else
+ * on a filesystem is -- a deep enough one would otherwise be a stack
+ * overflow rather than an error message. Anything past this reports a
+ * failure and deletes nothing. */
+#define TREE_MAX_DEPTH 64
+
+/* And bound the width. count_tree() runs synchronously on the Wayland
+ * event loop, on a keypress, BEFORE the user has agreed to anything --
+ * so on a big enough directory, pressing Delete would freeze the window
+ * while it walked. Past this many entries the walk stops and the
+ * question says "over N", which is still true and still enough to
+ * decide on. The removal itself is allowed to take as long as it takes:
+ * by then it has been asked for. */
+#define TREE_COUNT_CAP 20000
+
+/* Everything under `path`, not counting `path` itself.
+ *
+ * Returns false if the tree could not be walked -- unreadable, or too
+ * deep -- in which case the counts are meaningless and the caller must
+ * not offer to delete it, because a count you could not finish is
+ * exactly the count you must not show somebody as "this is what you are
+ * about to lose".
+ *
+ * Stopping at TREE_COUNT_CAP is NOT that. It returns true with a count
+ * that is a floor rather than a total, and the caller says "over" in
+ * front of it -- a truthful lower bound is a fine thing to decide on,
+ * where a wrong total is not. */
+static bool count_tree(const char *path, int depth,
+		unsigned long *files, unsigned long *dirs) {
+	if (depth > TREE_MAX_DEPTH) {
+		return false;
+	}
+	if (*files + *dirs >= TREE_COUNT_CAP) {
+		return true;   /* capped, not failed -- see TREE_COUNT_CAP */
+	}
+	DIR *d = opendir(path);
+	if (d == NULL) {
+		return false;
+	}
+	bool ok = true;
+	struct dirent *de;
+	while ((de = readdir(d)) != NULL) {
+		if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) {
+			continue;
+		}
+		char sub[PATH_MAX];
+		int n = snprintf(sub, sizeof(sub), "%s/%s", path, de->d_name);
+		if (n < 0 || (size_t)n >= sizeof(sub)) {
+			ok = false;
+			continue;
+		}
+		struct stat st;
+		if (lstat(sub, &st) != 0) {
+			ok = false;
+			continue;
+		}
+		/* lstat, so a symlink to a directory counts as one file and is
+		 * never walked into. Following one would count -- and later
+		 * delete -- things outside the tree entirely. */
+		if (S_ISDIR(st.st_mode)) {
+			(*dirs)++;
+			if (!count_tree(sub, depth + 1, files, dirs)) {
+				ok = false;
+			}
+		} else {
+			(*files)++;
+		}
+		if (*files + *dirs >= TREE_COUNT_CAP) {
+			break;
+		}
+	}
+	closedir(d);
+	return ok;
+}
+
+/* Remove `path` and everything under it. Same lstat rule: a symlink is
+ * unlinked, never followed. */
+static bool remove_tree(const char *path, int depth) {
+	if (depth > TREE_MAX_DEPTH) {
+		return false;
+	}
+	DIR *d = opendir(path);
+	if (d == NULL) {
+		return false;
+	}
+	bool ok = true;
+	struct dirent *de;
+	while ((de = readdir(d)) != NULL) {
+		if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) {
+			continue;
+		}
+		char sub[PATH_MAX];
+		int n = snprintf(sub, sizeof(sub), "%s/%s", path, de->d_name);
+		if (n < 0 || (size_t)n >= sizeof(sub)) {
+			ok = false;
+			continue;
+		}
+		struct stat st;
+		if (lstat(sub, &st) != 0) {
+			ok = false;
+			continue;
+		}
+		if (S_ISDIR(st.st_mode)) {
+			if (!remove_tree(sub, depth + 1)) {
+				ok = false;
+			}
+		} else if (unlink(sub) != 0) {
+			ok = false;
+		}
+	}
+	closedir(d);
+	if (rmdir(path) != 0) {
+		ok = false;
+	}
+	return ok;
+}
+
+static void do_delete(struct novi_files *s, const char *name) {
+	char full[PATH_MAX];
+	if (!child_path(s, name, full, sizeof(full))) {
+		return;
+	}
+
+	/* lstat, not stat: a symlink pointing at a directory is a link, and
+	 * deleting it means unlink(2) on the link -- never rmdir(2) on
+	 * whatever it happens to point at. */
+	struct stat st;
+	if (lstat(full, &st) != 0) {
+		set_status(s, true, "cannot delete: %s", strerror(errno));
+		return;
+	}
+
+	int keep = s->sel;
+	if (S_ISDIR(st.st_mode)) {
+		if (rmdir(full) != 0) {
+			if (errno == ENOTEMPTY || errno == EEXIST) {
+				/* prompt_open() normally catches this and asks the
+				 * recursive question instead, so reaching here means
+				 * something landed in the directory between the
+				 * question and the answer. Ask again, with the count
+				 * as it is now. */
+				prompt_open_tree(s, name);
+			} else {
+				set_status(s, true, "cannot delete: %s", strerror(errno));
+			}
+			return;
+		}
+	} else if (unlink(full) != 0) {
+		set_status(s, true, "cannot delete: %s", strerror(errno));
+		return;
+	}
+
+	reload_selecting(s, NULL, keep);
+	set_status(s, false, "deleted %s", name);
+}
+
+/* The recursive one. Reached only from the typed confirmation. */
+static void do_delete_tree(struct novi_files *s, const char *name) {
+	char full[PATH_MAX];
+	if (!child_path(s, name, full, sizeof(full))) {
+		return;
+	}
+	struct stat st;
+	if (lstat(full, &st) != 0 || !S_ISDIR(st.st_mode)) {
+		set_status(s, true, "'%s' is not a directory any more", name);
+		return;
+	}
+	int keep = s->sel;
+	bool ok = remove_tree(full, 0);
+	reload_selecting(s, ok ? NULL : name, keep);
+	if (ok) {
+		set_status(s, false, "deleted %s and everything in it", name);
+	} else {
+		/* Partial failure is the honest report. Some of it is gone and
+		 * some of it is not, and saying "deleted" would be a lie about
+		 * a destructive operation. */
+		set_status(s, true, "'%s' was only partly deleted -- check it", name);
+	}
+}
+
+static void do_rename(struct novi_files *s, const char *from, const char *to) {
+	if (!name_is_sane(s, to)) {
+		return;
+	}
+	if (strcmp(from, to) == 0) {
+		set_status(s, false, "unchanged");
+		return;
+	}
+
+	char src[PATH_MAX], dst[PATH_MAX];
+	if (!child_path(s, from, src, sizeof(src)) ||
+	    !child_path(s, to, dst, sizeof(dst))) {
+		return;
+	}
+
+	/* rename(2) replaces an existing target without a word. Refuse
+	 * instead. This is a check-then-act and something could appear in
+	 * the gap; on a single-user file manager that race is not worth
+	 * renameat2(RENAME_NOREPLACE), which is Linux-specific and which
+	 * musl only wraps on new-enough kernels. Losing a file to a silent
+	 * clobber is the failure that actually happens. */
+	struct stat st;
+	if (lstat(dst, &st) == 0) {
+		set_status(s, true, "'%s' already exists", to);
+		return;
+	}
+
+	if (rename(src, dst) != 0) {
+		set_status(s, true, "cannot rename: %s", strerror(errno));
+		return;
+	}
+	reload_selecting(s, to, s->sel);
+	set_status(s, false, "renamed to %s", to);
+}
+
+static void do_mkdir(struct novi_files *s, const char *name) {
+	if (!name_is_sane(s, name)) {
+		return;
+	}
+	char full[PATH_MAX];
+	if (!child_path(s, name, full, sizeof(full))) {
+		return;
+	}
+	/* 0777 and let the process umask decide, the way mkdir(1) does --
+	 * hardcoding 0755 here would ignore a umask someone set on purpose. */
+	if (mkdir(full, 0777) != 0) {
+		set_status(s, true, "cannot create: %s", strerror(errno));
+		return;
+	}
+	reload_selecting(s, name, s->sel);
+	set_status(s, false, "created %s", name);
+}
+
+/* ── Prompts ───────────────────────────────────────────────────── */
+
+static void prompt_close(struct novi_files *s) {
+	s->prompt = PROMPT_NONE;
+	s->prompt_len = 0;
+	s->prompt_text[0] = '\0';
+	s->prompt_target[0] = '\0';
+}
+
+/* Does this directory have anything in it? Cheaper than counting, and
+ * it is the only question prompt_open() needs to pick which of the two
+ * delete confirmations to ask. */
+static bool dir_is_nonempty(const char *path) {
+	DIR *d = opendir(path);
+	if (d == NULL) {
+		return false;
+	}
+	bool any = false;
+	struct dirent *de;
+	while ((de = readdir(d)) != NULL) {
+		if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) {
+			continue;
+		}
+		any = true;
+		break;
+	}
+	closedir(d);
+	return any;
+}
+
+static void prompt_open(struct novi_files *s, enum prompt_kind kind) {
+	if (kind != PROMPT_MKDIR && s->nentries == 0) {
+		set_status(s, true, "nothing selected");
+		return;
+	}
+
+	/* Ask the right question the first time. Being asked "y / n", saying
+	 * y, and then being asked something else is a bait-and-switch --
+	 * the second question is the one that mattered, and it should have
+	 * been the only one. lstat, so a symlink to a directory is a file
+	 * here as it is everywhere else in this program. */
+	if (kind == PROMPT_DELETE) {
+		char full[PATH_MAX];
+		struct stat st;
+		const char *sel = s->entries[s->sel].name;
+		if (child_path(s, sel, full, sizeof(full)) &&
+		    lstat(full, &st) == 0 && S_ISDIR(st.st_mode) &&
+		    dir_is_nonempty(full)) {
+			prompt_open_tree(s, sel);
+			return;
+		}
+	}
+	prompt_close(s);
+	s->status[0] = '\0';
+	s->prompt = kind;
+
+	/* The target is captured now, by name. The prompt then acts on that
+	 * name whatever the selection does in the meantime -- a confirmation
+	 * that reads the selection back at commit time is a confirmation for
+	 * the wrong file waiting to happen. */
+	if (kind != PROMPT_MKDIR) {
+		snprintf(s->prompt_target, sizeof(s->prompt_target), "%s",
+			s->entries[s->sel].name);
+	}
+	if (kind == PROMPT_RENAME) {
+		snprintf(s->prompt_text, sizeof(s->prompt_text), "%s", s->prompt_target);
+		s->prompt_len = (int)strlen(s->prompt_text);
+	}
+}
+
+/* The escalation: a directory with things in it. `y` is the right
+ * amount of friction for one file and the wrong amount for a tree, so
+ * this one shows what is inside and asks for a typed word. Three lower
+ * case letters is not a hoop to jump through -- it is just impossible
+ * to hit by accident, which `y` next to `t` on the keyboard is not.
+ *
+ * The count is computed before the question is asked, and a count that
+ * could not be finished refuses the operation instead of guessing: a
+ * number you could not actually total is exactly the number you must
+ * not show somebody as what they are about to lose. */
+static void prompt_open_tree(struct novi_files *s, const char *name) {
+	char full[PATH_MAX];
+	if (!child_path(s, name, full, sizeof(full))) {
+		return;
+	}
+	unsigned long files = 0, dirs = 0;
+	if (!count_tree(full, 0, &files, &dirs)) {
+		set_status(s, true, "cannot read all of '%s' -- not deleting it", name);
+		return;
+	}
+	prompt_close(s);
+	s->status[0] = '\0';
+	s->prompt = PROMPT_DELETE_TREE;
+	s->tree_files = files;
+	s->tree_dirs = dirs;
+	s->tree_capped = (files + dirs >= TREE_COUNT_CAP);
+	snprintf(s->prompt_target, sizeof(s->prompt_target), "%s", name);
+}
+
+/* The prompt's own text, for the status bar. */
+static void prompt_line(const struct novi_files *s, char *out, size_t outlen) {
+	switch (s->prompt) {
+	case PROMPT_DELETE:
+		snprintf(out, outlen, "delete '%s'?   y / n", s->prompt_target);
+		break;
+	case PROMPT_RENAME:
+		snprintf(out, outlen, "rename '%s' to: %s", s->prompt_target, s->prompt_text);
+		break;
+	case PROMPT_MKDIR:
+		snprintf(out, outlen, "new folder: %s", s->prompt_text);
+		break;
+	case PROMPT_DELETE_TREE:
+		snprintf(out, outlen,
+			"delete '%s' and %s%lu file%s in %lu folder%s?   type yes: %s",
+			s->prompt_target,
+			s->tree_capped ? "over " : "",
+			s->tree_files, s->tree_files == 1 ? "" : "s",
+			s->tree_dirs + 1, s->tree_dirs == 0 ? "" : "s",
+			s->prompt_text);
+		break;
+	case PROMPT_NONE:
+		out[0] = '\0';
+		break;
+	}
+}
+
+/* Backspace one whole UTF-8 character, not one byte -- a byte would
+ * leave a truncated sequence in the name being typed. */
+static void prompt_backspace(struct novi_files *s) {
+	int i = s->prompt_len;
+	while (i > 0) {
+		i--;
+		if (((unsigned char)s->prompt_text[i] & 0xc0) != 0x80) {
+			break;
+		}
+	}
+	s->prompt_len = i;
+	s->prompt_text[i] = '\0';
+}
+
+static void prompt_insert(struct novi_files *s, const char *utf8) {
+	size_t add = strlen(utf8);
+	if ((size_t)s->prompt_len + add >= sizeof(s->prompt_text)) {
+		return;
+	}
+	memcpy(s->prompt_text + s->prompt_len, utf8, add + 1);
+	s->prompt_len += (int)add;
+}
+
+static void prompt_commit(struct novi_files *s) {
+	enum prompt_kind kind = s->prompt;
+	char target[NAME_MAX_LEN + 1], text[NAME_MAX_LEN + 1];
+	snprintf(target, sizeof(target), "%s", s->prompt_target);
+	snprintf(text, sizeof(text), "%s", s->prompt_text);
+	prompt_close(s);
+
+	switch (kind) {
+	case PROMPT_DELETE: do_delete(s, target);        break;
+	case PROMPT_DELETE_TREE:
+		if (strcmp(text, "yes") == 0) {
+			do_delete_tree(s, target);
+		} else {
+			set_status(s, false, "not deleted");
+		}
+		break;
+	case PROMPT_RENAME: do_rename(s, target, text);  break;
+	case PROMPT_MKDIR:  do_mkdir(s, text);           break;
+	case PROMPT_NONE:                                break;
+	}
+}
+
+/* Returns true if the prompt consumed the key. */
+static bool prompt_key(struct novi_files *s, xkb_keysym_t sym, const char *text) {
+	if (s->prompt == PROMPT_NONE) {
+		return false;
+	}
+	if (sym == XKB_KEY_Escape) {
+		prompt_close(s);
+		set_status(s, false, "cancelled");
+		return true;
+	}
+
+	if (s->prompt == PROMPT_DELETE) {
+		/* Deliberately not Enter: Enter is the key people press to make
+		 * a dialog go away, and this one destroys something. Say yes on
+		 * purpose or say nothing at all. */
+		if (sym == XKB_KEY_y || sym == XKB_KEY_Y) {
+			prompt_commit(s);
+		} else if (sym == XKB_KEY_n || sym == XKB_KEY_N) {
+			prompt_close(s);
+			set_status(s, false, "cancelled");
+		}
+		return true;
+	}
+
+	switch (sym) {
+	case XKB_KEY_Return: case XKB_KEY_KP_Enter:
+		prompt_commit(s);
+		return true;
+	case XKB_KEY_BackSpace:
+		prompt_backspace(s);
+		return true;
+	default:
+		break;
+	}
+	if (text != NULL) {
+		prompt_insert(s, text);
+	}
+	return true;
+}
+
+/* ── Rendering ─────────────────────────────────────────────────── */
+
+static void draw_rect(uint32_t *px, uint32_t stride_px, uint32_t buf_w,
+		uint32_t buf_h, int x, int y, int w, int h, uint32_t color) {
+	for (int row = y; row < y + h && row < (int)buf_h; row++) {
+		if (row < 0) {
+			continue;
+		}
+		for (int col = x; col < x + w && col < (int)buf_w; col++) {
+			if (col < 0) {
+				continue;
+			}
+			px[row * (int)stride_px + col] = color;
+		}
+	}
+}
+
+static int visible_rows(const struct novi_files *s) {
+	int h = (int)s->height - HEADER_H - STATUS_H;
+	return h > 0 ? h / ROW_H : 1;
+}
+
+static void scroll_to_sel(struct novi_files *s) {
+	int rows = visible_rows(s);
+	if (rows < 1) {
+		rows = 1;
+	}
+	if (s->sel < s->top) {
+		s->top = s->sel;
+	} else if (s->sel >= s->top + rows) {
+		s->top = s->sel - rows + 1;
+	}
+	if (s->top < 0) {
+		s->top = 0;
+	}
+}
+
+/* ── The places sidebar ────────────────────────────────────────── */
+
+/* Recomputes where every place's row lands. Called at the top of
+ * render(); the pointer hit-test reads the cached `place_y` rather
+ * than working it out again. Same single-source-of-truth arrangement
+ * as novi-panel's layout_taskbar(), and for a sharper reason here:
+ * two copies of this arithmetic that disagreed by one row would mean
+ * clicking eject on a volume you were not pointing at.
+ *
+ * A place that does not fit gets y = -1, and nothing draws or
+ * hit-tests it. */
+static void layout_places(struct novi_files *s) {
+	int side_bot = (int)s->height - STATUS_H;
+	int y = HEADER_H + 6 + SIDEBAR_HEAD_H; /* past the PLACES heading */
+	bool devices_seen = false;
+
+	s->devices_head_y = -1;
+	for (int i = 0; i < PLACES_MAX; i++) {
+		s->place_y[i] = -1;
+	}
+
+	for (int i = 0; i < s->nplaces; i++) {
+		if (s->places[i].kind == PLACE_VOLUME && !devices_seen) {
+			devices_seen = true;
+			y += 6;
+			if (y + SIDEBAR_HEAD_H + ROW_H > side_bot) {
+				return;
+			}
+			s->devices_head_y = y;
+			y += SIDEBAR_HEAD_H;
+		}
+		if (y + ROW_H > side_bot) {
+			return;
+		}
+		s->place_y[i] = y;
+		y += ROW_H;
+	}
+}
+
+
+/* Re-read the mount table and keep the selection pointing at the same
+ * PLACE it was pointing at, not at the same index. A stick unmounting
+ * shifts everything below it up by one, and an index-preserving
+ * refresh would silently move the cursor to a different volume --
+ * which matters, because the next thing the cursor does might be
+ * ejecting it. Matched on the path, which is unique by construction:
+ * it is a mount point. */
+static void places_refresh(struct novi_files *s) {
+	char was[PATH_MAX];
+	was[0] = '\0';
+	if (s->place_sel >= 0 && s->place_sel < s->nplaces) {
+		snprintf(was, sizeof(was), "%s", s->places[s->place_sel].path);
+	}
+
+	s->nplaces = novi_places_read(s->places, PLACES_MAX);
+
+	s->place_sel = 0;
+	if (was[0] != '\0') {
+		for (int i = 0; i < s->nplaces; i++) {
+			if (strcmp(s->places[i].path, was) == 0) {
+				s->place_sel = i;
+				return;
+			}
+		}
+		/* The place it was on is gone. Focus follows it out: staying
+		 * in a sidebar whose selected row just vanished puts the
+		 * cursor on whatever moved up into that slot, which is the
+		 * one thing this function exists to prevent. */
+		if (s->focus_sidebar) {
+			s->focus_sidebar = false;
+		}
+	}
+}
+
+/* The volume under the cursor was unmounted out from under this
+ * process, or by it. Either way the current directory may no longer
+ * exist -- so check, and leave rather than sit in a dead path.
+ * `access` on the cwd is the honest test: a lazily-detached mount
+ * leaves the path resolvable-but-empty on some kernels and gone on
+ * others, and this program should behave the same either way. */
+static void leave_if_gone(struct novi_files *s) {
+	if (access(s->cwd, F_OK) == 0) {
+		return;
+	}
+	const char *home = getenv("HOME");
+	go_to(s, (home != NULL && home[0] == '/') ? home : "/");
+	set_status(s, false, "that volume went away");
+}
+
+static void do_eject(struct novi_files *s) {
+	if (s->place_sel < 0 || s->place_sel >= s->nplaces) {
+		return;
+	}
+	struct place *p = &s->places[s->place_sel];
+	if (p->kind != PLACE_VOLUME) {
+		set_status(s, true, "%s is not a removable volume", p->label);
+		return;
+	}
+
+    /* Out of the volume BEFORE ejecting it, if that is where we are.
+     * novi-eject refuses a busy mount, and this program's own cwd is
+     * what would make it busy -- so a file manager sitting on a stick
+     * could never eject it and would report the user's own window as
+     * the thing in the way. */
+	if (strncmp(s->cwd, p->path, strlen(p->path)) == 0) {
+		const char *home = getenv("HOME");
+		go_to(s, (home != NULL && home[0] == '/') ? home : "/");
+	}
+
+	/* Synchronous, and that is a real decision rather than a shortcut.
+	 * novi-eject is a sync and an unmount: fast on an idle volume,
+	 * seconds on one with writes still in flight -- and during those
+	 * seconds this window is frozen, which is the trap RFC 0017
+	 * documents. It is accepted here because the alternative is worse:
+	 * an asynchronous eject would have to report its result into a
+	 * sidebar whose contents may have changed by the time it lands,
+	 * and "did my stick actually eject" is exactly the question a
+	 * person needs answered before they pull it out. A frozen window
+	 * for two seconds says "working"; a silent one says nothing.
+	 */
+	char cmd[PATH_MAX + 64];
+	snprintf(cmd, sizeof(cmd), "novi-eject '%s' >/dev/null 2>&1", p->path);
+	int rc = system(cmd);
+
+	if (rc == 0) {
+		set_status(s, false, "ejected %s -- safe to unplug", p->label);
+	} else {
+		/* The overwhelmingly common failure, and the only one worth
+		 * naming: something still has a file open on it. */
+		set_status(s, true, "%s is busy -- close what is using it", p->label);
+	}
+	places_refresh(s);
+	leave_if_gone(s);
+}
+
+/* ── Pointer ───────────────────────────────────────────────────────
+ *
+ * novi-files was keyboard-only for its whole life, which was
+ * defensible while it was a list and a path bar and stopped being so
+ * the moment it grew a sidebar with an eject button in it. Everything
+ * here is additive: no keyboard path changed, and the program is still
+ * completely usable with no pointer at all.
+ */
+
+/* Which place is under (x, y), or -1. `on_eject` says whether the
+ * pointer is over that row's eject glyph rather than its label --
+ * a second answer from the same hit-test, because computing the row
+ * twice is how the two end up disagreeing about which volume. */
+static int place_at(const struct novi_files *s, double x, double y,
+		bool *on_eject) {
+	if (on_eject != NULL) {
+		*on_eject = false;
+	}
+	if (x < 0 || x >= SIDEBAR_W) {
+		return -1;
+	}
+	for (int i = 0; i < s->nplaces; i++) {
+		int ry = s->place_y[i];
+		if (ry < 0 || y < ry || y >= ry + ROW_H) {
+			continue;
+		}
+		if (on_eject != NULL && s->places[i].kind == PLACE_VOLUME &&
+				x >= SIDEBAR_W - PAD - ICON_SIZE) {
+			*on_eject = true;
+		}
+		return i;
+	}
+	return -1;
+}
+
+/* Which entry is under (x, y), or -1. The list scrolls, so this is
+ * `top` plus the row offset -- and it must reject a y past the last
+ * entry, or clicking the empty space below a short listing would
+ * select whatever index that arithmetic produced. */
+static int row_at(const struct novi_files *s, double x, double y) {
+	if (x < LIST_X || y < HEADER_H || y >= (int)s->height - STATUS_H) {
+		return -1;
+	}
+	int r = (int)((y - HEADER_H) / ROW_H);
+	int i = s->top + r;
+	if (r < 0 || i < 0 || i >= s->nentries) {
+		return -1;
+	}
+	return i;
+}
+
+static void render(struct novi_files *s, uint32_t *px, uint32_t stride_px) {
+	uint32_t w = s->width, h = s->height;
+	pixman_image_t *dest = pixman_image_create_bits(PIXMAN_x8r8g8b8,
+		(int)w, (int)h, px, (int)(stride_px * 4));
+
+	draw_rect(px, stride_px, w, h, 0, 0, (int)w, (int)h, BG_COLOR);
+
+	/* Header: the current path. */
+	draw_rect(px, stride_px, w, h, 0, 0, (int)w, HEADER_H, HEADER_BG);
+	int hbase = (HEADER_H - s->font_mono->height) / 2 + s->font_mono->ascent;
+	novi_text_draw(dest, s->font_mono, PAD, hbase, s->cwd, PATH_PIX);
+
+	/* ── Sidebar ───────────────────────────────────────────────── */
+	layout_places(s);
+	int side_top = HEADER_H;
+	int side_bot = (int)h - STATUS_H;
+	draw_rect(px, stride_px, w, h, 0, side_top, SIDEBAR_W,
+		side_bot - side_top, SIDEBAR_BG);
+	draw_rect(px, stride_px, w, h, SIDEBAR_W - 1, side_top, 1,
+		side_bot - side_top, SIDEBAR_RULE);
+
+	{
+		int hb = (SIDEBAR_HEAD_H - s->font_small->height) / 2 +
+			s->font_small->ascent;
+		novi_text_draw(dest, s->font_small, PAD, side_top + 6 + hb,
+			"PLACES", PLACE_HEAD_PIX);
+		/* One heading, present only when there is something under it,
+		 * so a machine with nothing plugged in has no empty DEVICES
+		 * section sitting there looking broken. */
+		if (s->devices_head_y >= 0) {
+			novi_text_draw(dest, s->font_small, PAD,
+				s->devices_head_y + hb, "DEVICES", PLACE_HEAD_PIX);
+		}
+
+		for (int i = 0; i < s->nplaces; i++) {
+			struct place *p = &s->places[i];
+			int y = s->place_y[i];
+			if (y < 0) {
+				continue;
+			}
+
+			bool selected = s->focus_sidebar && i == s->place_sel;
+			bool current = strcmp(p->path, s->cwd) == 0;
+			if (selected) {
+				draw_rect(px, stride_px, w, h, 0, y, SIDEBAR_W - 1, ROW_H,
+					SIDEBAR_SEL_BG);
+				draw_rect(px, stride_px, w, h, 0, y, 3, ROW_H, SEL_BAR);
+			} else if (i == s->hover_place) {
+				draw_rect(px, stride_px, w, h, 0, y, SIDEBAR_W - 1, ROW_H,
+					HOVER_BG);
+				if (current) {
+					draw_rect(px, stride_px, w, h, 0, y, 3, ROW_H, SEL_BAR);
+				}
+			} else if (current) {
+				/* Where you actually are, marked even when the
+				 * keyboard is over in the file list. Without this the
+				 * sidebar stops telling you anything the moment you
+				 * Tab away from it. */
+				draw_rect(px, stride_px, w, h, 0, y, 3, ROW_H, SEL_BAR);
+			}
+
+			enum novi_icon_id icon = ICON_HARD_DRIVE;
+			uint32_t icol = ICON_VOL_COLOR;
+			if (p->kind == PLACE_HOME) {
+				icon = ICON_HOUSE;
+				icol = ICON_PLACE_COLOR;
+			} else if (p->kind == PLACE_ROOT) {
+				icon = ICON_FOLDER;
+				icol = ICON_PLACE_COLOR;
+			}
+			draw_icon(px, stride_px, w, h, PAD,
+				y + (ROW_H - ICON_SIZE) / 2, icon, icol);
+
+			int base = y + (ROW_H - s->font_small->height) / 2 +
+				s->font_small->ascent;
+			int label_x = PAD + ICON_SIZE + ICON_GAP;
+			int label_w = SIDEBAR_W - label_x - PAD;
+
+			/* A volume gets an eject glyph on the right, and the label
+			 * has to stop before it -- an unmounted-looking half-glyph
+			 * under a long label is worse than a shortened label. */
+			if (p->kind == PLACE_VOLUME) {
+				label_w -= ICON_SIZE + 4;
+				draw_icon(px, stride_px, w, h,
+					SIDEBAR_W - PAD - ICON_SIZE,
+					y + (ROW_H - ICON_SIZE) / 2, ICON_EJECT,
+					selected ? SEL_BAR : ICON_PLACE_COLOR);
+			}
+
+			char label[PLACE_LABEL_MAX + 4];
+			novi_text_truncate(s->font_small, p->label, label_w,
+				label, sizeof(label));
+			novi_text_draw(dest, s->font_small, label_x, base, label,
+				(selected || current) ? NAME_PIX : PLACE_PIX);
+		}
+	}
+
+	int rows = visible_rows(s);
+	for (int r = 0; r < rows; r++) {
+		int i = s->top + r;
+		if (i >= s->nentries) {
+			break;
+		}
+		struct entry *e = &s->entries[i];
+		int y = HEADER_H + r * ROW_H;
+		bool selected = (i == s->sel);
+
+		if (!selected && i == s->hover_row) {
+			draw_rect(px, stride_px, w, h, LIST_X, y, (int)w - LIST_X,
+				ROW_H, HOVER_BG);
+		}
+		/* Dimmed rather than hidden when the keyboard is over in the
+		 * sidebar: the row you were on is still where Tab will put you
+		 * back, and a list with no visible cursor reads as having lost
+		 * your place. */
+		if (selected) {
+			draw_rect(px, stride_px, w, h, LIST_X, y, (int)w - LIST_X,
+				ROW_H, SEL_BG);
+			draw_rect(px, stride_px, w, h, LIST_X, y, 3, ROW_H,
+				s->focus_sidebar ? SIDEBAR_RULE : SEL_BAR);
+		}
+
+		/* The icon answers the same question Enter does, from the
+		 * same has_ext() -- a row that shows the image glyph opens in
+		 * novi-view, one that shows the file glyph opens in the
+		 * editor. Two answers derived separately would eventually
+		 * disagree, and a file manager whose icons lie about what
+		 * Enter will do is worse than one with no icons.
+		 *
+		 * (Until novi-view existed this drew ICON_PENCIL for every
+		 * plain file, because the generated set had no document glyph
+		 * and "this opens in the editor" was true of everything. It
+		 * stopped being true the moment a second app could be
+		 * launched; `file` and `image` went through tools/svg2icon in
+		 * the same change.) */
+		enum novi_icon_id icon = ICON_FILE;
+		if (e->is_dir) {
+			icon = ICON_FOLDER;
+		} else if (has_ext(e->name, EXT_IMAGE)) {
+			icon = ICON_IMAGE;
+		}
+		draw_icon(px, stride_px, w, h, LIST_X + PAD,
+			y + (ROW_H - ICON_SIZE) / 2,
+			icon, e->is_dir ? ICON_DIR_COLOR : ICON_FILE_COLOR);
+
+		int baseline = y + (ROW_H - s->font->height) / 2 + s->font->ascent;
+		novi_text_draw(dest, s->font, LIST_X + PAD + ICON_SIZE + ICON_GAP,
+			baseline, e->name, e->is_dir ? DIR_PIX : NAME_PIX);
+
+		if (!e->is_dir) {
+			char sz[32];
+			human_size(e->size, sz, sizeof(sz));
+			int sw = novi_text_width(s->font_mono, sz);
+			novi_text_draw(dest, s->font_mono, (int)w - PAD - sw,
+				baseline, sz, SIZE_PIX);
+		}
+	}
+
+	if (s->nentries == 0) {
+		int baseline = HEADER_H + ROW_H + s->font->ascent;
+		novi_text_draw(dest, s->font,
+			LIST_X + PAD + ICON_SIZE + ICON_GAP, baseline,
+			"(empty)", SIZE_PIX);
+	}
+
+	/* Status bar. */
+	int sy = (int)h - STATUS_H;
+	draw_rect(px, stride_px, w, h, 0, sy, (int)w, STATUS_H, STATUS_BG);
+	int sbase = sy + (STATUS_H - s->font_small->height) / 2 + s->font_small->ascent;
+
+	if (s->prompt != PROMPT_NONE) {
+		/* A prompt takes the whole bar, from the left, with a caret
+		 * where the next character lands. It is the only modal state
+		 * this program has, so it should be impossible to miss. */
+		char line[PATH_MAX + 64];
+		prompt_line(s, line, sizeof(line));
+		novi_text_draw(dest, s->font_small, PAD, sbase, line,
+			s->prompt == PROMPT_DELETE || s->prompt == PROMPT_DELETE_TREE
+				? ERROR_PIX : NAME_PIX);
+		if (s->prompt != PROMPT_DELETE) {
+			int cw = novi_text_width(s->font_small, line);
+			draw_rect(px, stride_px, w, h, PAD + cw + 1,
+				sy + (STATUS_H - s->font_small->height) / 2,
+				2, s->font_small->height, SEL_BAR);
+		}
+	} else {
+		char left[128];
+		snprintf(left, sizeof(left), "%d item%s%s", s->nentries,
+			s->nentries == 1 ? "" : "s", s->show_hidden ? "   (hidden shown)" : "");
+		novi_text_draw(dest, s->font_small, PAD, sbase, left, STATUS_PIX);
+
+		char right[sizeof(s->status) + 96];
+		snprintf(right, sizeof(right), "%s", s->status[0] ? s->status :
+			(s->focus_sidebar
+				? "Enter/click go  ^E eject  Tab back to files  ^Q quit"
+				: "Dbl-click or Enter open  Bksp up  Tab places  F2 rename  Del delete  ^Q quit"));
+		int rw = novi_text_width(s->font_small, right);
+		novi_text_draw(dest, s->font_small, (int)w - PAD - rw, sbase, right,
+			s->status_is_error ? ERROR_PIX : STATUS_PIX);
+	}
+
+	pixman_image_unref(dest);
+}
+
+/* ── Wayland plumbing ──────────────────────────────────────────── */
+
+static int allocate_shm_file(size_t size) {
+	char name[] = "/novi-files-XXXXXX";
+	struct timespec ts;
+	int fd = -1;
+	for (int tries = 0; tries < 100 && fd < 0; tries++) {
+		clock_gettime(CLOCK_REALTIME, &ts);
+		long r = ts.tv_nsec + tries;
+		for (int i = 0; i < 6; i++) {
+			name[12 + i] = 'A' + (r & 15) + (r & 16) * 2;
+			r >>= 5;
+		}
+		fd = shm_open(name, O_RDWR | O_CREAT | O_EXCL, 0600);
+	}
+	if (fd < 0) {
+		return -1;
+	}
+	shm_unlink(name);
+	if (ftruncate(fd, (off_t)size) < 0) {
+		close(fd);
+		return -1;
+	}
+	return fd;
+}
+
+static void surface_draw_frame(struct novi_files *s) {
+	if (!s->configured) {
+		return;
+	}
+	uint32_t stride = s->width * 4;
+	size_t size = (size_t)stride * s->height;
+
+	int fd = allocate_shm_file(size);
+	if (fd < 0) {
+		fprintf(stderr, "novi-files: failed to allocate shm buffer\n");
+		return;
+	}
+	uint32_t *data = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+	if (data == MAP_FAILED) {
+		fprintf(stderr, "novi-files: mmap failed\n");
+		close(fd);
+		return;
+	}
+	struct wl_shm_pool *pool = wl_shm_create_pool(s->shm, fd, (int32_t)size);
+	struct wl_buffer *buffer = wl_shm_pool_create_buffer(pool, 0,
+		(int32_t)s->width, (int32_t)s->height, (int32_t)stride,
+		WL_SHM_FORMAT_XRGB8888);
+	wl_shm_pool_destroy(pool);
+	wl_display_flush(s->display);
+	close(fd);
+
+	render(s, data, s->width);
+	munmap(data, size);
+
+	wl_surface_attach(s->surface, buffer, 0, 0);
+	wl_surface_damage_buffer(s->surface, 0, 0,
+		(int32_t)s->width, (int32_t)s->height);
+	wl_surface_commit(s->surface);
+}
+
+static void handle_key(struct novi_files *s, xkb_keysym_t sym, bool ctrl,
+		const char *text) {
+	/* An open prompt owns the keyboard. Nothing below runs while one is
+	 * up, so Delete cannot fire a second confirmation on top of the
+	 * first and Backspace cannot navigate out of the directory being
+	 * asked about. */
+	if (prompt_key(s, sym, ctrl ? NULL : text)) {
+		return;
+	}
+
+	if (ctrl) {
+		switch (sym) {
+		case XKB_KEY_q: case XKB_KEY_Q:
+			s->running = false;
+			return;
+		case XKB_KEY_e: case XKB_KEY_E:
+			/* Only from the sidebar, and deliberately: ^E from the
+			 * file list would have to guess which volume was meant --
+			 * the one you are inside, or the one the sidebar cursor
+			 * happens to be on. A key that ejects something you were
+			 * not looking at is not a convenience. */
+			if (s->focus_sidebar) {
+				do_eject(s);
+			} else {
+				set_status(s, true, "Tab to Places, then ^E to eject");
+			}
+			return;
+		case XKB_KEY_n: case XKB_KEY_N:
+			prompt_open(s, PROMPT_MKDIR);
+			return;
+		case XKB_KEY_d: case XKB_KEY_D:
+			prompt_open(s, PROMPT_DELETE);
+			return;
+		case XKB_KEY_h: case XKB_KEY_H:
+			s->show_hidden = !s->show_hidden;
+			s->status[0] = '\0';
+			read_dir(s);
+			return;
+		case XKB_KEY_r: case XKB_KEY_R:
+			s->status[0] = '\0';
+			read_dir(s);
+			set_status(s, false, "refreshed");
+			return;
+		default:
+			return;
+		}
+	}
+
+	/* Tab moves between the two lists. This program has no pointer and
+	 * never has, so a sidebar with no keyboard route into it would be
+	 * decoration. */
+	if (sym == XKB_KEY_Tab || sym == XKB_KEY_ISO_Left_Tab) {
+		s->focus_sidebar = !s->focus_sidebar;
+		s->status[0] = '\0';
+		return;
+	}
+
+	/* The sidebar owns the arrows while it has focus. Escape leaves it
+	 * rather than quitting -- Escape quitting out of a panel someone
+	 * just Tabbed into would be a nasty surprise, and there is still
+	 * ^Q. */
+	if (s->focus_sidebar) {
+		switch (sym) {
+		case XKB_KEY_Escape:
+			s->focus_sidebar = false;
+			return;
+		case XKB_KEY_Up:
+			if (s->place_sel > 0) { s->place_sel--; }
+			return;
+		case XKB_KEY_Down:
+			if (s->place_sel < s->nplaces - 1) { s->place_sel++; }
+			return;
+		case XKB_KEY_Home:
+			s->place_sel = 0;
+			return;
+		case XKB_KEY_End:
+			s->place_sel = s->nplaces > 0 ? s->nplaces - 1 : 0;
+			return;
+		case XKB_KEY_Return: case XKB_KEY_KP_Enter: case XKB_KEY_Right:
+			if (s->place_sel >= 0 && s->place_sel < s->nplaces) {
+				go_to(s, s->places[s->place_sel].path);
+				/* Focus follows the navigation into the list: the
+				 * next thing anybody does after picking a place is
+				 * look at what is in it. */
+				s->focus_sidebar = false;
+			}
+			return;
+		case XKB_KEY_Left:
+			s->focus_sidebar = false;
+			return;
+		default:
+			return;
+		}
+	}
+
+	switch (sym) {
+	case XKB_KEY_Escape:
+		s->running = false;
+		return;
+	case XKB_KEY_Up:
+		if (s->sel > 0) { s->sel--; }
+		break;
+	case XKB_KEY_Down:
+		if (s->sel < s->nentries - 1) { s->sel++; }
+		break;
+	case XKB_KEY_Home:
+		s->sel = 0;
+		break;
+	case XKB_KEY_End:
+		s->sel = s->nentries > 0 ? s->nentries - 1 : 0;
+		break;
+	case XKB_KEY_Page_Up: {
+		int rows = visible_rows(s);
+		s->sel = s->sel > rows ? s->sel - rows : 0;
+		break;
+	}
+	case XKB_KEY_Page_Down: {
+		int rows = visible_rows(s);
+		s->sel = s->sel + rows < s->nentries ? s->sel + rows
+			: (s->nentries > 0 ? s->nentries - 1 : 0);
+		break;
+	}
+	case XKB_KEY_Return: case XKB_KEY_KP_Enter: case XKB_KEY_Right:
+		open_selected(s);
+		break;
+	case XKB_KEY_BackSpace: case XKB_KEY_Left:
+		go_up(s);
+		break;
+	/* The two bindings every file manager has had for thirty years.
+	 * ^D and ^N exist alongside them for keyboards and remote consoles
+	 * where F2 and Delete do not survive the trip. */
+	case XKB_KEY_F2:
+		prompt_open(s, PROMPT_RENAME);
+		break;
+	case XKB_KEY_Delete:
+		prompt_open(s, PROMPT_DELETE);
+		break;
+	default:
+		break;
+	}
+	scroll_to_sel(s);
+}
+
+static void keyboard_keymap(void *data, struct wl_keyboard *kb,
+		uint32_t format, int fd, uint32_t size) {
+	struct novi_files *s = data;
+	if (format != WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1) {
+		close(fd);
+		return;
+	}
+	char *map = mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
+	if (map == MAP_FAILED) {
+		close(fd);
+		return;
+	}
+	struct xkb_keymap *keymap = xkb_keymap_new_from_string(s->xkb_context,
+		map, XKB_KEYMAP_FORMAT_TEXT_V1, XKB_KEYMAP_COMPILE_NO_FLAGS);
+	munmap(map, size);
+	close(fd);
+	if (keymap == NULL) {
+		return;
+	}
+	struct xkb_state *st = xkb_state_new(keymap);
+	if (s->xkb_state != NULL) {
+		xkb_state_unref(s->xkb_state);
+	}
+	if (s->xkb_keymap != NULL) {
+		xkb_keymap_unref(s->xkb_keymap);
+	}
+	s->xkb_keymap = keymap;
+	s->xkb_state = st;
+}
+
+static void keyboard_enter(void *data, struct wl_keyboard *kb, uint32_t serial,
+		struct wl_surface *surface, struct wl_array *keys) {
+	(void)data; (void)kb; (void)serial; (void)surface; (void)keys;
+}
+
+static void keyboard_leave(void *data, struct wl_keyboard *kb, uint32_t serial,
+		struct wl_surface *surface) {
+	(void)data; (void)kb; (void)serial; (void)surface;
+}
+
+static void keyboard_key(void *data, struct wl_keyboard *kb, uint32_t serial,
+		uint32_t time, uint32_t key, uint32_t key_state) {
+	struct novi_files *s = data;
+	if (key_state != WL_KEYBOARD_KEY_STATE_PRESSED || s->xkb_state == NULL) {
+		return;
+	}
+	xkb_keycode_t code = key + 8;
+	xkb_keysym_t sym = xkb_state_key_get_one_sym(s->xkb_state, code);
+	bool ctrl = xkb_state_mod_name_is_active(s->xkb_state, XKB_MOD_NAME_CTRL,
+		XKB_STATE_MODS_EFFECTIVE) > 0;
+
+	/* The typed character, for a prompt that is taking a name. From
+	 * xkb_state_key_get_utf8() and nowhere else: it applies the keymap,
+	 * the modifiers and any compose state, so a keysym-to-ASCII table
+	 * would get every non-US layout wrong -- the same reason novi-edit
+	 * reads its text here. */
+	char utf8[16];
+	int n = xkb_state_key_get_utf8(s->xkb_state, code, utf8, sizeof(utf8));
+	bool printable = n > 0 && (unsigned char)utf8[0] >= 0x20 && utf8[0] != 0x7f;
+
+	handle_key(s, sym, ctrl, printable ? utf8 : NULL);
+	surface_draw_frame(s);
+}
+
+static void keyboard_modifiers(void *data, struct wl_keyboard *kb,
+		uint32_t serial, uint32_t depressed, uint32_t latched,
+		uint32_t locked, uint32_t group) {
+	struct novi_files *s = data;
+	if (s->xkb_state != NULL) {
+		xkb_state_update_mask(s->xkb_state, depressed, latched, locked,
+			0, 0, group);
+	}
+}
+
+static void keyboard_repeat_info(void *data, struct wl_keyboard *kb,
+		int32_t rate, int32_t delay) {
+	(void)data; (void)kb; (void)rate; (void)delay;
+}
+
+static const struct wl_keyboard_listener keyboard_listener = {
+	.keymap = keyboard_keymap,
+	.enter = keyboard_enter,
+	.leave = keyboard_leave,
+	.key = keyboard_key,
+	.modifiers = keyboard_modifiers,
+	.repeat_info = keyboard_repeat_info,
+};
+
+/* ── Pointer listener ──────────────────────────────────────────── */
+
+#define DOUBLE_CLICK_MS 400
+
+static void pointer_update_hover(struct novi_files *s) {
+	bool eject = false;
+	int place = s->ptr_in ? place_at(s, s->ptr_x, s->ptr_y, &eject) : -1;
+	int row = s->ptr_in ? row_at(s, s->ptr_x, s->ptr_y) : -1;
+	if (place == s->hover_place && row == s->hover_row &&
+			eject == s->hover_eject) {
+		return;
+	}
+	s->hover_place = place;
+	s->hover_row = row;
+	s->hover_eject = eject;
+	surface_draw_frame(s);
+}
+
+static void pointer_enter(void *data, struct wl_pointer *p, uint32_t serial,
+		struct wl_surface *surface, wl_fixed_t sx, wl_fixed_t sy) {
+	struct novi_files *s = data;
+	s->ptr_in = true;
+	s->ptr_x = wl_fixed_to_double(sx);
+	s->ptr_y = wl_fixed_to_double(sy);
+	pointer_update_hover(s);
+}
+
+static void pointer_leave(void *data, struct wl_pointer *p, uint32_t serial,
+		struct wl_surface *surface) {
+	struct novi_files *s = data;
+	s->ptr_in = false;
+	/* Disarm: a press that leaves the window has been abandoned, and
+	 * bringing the pointer back to fire it later would be a click
+	 * nobody made. */
+	s->press_place = -1;
+	s->press_row = -1;
+	pointer_update_hover(s);
+}
+
+static void pointer_motion(void *data, struct wl_pointer *p, uint32_t time,
+		wl_fixed_t sx, wl_fixed_t sy) {
+	struct novi_files *s = data;
+	s->ptr_x = wl_fixed_to_double(sx);
+	s->ptr_y = wl_fixed_to_double(sy);
+	pointer_update_hover(s);
+}
+
+static void pointer_button(void *data, struct wl_pointer *p, uint32_t serial,
+		uint32_t time, uint32_t button, uint32_t state) {
+	struct novi_files *s = data;
+	if (button != BTN_LEFT) {
+		return;
+	}
+	/* A prompt owns the whole program while it is up -- the same rule
+	 * the keyboard follows. Answering "delete this?" by clicking
+	 * somewhere else is not an answer. */
+	if (s->prompt != PROMPT_NONE) {
+		return;
+	}
+
+	if (state == WL_POINTER_BUTTON_STATE_PRESSED) {
+		s->press_place = place_at(s, s->ptr_x, s->ptr_y, &s->press_eject);
+		s->press_row = row_at(s, s->ptr_x, s->ptr_y);
+		return;
+	}
+
+	/* Released: fire only if the release is over the same thing the
+	 * press was. */
+	int was_place = s->press_place;
+	int was_row = s->press_row;
+	bool was_eject = s->press_eject;
+	s->press_place = -1;
+	s->press_row = -1;
+	s->press_eject = false;
+
+	bool eject_now = false;
+	if (was_place >= 0 && place_at(s, s->ptr_x, s->ptr_y, &eject_now) == was_place) {
+		s->place_sel = was_place;
+		/* Focus goes to the sidebar and stays: the next thing anybody
+		 * does after clicking a volume is often ^E, and it would be an
+		 * unkind surprise for that to say "Tab to Places" when Places
+		 * is exactly where they just clicked. */
+		s->focus_sidebar = true;
+		s->status[0] = '\0';
+		if (was_eject && eject_now) {
+			do_eject(s);
+		} else {
+			go_to(s, s->places[was_place].path);
+		}
+		surface_draw_frame(s);
+		return;
+	}
+
+	if (was_row >= 0 && row_at(s, s->ptr_x, s->ptr_y) == was_row) {
+		bool same = (was_row == s->last_click_row) &&
+			(time - s->last_click_ms) < DOUBLE_CLICK_MS;
+		s->sel = was_row;
+		s->focus_sidebar = false;
+		s->status[0] = '\0';
+		if (same) {
+			/* A double click is one open, not two. Clearing the
+			 * timestamp stops a third click inside the window from
+			 * counting as a second double click and opening again. */
+			s->last_click_ms = 0;
+			s->last_click_row = -1;
+			open_selected(s);
+		} else {
+			s->last_click_ms = time;
+			s->last_click_row = was_row;
+		}
+		scroll_to_sel(s);
+		surface_draw_frame(s);
+	}
+}
+
+static void pointer_axis(void *data, struct wl_pointer *p, uint32_t time,
+		uint32_t axis, wl_fixed_t value) {
+	struct novi_files *s = data;
+	if (axis != WL_POINTER_AXIS_VERTICAL_SCROLL) {
+		return;
+	}
+	/* Scrolling moves the VIEW, not the selection -- the convention
+	 * every list has. `top` is clamped so the last screenful cannot be
+	 * scrolled off the bottom into empty space. */
+	int rows = visible_rows(s);
+	int step = wl_fixed_to_double(value) > 0 ? 3 : -3;
+	int max_top = s->nentries - rows;
+	if (max_top < 0) {
+		max_top = 0;
+	}
+	int want = s->top + step;
+	if (want > max_top) {
+		want = max_top;
+	}
+	if (want < 0) {
+		want = 0;
+	}
+	if (want == s->top) {
+		return;
+	}
+	s->top = want;
+	pointer_update_hover(s); /* the row under the pointer just changed */
+	surface_draw_frame(s);
+}
+
+/* wl_pointer version 5 added frame/axis_source/axis_stop/axis_discrete,
+ * and libwayland does not treat a missing handler as "not interested":
+ * it aborts the client with "listener function for opcode 5 of
+ * wl_pointer is NULL" the first time the compositor sends one. Which it
+ * does immediately -- `frame` follows every pointer event group -- so
+ * the window vanished on the first mouse move, with the message on
+ * stderr where nobody was looking.
+ *
+ * This client binds wl_seat at 5 because the KEYBOARD wants it
+ * (repeat_info arrived in 4). novi-panel binds 1 and needs none of
+ * this, which is why its five-entry listener is not the example to
+ * copy. The four below are genuinely no-ops here: scroll is handled
+ * per-axis-event, and nothing needs the frame boundary to batch
+ * against.
+ */
+static void pointer_frame(void *data, struct wl_pointer *p) {
+	(void)data; (void)p;
+}
+
+static void pointer_axis_source(void *data, struct wl_pointer *p,
+		uint32_t axis_source) {
+	(void)data; (void)p; (void)axis_source;
+}
+
+static void pointer_axis_stop(void *data, struct wl_pointer *p,
+		uint32_t time, uint32_t axis) {
+	(void)data; (void)p; (void)time; (void)axis;
+}
+
+static void pointer_axis_discrete(void *data, struct wl_pointer *p,
+		uint32_t axis, int32_t discrete) {
+	(void)data; (void)p; (void)axis; (void)discrete;
+}
+
+static const struct wl_pointer_listener pointer_listener = {
+	.enter = pointer_enter,
+	.leave = pointer_leave,
+	.motion = pointer_motion,
+	.button = pointer_button,
+	.axis = pointer_axis,
+	.frame = pointer_frame,
+	.axis_source = pointer_axis_source,
+	.axis_stop = pointer_axis_stop,
+	.axis_discrete = pointer_axis_discrete,
+};
+
+static void seat_capabilities(void *data, struct wl_seat *seat, uint32_t caps) {
+	struct novi_files *s = data;
+	if ((caps & WL_SEAT_CAPABILITY_KEYBOARD) && s->keyboard == NULL) {
+		s->keyboard = wl_seat_get_keyboard(seat);
+		wl_keyboard_add_listener(s->keyboard, &keyboard_listener, s);
+	}
+	if ((caps & WL_SEAT_CAPABILITY_POINTER) && s->pointer == NULL) {
+		s->pointer = wl_seat_get_pointer(seat);
+		wl_pointer_add_listener(s->pointer, &pointer_listener, s);
+	}
+}
+
+static void seat_name(void *data, struct wl_seat *seat, const char *name) {
+	(void)data; (void)seat; (void)name;
+}
+
+static const struct wl_seat_listener seat_listener = {
+	.capabilities = seat_capabilities,
+	.name = seat_name,
+};
+
+static void wm_base_ping(void *data, struct xdg_wm_base *wm_base,
+		uint32_t serial) {
+	(void)data;
+	xdg_wm_base_pong(wm_base, serial);
+}
+
+static const struct xdg_wm_base_listener wm_base_listener = {
+	.ping = wm_base_ping,
+};
+
+static void xdg_surface_configure(void *data, struct xdg_surface *xdg_surface,
+		uint32_t serial) {
+	struct novi_files *s = data;
+	xdg_surface_ack_configure(xdg_surface, serial);
+	s->configured = true;
+	surface_draw_frame(s);
+}
+
+static const struct xdg_surface_listener xdg_surface_listener_impl = {
+	.configure = xdg_surface_configure,
+};
+
+static void toplevel_configure(void *data, struct xdg_toplevel *toplevel,
+		int32_t width, int32_t height, struct wl_array *states) {
+	struct novi_files *s = data;
+	if (width > 0 && height > 0) {
+		s->width = (uint32_t)width;
+		s->height = (uint32_t)height;
+		scroll_to_sel(s);
+	}
+}
+
+static void toplevel_close(void *data, struct xdg_toplevel *toplevel) {
+	struct novi_files *s = data;
+	s->running = false;
+}
+
+static const struct xdg_toplevel_listener toplevel_listener = {
+	.configure = toplevel_configure,
+	.close = toplevel_close,
+};
+
+static void registry_global(void *data, struct wl_registry *registry,
+		uint32_t name, const char *interface, uint32_t version) {
+	(void)version;
+	struct novi_files *s = data;
+	if (strcmp(interface, wl_compositor_interface.name) == 0) {
+		s->compositor = wl_registry_bind(registry, name,
+			&wl_compositor_interface, 4);
+	} else if (strcmp(interface, wl_shm_interface.name) == 0) {
+		s->shm = wl_registry_bind(registry, name, &wl_shm_interface, 1);
+	} else if (strcmp(interface, wl_seat_interface.name) == 0) {
+		s->seat = wl_registry_bind(registry, name, &wl_seat_interface, 5);
+		wl_seat_add_listener(s->seat, &seat_listener, s);
+	} else if (strcmp(interface, xdg_wm_base_interface.name) == 0) {
+		s->wm_base = wl_registry_bind(registry, name,
+			&xdg_wm_base_interface, 1);
+		xdg_wm_base_add_listener(s->wm_base, &wm_base_listener, s);
+	}
+}
+
+static void registry_global_remove(void *data, struct wl_registry *registry,
+		uint32_t name) {
+	(void)data; (void)registry; (void)name;
+}
+
+static const struct wl_registry_listener registry_listener = {
+	.global = registry_global,
+	.global_remove = registry_global_remove,
+};
+
+int main(int argc, char **argv) {
+	struct novi_files s = {0};
+	s.running = true;
+	s.width = WINDOW_WIDTH;
+	s.height = WINDOW_HEIGHT;
+
+	if (argc > 2) {
+		fprintf(stderr, "usage: novi-files [DIRECTORY]\n");
+		return 2;
+	}
+	const char *start = argc == 2 ? argv[1] : getenv("HOME");
+	if (start == NULL || start[0] == '\0') {
+		start = "/";
+	}
+	if (realpath(start, s.cwd) == NULL) {
+		snprintf(s.cwd, sizeof(s.cwd), "/");
+	}
+	read_dir(&s);
+
+	s.display = wl_display_connect(NULL);
+	if (s.display == NULL) {
+		fprintf(stderr, "novi-files: failed to connect to Wayland display "
+			"(is WAYLAND_DISPLAY set?)\n");
+		return 1;
+	}
+	s.xkb_context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+	s.registry = wl_display_get_registry(s.display);
+	wl_registry_add_listener(s.registry, &registry_listener, &s);
+	wl_display_roundtrip(s.display);
+
+	if (s.compositor == NULL || s.shm == NULL || s.wm_base == NULL) {
+		fprintf(stderr, "novi-files: compositor is missing a required global "
+			"(wl_compositor/wl_shm/xdg_wm_base)\n");
+		return 1;
+	}
+
+	/* Three faces, split by what the text IS rather than by where it
+	 * sits (design language §2). A filename is language, so it is
+	 * Inter. A PATH and a SIZE IN BYTES are machine values that people
+	 * read character by character and compare column to column, so
+	 * they stay monospace -- which is also what stops "4 B" and
+	 * "1.2 MB" from wandering as the listing scrolls. */
+	s.font = novi_text_load_font(NOVI_FONT_BODY);
+	s.font_small = novi_text_load_font(NOVI_FONT_CAPTION);
+	s.font_mono = novi_text_load_font(NOVI_FONT_MONO_SM);
+	if (s.font == NULL || s.font_small == NULL || s.font_mono == NULL) {
+		fprintf(stderr, "novi-files: failed to load a font\n");
+		return 1;
+	}
+
+	s.surface = wl_compositor_create_surface(s.compositor);
+	s.xdg_surface = xdg_wm_base_get_xdg_surface(s.wm_base, s.surface);
+	xdg_surface_add_listener(s.xdg_surface, &xdg_surface_listener_impl, &s);
+	s.xdg_toplevel = xdg_surface_get_toplevel(s.xdg_surface);
+	xdg_toplevel_add_listener(s.xdg_toplevel, &toplevel_listener, &s);
+	xdg_toplevel_set_title(s.xdg_toplevel, "Files");
+	xdg_toplevel_set_app_id(s.xdg_toplevel, "novi-files");
+
+	s.hover_place = -1;
+	s.hover_row = -1;
+	s.press_place = -1;
+	s.press_row = -1;
+	s.last_click_row = -1;
+	s.devices_head_y = -1;
+
+	places_refresh(&s);
+
+	wl_surface_commit(s.surface);
+
+	/* Watching the mount table, which is what makes the sidebar live
+	 * rather than a snapshot from startup. That needed a real poll()
+	 * loop: this program used to be a plain wl_display_dispatch(),
+	 * which has nowhere to put a second file descriptor.
+	 *
+	 * prepare_read/read_events/cancel_read is the only correct way to
+	 * poll() the display fd -- dispatch() does its own internal read
+	 * and racing it loses events. cancel_read() on EVERY path that
+	 * does not read, poll errors included, or the next prepare_read()
+	 * blocks forever (RFC 0017 learned that one the hard way).
+	 */
+	s.mounts_fd = novi_places_watch_open();
+
+	while (s.running) {
+		while (wl_display_prepare_read(s.display) != 0) {
+			if (wl_display_dispatch_pending(s.display) < 0) {
+				s.running = false;
+				break;
+			}
+		}
+		if (!s.running) {
+			wl_display_cancel_read(s.display);
+			break;
+		}
+		wl_display_flush(s.display);
+
+		struct pollfd fds[2] = {
+			{.fd = wl_display_get_fd(s.display), .events = POLLIN},
+			/* POLLPRI, not POLLIN: /proc/self/mounts never becomes
+			 * "readable" in the ordinary sense, and a poll set up for
+			 * POLLIN here waits forever while the sidebar quietly
+			 * never updates. */
+			{.fd = s.mounts_fd, .events = POLLPRI},
+		};
+		int nfds = s.mounts_fd >= 0 ? 2 : 1;
+		int ret = poll(fds, (nfds_t)nfds, -1);
+		if (ret < 0) {
+			wl_display_cancel_read(s.display);
+			if (errno == EINTR) {
+				continue;
+			}
+			break;
+		}
+
+		if (fds[0].revents & POLLIN) {
+			wl_display_read_events(s.display);
+		} else {
+			wl_display_cancel_read(s.display);
+		}
+		if (wl_display_dispatch_pending(s.display) < 0) {
+			break;
+		}
+
+		if (nfds == 2 && (fds[1].revents & (POLLPRI | POLLERR))) {
+			/* Drain FIRST. POLLPRI stays asserted until the file is
+			 * read again, so a wake that redraws and polls again
+			 * without this spins at 100% CPU forever -- silent, and
+			 * only visible as a hot laptop. */
+			novi_places_watch_drain(s.mounts_fd);
+			places_refresh(&s);
+			leave_if_gone(&s);
+			surface_draw_frame(&s);
+		}
+
+		/* Reap any editor we launched, so a long-lived Files window
+		 * does not accumulate zombies. WNOHANG in the loop rather than
+		 * a SIGCHLD handler: there is nothing to do with the status,
+		 * and a handler would be a second thing touching state the
+		 * event loop owns. */
+		while (waitpid(-1, NULL, WNOHANG) > 0) {
+			;
+		}
+	}
+
+	if (s.mounts_fd >= 0) {
+		close(s.mounts_fd);
+	}
+
+	if (s.pointer != NULL) {
+		wl_pointer_destroy(s.pointer);
+	}
+	free(s.entries);
+	if (s.font_mono != NULL) {
+		fcft_destroy(s.font_mono);
+	}
+	if (s.xkb_state != NULL) {
+		xkb_state_unref(s.xkb_state);
+	}
+	if (s.xkb_keymap != NULL) {
+		xkb_keymap_unref(s.xkb_keymap);
+	}
+	if (s.xkb_context != NULL) {
+		xkb_context_unref(s.xkb_context);
+	}
+	wl_display_disconnect(s.display);
+	return 0;
+}

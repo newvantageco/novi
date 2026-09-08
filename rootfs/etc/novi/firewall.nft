@@ -1,0 +1,90 @@
+# /etc/novi/firewall.nft — the one ruleset Novi ships (RFC 0016).
+#
+# Loaded when `network.firewall = on` in /etc/novi/system.conf.
+# `novi-state apply` runs `nft -f` on this file; `off` deletes the
+# table. Nothing supervises it -- the kernel holds the ruleset, so
+# there is no daemon, and boot convergence reloads it like any other
+# declared state.
+#
+# This is repo content rather than something generated, for the same
+# reason /etc/passwd and /etc/shadow are: it is policy, and policy
+# should show up in a diff. Edit it if you need something else; it is a
+# real file in nftables' real format, not a serialisation of a settings
+# panel.
+#
+# The table is called `novi` on purpose. The observer asks the kernel
+# whether a table by that name exists, so this ruleset can be turned on
+# and off without touching -- or claiming -- anything else somebody has
+# installed in another table.
+
+table inet novi {
+	# Ports opened by declaration, and by nothing else. Both sets are
+	# empty here; `network.firewall.allow` in /etc/novi/system.conf
+	# fills them, and `novi-state` is the only thing that writes them
+	# (RFC 0022).
+	#
+	# They are SETS rather than rules in this file because the holes
+	# are configuration and this file is policy. A port list belongs
+	# in the same document as the hostname, where `novi-state diff`
+	# can see it and a generation can roll it back; the shape of the
+	# filter belongs here.
+	#
+	# Enabling a daemon does not open a port. That something listens
+	# and that the world may reach it are two decisions, and a
+	# firewall that opens itself because a service started is not a
+	# firewall. `novi-state apply` says so out loud when it starts a
+	# service whose port is closed.
+	set open_tcp {
+		type inet_service
+	}
+
+	set open_udp {
+		type inet_service
+	}
+
+	chain input {
+		type filter hook input priority filter; policy drop;
+
+		# Replies to things we started, and the ICMP errors that
+		# belong to them. This is what makes a default-drop input
+		# policy usable at all.
+		ct state established,related accept
+		ct state invalid drop
+
+		# Loopback is not the network.
+		iif lo accept
+
+		# ICMP is accepted, not dropped. A host that black-holes it
+		# breaks path-MTU discovery for everyone talking to it and is
+		# a worse neighbour than one that answers a ping. "Stealth" is
+		# not a security property when the packets that reveal you are
+		# the ones your own TCP needs.
+		ip protocol icmp accept
+		ip6 nexthdr ipv6-icmp accept
+
+		# DHCP replies arrive before conntrack has anything to match:
+		# udhcpc sends from 0.0.0.0:68 to 255.255.255.255:67, and the
+		# reply is a broadcast that is not "related" to anything. On a
+		# machine that gets its address by DHCP -- which is the
+		# default -- leaving this out means the firewall comes up and
+		# the lease never renews.
+		udp dport 68 accept
+		ip6 nexthdr udp udp dport 546 accept
+
+		# The declared holes. Empty sets match nothing, so on a
+		# machine that has declared nothing these two lines are the
+		# same as not being here.
+		tcp dport @open_tcp accept
+		udp dport @open_udp accept
+	}
+
+	# Nothing here forwards. If Novi ever routes for anything, that is
+	# a deliberate change to this file, not a default.
+	chain forward {
+		type filter hook forward priority filter; policy drop;
+	}
+
+	# No output chain, deliberately. A desktop that cannot make
+	# connections is not usable, and a filter constraining processes
+	# run by the user who can also edit the filter is theatre.
+}

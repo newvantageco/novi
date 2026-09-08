@@ -66,9 +66,17 @@ cd "${SOURCES}"
 
 # ── Base rootfs directory layout ─────────────────────────
 echo "==> Creating rootfs hierarchy"
-mkdir -p "${ROOTFS}"/{boot,dev,etc,home,lib,mnt,opt,proc,root,run,srv,sys,tmp,usr/{bin,lib,share},var/{log,run,tmp}}
+mkdir -p "${ROOTFS}"/{boot,dev,etc,home,lib,mnt,opt,proc,root,run,srv,sys,tmp,usr/{bin,lib,share},var/{empty,log,run,tmp}}
 chmod 1777 "${ROOTFS}/tmp"
 chmod 700  "${ROOTFS}/root"
+# /var/empty is sshd's privilege-separation chroot (RFC 0022). It must
+# be owned by root, contain nothing, and be writable by nobody else --
+# sshd checks all three at startup and refuses to run otherwise, which
+# is the point of it. It is in the BASE hierarchy although sshd is a
+# package, for the same reason the sshd account is in /etc/passwd: a
+# directory's ownership and mode are baked into the squashed image, so
+# they are build-time facts, not install-time ones.
+chmod 755  "${ROOTFS}/var/empty"
 
 # ── User/group database ──────────────────────────────────
 # Nothing ever created /etc/passwd or /etc/group -- confirmed via a
@@ -109,6 +117,58 @@ install -D -m 644 "${REPO_ROOT}/rootfs/etc/profile" "${ROOTFS}/etc/profile"
 # install a package to fix that.
 install -D -m 755 "${REPO_ROOT}/packages/novi-hwdetect" "${ROOTFS}/sbin/novi-hwdetect"
 install -D -m 755 "${REPO_ROOT}/packages/novi-hotplug" "${ROOTFS}/sbin/novi-hotplug"
+# Removable media (RFC 0023). novi-mount is in /sbin because its only
+# automatic caller is a uevent handler that also lives there and runs
+# as root; novi-eject is in /usr/bin because a person types it.
+install -D -m 755 "${REPO_ROOT}/packages/novi-mount" "${ROOTFS}/sbin/novi-mount"
+install -D -m 755 "${REPO_ROOT}/packages/novi-eject" "${ROOTFS}/usr/bin/novi-eject"
+
+# The live-boot desktop helper (RFC 0007): the base image is
+# console-only, so a live boot that wants a desktop installs one from
+# the repository on the medium, and this is the script that does it.
+# init/skel/rc.init calls it when `novi.live.desktop` is on the kernel
+# command line.
+#
+# It used to be build/22-live-desktop.sh -- a whole discovered build
+# stage whose entire body was this one `install` line, for a file that
+# is repo content under rootfs/ exactly like the seven above it. It
+# came back here when novi-view needed stage number 22 and the 20s
+# turned out to be full; a stage that cross-compiles nothing and
+# installs one shell script was the one that did not need to exist.
+install -D -m 755 "${REPO_ROOT}/rootfs/usr/bin/novi-live-desktop" \
+    "${ROOTFS}/usr/bin/novi-live-desktop"
+
+# /etc/os-release -- how anything that is not this project asks what
+# this machine is running. It had never existed. Every tool that wants
+# to identify a distro reads it (the freedesktop spec is the closest
+# thing there is to a universal answer to "what am I on"), and the
+# README documented its exact contents as fact for as long as the file
+# had not been written.
+#
+# Generated from 00-versions.sh rather than kept as repo content under
+# rootfs/etc/, and that is the opposite call from passwd/group/shadow
+# on purpose: those hold policy (fixed GIDs, the root password field)
+# that should show up in a diff, while every field here is already a
+# variable one file away. A second copy would only be somewhere for the
+# version to go stale -- which is precisely what happened to the README.
+#
+# The real file lives in /usr/lib with a relative symlink from /etc, as
+# the spec asks: /usr/lib/os-release is vendor data that belongs with
+# the OS, /etc is where an administrator may override it, and an
+# application that only looks in /etc still finds it.
+install -d -m 755 "${ROOTFS}/usr/lib"
+cat > "${ROOTFS}/usr/lib/os-release" <<EOF
+NAME="${OS_NAME}"
+ID=${OS_ID}
+VERSION="${OS_VERSION} (${OS_CODENAME})"
+VERSION_ID=${OS_VERSION}
+VERSION_CODENAME=${OS_CODENAME}
+PRETTY_NAME="${OS_NAME} Linux ${OS_VERSION} (${OS_CODENAME})"
+HOME_URL="https://novilinux.org"
+BUG_REPORT_URL="https://github.com/newvantageco/novi/issues"
+EOF
+chmod 644 "${ROOTFS}/usr/lib/os-release"
+ln -sf ../usr/lib/os-release "${ROOTFS}/etc/os-release"
 
 # ACPI event handlers. The two path names are dictated by busybox
 # acpid's compiled-in action table (PWRF -> power button, LID -> lid),

@@ -1,0 +1,412 @@
+#!/bin/sh
+# novi-mount — mount removable media, and refuse everything else.
+#
+#   novi-mount add <devname>       mount it if it should be mounted
+#   novi-mount remove <devname>    unmount it if we mounted it
+#   novi-mount list                what is mounted, and where
+#
+# RFC 0023. Called by novi-hotplug when a block device appears or
+# goes away; usable by hand for the same reasons `novi-wifi` is.
+#
+# This is deliberately NOT udisks2, and not a daemon. There is nothing
+# here that needs to run continuously: the kernel says a device
+# arrived, this decides and mounts, and then it is over. The same
+# argument as `nft` holding the firewall with no daemon behind it
+# (RFC 0016) and busybox `uevent` being the hotplug listener rather
+# than something of ours (RFC 0012).
+#
+# shellcheck disable=SC3043
+set -u
+
+MEDIA_ROOT=/run/media
+STATE_FILE="${NOVI_STATE_FILE:-/etc/novi/system.conf}"
+LOCK_DIR=/run/novi/mount.lock
+
+msg()  { printf '  -> %s\n' "$*"; }
+warn() { printf 'WARN: %s\n' "$*" >&2; }
+die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+
+# To syslog as well, because the interesting invocations come from a
+# uevent handler where nobody is watching stdout. RFC 0004 exists so
+# there is somewhere for this to go.
+note() {
+    logger -t novi-mount -p daemon.info "$*" 2>/dev/null || true
+}
+
+# A toast, if anybody is looking (RFC 0024). Separate from note(): that
+# is a diagnostic line for whoever is reading the log afterwards
+# ("mounted sda (vfat) at /run/media/X"), this is a sentence for the
+# person who just pushed a stick into a slot. Different audiences,
+# different wording, and neither is a substitute for the other.
+#
+# novi-notify never fails and never blocks -- with no desktop running
+# it writes to syslog and exits 0 -- so this needs no guard and no
+# `|| true` beyond the one that catches it not being installed at all.
+tell() {
+    command -v novi-notify >/dev/null 2>&1 || return 0
+    novi-notify "$@" >/dev/null 2>&1 || true
+}
+
+# ---------------------------------------------------------------------------
+# Is automount even on
+# ---------------------------------------------------------------------------
+#
+# Read at event time, like power.lid and power.button (RFC 0013): there
+# is no daemon holding the setting, so it cannot drift and `apply` has
+# nothing to converge. Turning it off takes effect on the next device,
+# not on the next reboot.
+automount_enabled() {
+    local v
+    [ -r "$STATE_FILE" ] || return 0
+    v="$(awk -F= '/^[[:space:]]*storage\.automount[[:space:]]*=/ {
+             gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit }' \
+         "$STATE_FILE" 2>/dev/null)"
+    [ "$v" != "off" ]
+}
+
+# ---------------------------------------------------------------------------
+# Which devices are ours to touch
+# ---------------------------------------------------------------------------
+
+# The disk a partition belongs to: sdb1 -> sdb, nvme0n1p2 -> nvme0n1.
+# Read from sysfs rather than by trimming the name, because the two
+# naming schemes disagree about whether the trailing digits are a
+# partition number, and guessing wrong here means guessing about the
+# root disk.
+parent_disk() {
+    local dev="$1" link
+    if [ -e "/sys/class/block/${dev}/partition" ]; then
+        link="$(readlink -f "/sys/class/block/${dev}")" || return 1
+        link="${link%/*}"
+        printf '%s\n' "${link##*/}"
+        return 0
+    fi
+    printf '%s\n' "$dev"
+}
+
+# Removable in the sense a person means: a stick, a card, an external
+# drive. Two tests, because neither alone is enough -- a USB hard disk
+# reports removable=0 (the medium is not removable, the DEVICE is), and
+# a hot-plugged SATA disk in a server backplane is not something to
+# mount under someone's session.
+is_removable() {
+    local disk="$1" path
+    [ "$(cat "/sys/block/${disk}/removable" 2>/dev/null)" = "1" ] && return 0
+    path="$(readlink -f "/sys/block/${disk}" 2>/dev/null)" || return 1
+    case "$path" in
+        */usb[0-9]*/*|*/mmc_host/*|*/firewire*) return 0 ;;
+    esac
+    return 1
+}
+
+# Anything already mounted anywhere is not ours -- that covers the root
+# filesystem, /boot, the ESP, the live medium and anything in fstab
+# that `mount -a` already brought up.
+already_mounted() {
+    awk -v d="/dev/$1" '$1 == d { found = 1 } END { exit !found }' /proc/mounts
+}
+
+# Named in fstab is not ours either, mounted or not: fstab is somebody
+# saying where that filesystem goes, and automounting it somewhere else
+# would give the same filesystem two homes. Matched on the device node,
+# the LABEL= and the UUID= forms, since fstab may use any of them.
+in_fstab() {
+    local dev="$1" label uuid
+    [ -r /etc/fstab ] || return 1
+    eval "$(blkid "/dev/${dev}" 2>/dev/null | sed 's/^[^:]*: //')" 2>/dev/null || true
+    label="${LABEL:-}"
+    uuid="${UUID:-}"
+    awk -v dev="/dev/${dev}" -v label="$label" -v uuid="$uuid" '
+        /^[[:space:]]*#/ { next }
+        NF < 2 { next }
+        $1 == dev { found = 1 }
+        label != "" && $1 == "LABEL=" label { found = 1 }
+        uuid  != "" && $1 == "UUID=" uuid   { found = 1 }
+        END { exit !found }' /etc/fstab
+}
+
+# ---------------------------------------------------------------------------
+# Where it goes, and what it is
+# ---------------------------------------------------------------------------
+
+# A filesystem label is text off a stick somebody else formatted: it
+# can contain a slash, a newline, a leading dot, or 200 characters.
+# It is about to become a directory name under /run/media, so it is
+# filtered down to a safe set rather than escaped -- the same call
+# novi-wifi makes about an SSID and the package index makes about `|`.
+# Anything that does not survive falls back to the device name, which
+# is always safe and never ambiguous.
+safe_name() {
+    local raw="$1" out
+    out="$(printf '%s' "$raw" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-64)"
+    # A leading dot is rejected, not stripped: `..` survives `tr` (dots
+    # are in the keep set, so `../../etc` becomes `.._.._etc`) and a
+    # hidden directory under /run/media is a volume nobody can find.
+    # Everything else that survives the filter is a safe directory
+    # name, including a leading underscore -- there is no reason to
+    # refuse `_backup`.
+    case "$out" in
+        ''|.*) printf '' ;;
+        *) printf '%s' "$out" ;;
+    esac
+}
+
+# The filesystems this system will mount, and nothing else -- an
+# allowlist rather than `mount -t auto`, on the same argument as
+# novi-umh's one-entry allowlist (RFC 0016) and novi-gpt writing
+# exactly one layout (RFC 0008). The kernel will happily try an image
+# as any filesystem it has a driver for, and a filesystem driver
+# parsing a hostile image is one of the larger attack surfaces a kernel
+# has. This list is what people plug in, not what the kernel can be
+# talked into.
+#
+# What blkid CALLS a filesystem and what `mount -t` WANTS are not the
+# same string, and the one case where they differ is the one nobody
+# would think to check: blkid reports NTFS as `ntfs`, and the in-tree
+# read-write driver is `ntfs3`. Mounting `-t ntfs` asks for a driver
+# this kernel does not have (the old read-only one, removed upstream in
+# 6.9), so every NTFS volume -- every external drive that has ever been
+# near Windows -- would have been refused with "unknown filesystem
+# type" by code whose allowlist said it was supported. Caught by
+# running blkid over a real mkfs.ntfs image before writing the test,
+# not by reading the code.
+#
+# Everything else maps to itself. Returning the mount type from the
+# same function that decides support keeps the two from drifting: an
+# entry that is not mountable cannot be added to the list without also
+# saying what to mount it as.
+mount_type() {
+    case "$1" in
+        ntfs|ntfs3)              printf 'ntfs3' ;;
+        ext2|ext3|ext4)          printf '%s' "$1" ;;
+        vfat|exfat|btrfs|xfs)    printf '%s' "$1" ;;
+        iso9660|udf)             printf '%s' "$1" ;;
+        *)                       return 1 ;;
+    esac
+    return 0
+}
+
+
+# nosuid and nodev, always. A setuid binary or a device node on a stick
+# someone found in a car park is the oldest trick there is, and neither
+# has any business coming from removable media.
+#
+# NOT noexec, and that is a decision. It would block running a script
+# or a binary from a stick, which is a thing people legitimately do
+# (and which this project's own installer does from the live medium);
+# the attack it stops needs the attacker to already be running code
+# here. udisks2 makes the same call for the same reason.
+#
+# iso9660 and udf are read-only media, so they are mounted ro -- saying
+# so is better than letting mount discover it and print a warning.
+mount_options() {
+    case "$1" in
+        iso9660|udf) printf 'ro,nosuid,nodev' ;;
+        vfat|exfat)  printf 'rw,nosuid,nodev,uid=0,gid=0,umask=022,iocharset=utf8' ;;
+        ntfs3)       printf 'rw,nosuid,nodev,uid=0,gid=0,umask=022,windows_names' ;;
+        *)           printf 'rw,nosuid,nodev' ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# The lock
+# ---------------------------------------------------------------------------
+#
+# Two partitions on one stick produce two uevents in the same
+# millisecond and novi-hotplug backgrounds both. Without this they race
+# to create the same mount point when both have the same label, and one
+# of them mounts over the other. mkdir is the atomic primitive every
+# shell has; there is no flock in busybox ash.
+#
+# The stale-lock case is handled by the PID inside it rather than by a
+# timeout: a handler killed mid-mount would otherwise wedge automount
+# until the next reboot, silently.
+lock_acquire() {
+    local tries=0 owner
+    mkdir -p /run/novi 2>/dev/null || true
+    while ! mkdir "$LOCK_DIR" 2>/dev/null; do
+        owner="$(cat "${LOCK_DIR}/pid" 2>/dev/null || printf '')"
+        if [ -n "$owner" ] && [ ! -d "/proc/${owner}" ]; then
+            note "clearing a lock left by dead pid ${owner}"
+            rm -rf "$LOCK_DIR"
+            continue
+        fi
+        tries=$((tries + 1))
+        [ "$tries" -gt 100 ] && { warn "could not take $LOCK_DIR"; return 1; }
+        sleep 0.1 2>/dev/null || sleep 1
+    done
+    printf '%s\n' "$$" > "${LOCK_DIR}/pid"
+    return 0
+}
+
+lock_release() {
+    rm -rf "$LOCK_DIR"
+}
+
+# ---------------------------------------------------------------------------
+# add
+# ---------------------------------------------------------------------------
+
+cmd_add() {
+    local dev="$1" disk type mtype name target opts n
+
+    automount_enabled || { note "automount is off; ignoring ${dev}"; return 0; }
+    [ -b "/dev/${dev}" ] || return 0
+
+    disk="$(parent_disk "$dev")" || return 0
+
+    # A whole disk that HAS a partition table is not a filesystem --
+    # the partitions will arrive as their own uevents. Mounting the
+    # disk itself would either fail or, worse, succeed on a stick
+    # formatted superfloppy-style and then collide with a partition
+    # that never existed.
+    if [ "$disk" = "$dev" ]; then
+        for _p in /sys/class/block/"${dev}"[0-9]*; do
+            [ -e "$_p" ] && return 0
+        done
+    fi
+
+    is_removable "$disk"   || { return 0; }
+    already_mounted "$dev" && { return 0; }
+    in_fstab "$dev"        && { note "${dev} is in /etc/fstab; leaving it alone"; return 0; }
+
+    # blkid prints `TYPE="ext4" LABEL="STICK"` and nothing at all for a
+    # partition with no filesystem on it -- which is the ordinary state
+    # of a swap partition or a freshly created one, not an error.
+    TYPE=""; LABEL=""; UUID=""
+    eval "$(blkid "/dev/${dev}" 2>/dev/null | sed 's/^[^:]*: //')" 2>/dev/null || true
+    type="${TYPE:-}"
+    [ -n "$type" ] || return 0
+
+    if ! mtype="$(mount_type "$type")"; then
+        note "${dev} holds '${type}', which this system does not mount"
+        return 0
+    fi
+
+    name="$(safe_name "${LABEL:-}")"
+    [ -n "$name" ] || name="$dev"
+
+    lock_acquire || return 1
+
+    # Two sticks both labelled "USB" is not a rare case, it is the
+    # normal case. Suffix rather than refuse.
+    target="${MEDIA_ROOT}/${name}"
+    n=1
+    while [ -e "$target" ]; do
+        # An empty directory we left behind is ours to reuse; anything
+        # else gets a new name.
+        if [ -d "$target" ] && ! mountpoint -q "$target" 2>/dev/null &&
+                [ -z "$(ls -A "$target" 2>/dev/null)" ]; then
+            break
+        fi
+        n=$((n + 1))
+        target="${MEDIA_ROOT}/${name}_${n}"
+        [ "$n" -gt 32 ] && { lock_release; warn "too many volumes named ${name}"; return 1; }
+    done
+
+    mkdir -p "$target" || { lock_release; return 1; }
+    opts="$(mount_options "$mtype")"
+
+    if mount -t "$mtype" -o "$opts" "/dev/${dev}" "$target" 2>/dev/null; then
+        note "mounted ${dev} (${mtype}) at ${target}"
+        tell -i drive "${name} is ready" "$target"
+        msg "${dev} -> ${target}"
+    else
+        # A dirty NTFS or exFAT volume, or a stick pulled mid-write.
+        # Read-only is the honest fallback: the data is readable and
+        # nothing here is going to make the corruption worse.
+        if mount -t "$mtype" -o "ro,nosuid,nodev" "/dev/${dev}" "$target" 2>/dev/null; then
+            note "mounted ${dev} (${mtype}) READ-ONLY at ${target} -- it would not mount rw"
+            tell -u critical -i drive "${name} is read-only" \
+                "it would not mount for writing"
+            msg "${dev} -> ${target} (read-only)"
+        else
+            rmdir "$target" 2>/dev/null || true
+            note "could not mount ${dev} (${mtype})"
+            warn "could not mount /dev/${dev} (${mtype})"
+            lock_release
+            return 1
+        fi
+    fi
+    lock_release
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# remove
+# ---------------------------------------------------------------------------
+
+cmd_remove() {
+    local dev="$1" mp
+
+    # By the time this runs the device node is already gone, so the
+    # mount point comes from /proc/mounts, not from blkid.
+    mp="$(awk -v d="/dev/$dev" '$1 == d { print $2; exit }' /proc/mounts)"
+    [ -n "$mp" ] || return 0
+    case "$mp" in
+        "${MEDIA_ROOT}"/*) : ;;
+        *) note "${dev} was mounted at ${mp}, which is not ours to unmount"; return 0 ;;
+    esac
+
+    # Lazy, and deliberately. This runs when the device is ALREADY
+    # gone: a plain umount blocks on writeback to hardware that is no
+    # longer there. `umount -l` detaches the tree immediately and lets
+    # the kernel clean up when the last reference drops, which is the
+    # only thing that can work for a stick someone yanked.
+    #
+    # This is the ugly path. novi-eject is the one that flushes first.
+    umount -l "$mp" 2>/dev/null || true
+    rmdir "$mp" 2>/dev/null || true
+    note "unmounted ${dev} from ${mp}"
+    # Critical, and that is not melodrama: this path only runs when a
+    # device went away while still mounted -- somebody pulled it
+    # without ejecting -- and the whole point of saying so is that they
+    # should see it even if they have already looked away.
+    tell -u critical -i drive "${mp##*/} was removed" \
+        "it was unplugged before it was ejected"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# list
+# ---------------------------------------------------------------------------
+
+cmd_list() {
+    local found=0
+    while read -r src mp _rest; do
+        case "$mp" in
+            "${MEDIA_ROOT}"/*) ;;
+            *) continue ;;
+        esac
+        found=1
+        printf '%-14s %s\n' "$src" "$mp"
+    done < /proc/mounts
+    [ "$found" -eq 1 ] || printf 'no removable volumes mounted\n'
+}
+
+# ---------------------------------------------------------------------------
+
+usage() {
+    cat <<'USAGE'
+Usage:
+  novi-mount add <device>       mount it, if it is removable media
+  novi-mount remove <device>    unmount it, if we mounted it
+  novi-mount list               removable volumes and their mount points
+
+<device> is a kernel name such as sdb1, not a path.
+
+Mounting happens automatically when `storage.automount = on` in
+/etc/novi/system.conf, which is the default. Volumes appear under
+/run/media/<label>. Use `novi-eject` to remove one safely.
+USAGE
+    exit 1
+}
+
+mkdir -p "$MEDIA_ROOT" 2>/dev/null || true
+
+case "${1:-}" in
+    add)    [ $# -eq 2 ] || usage; cmd_add "$2" ;;
+    remove) [ $# -eq 2 ] || usage; cmd_remove "$2" ;;
+    list)   cmd_list ;;
+    *)      usage ;;
+esac

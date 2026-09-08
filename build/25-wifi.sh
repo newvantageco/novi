@@ -9,7 +9,8 @@
 # the machines people actually own.
 #
 # wpa_supplicant is built with its INTERNAL crypto
-# (CONFIG_TLS=internal + libtommath), so it pulls in no OpenSSL. The
+# (wolfSSL since RFC 0021, internal + libtommath before it), so it
+# pulls in no OpenSSL. The
 # base image deliberately has none -- novi-verify exists precisely so
 # that stays true (RFC 0006) -- and adding a TLS stack to get onto a
 # network would undo that in one step.
@@ -54,31 +55,105 @@ TESTDIR="${BUILD_DIR}/wifi-test"
 rm -rf "${WORK}"; mkdir -p "${WORK}" "${TESTDIR}"
 
 # ── libnl ─────────────────────────────────────────────────────────────────
-# wpa_supplicant's nl80211 driver talks to the kernel through netlink,
-# and libnl is what it uses to do that. --disable-cli drops nl-* tools
-# nothing here runs.
-echo ">>> Building libnl ${LIBNL_VERSION} ..."
-tar -xf "${SOURCES}/libnl-${LIBNL_VERSION}.tar.gz" -C "${WORK}"
+# Built by 06-wayland.sh now, not here. novi-panel (stage 10) links it
+# for the network indicator's nl80211 query, and a library built in a
+# LATER stage than one of its consumers is invisible in a warm tree and
+# fatal in a clean one -- the novi-launcher/fcft trap, exactly (RFC
+# 0005). A library with more than one consumer belongs in the library
+# stage.
+[ -f "${ROOTFS}/usr/lib/pkgconfig/libnl-genl-3.0.pc" ] || {
+    echo "ERROR: libnl not found in ${ROOTFS} -- run build/06-wayland.sh first." >&2
+    exit 1
+}
+
+# ── wolfSSL: the crypto backend that has EC ───────────────────────────────
+#
+# RFC 0021. This replaces CONFIG_TLS=internal, and the distinction that
+# makes it acceptable is worth being precise about: THE BASE IMAGE
+# ALREADY LINKED A TLS IMPLEMENTATION. `CONFIG_TLS=internal` is not
+# "no crypto" -- it is ~200 KB of AES, SHA, RSA, bignum and a TLS
+# handshake written by the wpa_supplicant authors, compiled straight
+# into the binary. RFC 0009's rule was "no OpenSSL", and RFC 0006's
+# was "checking a package signature must not need a TLS stack"
+# (novi-verify, still static, still separate). Neither said the
+# supplicant may not have crypto; it always had some.
+#
+# So this swaps one crypto implementation for a bigger, far more
+# reviewed one, and gets WPA3 for it -- SAE and OWE need
+# elliptic-curve operations that internal TLS simply does not
+# implement.
+#
+# WHY WOLFSSL AND NOT MBEDTLS: RFC 0020 went looking and found that
+# wpa_supplicant 2.11 has no mbedTLS backend at all -- its Makefile
+# offers openssl, gnutls, wolfssl, internal, linux and none, and
+# `grep -rli mbedtls` over the tarball returns nothing. RFC 0009 named
+# mbedTLS as the way in and was wrong. wolfSSL is dual GPL-2.0 /
+# commercial, and the GPL half is clean under this project's own
+# GPLv2.
+#
+# BUILT HERE, IN THE WIFI STAGE, and that is deliberate rather than
+# lazy. The rule this repo learned from novi-launcher linking fcft is
+# about a library built in a LATER stage than its consumer -- a
+# backwards dependency invisible except in a clean tree. wolfSSL's
+# only consumers are wpa_supplicant and hostapd, both built right
+# here, so there is no ordering hazard at all. The day something else
+# links it, it moves to a stage of its own; until then a stage number
+# below 25 does not exist to give it.
+echo ">>> Building wolfSSL ${WOLFSSL_VERSION} (wpa_supplicant backend) ..."
+rm -rf "${WORK}/wolfssl-${WOLFSSL_VERSION}" "${WORK}/wolfssl-obj"
+tar -xf "${SOURCES}/wolfssl-${WOLFSSL_VERSION}.tar.gz" -C "${WORK}"
+
+# AUTOTOOLS, not cmake, and the difference is not cosmetic.
+#
+# cmake has a WOLFSSL_WPAS option and it is NOT the same set as
+# autotools' --enable-wpas. Built with the cmake flag, wpa_supplicant's
+# tls_wolfssl.c failed on fourteen errors -- `SSL_OP_NO_TLSv1`
+# undeclared, implicit declarations of wolfSSL_get_client_random,
+# wolfSSL_export_keying_material, wolfSSL_get_peer_finished -- because
+# --enable-wpas also turns on OPENSSL_EXTRA and about twenty other
+# defines (HAVE_SECRET_CALLBACK, HAVE_KEYING_MATERIAL, KEEP_PEER_CERT,
+# WOLFSSL_DER_LOAD ...) that the cmake option does not. Reconstructing
+# that list by hand is exactly the mistake this comment used to warn
+# about, so: use the switch upstream maintains.
+#
+# The price is autoconf/automake/libtoolize on the build host, because
+# this tarball comes from `git archive` (GitHub's /archive/ endpoint is
+# unreachable here) and has no generated `configure`. CONTRIBUTING.md
+# lists them.
 (
-    cd "${WORK}/libnl-${LIBNL_VERSION}"
-    ./configure --host="${TARGET_TRIPLE}" --prefix=/usr \
-        --disable-static --disable-cli >/dev/null
+    cd "${WORK}/wolfssl-${WOLFSSL_VERSION}"
+    ./autogen.sh >/dev/null 2>&1
+
+    # --enable-wpas is the whole point. --disable-examples and
+    # --disable-crypttests drop programs built for the TARGET that
+    # could not run here anyway and that nothing asked for -- in an
+    # image whose base/desktop split is computed from what is present,
+    # dead weight is not inert (RFC 0007).
+    #
+    # CFLAGS carries -Wno-error=stringop-overflow, and only that one.
+    # GCC 14 flags Hmac_UpdateFinal_CT's constant-time trick: it writes
+    # into `hmac->innerHash` as a flat byte array past the union member
+    # GCC sized it from ("writing 16 bytes into a region of size 0 ...
+    # at offset 816 into destination object 'hmac' of size 784"). That
+    # is deliberate in a routine whose point is to touch the same
+    # memory regardless of digest length. Disabling the one diagnostic
+    # rather than -Werror wholesale keeps every other warning fatal.
+    ./configure \
+        --build="$(gcc -dumpmachine)" \
+        --host="${TARGET_TRIPLE}" \
+        --prefix=/usr \
+        --enable-wpas \
+        --enable-shared \
+        --disable-static \
+        --disable-examples \
+        --disable-crypttests \
+        CFLAGS="-O2 -Wno-error=stringop-overflow" >/dev/null
     make -j"$(nproc)" >/dev/null
     make install DESTDIR="${ROOTFS}" >/dev/null
 )
-# libtool leaves .la files that point at build-tree paths; nothing on
-# the target reads them and they are a classic source of confusing
-# link failures later.
-rm -f "${ROOTFS}"/usr/lib/libnl*.la
-
-# libnl builds six libraries; wpa_supplicant and iw link two of them.
-# The other four -- route, nf, xfrm, idiag -- are 3 MB of netlink
-# families nothing in this image speaks. --disable-cli already dropped
-# the tools that would have used them.
-rm -f "${ROOTFS}"/usr/lib/libnl-route-3.so* \
-      "${ROOTFS}"/usr/lib/libnl-nf-3.so* \
-      "${ROOTFS}"/usr/lib/libnl-xfrm-3.so* \
-      "${ROOTFS}"/usr/lib/libnl-idiag-3.so*
+rm -f "${ROOTFS}"/usr/lib/libwolfssl.la
+find "${ROOTFS}/usr/lib" -maxdepth 1 -type f -name 'libwolfssl.so.*' \
+    -exec "${CROSS}-strip" --strip-unneeded {} + 2>/dev/null || true
 
 # ── wpa_supplicant configuration ──────────────────────────────────────────
 #
@@ -93,28 +168,29 @@ write_wpa_config() {
 CONFIG_DRIVER_NL80211=y
 CONFIG_LIBNL32=y
 
-# Internal crypto, so this links no OpenSSL. The base image has none
-# and should keep having none.
-CONFIG_TLS=internal
-CONFIG_INTERNAL_LIBTOMMATH=y
-CONFIG_INTERNAL_LIBTOMMATH_FAST=y
+# wolfSSL, not OpenSSL and not the internal implementation (RFC 0021).
+# The stage header has the whole argument; the short version is that
+# CONFIG_TLS=internal was already a TLS stack -- just one without
+# elliptic curves, which is what WPA3 needs.
+CONFIG_TLS=wolfssl
 
-# NO WPA3 (SAE/OWE), and this is a real limitation, not an oversight.
+# WPA3. SAE is WPA3-Personal; OWE is opportunistic encryption on open
+# networks. Both need the crypto_ec_* operations dragonfly.c calls,
+# which is precisely what CONFIG_TLS=internal did not have -- it linked
+# cleanly right up to "undefined reference to crypto_ec_get_prime".
 #
-# SAE and OWE need elliptic-curve crypto -- crypto_ec_*, and the
-# bignum operations dragonfly.c calls -- and CONFIG_TLS=internal does
-# not implement EC. Turning them on links cleanly right up to
-# "undefined reference to crypto_ec_get_prime", which is where this
-# was found.
-#
-# The three ways out are: link OpenSSL (undoes the reason this whole
-# stage exists), link mbedTLS (small, self-contained, has EC,
-# supported by wpa_supplicant 2.11 -- the real answer, and its own
-# piece of work), or ship WPA2 only. WPA2-Personal and WPA2-Enterprise
-# cover essentially every network in service, and WPA3 routers run
-# transition mode, so this connects to them too. It will not connect
-# to a WPA3-ONLY network. RFC 0009 says so out loud rather than
-# leaving someone to discover it in a cafe.
+# CONFIG_SAE_PK is SAE Public Key: it binds an SSID to a key so a
+# rogue AP with the same name and the same password cannot impersonate
+# the real one. It costs nothing once SAE is on.
+CONFIG_SAE=y
+CONFIG_SAE_PK=y
+CONFIG_OWE=y
+
+# Management frame protection. Not optional with SAE -- WPA3 requires
+# it -- and this is also the option that makes a WPA2 association
+# negotiate PMF when the AP offers it. Off, a WPA3 AP simply refuses
+# to associate.
+CONFIG_IEEE80211W=y
 
 # Enterprise EAP methods: eduroam, corporate networks. These are what
 # make this usable somewhere other than a house.
@@ -146,6 +222,22 @@ CONFIG_DEBUG_SYSLOG=y
 # Deliberately off: WPS is a protocol with a well-known offline PIN
 # attack, and nothing here has a use for smartcards.
 WPACONF
+
+    # Appended UNQUOTED, because these two need ${ROOTFS} expanded.
+    #
+    # wpa_supplicant's Makefile adds `LIBS += -lwolfssl` for
+    # CONFIG_TLS=wolfssl and nothing else: no pkg-config lookup, no
+    # search path. Cross-compiling, that finds neither the header nor
+    # the library and stops at `wolfssl/options.h: No such file or
+    # directory`. .config IS a makefile fragment included before those
+    # rules, so `+=` here is the supported way to widen the search --
+    # passing CFLAGS= on the make command line would REPLACE everything
+    # the config just computed.
+    cat >> "$1" <<EOF
+CFLAGS += -I${ROOTFS}/usr/include
+LIBS += -L${ROOTFS}/usr/lib
+LIBS_p += -L${ROOTFS}/usr/lib
+EOF
 }
 
 # ── wpa_supplicant ────────────────────────────────────────────────────────
@@ -171,7 +263,9 @@ echo ">>> Building hostapd ${WPA_SUPPLICANT_VERSION} (test harness only) ..."
 tar -xf "${SOURCES}/hostapd-${WPA_SUPPLICANT_VERSION}.tar.gz" -C "${WORK}"
 (
     cd "${WORK}/hostapd-${WPA_SUPPLICANT_VERSION}/hostapd"
-    # CONFIG_TLS=internal here too. hostapd's default crypto backend is
+    # CONFIG_TLS=wolfssl here too, and CONFIG_SAE so this can be a
+    # WPA3 access point -- the test peer has to speak what the client
+    # is being tested for. hostapd's default crypto backend is
     # OpenSSL and it does not ask -- it just compiles
     # src/crypto/crypto_openssl.c and fails on <openssl/opensslv.h>.
     # This binary never ships, but a test harness that needs a library
@@ -180,9 +274,14 @@ tar -xf "${SOURCES}/hostapd-${WPA_SUPPLICANT_VERSION}.tar.gz" -C "${WORK}"
 CONFIG_DRIVER_NL80211=y
 CONFIG_LIBNL32=y
 CONFIG_IEEE80211N=y
-CONFIG_TLS=internal
-CONFIG_INTERNAL_LIBTOMMATH=y
+CONFIG_TLS=wolfssl
+CONFIG_SAE=y
+CONFIG_IEEE80211W=y
 HAPCONF
+    cat >> .config <<EOF
+CFLAGS += -I${ROOTFS}/usr/include
+LIBS += -L${ROOTFS}/usr/lib
+EOF
     make -j"$(nproc)" \
         CC="${CROSS}-gcc" \
         LD="${CROSS}-gcc" \

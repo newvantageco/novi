@@ -51,12 +51,33 @@ import sys
 # libevdev, libmtdev, libexpat, libdisplay-info -- counts as "needed by
 # the base" and can never move. Eight libraries were being held in a
 # console image by eight programs nobody would run on one.
+# The SEED list, and it is not the same list as PACKAGE_TABLE below --
+# a new desktop client has to be added to BOTH.
+#
+# These are the roots of the desktop closure: what is reachable from
+# here moves out, and everything else is base. PACKAGE_TABLE then says
+# which package each moved file belongs to. Adding a client to the
+# table alone leaves it seeded as a BASE binary, so its libraries get
+# pinned into the base while the table's own sweep moves them out --
+# which surfaces as the straddle check firing on fourteen libraries
+# that have nothing to do with the change:
+#
+#   usr/lib/libfcft.so.3 stays, usr/lib/libfcft.so moves
+#
+# A correct error pointing nowhere near the cause. novi-notifyd was
+# added to the table and not to this list, and that is exactly what it
+# printed.
 DESKTOP_BINARIES = [
     # The desktop proper
     "usr/bin/novi-shell",
+    "usr/bin/novi-notifyd",
+    "usr/bin/novi-bg",
     "usr/bin/novi-panel",
     "usr/bin/novi-launcher",
     "usr/bin/novi-settings",
+    "usr/bin/novi-edit",
+    "usr/bin/novi-files",
+    "usr/bin/novi-view",
     "usr/bin/novi-lockscreen",
     "usr/bin/novi-screenshot",
     "usr/bin/foot",
@@ -128,10 +149,27 @@ PACKAGE_TABLE = [
      [r"^novi-launcher$"]),
     ("novi-settings",    "OS",            "Settings: account and declared system state",
      [r"^novi-settings$"]),
+    ("novi-edit",        "OS",            "Text editor",
+     [r"^novi-edit$"]),
+    ("novi-files",       "OS",            "File manager",
+     [r"^novi-files$"]),
+    ("novi-view",        "OS",            "Image viewer",
+     [r"^novi-view$"]),
+    ("zlib",             "ZLIB",          "Deflate compression library",
+     [r"^libz\.so"]),
+    ("libpng",           "LIBPNG",        "PNG image codec",
+     [r"^libpng"]),
     ("novi-lockscreen",  "OS",            "Super+L session lock",
      [r"^novi-lockscreen$"]),
     ("novi-screenshot",  "OS",            "PrintScreen screen capture",
      [r"^novi-screenshot$"]),
+    # novi-notifyd only. Its sender, novi-notify, stays in the base
+    # image on purpose (RFC 0024) and matches no pattern here, which is
+    # how an unclaimed base file is meant to look.
+    ("novi-notifyd",     "OS",            "Desktop notifications (RFC 0024)",
+     [r"^novi-notifyd$"]),
+    ("novi-bg",          "OS",            "Desktop background",
+     [r"^novi-bg$"]),
 ]
 
 # Data directories that belong to a package but contain no ELF, so the
@@ -163,7 +201,16 @@ DATA_FILES = [
 
     ("fontconfig", "etc/fonts"),
     ("fontconfig", "usr/share/fontconfig"),
-    ("fonts-jetbrains-mono", "usr/share/fonts"),
+    # Two font families, two packages, and the directories are named
+    # rather than the parent swept: "usr/share/fonts" as one entry
+    # put Inter inside a package called fonts-jetbrains-mono, so
+    # `pkg install fonts-jetbrains-mono` silently delivered a font
+    # its name says nothing about. A package's name has to describe
+    # what is in it or the index stops being an answer to "what do I
+    # have". The cost is that a third family needs a line here --
+    # which is the right amount of friction for adding a font.
+    ("fonts-jetbrains-mono", "usr/share/fonts/jetbrains-mono"),
+    ("fonts-inter", "usr/share/fonts/inter"),
     ("foot", "usr/share/terminfo"),
     ("novi-launcher", "usr/share/novi"),
 ]
@@ -171,12 +218,14 @@ DATA_FILES = [
 # Packages that exist only to pull others in.
 META_PACKAGES = [
     ("novi-desktop", "OS", "The Novi desktop: compositor, panel, launcher, terminal",
-     ["novi-shell", "novi-panel", "novi-launcher", "novi-settings",
-      "novi-lockscreen", "novi-screenshot", "foot", "fonts-jetbrains-mono"]),
+     ["novi-shell", "novi-panel", "novi-launcher", "novi-settings", "novi-edit", "novi-files", "novi-view",
+      "novi-lockscreen", "novi-screenshot", "novi-notifyd", "novi-bg", "foot",
+      "fonts-jetbrains-mono", "fonts-inter"]),
 ]
 
 EXTRA_PACKAGE_DESCRIPTIONS = {
     "fonts-jetbrains-mono": ("JETBRAINS_MONO", "JetBrains Mono, the default terminal font"),
+    "fonts-inter": ("INTER", "Inter, the UI sans every Novi client labels itself with"),
     "novi-headers": ("OS", "Headers and pkg-config files for the libraries Novi ships"),
 }
 
@@ -212,14 +261,40 @@ class Rootfs:
     def needed(self, rel):
         return readelf_needed(self.readelf, self.full(rel))
 
+    # rel, plus every link hop it goes through, ending at the real file.
+    #
+    # A soname symlink has no ELF header of its own, so readelf_needed()
+    # returns nothing for it -- which meant the walk below used to stop
+    # dead at every `libfoo.so.N`, seeing only the one name a binary
+    # records and never the file that name points at. Nothing had
+    # noticed, because the sweep further down claims table-owned
+    # libraries whether the graph reached them or not. It stops being
+    # survivable the moment anything reasons about reachability, which
+    # the straddle check in main() now does.
+    def chain(self, rel):
+        out, cur, hops = [], rel, 0
+        while hops < 16:
+            out.append(cur)
+            full = self.full(cur)
+            if not os.path.islink(full):
+                break
+            tgt = os.readlink(full)
+            cur = (os.path.normpath(tgt.lstrip("/")) if os.path.isabs(tgt)
+                   else os.path.normpath(os.path.join(os.path.dirname(cur), tgt)))
+            if cur in out or not os.path.exists(self.full(cur)):
+                break
+            hops += 1
+        return out
+
     def closure(self, seeds):
         seen, queue = set(), [s for s in seeds if os.path.exists(self.full(s))]
         while queue:
             rel = queue.pop()
             if rel in seen:
                 continue
-            seen.add(rel)
-            for so in self.needed(rel):
+            hops = self.chain(rel)
+            seen.update(hops)
+            for so in self.needed(hops[-1]):
                 tgt = self.soname.get(so)
                 if tgt and tgt not in seen:
                     queue.append(tgt)
@@ -325,6 +400,40 @@ def main():
                 expanded.add(rel)
 
     move = sorted(expanded)
+
+    # A library's real file, its soname link and its development link are
+    # one thing with three names. If some of those names move and some
+    # stay, the base image keeps a symlink pointing at a file that is no
+    # longer there, and the package ships a library the dynamic linker
+    # cannot find by the only name anything records -- neither of which
+    # is visible anywhere at build time.
+    #
+    # Not theoretical. libpng's `make install` puts `pngfix` and
+    # `png-fix-itxt` in /usr/bin; they are not desktop binaries, so their
+    # closure pinned `libpng16.so.16` and `libz.so.1` into the base while
+    # the sweep moved `libpng16.so.16.43.0` and `libz.so.1.3.1` out with
+    # the desktop. Both packages built, indexed, signed and installed
+    # cleanly; `pkg install novi-desktop` reported success; and novi-view
+    # died at exec with "Error loading shared library libpng16.so.16".
+    # The stage that caused it no longer installs those two programs --
+    # but the next library to ship a utility would have done it again, so
+    # the check is here rather than only there.
+    moved = set(move)
+    straddling = set()
+    for rel in move:
+        for sib in rf.siblings(rel):
+            if sib not in moved and os.path.exists(rf.full(sib)):
+                straddling.add((sib, rel))
+    if straddling:
+        print("ERROR: a library is being split across the base/desktop "
+              "boundary -- these names stay in the base image while the "
+              "file they name moves out:", file=sys.stderr)
+        for sib, rel in sorted(straddling):
+            print("  %s stays, %s moves" % (sib, rel), file=sys.stderr)
+        print("Something in the base links one of these by soname. Find it "
+              "with readelf -d and decide whether it belongs in a "
+              "console-only image at all.", file=sys.stderr)
+        return 1
 
     # Safety net: nothing that stays may need anything that goes.
     moving_sonames = {os.path.basename(m) for m in move}

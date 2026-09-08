@@ -40,3 +40,19 @@ int novi_text_draw(pixman_image_t *dest, struct fcft_font *font,
  * right-aligning text (the panel clock) without actually drawing.
  * Does not touch `dest`. */
 int novi_text_width(struct fcft_font *font, const char *text);
+
+/* Copies `text` into `out`, shortened with a trailing "…" if it would
+ * be wider than `max_w`. Shrinks one real UTF-8 CODEPOINT at a time,
+ * never one byte, so a multi-byte character is never cut in half into
+ * invalid UTF-8 -- which is the whole reason this is here and not a
+ * strncpy at each call site.
+ *
+ * U+2026 was confirmed present in JetBrainsMono-Regular.ttf's own cmap
+ * before this relied on it, with the same fontTools check
+ * ICON-PIPELINE.md's symbol picker used.
+ *
+ * Lives here because two clients now need it: novi-panel's taskbar
+ * pills and novi-files' places sidebar. A second copy is how the two
+ * end up truncating differently. */
+void novi_text_truncate(struct fcft_font *font, const char *text,
+	int max_w, char *out, size_t out_size);

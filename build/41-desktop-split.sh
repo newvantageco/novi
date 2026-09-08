@@ -1,13 +1,13 @@
 #!/bin/bash
 # ============================================================
-# 21-desktop-split.sh — Remove the desktop from the base image
+# 41-desktop-split.sh — Remove the desktop from the base image
 #
 # RFC 0007. §2 of the platform roadmap wants a small native base with
 # everything else delivered as packages. Until now the desktop was in
 # the base image AND in the repository, which is the architecture
 # described rather than the one shipped.
 #
-# This stage deletes exactly the files build/20-repo.sh packaged, using
+# This stage deletes exactly the files build/40-repo.sh packaged, using
 # the manifest that stage wrote. It does not have its own idea of what
 # the desktop is -- one source of truth for the split, computed from
 # the ELF dependency graph, or the two drift apart and the image ends
@@ -31,7 +31,7 @@ source "${SCRIPT_DIR}/00-versions.sh"
 
 MANIFEST="${BUILD_DIR}/repo-desktop-files.list"
 [ -f "${MANIFEST}" ] || {
-    echo "ERROR: ${MANIFEST} not found -- run build/20-repo.sh first." >&2
+    echo "ERROR: ${MANIFEST} not found -- run build/40-repo.sh first." >&2
     exit 1
 }
 
@@ -52,11 +52,31 @@ while IFS= read -r rel; do
     fi
 done < "${MANIFEST}"
 
-# Prune directories the removal emptied. -depth so children go first;
-# rmdir rather than rm -rf so a directory that still holds something
-# survives untouched.
-find "${ROOTFS}/usr/share" "${ROOTFS}/usr/lib" "${ROOTFS}/etc/fonts" \
-     -depth -type d -empty -exec rmdir {} + 2>/dev/null || true
+# Prune directories the removal emptied. rmdir rather than rm -rf, so a
+# directory that still holds something survives untouched.
+#
+# usr/include is in this list because RFC 0015 made the headers a
+# package too: without it the base kept empty directories named after
+# libraries it no longer contains, which reads like a broken install
+# rather than a deliberate one.
+#
+# The loop is not belt-and-braces. `find -depth -type d -empty -exec
+# rmdir {} +` looks like it handles nesting and does not: -empty is
+# evaluated during the traversal, so a parent that still contains an
+# about-to-be-deleted empty child is not empty *at the moment it is
+# tested*. One pass removes only the deepest level. That left
+# usr/include/alsa/sound behind as a three-deep chain of empty
+# directories, and would have quietly done the same under usr/share for
+# as long as this script has existed. Repeat until a pass changes
+# nothing; bounded so a bug here cannot spin forever.
+prune_pass() {
+    find "${ROOTFS}/usr/share" "${ROOTFS}/usr/lib" "${ROOTFS}/etc/fonts" \
+         "${ROOTFS}/usr/include" \
+         -depth -type d -empty -print -exec rmdir {} + 2>/dev/null | wc -l
+}
+for _ in 1 2 3 4 5 6 7 8; do
+    [ "$(prune_pass)" -eq 0 ] && break
+done
 
 AFTER="$(du -sh "${ROOTFS}" | cut -f1)"
 

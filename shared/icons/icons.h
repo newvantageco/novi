@@ -19,6 +19,8 @@ enum novi_icon_id {
 	ICON_FOLDER,         /* app-grid: files */
 	ICON_GLOBE,          /* app-grid: web */
 	ICON_PENCIL,         /* app-grid: editor */
+	ICON_FILE,           /* files: a plain file */
+	ICON_IMAGE,          /* files: a file the viewer can open */
 	ICON_PACKAGE,        /* app-grid: pkg */
 	ICON_SETTINGS,       /* app-grid: settings */
 	ICON_SHIELD,         /* app-grid: security tools */
@@ -27,6 +29,11 @@ enum novi_icon_id {
 	ICON_POWER,          /* status bar */
 	ICON_CHEVRON_RIGHT,  /* disclosure, collapsed */
 	ICON_CHEVRON_DOWN,   /* disclosure, expanded */
+	ICON_HOUSE,          /* files: the home place */
+	ICON_HARD_DRIVE,     /* files: a mounted volume */
+	ICON_EJECT,          /* files: take a volume out */
+	ICON_SEARCH,         /* launcher: the input line */
+	ICON_CALCULATOR,     /* launcher: an expression that evaluated */
 	NOVI_ICON_COUNT,
 };
 

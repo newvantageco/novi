@@ -48,6 +48,8 @@ static const struct icon_job JOBS[] = {
 	{ "ICON_FOLDER",        "icon_folder_px",        "svg/folder.svg",        24 },
 	{ "ICON_GLOBE",         "icon_globe_px",         "svg/globe.svg",         24 },
 	{ "ICON_PENCIL",        "icon_pencil_px",        "svg/pencil.svg",        24 },
+	{ "ICON_FILE",          "icon_file_px",          "svg/file.svg",          24 },
+	{ "ICON_IMAGE",         "icon_image_px",         "svg/image.svg",         24 },
 	{ "ICON_PACKAGE",       "icon_package_px",       "svg/package.svg",       24 },
 	{ "ICON_SETTINGS",      "icon_settings_px",      "svg/settings.svg",      24 },
 	{ "ICON_SHIELD",        "icon_shield_px",        "svg/shield.svg",        24 },
@@ -56,6 +58,23 @@ static const struct icon_job JOBS[] = {
 	{ "ICON_POWER",         "icon_power_px",         "svg/power.svg",         16 },
 	{ "ICON_CHEVRON_RIGHT", "icon_chevron_right_px", "svg/chevron-right.svg", 16 },
 	{ "ICON_CHEVRON_DOWN",  "icon_chevron_down_px",  "svg/chevron-down.svg",  16 },
+	/* novi-files' places sidebar (RFC 0023). 16 px, like the other
+	 * chrome glyphs and unlike the 24 px app-grid set: these sit on a
+	 * 26 px row beside 12 pt text, not in a launcher tile. */
+	{ "ICON_HOUSE",         "icon_house_px",         "svg/house.svg",         16 },
+	{ "ICON_HARD_DRIVE",    "icon_hard_drive_px",    "svg/hard-drive.svg",    16 },
+	{ "ICON_EJECT",         "icon_eject_px",         "svg/eject.svg",         16 },
+	/* novi-launcher. The magnifier sits beside the input line at chrome
+	 * size; the calculator sits in a RESULT ROW next to app icons, so
+	 * it takes the 24 px app-grid size to match them.
+	 *
+	 * Not a free choice: at 16 px the calculator's keys fall below one
+	 * pixel and it rasterises to a plain rounded box with a line in it,
+	 * which is worse than drawing no icon at all. Checked against the
+	 * ASCII preview `make generate` prints, which is what that preview
+	 * is for. */
+	{ "ICON_SEARCH",        "icon_search_px",        "svg/search.svg",        16 },
+	{ "ICON_CALCULATOR",    "icon_calculator_px",    "svg/calculator.svg",    24 },
 };
 
 /* nanosvg parses colors from a fixed keyword/hex table and has no notion

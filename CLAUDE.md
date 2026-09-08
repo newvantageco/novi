@@ -19,7 +19,15 @@ this file.
 
 Full pipeline: `bash build.sh` — it **discovers** `build/NN-*.sh` and runs
 all of them in numeric order, so a new stage is part of the build the moment
-the file exists. `--base-only` stops after the kernel (01–05: bootable
+the file exists. **01–39 build content into the rootfs; 40+ package it.**
+That gap is deliberate: everything that puts a file in the image has to
+run before `40-repo.sh` computes the base/desktop split from what is
+there. The packaging stages used to be 30/31/32 with content filling
+20–29, and twice a new stage had nowhere legal to go — a base binary
+built after the split would ship, but pkgsplit would have computed the
+split without it, which is a trap rather than a rule. Two stages may not share a number and `build.sh` refuses
+if they do: `NN` is what `--from`/`--to` name and what a failed stage tells
+you to resume from, so a duplicate turns the identity into a guess. `--base-only` stops after the kernel (01–05: bootable
 console, no desktop/pkg/state/installer), `--from NN` resumes. Each stage can
 also be run standalone (`bash build/NN-*.sh`) but stages depend on prior
 stages' output in `/build/{sources,tools,sysroot,rootfs}` — see Architecture
@@ -41,15 +49,18 @@ below for why `/build` is hardcoded and unrelated to the repo checkout path.
 - `bash scripts/mkvm.sh [--disk]` — boot the ISO in QEMU/KVM
 - `novi-install install --disk DEV` (on the booted live system) — install to
   disk (RFC 0003)
-- `bash build/20-repo.sh` — build and sign the first-party package
+- `bash build/40-repo.sh` — build and sign the first-party package
   repository into `/build/repo` (RFC 0006); serve that directory over HTTP
   and point a machine at it with `mirror =` in `/etc/novi/pkg.conf`
 - `bash build/25-wifi.sh` — libnl, wpa_supplicant, `iw`, `novi-wifi`
   (RFC 0009); also builds hostapd into `/build/wifi-test/` for the hwsim
   test harness, deliberately not into the image
+- `bash build/21-imagelibs.sh`, `bash build/22-novi-view.sh` — zlib and
+  libpng (the first image *decoding* on this system; novi-screenshot
+  could only ever write) and the viewer that uses them
 - `bash build/23-e2fsprogs.sh`, `bash build/24-novi-gpt.sh` — real `mke2fs`
   (journalled ext4) and the GPT writer UEFI installs need (RFC 0008)
-- `bash build/21-desktop-split.sh` — **destructive**: removes the packaged
+- `bash build/41-desktop-split.sh` — **destructive**: removes the packaged
   desktop from `/build/rootfs`, leaving a console-only base (RFC 0007).
   Must run after 20; re-running 06..14 puts the files back
 - `bash build/26-firmware.sh` — curated linux-firmware + `wireless-regdb`
@@ -61,6 +72,26 @@ below for why `/build` is hardcoded and unrelated to the repo checkout path.
   `/build/stage-toolchain` and packaged into `/build/repo` by the
   `repo` phase, which re-signs the index. Takes a phase argument
   because the gcc build is long and the others are not
+- `bash build/30-novi-umh.sh` — `/sbin/usermode-helper`, the one binary
+  `CONFIG_STATIC_USERMODEHELPER` lets the kernel exec. Without it no
+  kernel-initiated `request_module()` runs at all (RFC 0016)
+- `bash build/33-nftables.sh` — libmnl, libnftnl, nftables and the
+  shipped ruleset `/etc/novi/firewall.nft` (RFC 0016). Base image, not
+  a package: 1.1 MB stripped
+- `bash build/34-cryptsetup.sh` — LUKS2 (RFC 0018): popt, json-c,
+  libuuid and libdevmapper built static into a private prefix and
+  linked into one `cryptsetup` binary, which is the only thing
+  installed
+- `bash build/31-mbedtls.sh` — mbedTLS (RFC 0020), into
+  `/build/tls-deps` for linking and into the `mbedtls` package for the
+  target. Never `${ROOTFS}`: a TLS stack in the base image is the
+  thing that RFC is careful to avoid
+- `bash build/35-devtools.sh [openssh|ca|curl|git|repo|all]` — the ssh
+  client, the CA bundle, curl and git (RFC 0019, RFC 0020), staged
+  into `/build/stage-devtools` and published by
+  `43-devtools-repo.sh`. Packages, never base. Also builds `sshd`
+  into `/build/ssh-test/` as the test peer, deliberately not into the
+  image
 - **`bash build/16-s6-rc-db.sh` after ANY change under `init/`** (see below),
   then `bash scripts/mkinitramfs.sh --output build/initramfs.cpio.gz` and
   `bash scripts/mkiso.sh` to get it into a bootable image
@@ -90,6 +121,12 @@ Two invariants worth not breaking:
   file must stay pleasant to hand-edit, or the "GUI and text editor
   write the same document" claim collapses and it becomes another
   machine-owned blob.
+  The same care applies to editing the *shipped* `system.conf` by hand:
+  most of that file is commented-out examples, and a patch that lands
+  one line off turns an example into a declaration. That is how
+  `power.governor = schedutil` — documented right there as *"not set by
+  default"* — became live on every image. Read a `system.conf` diff for
+  what it **uncomments**, not only for what it adds.
 - **Generations snapshot *observed* state, not the state file.** By the
   time `apply` runs, the file already holds the new values, so copying
   it would save the change instead of what the change replaced, and
@@ -126,6 +163,43 @@ the whole script — and the boot step — down with it.
 
 Three smaller things worth knowing before extending this:
 
+- **The System panel edits VALUES now, not just on/off.** It could
+  only flip booleans, so every key with a value — the hostname, the
+  DNS list, `network.firewall.allow`, `storage.automount` — answered
+  "edit it in the file", which made "the GUI and a text editor write
+  the same document" a claim only half kept. `e` opens an inline
+  editor on the selected row; the write still goes through
+  `novi-state set`, never to the file. Three things it has to get
+  right: the edit branch runs BEFORE the panel's other keys (Space
+  must type a space, not toggle the row being edited), leaving the
+  panel with Left/Right cancels the edit (that check runs first, so
+  without it `editing` survives the switch and the panel is silently
+  modal when you come back), and a value containing `#` is REFUSED —
+  it would start a comment when the file is read back, so the GUI
+  would corrupt the document it is a view of.
+- **A list that shows a subset without saying so is a bug class, not
+  an instance.** Having fixed it once, the same sweep found it in two
+  more places -- the launcher stopped at six matches silently (its own
+  symbol table produces nineteen more on a one-letter query), and the
+  Network panel both stopped drawing at the window edge and dropped
+  every SSID past its 24-entry cap. Where it was already handled it was
+  handled loudly: novi-files reports a truncated listing in its status
+  bar, novi-edit opens a too-large file read-only with the reason. The
+  one deliberate elision left is novi-panel's taskbar, which gives an
+  entry that will not fit `w = 0` so that render and hit-test agree it
+  is absent -- Alt+Tab still reaches those windows, and the comment
+  there says why.
+- **The panel could only ever show its first fourteen keys.** No
+  scrolling, a hard `break` at the window's bottom edge — so
+  `network.firewall.allow` and everything after it was in the
+  document, named in the panel's own heading, and unreachable. The
+  scroll window is clamped in the draw, where the height is known, so
+  a resize cannot leave it pointing at a row that no longer exists.
+  Two things that must stay counted over the WHOLE document rather
+  than the visible rows: the drift tally (scrolling must not change
+  how many things are wrong with your machine) and the count of lines
+  `load_state_file()` skipped for being too long, which used to vanish
+  silently and is now reported.
 - The GUI's `novi-state` calls **block the Wayland event loop**. Fine
   for a `set` (one awk pass) or an `apply` (a couple of s6-rc
   transitions); not fine once a domain converges something slow, like a
@@ -135,6 +209,29 @@ Three smaller things worth knowing before extending this:
   function: callers use `have="$(observe_key …)"`, and a command
   substitution is a subshell, so the assignment would be discarded.
   Same subshell trap `packages/pkg` hit for real.
+- **One key that cannot converge must not take the rest of the document
+  with it.** `converge_key` reports an impossible value by calling
+  `die`, which ends the script — so `cmd_apply` abandoned every key
+  sorted *after* the failure, silently, with an exit status nobody read.
+  It cost five boots. `power.governor = schedutil` was declared on a VM
+  with no cpufreq driver; `power` sorts before `services`, and
+  `novi-live-desktop` brings the desktop up by setting
+  `services.novi-shell on` and running `novi-state boot` — so the
+  desktop packages installed, the keys were declared on, and nothing
+  started them. The machine came up to a console login prompt with one
+  ERROR line three sections of the document away from the symptom, and
+  `novi-live-desktop` printed "desktop ready" regardless because every
+  step of it ends in `|| true`. Each converge runs in a **subshell**
+  now, so a failure is a value rather than the end of the program, and
+  a failed key is skipped in later passes (or one bad key prints the
+  same error three times). `apply` returns non-zero; boot convergence
+  still always exits 0.
+- **A key that is *read at use time* is validated in the observer and
+  nowhere else** (`power.blank`, `power.lid`, `power.button`,
+  `storage.automount`). Nothing holds them, so they cannot drift and
+  `apply` has nothing to converge — which also means `converge_key`
+  never runs to reject a typo. `power.blank = ten` reports as
+  `unsupported`, i.e. as drift, which is where a person finds out.
 - **`bash build/16-s6-rc-db.sh` after ANY change under `init/`.** Both
   the s6-rc database and the s6-linux-init scripts are *generated*; the
   running system reads the generated copies, never `init/`, so an
@@ -229,6 +326,346 @@ RFC 0012 (`docs/rfcs/0012-hotplug.md`).
   interface at start. Per-interface DHCP is RFC 0009's work; reaching
   into the network service from a uevent handler is split-brain.
 
+## Architecture: the design system, and where it lives
+
+`docs/design/GUI-DESIGN-LANGUAGE.md` has been the adopted reference
+since September 2026 and was only half implemented; `common/theme.h`
+is §1-§3 as C constants and every client includes it.
+
+- **Every colour existed six times before this.** novi-panel called
+  the card background `0xff232430`, novi-files the same, novi-notifyd
+  `0xff1b1b26`, and nothing connected them to the token they were all
+  trying to be. New UI code uses a `NOVI_*` token or adds one; a raw
+  hex literal in a client is the bug this file exists to prevent.
+- **`NOVI_PIX()` expands 8-bit channels by REPLICATION (`0xA3` ->
+  `0xA3A3`), not by shifting left 8.** A shift maps `0xFF` to `0xFF00`,
+  so pure white comes out 0.4% grey and full alpha is very slightly
+  transparent. Several hand-written `pixman_color_t` literals in this
+  repo had exactly that shift.
+- **Inter for language, JetBrains Mono for machine values**, and the
+  split is by what the text IS, not where it sits: a filename is
+  Inter, a path and a size in bytes are mono. novi-edit's *buffer*
+  stays mono because its cursor arithmetic assumes a fixed advance;
+  only its chrome changed.
+- **Static Inter weights, not the variable font** the design doc
+  recommends. Selecting a weight out of a variable font depends on
+  fontconfig's named-instance handling, and a build where that quietly
+  does not work gives Regular everywhere with no error to notice.
+- **Accent is a signal colour and never a large fill**, and getting
+  that wrong is easy: the first pass made every directory row in
+  novi-files teal, beside an accent-tinted selection that was trying
+  to mean something. Hierarchy between kinds of thing is brightness;
+  accent means one thing per window.
+- **`novi-bg` paints the desktop, not the compositor.** A
+  `wlr_scene_rect` is one solid colour by construction, and teaching
+  novi-shell to rasterise a gradient is the UI work RFC 0001 keeps out
+  of it. Generated rather than an image file: no asset, no decoder, no
+  resolution to be wrong at. It sets an EMPTY INPUT REGION -- a
+  full-screen background surface that takes clicks swallows nearly
+  every press on the desktop.
+- **A library linked by more than one client belongs in the library
+  stage**, and this repo has now learned it twice. novi-panel (stage
+  10) started linking libnl, which 25-wifi.sh built at stage 25:
+  invisible in a warm tree, fatal in a clean one, exactly as
+  novi-launcher/fcft was. libnl is built by `06-wayland.sh` now.
+- **One missing `.pc` makes pkg-config blame every package in the
+  query.** Asked for `wayland-client fcft libnl-genl-3.0` in one
+  invocation, it reported all three as not found, and the build died
+  on `wayland-client.h: No such file or directory` with
+  `wayland-client.pc` sitting in the rootfs. Read the whole list
+  before believing the first name in it.
+
+## Architecture: the compositor draws exactly one thing
+
+`novi-shell/decoration.c` is the whole of the window chrome — title,
+top corners, hairline, three control dots, nine-slice drop shadow —
+and it is the only place this compositor rasterises anything. That is
+not a crack in RFC 0001's "UI belongs in a client" rule: server-side
+decorations are by definition drawn by the server, because the client
+that wanted none is not there to ask.
+
+- **The scene graph takes rects or buffers, and chrome is neither.**
+  A `wlr_scene_rect` is one solid colour; a rounded corner, an
+  anti-aliased circle, a gradient and text are all "rasterise it
+  yourself and wrap it in a `wlr_buffer`". Five callbacks, two of
+  which do anything — `get_dmabuf`/`get_shm` correctly answer "no"
+  because it is malloc'd memory, and the pixman renderer wants the
+  pointer anyway.
+- **Those buffers are PREMULTIPLIED ARGB8888**, which is why every
+  colour is multiplied by its own coverage before being stored. This
+  file already carried a note about a "dimmed" 40%-alpha scene rect
+  that rendered BRIGHTER than the full-strength ones beside it for
+  exactly this reason.
+- **The shadow is a nine-slice, and its offset is DOWNWARD only.**
+  `SHADOW_OFFSET` gives the bottom slices a lead-in of full-strength
+  rows before their falloff; applying that same lead sideways hangs
+  four columns of solid black off the right edge of every window,
+  symmetric with nothing. It was a real bug in the first draft, and
+  the reason `lead` is a parameter rather than a constant inside the
+  sprite builder.
+- **Shadow slices must reject pointer input**
+  (`point_accepts_input`). Otherwise twenty translucent pixels around
+  every window swallow clicks meant for whatever is behind them.
+- **Focus is redrawn from `focus_toplevel()`, not from the commit
+  handler.** A window that LOSES focus does not commit a frame just
+  because it lost it, so it would keep looking focused until it next
+  drew something of its own.
+- **A control's hit target is its buffer's box**, so the dot sprite is
+  16px with an 8px disc centred in it and the rest transparent. An 8px
+  sprite would mean an 8px target. 16 is also the dot gap, so
+  neighbouring targets meet exactly and never overlap.
+- **Title-bar drag cannot go through `begin_interactive()`.** That
+  function refuses a toplevel whose *surface* does not hold pointer
+  focus — right for a client asking to be moved, and wrong here, since
+  the pointer is over the compositor's own decoration and the client's
+  surface never has pointer focus at all. The move is clamped to keep
+  96px of window and the whole title bar inside the usable area:
+  dragging is a thing a person does now, so putting a window somewhere
+  unrecoverable is a thing a person can do now.
+- **A GUI test that reports "nothing happened" is usually the test.**
+  This one said so twice: QEMU's QKeyCode has `meta_l`, not `super`,
+  so two Super+. runs sent an invalid keycode; and a foot window's
+  title bar sits at y=142..173, not the y=176 the drag test grabbed —
+  two pixels into the terminal. Measure the geometry off a screendump
+  before concluding the code is wrong.
+
+## Architecture: a launcher has to answer "what is installed"
+
+`novi-launcher` showed nothing on an empty query and exactly one match
+once you typed. Its own comment defended that as matching the
+calculator's one-result display, with "exactly one real app (foot) to
+ever produce more than one match against".
+
+- **The count was never the problem.** A launcher that shows nothing
+  until you type cannot tell you what the machine has, and a bare
+  cursor on a bare card is a puzzle rather than an invitation. Empty
+  query lists everything; typing filters.
+- **One kind-tagged `struct result`, not three parallel lists.** The
+  selection is one index, and the keyboard should not have to know
+  whether it is moving through apps, a calculator answer or symbols.
+- **The card grows inside a FIXED surface** rather than resizing its
+  own layer surface per keystroke — that would be a
+  set_size/commit/configure round trip per character, which is both
+  flicker and a protocol dance to get wrong.
+
+## Architecture: the palette drifts unless something checks
+
+`common/theme.h` was adopted by half the clients and the other half
+kept private palettes — found by `grep`ing every client for
+`0x[0-9a-f]{8}` literals, not by looking at screenshots.
+
+- **Two clients had invented a SECOND ACCENT.** `novi-settings`
+  defined its accent and its focus ring as `0xff8ab4f8` (Google's
+  blue), and `novi-launcher` used the same value for result rows. The
+  desktop answered "which thing is active?" in teal everywhere and in
+  blue in those two, and it looked deliberate enough that no
+  screenshot review caught it.
+- **`NOVI_PIX()` exists because hand-written `pixman_color_t` literals
+  get the expansion wrong**, and two more files had it: `0xe0` written
+  as `0xe000` rather than `0xe0e0`. Never write one by hand.
+- **Map by ELEVATION, not by nearest hex.** novi-edit's canvas is
+  bg-card (the sheet), its gutter and status bar are bg-panel (chrome
+  beside it), its cursor line is bg-card-raised (a row lifted off that
+  sheet). Choosing the token whose *meaning* fits keeps the answer
+  stable when a token's value changes.
+- **The audit is two greps, and the second one exists because the
+  first missed the worst case.** Run both whenever a client is added:
+
+  ```sh
+  CLIENTS="novi-panel novi-files novi-edit novi-view novi-settings
+           novi-lockscreen novi-launcher novi-notifyd novi-bg
+           novi-screenshot novi-shell common"
+  # packed 0xAARRGGBB
+  grep -rn '0x[0-9a-fA-F]\{8\}' --include=*.c --include=*.h $CLIENTS
+  # hand-written pixman_color_t, whose channels are only FOUR hex digits
+  grep -rn '\.red *=' --include=*.c --include=*.h $CLIENTS
+  ```
+
+  Named directories rather than `novi-*/`: that glob also sweeps
+  `novi-gpt`, whose eight-hex constants are a CRC polynomial and GPT
+  header fields. A hit is a question, not a verdict — an alpha mask or
+  a format constant is fine; a colour is not.
+
+  The eight-hex grep alone reported novi-panel clean while it held
+  **five** hand-written `pixman_color_t` literals, every one of them
+  with the shift bug, including the accent for the taskbar's active
+  entry and the Apps button's hover. The panel is the most-looked-at
+  surface on the desktop and its accent had been slightly darker than
+  every other accent for the whole life of the file, under a comment
+  that said "same tokens as the apps label". **A four-hex channel does
+  not look like a colour to a grep for colours.**
+
+## Architecture: notifications, and a surface that never came back
+
+RFC 0024 (`docs/rfcs/0024-notifications.md`). `novi-notify` in the
+base image, `novi-notifyd` drawing toasts on the desktop.
+
+- **A UNIX DATAGRAM socket, and specifically not a FIFO.** A FIFO is
+  the one transport a shell script could have used with no C at all —
+  and `open(O_WRONLY)` on a FIFO with no reader blocks FOREVER. The
+  largest caller is a uevent handler, where that stops the kernel's
+  hotplug queue (RFC 0012). Not a stream either: a stream needs
+  `connect()` to succeed, so a daemon mid-startup would make senders
+  block or fail on timing. Datagram means one message is one message.
+- **Not D-Bus, for the third time** — RFC 0009 (iwd), RFC 0023
+  (udisks2), now this. `org.freedesktop.Notifications` is a D-Bus
+  interface; what is needed is "hand a short string to a program that
+  may not be running", which is eighty lines.
+- **The sender is base and the daemon is a package**, because the
+  things with something to say (`novi-mount`, `novi-eject`) are base
+  tools that run on machines with no desktop. `novi-notify` always
+  writes to syslog too: on a console-only machine that line is the
+  whole feature.
+- **A separate client, not a second surface in novi-panel.** A socket
+  bug that kills this process costs a toast; the same bug inside the
+  panel costs the taskbar and the clock.
+- **UNMAPPING A LAYER SURFACE IS A ONE-WAY DOOR.** Attaching a NULL
+  buffer when the stack emptied is the documented way to stop
+  occupying a rectangle, and it does not come back: the surface needs
+  another configure round before the compositor will accept a buffer,
+  so the next toast attached one to a surface that was not ready and
+  wlroots dropped it. Nothing drew, ever, and nothing said so — daemon
+  running, socket bound, syslog full. A screenshot found it. The
+  surface now stays mapped for life and click-through is
+  `wl_surface_set_input_region()` over exactly the cards, which is
+  better than unmapping ever was: the GAPS between cards pass clicks
+  through too.
+- **Everything on that socket is untrusted text.** The biggest sender
+  is novi-mount announcing a volume by its filesystem label — a string
+  off a stranger's stick — and the socket is world-writable by design
+  (an unprivileged program has as much business notifying as root
+  does, and there is no session bus to arbitrate). Control characters
+  are dropped, lengths capped, urgency and icon matched against fixed
+  lists. An unknown icon name is *no icon*, not a fallback and not an
+  error.
+- **Critical never expires.** Something that matters enough to be
+  called critical should not vanish while the person is looking away.
+  novi-mount uses it for exactly one thing: a volume yanked while
+  mounted.
+- **`DESKTOP_BINARIES` in pkgsplit is NOT `PACKAGE_TABLE`** — a new
+  desktop client goes in both. Adding it to the table alone leaves it
+  seeded as a base binary, so its libraries get pinned into the base
+  while the table's sweep moves them out, and the straddle check fires
+  on fourteen unrelated libraries: a correct error pointing nowhere
+  near the cause.
+
+## Architecture: the places sidebar, and polling /proc/mounts
+
+RFC 0023's addendum. `novi-files` shows Home, Filesystem and a DEVICES
+section that appears and vanishes as media comes and goes.
+
+- **`poll()` on `/proc/self/mounts` has two traps stacked.** It reports
+  **POLLPRI**, never POLLIN — a poll set up for POLLIN waits forever
+  while the sidebar silently never updates. And **POLLPRI stays
+  asserted until the file is read again**, so a loop that wakes,
+  redraws and polls again without re-reading spins at 100% CPU:
+  silent, and visible only as a hot laptop.
+  `novi_places_watch_drain()` is that read; every wake calls it first.
+- **Volumes come from `/proc/mounts`, not from listing `/run/media`.**
+  A directory can be there with nothing mounted on it, and the sidebar
+  would offer a place that is an empty directory.
+- **Mount points are octal-escaped in `/proc/mounts`** (`\040` and
+  three others). `My\040Stick` is not a path, and this code does not
+  get to assume novi-mount's `safe_name()` is the only thing that ever
+  mounts anything under `/run/media`.
+- **The sidebar selection is preserved by PATH, not by index.** A
+  volume unmounting shifts everything below it up one, and an
+  index-preserving refresh moves the cursor onto a *different* volume
+  — which matters when the next keystroke might eject it.
+- **Ejecting the volume you are standing in leaves it first.**
+  novi-eject refuses a busy mount and the window's own cwd is what
+  makes it busy, so without this a file manager could never eject the
+  stick it was showing and would blame the user's own window.
+- **`^E` works only from the sidebar**: from the file list it would
+  have to guess which volume was meant, and a key that ejects
+  something you were not looking at is not a convenience.
+- **New icons go through `shared/icons/tools/svg2icon`**, vendored at
+  the same pinned Lucide commit, never hand-transcribed. Lucide
+  renamed `home` to `house`: `icons/home.svg` is a 404 at that commit.
+- `novi_text_truncate()` lives in `common/text.c` now — two clients
+  need it, and two copies is how they end up truncating differently.
+- **`wl_pointer` v5 aborts the client on a NULL listener slot.**
+  Version 5 added `frame`, `axis_source`, `axis_stop` and
+  `axis_discrete`; libwayland does not treat a missing handler as "not
+  interested", it kills the client with *"listener function for opcode
+  5 of wl_pointer is NULL"* — immediately, because `frame` follows
+  every pointer event group. novi-files binds `wl_seat` at 5 for the
+  KEYBOARD (`repeat_info` arrived in 4); novi-panel binds 1 and needs
+  none of them, so its five-entry listener is the wrong thing to copy.
+- **The sidebar's row geometry lives in `layout_places()`, not in
+  `render()`**, because the hit-test needs the same arithmetic and two
+  copies disagreeing by one row means clicking eject on a volume you
+  were not pointing at.
+- **`row_at()` must reject a y past the last entry**, or a click in the
+  empty space below a short listing selects whatever index the
+  arithmetic produced.
+- Double-click uses the timestamp `wl_pointer.button` carries, not a
+  clock read in the client — the latter measures when the client got
+  round to the event, not when the button went down.
+
+## Architecture: removable media
+
+RFC 0023 (`docs/rfcs/0023-removable-media.md`). Plug in a stick, it
+appears at `/run/media/<label>`; `novi-eject` takes it out.
+
+- **The kernel could not read most sticks, and that was the real
+  blocker.** `CONFIG_EXFAT_FS` and `CONFIG_NTFS3_FS` were off. Windows
+  and macOS format anything over 32 GB as exFAT, and any drive that
+  has lived on Windows is NTFS — so automount without them fails on
+  most media that exists, with "unknown filesystem type", which reads
+  as a broken stick. NTFS3 is Paragon's read-write driver, not the
+  ancient read-only `ntfs` upstream removed in 6.9; the two are one
+  letter apart in Kconfig.
+- **`blkid` says `ntfs`; the driver is `ntfs3`.** The allowlist said
+  `ntfs3` and the detected type said `ntfs`, so every NTFS volume
+  would have been refused *by code whose list claimed to support it*.
+  Found by running `blkid` over a real `mkfs.ntfs` image while
+  building the test media — not by reading the code, twice.
+  `mount_type()` returns the mount type from the same function that
+  decides support, so the two cannot drift.
+- **Almost all of `novi-mount` is deciding whether to touch the device
+  at all**, because every wrong answer there is serious. Removable is
+  two tests, not one (a USB hard disk reports `removable=0` — the
+  *medium* is not removable, the *device* is). "Already mounted"
+  covers root, `/boot`, the ESP and the live medium in one check with
+  no list to keep in sync. `/etc/fstab` is matched on the device node,
+  `LABEL=` **and** `UUID=`, because fstab may use any of the three.
+- **A filesystem label is attacker-controlled text about to become a
+  directory name.** Filtered to `[A-Za-z0-9._-]`, truncated, and a
+  leading dot is *rejected rather than stripped* — `..` survives the
+  character filter because dots are in the keep set. Verified with an
+  ext4 image whose superblock label reads `../../etc`: it mounts as
+  `/run/media/sdd`. Same call as novi-wifi on an SSID.
+- **An allowlist of filesystems, never `mount -t auto`.** A filesystem
+  driver parsing a hostile image is one of the larger attack surfaces
+  a kernel has.
+- **`nosuid,nodev` always; `noexec` deliberately not.** `noexec` would
+  block running a script from a stick — which this project's own
+  installer does from the live medium — and the attack it stops needs
+  the attacker already running code here. udisks2 makes the same call.
+- **`novi-mount remove` is lazy and `novi-eject` is not, and that is
+  the entire difference between them.** `remove` runs when the device
+  is already gone, where a plain `umount` blocks on writeback to
+  hardware that is not there. `eject` runs while it is still present,
+  where a busy mount means a program is genuinely still writing and
+  detaching the tree underneath it would lose exactly the data the
+  command exists to protect. It refuses instead.
+- **`storage.automount` has no converger**, like `power.lid`:
+  novi-mount reads it at event time. So `converge_key` never runs to
+  reject a typo and the *observer* has to — an unusable value reports
+  as drift rather than sitting in the document looking converged while
+  sticks silently failed to mount.
+- **The uevent handler backgrounds the call** (RFC 0012's rule —
+  mounting is exactly the thing that can block), which makes two
+  partitions on one stick race. `novi-mount` takes an `mkdir` lock;
+  there is no `flock` in BusyBox ash. The stale-lock case checks
+  whether the PID inside still exists rather than using a timeout, or
+  a handler killed mid-mount would wedge automount until reboot,
+  silently.
+- **`CONFIG_ISO9660_FS` is now stated in the curated config** instead
+  of being force-enabled by `05-kernel.sh` behind its back. A symbol
+  the build has to repair is a symbol the config should state.
+
 ## Architecture: shutdown, and why it used to hang
 
 RFC 0013 (`docs/rfcs/0013-power-events.md`).
@@ -301,6 +738,50 @@ one of them on a machine `novi-state diff` called converged.
   change` returns, so a service about to crash-loop may not have died
   yet. It reports what is already true, not what is about to be.
 
+## Architecture: something finally reads the health signal
+
+RFC 0014 built `novi-state health` and **nothing read it for the rest
+of the project's life** — the roadmap listed "something should consume
+this" from the day it shipped, and it survived every round of work
+since, including several that went looking for gaps. `init/services/health`
+is that consumer.
+
+- **A service, not a panel timer.** The check forks `s6-svstat` and
+  `s6-svdt` once per supervised service — about twenty processes. That
+  is nothing at a shell prompt and far too much on a Wayland client's
+  event loop, which novi-panel repaints from once a second. So the same
+  arrangement RFC 0009 uses for the network interface: the service does
+  the work and publishes to `/run/novi/health`, the panel reads a file.
+  A second observer written in C inside a client is the parallel truth
+  novi-state exists to abolish.
+- **Polling is safe here, and that is a property of the checker rather
+  than luck.** `service_health()` will not say CRASHLOOP unless a
+  service has actually died, nor NOTREADY until it has been up a minute
+  without signalling readiness it declares. So a 30-second sample
+  cannot catch a healthy service mid-start and call it broken — which
+  is precisely the mistake this whole feature exists to stop making.
+- **The file is written to a temp name and renamed.** A reader on its
+  own schedule must never see half a line.
+- **The service declares no `notification-fd`.** Nothing observes its
+  readiness, and declaring one it never signals would make it NOTREADY
+  to its own check after sixty seconds. RFC 0015 found exactly that
+  firing on every service that never declares readiness.
+- **A toast on the TRANSITION, an indicator while it is true.** The
+  toast says "this just happened"; re-announcing an unchanged problem
+  every thirty seconds is how a notification stops being read. Normal
+  urgency, not critical — critical never expires (RFC 0024) and the
+  persistent signal is the panel's job.
+- **The indicator is deliberately not clickable**, unlike the two
+  buttons beside it. There is no service UI to open, and a panel item
+  that opens a terminal is not a thing this desktop does. When
+  somewhere exists for it to lead, it should lead there.
+- **Recovery is not instant, and a test that expects it to be is
+  wrong.** A service that has just come back from dying reads
+  CRASHLOOP for sixty seconds by design, so the indicator clears about
+  a minute and a half after the fix, not immediately. The first
+  recovery test waited 36 seconds, saw `degraded`, and would have been
+  read as the indicator sticking forever.
+
 ## Architecture: the native toolchain
 
 RFC 0015 (`docs/rfcs/0015-native-toolchain.md`). `pkg install
@@ -352,6 +833,82 @@ Novi, which compiles and runs its own C and C++.
 - **"Novi can compile C" is not "Novi can rebuild itself."** That needs
   autotools, git, Python and a kernel build, none of which are packaged.
   Do not overstate this one.
+
+## Architecture: the clipboard, and what a selection anchor means
+
+`common/clipboard.c` is the whole of it — core-Wayland
+`wl_data_device_manager`, which novi-shell already creates. No new
+protocol: copying in foot and pasting in novi-edit only works if both
+ends speak the standard thing, and they do.
+
+- **Pasting what you yourself copied never goes near the wire.** It
+  cannot: answering our own `wl_data_offer` means our own `send`
+  callback has to run, and that needs the event loop we would be
+  sitting inside, blocked on the pipe. That is a deadlock, not a slow
+  path, which is why the module keeps its own copy of what it put on
+  the clipboard and returns that.
+- **A selection dies with the process that owns it — so novi-shell
+  keeps a copy.** That is the protocol, not a bug in any client: copy in
+  the editor, close the editor, paste anywhere, and on a bare Wayland
+  desktop you get nothing. The two fixes are a manager speaking
+  `zwlr_data_control_v1` or the compositor holding the text; novi-shell
+  does the second, because the seat is already there and a clipboard
+  buffer is not UI, so RFC 0001's "UI belongs in a client" rule does not
+  reach it. It watches `seat->events.set_selection` (the selection
+  having *changed*, including to nothing — not `request_set_selection`,
+  which is a client asking), keeps up to 1 MB of text, and re-offers it
+  as a compositor-owned source when the selection empties.
+- **Neither half of that may block**, and both are on the compositor's
+  own event loop for it. A blocking read from a client's pipe freezes
+  every window on the screen; so does a blocking write of a megabyte
+  into a 64 KB pipe whose reader is slow. That is most of the length of
+  the code.
+- novi-launcher's symbol picker still stays resident after its window is
+  gone (`novi_clipboard_serving()`), and should: persistence hands the
+  text over when the owner *exits*, which is not a reason to exit before
+  the compositor has read it.
+- `flush` before closing our end of the paste pipe: the fd is handed to
+  the compositor when the request actually goes out, not when it is
+  queued.
+
+**Every mutation of the document drops the selection**, and that is an
+invariant, not tidiness. An anchor is a position in the document as it
+was when the selection started, and every routine that reads a
+selection indexes `lines[]` with it. Undo restored a *shorter* document
+without clearing the selection; the anchor kept pointing at a line that
+no longer existed; the next `^C` read off the end of `lines[]` and the
+editor died with `SIGSEGV addr=0`. The same anchor left live while
+typing also made a phantom selection that grew one character per
+keystroke. `sel_active()` additionally range-checks the anchor, so the
+next way of getting this wrong shows up as "nothing is selected"
+instead of as a crash.
+
+The crash was found by giving novi-edit a temporary SIGSEGV handler
+that printed a breadcrumb, booting it, and reading the screendumps —
+one of which showed the phantom highlight on a line index that no
+longer existed. Two rounds of reasoning about the code had failed to
+find it. **When a GUI bug survives careful reading, screenshot it.**
+
+## Architecture: a compositor answers when the client is ready
+
+`zxdg_decoration_manager_v1` arrives *before* the client's first commit
+— that is the correct order, and foot and everything else do it. But
+answering it means sending a configure, and a configure cannot go to an
+xdg_surface that has not been committed yet: wlroots logs `A configure
+is scheduled for an uninitialized xdg_surface` and drops it.
+
+That fired on **every window this compositor ever opened**, and nothing
+looked broken, because the mode is re-sent with the real configure at
+initial commit and clients end up server-side decorated anyway. Which
+is exactly what made it worth fixing: a per-window ERROR that means
+nothing is how a log stops being read — the same argument as `/init`'s
+twenty-two meaningless `Could not load module` warnings a boot.
+
+`server_new_xdg_decoration()` now holds the answer in a small
+per-decoration struct with a `surface.commit` listener and gives it once
+the surface is initialised. Any future compositor-to-client reply has
+the same constraint: **before the initial commit there is nobody to
+configure.**
 
 ## Architecture: installation splits `grub-install` in half
 
@@ -459,8 +1016,502 @@ signal at all.**
   "can't run '/etc/init.d/rcS'". Stage 03 now removes that symlink at the
   source, and `16-s6-rc-db.sh` checks `/sbin/init` and repairs it.
 
-When touching any build stage, ask what it does to artifacts a *later* stage
-owns. `bash build.sh --from NN` exists and people will use it.
+A third case, the mirror image of those two: **a stage can be correct in a
+warm tree and broken from scratch.** `novi-launcher` (stage 08) links
+`fcft`, which stage **09** built. Its Makefile said so out loud — "all
+already built for foot (build/09-foot.sh), no new dependency" — which
+was true in the tree it was written in and false in build order. A
+genuinely clean `bash build.sh` stopped at stage 08 with
+`cannot find -lfcft`, and nothing noticed because building from an
+empty `/build` is rare and CI compiles nothing. The font libraries now
+live in `06-wayland.sh` with the rest of the shared stack: a library
+more than one client links belongs in the library stage, not inside
+whichever application happened to need it first.
+
+So when touching any build stage, ask both questions: what does it do to
+artifacts a *later* stage owns (`--from NN` exists and people use it),
+and does it depend on anything a later stage produces? The second is
+invisible in every tree except a clean one.
+
+**A stage that cross-compiles a client calls `require_desktop_headers`
+first** (`build/00-versions.sh`). 41-desktop-split.sh removes the
+headers, so in any tree where a full build has run, rebuilding one
+client stops with four "No such file or directory" lines and no clue.
+The line it prints instead names `scripts/restore-build-inputs.sh`.
+That guard exists because chaining a rebuild into `40-repo.sh` without
+checking it succeeded packaged a rootfs with no desktop in it, and
+41-desktop-split.sh then deleted from the base exactly what that empty
+manifest described — no desktop in the image AND none in the
+repository. **Never chain `40-repo.sh` after an unchecked build.**
+
+**`40-repo.sh` now REFUSES to run on an already-split rootfs**, and that
+guard exists because the comment above did not stop it happening.
+pkgsplit computes the desktop from what is *in* the rootfs, so running
+40 after 41 has taken the desktop out asks a question whose honest
+answer is "nothing leaves the base": an empty manifest, a repository
+holding one meta-package, and a 95 MB-smaller ISO with no desktop
+anywhere — no error, because an empty answer is a valid answer.
+`bash build.sh` never trips it; re-running stages by hand does. The
+recovery is the stages, in order: `bash build.sh --from 06 --to 29`,
+then 40, 41, 42.
+
+**`restore-build-inputs.sh` launders stale files forward.** It restores
+headers and `.pc` files *from the packages*, so anything that was in a
+package once stays in every package built from that restored tree,
+even after the stage that produced it stopped producing it. A clean
+06..29 rebuild put 440 headers in `/usr/include`; the restored tree had
+543. The clean number is the right one — treat a manifest that shrinks
+after a real rebuild as a correction, not a regression.
+
+**`40-repo.sh` WIPES `/build/repo`, so `42-toolchain-repo.sh` has to run
+again after it.** `build.sh` gets this right because it runs the stages
+in order; running 40 and 41 by hand and stopping does not. The only
+symptom is an ISO that is 95 MB smaller and has no `novi-devel` in its
+repository — no error, and nothing says which packages a repository
+was *supposed* to contain. Check the size, or check
+`ls /build/repo/*.pkg.tar.gz | wc -l` (37, not 31).
+
+**And do not repair a broken `/build` by hand.** Extracting packages back
+over the rootfs to recover build inputs, then deleting what does not
+belong with an ad-hoc `rm` loop, produces a tree nobody can reason
+about — including an image that reached s6-linux-init and never started
+stage 2, with no error anywhere, resisting several rounds of bisection.
+Re-running the stages in order fixed it in one pass and would have been
+faster from the start. The stages are the recovery mechanism; that is
+what they are for.
+
+## Architecture: HTTPS, and a correction about WPA3
+
+RFC 0020 (`docs/rfcs/0020-https.md`). mbedTLS, curl and a Mozilla CA
+bundle, **as packages** — no TLS *library* reaches the base image from
+this work, which is the whole reason it was allowed.
+
+- **RFC 0009 said mbedTLS was the way to WPA3. It is not, for
+  wpa_supplicant 2.11.** That tree offers `CONFIG_TLS` values of
+  openssl, gnutls, wolfssl, internal, linux and none, and
+  `grep -rli mbedtls` over the whole tarball returns nothing. WPA3
+  needed **wolfSSL**, which RFC 0021 then did. Both RFCs now say so;
+  a wrong claim repeated in a roadmap is how the wrong work gets
+  scheduled.
+- **The CA bundle is hash-pinned, and it is only the second thing
+  here that is.** The first is TweetNaCl, because it verifies package
+  signatures; a CA bundle is a list of parties whose word is accepted
+  about who a server is, so a modified one means every HTTPS
+  connection is validated against a set somebody else chose. Pinning
+  needs a *dated* `cacert-YYYY-MM-DD.pem`, not the rolling file.
+- **curl refuses `--without-ssl` alongside `--with-mbedtls`** —
+  "conflicting parameters". Naming the backend IS the exclusion.
+- **`--build` must be given explicitly to curl's configure.** Its
+  "checking run-time libs availability" test is guarded by
+  `if test "x$cross_compiling" != xyes`, and with only `--host`
+  autoconf did not conclude it was cross-compiling: it compiled a
+  program, tried to *run* it, and failed the build with "one or more
+  libs available at link-time are not available run-time" naming
+  `-lmbedtls`. Name both triples.
+- **`-Wl,-rpath-link` again**, and that is twice now (33-nftables.sh
+  was the first). Linking git pulls in `libcurl.so`, whose
+  `DT_NEEDED` names `libmbedtls.so.21`; `-L` alone gave five
+  "undefined reference to `mbedtls_ssl_conf_ca_chain`" from a library
+  that exports every one of them.
+- **The proof that HTTPS verification works is a triple, not a
+  success.** Untrusted certificate refused → the same CA appended to
+  the bundle → the same clone succeeds → a self-signed certificate for
+  the same name still refused. Any one of those alone cannot
+  distinguish "verification works" from "nothing works".
+
+## Architecture: git and ssh, and the blocklist that rotted
+
+RFC 0019 (`docs/rfcs/0019-git-and-ssh.md`). `pkg install git` — over
+ssh and locally, never https.
+
+- **OpenSSH is built `--without-openssl`**, which is the only reason
+  it is in this image at all (RFC 0006's argument for `novi-verify`,
+  RFC 0009's for `CONFIG_TLS=internal`). The cost is ed25519 keys
+  ONLY — no RSA, ECDSA, certificates, FIDO or PKCS#11 — and that is
+  worth stating wherever this is described rather than leaving to be
+  discovered against an old server.
+- **git was built `NO_CURL=1`** and no longer is: RFC 0020 made the
+  TLS decision on its own and git now has `https://` remotes through
+  curl and mbedTLS, all three as packages.
+- **`NO_REGEX=NeedsStartEnd`**: musl's `regexec()` has no
+  `REG_STARTEND`. git's own `#error` names the exact flag, which is
+  the kindest way an upstream can handle a libc difference.
+- **`--without-zlib-version-check` is a cross-compile necessity.**
+  OpenSSH's check compiles a program that calls `zlibVersion()` and
+  *runs* it; cross-compiling it cannot, so it concludes "zlib too old"
+  about zlib 1.3.1. Same shape as skalibs' run-time sysdeps: any
+  autoconf test that must execute its own output is a wall.
+- **OpenSSH 9.8 split the daemon.** `sshd` is only the listener now
+  and execs `sshd-session` from a compiled-in `/usr/libexec` path;
+  `make sshd` alone gives you a daemon that accepts a connection and
+  dies with "sshd-session does not exist or is not executable". sshd
+  is built here as the *test peer* and never installed — the hostapd
+  bargain from RFC 0009.
+- **`restore-build-inputs.sh` now restores what the MANIFEST names,
+  not "every package except a blocklist".** The blocklist was correct
+  until the repository gained a package that was neither desktop nor
+  toolchain: `git` and `openssh` were cheerfully installed into the
+  console base image, and the next `40-repo.sh` failed with pkgsplit's
+  straddle check — `usr/lib/libz.so.1 stays, usr/lib/libz.so moves` —
+  because a base binary suddenly linked zlib. The error was correct
+  and pointed nowhere near the cause. `40-repo.sh` already writes
+  `repo-desktop-files.list`; restoring exactly those paths is a
+  derived answer that cannot rot, and a blocklist is one that has to
+  be updated by whoever adds the next package, with nothing to tell
+  them.
+
+## Architecture: full-disk encryption, and BusyBox fdisk's default
+
+RFC 0018 (`docs/rfcs/0018-full-disk-encryption.md`).
+`novi-install --encrypt` makes a LUKS2 root; the initramfs asks for the
+passphrase.
+
+- **`CONFIG_CRYPTO_XTS` was the one hole.** `DM_CRYPT`, AES, AES-NI,
+  SHA-256 and the AF_ALG user API were all set; XTS — the mode LUKS2's
+  default `aes-xts-plain64` needs — was unmentioned, which means `n`.
+  dm-crypt was present and could not have opened the container
+  cryptsetup creates by default. Same shape as RFC 0016's
+  `NF_TABLES_INET`.
+- **`cryptsetup` is ONE STATIC BINARY**, and the four static libraries
+  it links (`popt`, `json-c`, `libuuid`, `libdevmapper`) never reach
+  `${ROOTFS}` — they live in `/build/crypt-deps`. Two reasons: the
+  initramfs is a different root filesystem and a dynamic build means
+  shipping a loader and a library list into it that can rot; and
+  pkgsplit never sees a `.a` or a header it has no `PACKAGE_TABLE`
+  pattern for. `34-cryptsetup.sh` **fails the build** if
+  `cryptsetup.static` has a `PT_INTERP`.
+- **The crypto backend is `kernel`** — AF_ALG. Every other backend
+  cryptsetup offers is a library this image has refused to carry
+  (OpenSSL, gcrypt, NSS, nettle), which is the whole argument for
+  `novi-verify` in RFC 0006.
+- **BusyBox `fdisk`'s default first sector for a new partition is 63**
+  — the start of the disk — not the first free sector after the
+  partitions that already exist, which is what util-linux offers and
+  what anyone writing the keystrokes expects. Taking the default
+  produced a partition 2 of 63..2047: 992 KB, overlapping the post-MBR
+  gap. cryptsetup refused it with "keyslots area is very small" and
+  "Cannot wipe header", naming neither the size nor the cause. Give
+  every sector explicitly. **This class of bug is testable without a
+  VM**: the shipped BusyBox is a static x86_64 binary, so
+  `printf '…' | /build/rootfs/bin/busybox fdisk -u <12G sparse file>`
+  reproduces it in a second.
+- **The BIOS encrypted layout needs its own `core.img`.** The prefix is
+  baked in at `grub-mkimage` time; `(hd0,msdos1)/boot/grub` is right
+  when partition 1 IS the root filesystem and wrong when partition 1 is
+  `/boot`. `mkiso.sh` generates `core-boot.img` with prefix
+  `(hd0,msdos1)/grub` beside it.
+- **Mount the boot partition BEFORE the ESP.** `/boot/efi` lives inside
+  `/boot`; mounting the ESP first and the boot partition on top of it
+  buries the ESP mount — the same shape as `/run/live` in RFC 0003.
+- **`cryptsetup` flushes input when it takes the terminal**
+  (`tcsetattr(TCSAFLUSH)`), so a passphrase typed in the same
+  millisecond the prompt appears is discarded, echoed in the clear, and
+  simply ignored. That is a *test harness* problem, not a product one —
+  a person types seconds later — but it cost a debugging round: give an
+  automated test a pause after the prompt.
+- **`00-versions.sh` exports `SOURCES`, and that is a name makefiles
+  use.** LVM2's `make.tmpl` has `OBJECTS = $(SOURCES:%.c=%.o)` and its
+  top-level makefile never assigns it, so the environment came straight
+  through and the build died with `make: *** /build/sources: Is a
+  directory. Stop.` — naming our own export and no part of LVM2.
+  `env -u SOURCES make …`. Any autotools tree with a plain `SOURCES`
+  can hit this.
+
+## Architecture: the panel's network indicator
+
+RFC 0009's roadmap item, done. `novi-panel` shows wired / wifi with
+signal bars / offline, and clicking it opens `novi-settings`.
+
+- **`/proc/net/wireless` does not exist on this system.** It is
+  created by cfg80211's wireless-extensions compatibility layer and
+  `CONFIG_CFG80211_WEXT` is off — checked in `kernel/config-x86_64`,
+  not assumed, because the failure mode is an indicator that silently
+  shows no signal on every machine forever. nl80211
+  (`NL80211_CMD_GET_STATION` → `NL80211_STA_INFO_SIGNAL`) is the
+  interface that exists. libnl was already in the base image for
+  wpa_supplicant, so this is a new *link*, not a new dependency, and
+  pkgsplit leaves the library in the base and derives nothing extra
+  for the package.
+- **The panel reads the interface the service PUBLISHED, never its
+  own walk of `/sys/class/net`.** `/run/novi/network.device` and
+  `network.wifi.device` hold the resolved name each service actually
+  chose (not the `auto` spec — that is `network.interface`, a
+  different file for a different question). A second walk would be a
+  second answer to a question that has one, and RFC 0009's
+  `pick_interface()` has real rules (wired first; a radio is a
+  `phy80211` link, not a name) that a panel reimplementing them would
+  drift from.
+- **`carrier`, not `operstate`.** `operstate` reports "unknown" for
+  plenty of working interfaces. Reading `carrier` on an
+  administratively down interface fails with EINVAL rather than
+  returning 0 — the kernel refusing to guess — which lands as "no
+  link", the right answer either way.
+- **The netlink call is synchronous, with a 200 ms `SO_RCVTIMEO`.** A
+  local kernel dump answers in microseconds, so this is not RFC 0017's
+  situation (a child process taking seconds) — but it sits on the
+  Wayland event loop, and "no reason to hang" is not a guarantee.
+- **`novi-panel/icons.c` is pure geometry with a HOST test
+  (`make -C novi-panel check`, run by `scripts/lint.sh`), and that
+  split exists because of a specific blind spot.** The fan's lit-element
+  mask is `(1u << bars) - 1u`; mac80211_hwsim reports −30 dBm and
+  nothing else, so a live boot only ever draws four bars — and a mask
+  bug draws four bars correctly anyway, since `0xF` is `0xF` however
+  you got there. The host test renders every state and asserts the
+  invariants; it immediately found the fan's origin dot being clipped
+  flat by the icon box, which the live screenshot did not show.
+- **Get the sign right on icon-local Y.** The RJ45 glyph's first
+  version passed `cy + 1.5` where the SDF wanted a centre, drawing a
+  perfectly clean jack upside down with its latch tab off the top.
+  Screenshotting it is what found it — the repo's standing advice
+  about GUI bugs, applied to a five-line function.
+- **Battery is deliberately absent, not forgotten.** QEMU emulates
+  none, so it could be written and could not be verified.
+
+## Architecture: a GUI that runs something slow
+
+RFC 0017 (`docs/rfcs/0017-wifi-in-the-desktop.md`). `novi-settings`'
+Network panel scans, joins and forgets WiFi networks, and it is the
+first client here that had to run a subprocess taking *seconds*.
+
+- **The panel is a front-end to `novi-wifi` and `novi-state`, like
+  every other panel.** It does not open `/etc/novi/wifi.conf`, walk
+  `/sys/class/net`, or run `wpa_cli` — same argument as the System
+  panel shelling out to `novi-state set`. Three verbs were added to
+  `novi-wifi` for it: `add <ssid> --stdin`, `scan --tsv`, `iface`.
+- **A passphrase goes down a pipe, never in argv.**
+  `/proc/<pid>/cmdline` is world-readable for as long as the process
+  lives.
+- **`scan --tsv` puts the signal FIRST.** An SSID may contain spaces,
+  so a trailing field cannot be found by counting from the left — the
+  padded human table is unparseable for that reason, and a GUI parsing
+  a table meant for people breaks the first time somebody puts two
+  spaces in their router's name. Tabs and newlines in an SSID are
+  dropped, not escaped (an SSID is attacker-controlled text off the
+  air); same call the package index makes about `|`.
+- **`job_start`/`job_pump` is the async runner**, and three details in
+  it are load-bearing: the pipe's read end is `O_NONBLOCK` (a blocking
+  second read sleeps until the child produces more — freezing the
+  window for the length of the scan); the poll watches `POLLHUP` as
+  well as `POLLIN` (a child that prints nothing and exits produces
+  only a hangup, and waiting for `POLLIN` alone leaves the window
+  saying "Scanning..." forever); and the main loop uses libwayland's
+  `wl_display_prepare_read`/`read_events`/`cancel_read` protocol —
+  `cancel_read` on **every** path that does not read, poll errors
+  included, or the next `prepare_read` blocks forever.
+- **`set_status` copies now.** It used to store the pointer, which was
+  fine while every caller passed a string literal; this panel reports
+  what a child process just said, from a buffer the next job
+  overwrites.
+- **The proof that the loop is not blocked is a panel switch mid-scan**,
+  not a "Scanning..." label. The label is drawn synchronously by the
+  keypress that started the job and would appear either way; a
+  different panel rendering while the child is still running could
+  not.
+
+## Architecture: sshd, and the port that does not open itself
+
+RFC 0022 (`docs/rfcs/0022-sshd.md`). `openssh-server` as a package,
+`services.sshd`, and a second declared key for the hole.
+
+- **The host key is generated on first start, in
+  `init/services/sshd/run`, and exists nowhere in the image.** A
+  distribution that ships a host key ships the same one to every
+  machine that installs it — anybody holding the ISO can then
+  impersonate any of them. Nothing in `novi.iso` and no package
+  contains one. `ssh-keygen -A` is not used: this OpenSSH has no
+  OpenSSL, so ed25519 is the only key type that can exist, and naming
+  it beats printing two failures.
+- **`network.firewall.allow` is a SEPARATE key from `services.<name>`,
+  and that is the design, not an oversight.** Deriving the holes from
+  the enabled services is one key instead of two and it is what people
+  expect; it is also a firewall that opens itself because a daemon
+  started, which is a service registry with a policy file attached.
+  The set of things reachable from the network has to be one list a
+  person chose.
+- **The cost of that split is a machine you cannot reach and no
+  explanation, so `novi-state` prints one.** It is *not drift* — both
+  keys are exactly as declared, so `diff` cannot report it and `apply`
+  cannot fix it. `firewall_hole_note()` says it from both commands.
+  `LISTENING_SERVICES` exists only to produce that sentence; nothing
+  in it opens anything.
+- **Ports are numbers, never names.** `nft` resolves `ssh` through
+  `/etc/services`, which BusyBox does not ship — a name would work on
+  the build host and fail on the machine.
+- **Declared and observed port lists are compared canonically**
+  (sorted numerically per protocol), or `22, 80` would report eternal
+  drift against `80,22` and `apply` would rewrite the same ports every
+  run. When they match, the observer echoes the *declared* string back
+  verbatim so the document's own formatting is never "corrected".
+  Firewall off means the key is inert, not drifted — same call
+  `network.interface` makes with the network service down.
+- **`EARLY_KEYS` is `network.firewall network.firewall.allow`, in that
+  order.** The ruleset reload empties the sets, so filling them first
+  would fill sets that are about to be replaced.
+- **`PermitRootLogin no`, not `prohibit-password`.** `/etc/shadow`
+  ships `root::`. `PasswordAuthentication yes` is safe *only because*
+  of what sits behind it, and the load-bearing half is not the one you
+  would guess: **OpenSSH refuses a locked account outright, with a key
+  too.** `allowed_user()` checks the `!` in shadow before any
+  authentication method is tried, so an account novi-state created,
+  owning a valid `authorized_keys`, gets `Permission denied
+  (publickey,password)` until someone runs `passwd`. Verified live —
+  it denied this RFC's own first test run. A freshly opened port 22
+  therefore has nobody who can authenticate at all.
+- **No `UsePAM no` in sshd_config.** Built `--without-pam`, sshd does
+  not know the keyword and prints `Unsupported option UsePAM` on every
+  start and every `sshd -t`. A line whose only effect is a warning
+  about itself is worse than the absence it documented.
+- **`exec sshd` is not enough: sshd re-execs itself and demands an
+  absolute `argv[0]`.** `exec sshd -D -e` gave `sshd requires
+  execution with an absolute path` once a second forever, from a
+  binary whose `sshd -t` had just called the config perfect. PATH was
+  fine (04-s6.sh puts `/usr/sbin` on it) — it is `argv[0]` sshd
+  objects to.
+- **A longrun that declares readiness must also declare
+  `timeout-up`.** This service had `notification-fd` and none, so with
+  the package absent its `exit 1` became a crash loop and `s6-rc -u
+  change` waited FOREVER: `novi-state apply` hung, the console with
+  it, and boot convergence would have hung the boot. `network` and
+  `wifi` had always bounded it; this one broke the pattern. The
+  corollary to "a longrun anything observes needs notification-fd".
+- **A `sed` range whose start line also matches the end pattern does
+  not end on that line.** `/elements = {/,/}/` ran on to the set's own
+  closing brace, and a greedy `.*` captured `22 } ` — so the firewall
+  observer called a perfectly correct set unparseable, `diff` reported
+  permanent drift and `apply` rewrote the same port three times.
+  `[^}]*`, not `.*`.
+- **The service definition is base content; the binaries are a
+  package.** s6-rc does not check that a run script's program exists,
+  so it is inert until `pkg install openssh-server` — the seatd /
+  novi-shell arrangement from RFC 0007.
+- **Readiness means the host key exists**, not that a socket is bound.
+  sshd says nothing when it starts listening, and claiming otherwise
+  is the RFC 0014 mistake again. The host key is the one precondition
+  anything else can race on.
+- `sshd`, `/var/empty` and the UID are base content for the same
+  reason `/etc/passwd` is repo content: a UID and a directory mode are
+  baked into a squashed image, so they are build-time facts.
+
+## Architecture: the firewall, and the exec the kernel could not make
+
+RFC 0016 (`docs/rfcs/0016-declarative-firewall.md`). `network.firewall
+= on` in `system.conf`, one policy file at `/etc/novi/firewall.nft`,
+converged by `novi-state` — no daemon, because the kernel holds the
+ruleset.
+
+- **`CONFIG_STATIC_USERMODEHELPER=y` was set and
+  `/sbin/usermode-helper` did not exist.** That routes every
+  usermode-helper call the kernel makes — `request_module()` above all
+  — through one compiled-in path, so **no kernel-initiated module
+  autoload had ever worked**, for the life of the project. Invisible
+  because every module this image loads is named by something in
+  userspace (`/init`'s list, `novi-hwdetect`, `novi-hotplug`); it
+  surfaced only when nf_tables tried to autoload `nft_ct` and the
+  failure came back as `Could not process rule: No such file or
+  directory`, which reads like a missing file and is a missing exec.
+  `novi-umh/main.c` is the missing half: the kernel leaves the helper
+  it meant to run in `argv[0]`, so it is a filter (allowlist, one
+  entry, `/sbin/modprobe`) and not a dispatcher. Refusals go to
+  `/dev/kmsg` — the bug was a silent exec failure, and a silent
+  refusal is the same bug in a different hat.
+- **It has to be in the initramfs too.** Different root filesystem,
+  same compiled-in path. Same argument as `/dev/fd`.
+- **Each `write()` to `/dev/kmsg` is its own kernel log record.**
+  Composing one line out of three writes put the reason in one record
+  and the path in the next, so `dmesg | grep novi-umh` showed
+  `novi-umh: refused ` with nothing after it — precisely the
+  information the message exists to carry. Build the line, write once.
+- Verified by pointing `/proc/sys/kernel/modprobe` at a script that
+  would `touch /tmp/PWNED` and making the kernel want a module: three
+  refusals in `dmesg`, naming the path, and no `/tmp/PWNED`.
+- **`novi-state boot --early` exists because boot convergence is too
+  late for a firewall.** The full pass runs after `s6-rc change`
+  returns — correct for everything whose convergence *is* a service
+  transition — by which point `network` holds a lease and any declared
+  service that listens is listening. Measured, not supposed: the table
+  appeared a second or two after the login prompt. `EARLY_KEYS` is
+  `network.firewall` and the membership rule is that converging the
+  key must need nothing from s6-rc. It is deliberately not a general
+  "apply one key" flag; partial convergence on demand is how a client
+  ends up owning half the document.
+- **`nft -f` is additive, so the converger deletes the table first.**
+  Reloading after an edit that *removed* a rule would otherwise leave
+  the removed rule in place. And `nft delete table` on a table that
+  does not exist is an error, so turning the firewall off has to
+  tolerate it being off already — the one case convergence must treat
+  as success.
+- **The observer reports `unsupported`, not `off`, when `nft` is
+  missing.** A machine that cannot filter is not a machine that is not
+  filtering, and `off` would let `diff` call it converged.
+- **`-L` is not enough to link against a library in `${ROOTFS}`.**
+  `nft` pulls in `libnftables.so`, whose `DT_NEEDED` names
+  `libnftnl.so.11`; the linker must *find that file* to resolve
+  transitive symbols, and the cross-gcc's sysroot is `${SYSROOT}`.
+  The five "undefined reference to `nftnl_expr_alloc@LIBNFTNL_11`"
+  read like a libnftnl too old to have them, and `readelf` showed all
+  five exported by the library that had just been installed.
+  `-Wl,-rpath-link` is the fix, as `build/lib-meson-cross.sh` already
+  knew.
+
+## Architecture: the kernel was hardened and the userland was not
+
+`kernel/config-x86_64` sets `STACKPROTECTOR_STRONG`, `RANDOMIZE_BASE`,
+`STRICT_KERNEL_RWX`, `FORTIFY_SOURCE` and `INIT_ON_ALLOC_DEFAULT_ON`.
+Every binary it was protecting was built with **none** of it: `type=EXEC`
+(so kernel ASLR could not apply), no `__stack_chk_fail`, no `BIND_NOW`,
+and no optimisation at all — which also means `_FORTIFY_SOURCE` would
+have been a no-op even if it had been set.
+
+`harden_flags()` in `build/00-versions.sh` is the one place that sets
+it, and the client stages call it next to `require_desktop_headers`.
+**Not** applied to the static binaries (BusyBox, `novi-verify`): static
+PIE is a different flag with different failure modes in PID 1's path,
+and widening it is its own change with its own boot test.
+
+Three things this turned up that generalise:
+
+- **`CFLAGS` reached the compile and `LDFLAGS` reached nothing.** Every
+  Makefile here linked with `$(CC) $(CFLAGS) -o $@ …` and never named
+  `$(LDFLAGS)`, so `-pie` and `-z now` were dropped while
+  `-fstack-protector-strong` went through. The binaries looked hardened
+  if you checked only for a stack canary. **Check the artifact, not the
+  flags you think you passed** — `scripts/check-hardening.sh` does, and
+  `40-repo.sh` runs it before packaging, which is the last moment every
+  first-party binary is still in the rootfs.
+- **`readelf … | grep -q` under `set -o pipefail` reports a false
+  failure.** grep exits on the first match, readelf takes SIGPIPE, and
+  pipefail turns that into a non-zero pipeline. The first version of
+  the checker called three binaries unhardened while `readelf -s` by
+  hand showed the symbol twice. Read each file's headers into a
+  variable once instead.
+- **`-O0` hides `-Wformat-truncation`.** Turning on `-O2` surfaced three
+  real `snprintf` truncations that had been invisible for the life of
+  the project, one of which silently cut a `.app` descriptor's `exec=`
+  line — registering an application whose command could not run, with
+  nothing anywhere saying why.
+
+Verified the way it has to be: `novi-edit` loaded at three different
+addresses across three runs on a booted machine. A flag being set is
+not ASLR; a different address every time is.
+
+## Architecture: what the machine says it is
+
+`/etc/os-release` is a relative symlink to `/usr/lib/os-release`, which
+`03-base.sh` **generates** from `00-versions.sh`. It had never existed
+— found by a clean build, after the README had documented its exact
+contents as fact for as long as the file had not been written.
+
+Generated, not repo content under `rootfs/etc/`, and that is the
+opposite call from `passwd`/`group`/`shadow` deliberately: those hold
+policy (fixed GIDs, the root password field) that should show up in a
+diff, while every field here is already a variable one file away. A
+second copy is only somewhere for the version to go stale, which is
+exactly what happened to the README.
+
+`/usr/lib` is one of pkgsplit's `LIB_DIRS`, so a new file there is
+worth a thought — this one is safe because the sweep only claims files
+matching a `PACKAGE_TABLE` pattern, and `os-release` matches none, so
+it stays in the base.
 
 ## Architecture: users, and where secrets are not
 
@@ -581,7 +1632,7 @@ Three things it is important not to break:
   the graph finds what is *reachable*, `PACKAGE_TABLE` claims what is
   *ours*, and anything claimed that the base does not need moves too. A
   file matching no pattern is a hard error, never a guess.
-- **`build/21-desktop-split.sh` deletes exactly what `20-repo.sh`
+- **`build/41-desktop-split.sh` deletes exactly what `40-repo.sh`
   packaged**, from the manifest 20 wrote. One source of truth, or the two
   drift and the image ends up broken or still fat. Re-running stages
   06..14 puts the files back; that ordering is what `build.sh` does.
@@ -590,6 +1641,28 @@ Three things it is important not to break:
   that a run script's binary exists, so a declared-off service pointing at
   a not-yet-installed binary is inert, not broken — and a machine that
   installs `novi-desktop` can then just flip the key.
+- **A library's three names must move or stay as a unit, and one stray
+  utility in `/usr/bin` is enough to break that.** libpng's `make
+  install` puts `pngfix` and `png-fix-itxt` in the base; they are not
+  desktop binaries, so their closure pinned `libpng16.so.16` and
+  `libz.so.1` into the base while the sweep moved
+  `libpng16.so.16.43.0` and `libz.so.1.3.1` out with the desktop. The
+  base kept two dangling symlinks, the packages shipped without the
+  only names anything records, and — because `owner` is keyed on
+  basename — `novi-view`'s derived `depends=` silently lost `libpng`
+  and `zlib` too. Everything built, indexed, signed and installed;
+  `pkg install novi-desktop` reported success; the viewer died at exec
+  with `Error loading shared library libpng16.so.16`. pkgsplit now
+  fails the build on a straddling sibling group, and `21-imagelibs.sh`
+  does not install utilities nobody asked for. **Do not put anything in
+  the image that nothing asked for** — in a split computed from what
+  the base needs, dead weight is not inert, it votes.
+- **`closure()` used to stop at every soname symlink.** A symlink has no
+  ELF header, so `readelf -d` returns nothing and the walk ended at
+  `libfoo.so.N` without ever reading the file it points at. It survived
+  because the `PACKAGE_TABLE` sweep drags table-owned libraries along
+  regardless — but it made the reachability answer wrong, which matters
+  the moment anything reasons about it. It follows links now.
 
 Two smaller ones:
 
@@ -657,18 +1730,70 @@ slowdown to xhci and then never re-tested without it. Always pass
 `-vga none` when screendumping a compositor, too — `-machine pc` adds a
 std VGA device and `screendump` defaults to device 0.
 
+## Architecture: WPA3, and what "no TLS in the base" actually forbade
+
+RFC 0021 (`docs/rfcs/0021-wpa3.md`). `CONFIG_TLS=wolfssl`, and SAE
+verified against a WPA3-only AP.
+
+- **The base image already linked a TLS implementation, and had from
+  the start.** `CONFIG_TLS=internal` is not "no crypto" — it is ~200 KB
+  of AES, SHA, RSA, bignum and a TLS 1.2 handshake compiled into
+  wpa_supplicant. RFC 0009's rule was *no OpenSSL*; RFC 0006's was
+  *checking a package signature must not need a TLS stack*
+  (`novi-verify`, still static, still the only thing on that path).
+  Neither said the supplicant may not have crypto. So this swaps
+  200 KB nobody has reviewed for 1.4 MB that is audited and
+  maintained — a rehousing of attack surface, not a widening. Get the
+  rule right before invoking it: the vague version of it would have
+  blocked this forever.
+- **wolfSSL is built in `25-wifi.sh`, not a stage of its own.** The
+  novi-launcher/fcft rule is about a library built in a *later* stage
+  than its consumer; wolfSSL's only consumers are wpa_supplicant and
+  hostapd, built in this same stage, so there is no ordering hazard.
+  The day something else links it, it moves.
+- **Autotools, not cmake, and it is not cosmetic.** cmake's
+  `WOLFSSL_WPAS` is NOT the same define set as autotools'
+  `--enable-wpas`, which also turns on `OPENSSL_EXTRA` and ~20 others
+  (`HAVE_SECRET_CALLBACK`, `HAVE_KEYING_MATERIAL`, `KEEP_PEER_CERT`
+  …). With the cmake flag, `tls_wolfssl.c` failed on fourteen errors —
+  `SSL_OP_NO_TLSv1` undeclared, implicit declarations of
+  `wolfSSL_get_client_random` and friends. Use the switch upstream
+  maintains rather than reconstructing the list.
+- **`CFLAGS`/`LIBS` go into the generated `.config`, which is a
+  makefile fragment** (`CFLAGS += …`). Passing `CFLAGS=` on the `make`
+  command line *replaces* everything upstream's makefiles put there.
+  Same trap as RFC 0009's exported `LDFLAGS`, one level in.
+- **`ieee80211w=1`, not `=2`.** SAE requires PMF, so without it a WPA3
+  AP refuses to associate at all; `=2` would have made every WPA2 AP
+  unjoinable. One block with `key_mgmt=WPA-PSK SAE` joins whichever
+  the AP offers, and both halves are tested — a WPA3-only AP
+  (`sae_require_mfp=1`) and a WPA2-only AP, with the same block.
+- **`sae_password=` is the plaintext passphrase on disk, unavoidably.**
+  SAE derives from the passphrase, not from the PBKDF2 PSK, so there
+  is no one-way transform to store. `/etc/novi/wifi.conf` was already
+  0600 and root-only for this reason. `novi-wifi add --wpa2-only` is
+  the escape hatch: `psk=` only, no plaintext, no WPA3.
+- **`wpa_passphrase`'s output ends with `}`, so appending to it puts
+  keys at file scope.** Three SAE keys landed outside the block,
+  wpa_supplicant refused the file, and `novi-wifi status` reported
+  *"the supplicant is not running"* — a message about a service,
+  produced by a syntax error in a config file. `add_network_block`
+  drops the brace, appends, restores it, and `die`s rather than
+  editing blind if the last line is not `}`.
+
 ## Architecture: WiFi, and the second secret store
 
 RFC 0009 (`docs/rfcs/0009-wifi.md`).
 
-- **wpa_supplicant is built with `CONFIG_TLS=internal`**, so it links no
-  OpenSSL. The base image has none and `novi-verify` exists so it stays
-  that way. iwd was rejected because its control interface is D-Bus.
-- **No WPA3**, and that is a decision, not an omission: SAE/OWE need EC
-  crypto that internal TLS does not implement (it links to
-  `undefined reference to crypto_ec_get_prime`). mbedTLS is the named way
-  in. It connects to WPA3 routers in transition mode, not to WPA3-only
-  networks.
+- **wpa_supplicant links no OpenSSL**, and that is the rule — not "no
+  crypto". It was `CONFIG_TLS=internal` and is `CONFIG_TLS=wolfssl`
+  since RFC 0021; see that section below. iwd was rejected because its
+  control interface is D-Bus.
+- **WPA3 was impossible under internal TLS** and is the reason for the
+  swap: SAE/OWE need EC crypto internal does not implement, and
+  turning them on linked cleanly right up to `undefined reference to
+  crypto_ec_get_prime`. RFC 0009 named mbedTLS as the way in and was
+  wrong (RFC 0020 found there is no mbedTLS backend in 2.11 at all).
 - **`network.wifi` and `network.wifi.interface` are all that is declared.**
   Passphrases live in `/etc/novi/wifi.conf` at 0600, in wpa_supplicant's
   own format, managed by `novi-wifi`. Same rule as `/etc/shadow`:
@@ -678,8 +1803,8 @@ RFC 0009 (`docs/rfcs/0009-wifi.md`).
   a name starting with `wl`.
 - **hostapd is built by `25-wifi.sh` and never installed.** It is the test
   peer; verification runs two `mac80211_hwsim` radios, one AP one station,
-  with a real WPA2 handshake between them. It needs `CONFIG_TLS=internal`
-  too — its default backend is OpenSSL and it does not ask.
+  with a real handshake between them. It needs `CONFIG_TLS` set
+  explicitly too — its default backend is OpenSSL and it does not ask.
 
 **`s6-rc -a list` reporting a longrun "up" has now hidden three separate
 crash-loops** (RFC 0004's `syslog`; here, `wpa_supplicant -s` rejected

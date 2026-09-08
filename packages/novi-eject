@@ -1,0 +1,155 @@
+#!/bin/sh
+# novi-eject — take a volume out safely.
+#
+#   novi-eject                    list what could be ejected
+#   novi-eject <name|dev|path>    flush it, unmount it, power it down
+#
+# RFC 0023. The counterpart to novi-mount's `remove`, and the
+# difference between them is the whole point of this program existing:
+# `remove` runs when the device is ALREADY gone and can only limit the
+# damage, this runs while it is still there and can prevent it.
+#
+# "Safely remove" is not folklore. A write to a USB stick returns as
+# soon as it is in the page cache; the stick's own controller may then
+# take seconds to finish an erase block. Pulling it in between loses
+# the write and can lose the filesystem. sync(), then umount, then
+# telling the kernel to stop the device, is what makes the light go out
+# before the plug comes out.
+#
+# shellcheck disable=SC3043
+set -u
+
+MEDIA_ROOT=/run/media
+
+msg()  { printf '  -> %s\n' "$*"; }
+die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+
+# Accepts whatever someone has to hand: the mount point, the label, the
+# device node, or the bare kernel name. Anything else is a typo, and a
+# typo should say so rather than eject a different volume.
+resolve() {
+    local arg="$1" mp
+
+    case "$arg" in
+        /dev/*)  arg="${arg#/dev/}" ;;
+    esac
+
+    # A mount point, given as a path or as just the label.
+    for mp in "$arg" "${MEDIA_ROOT}/${arg##*/}"; do
+        case "$mp" in "${MEDIA_ROOT}"/*) ;; *) continue ;; esac
+        if awk -v m="$mp" '$2 == m { found = 1 } END { exit !found }' /proc/mounts; then
+            printf '%s\n' "$mp"
+            return 0
+        fi
+    done
+
+    # A device name.
+    mp="$(awk -v d="/dev/$arg" '$1 == d { print $2; exit }' /proc/mounts)"
+    if [ -n "$mp" ]; then
+        case "$mp" in
+            "${MEDIA_ROOT}"/*) printf '%s\n' "$mp"; return 0 ;;
+            *) die "/dev/${arg} is mounted at ${mp}, which novi-eject does not manage" ;;
+        esac
+    fi
+    return 1
+}
+
+cmd_list() {
+    local found=0 src mp _rest
+    while read -r src mp _rest; do
+        case "$mp" in "${MEDIA_ROOT}"/*) ;; *) continue ;; esac
+        found=1
+        printf '%-14s %s\n' "$src" "$mp"
+    done < /proc/mounts
+    if [ "$found" -eq 0 ]; then
+        printf 'nothing to eject\n'
+        return 1
+    fi
+    printf '\nnovi-eject <name> to remove one safely.\n'
+    return 0
+}
+
+# The disk behind a partition, from sysfs rather than by trimming
+# digits off the name -- sdb1 and nvme0n1p1 do not trim the same way,
+# and the answer here decides what gets powered down.
+parent_disk() {
+    local dev="$1" link
+    if [ -e "/sys/class/block/${dev}/partition" ]; then
+        link="$(readlink -f "/sys/class/block/${dev}")" || return 1
+        link="${link%/*}"
+        printf '%s\n' "${link##*/}"
+        return 0
+    fi
+    printf '%s\n' "$dev"
+}
+
+# Ask the kernel to stop using the device, so its light goes out and it
+# is genuinely safe to unplug.
+#
+# `delete` on the SCSI device is the mechanism USB storage actually
+# has; there is no generic "eject" for a stick. It is best-effort and
+# says so: the unmount is what protects the data, and a device that
+# stays powered is untidy rather than dangerous. Reported either way,
+# because "safely remove" that quietly did half the job is how people
+# learn to ignore it.
+power_down() {
+    local disk="$1" node
+    node="/sys/block/${disk}/device/delete"
+    if [ -w "$node" ]; then
+        printf '1\n' > "$node" 2>/dev/null && return 0
+    fi
+    return 1
+}
+
+cmd_eject() {
+    local arg="$1" mp dev disk
+
+    mp="$(resolve "$arg")" || die "no removable volume matches '${arg}' (try: novi-eject)"
+    dev="$(awk -v m="$mp" '$2 == m { print $1; exit }' /proc/mounts)"
+    dev="${dev#/dev/}"
+
+    # sync BEFORE umount, not instead of it. umount does flush this
+    # filesystem, but a stick that is also being written by something
+    # else -- a copy still finishing in another terminal -- benefits
+    # from the global flush first, and it costs nothing on an idle
+    # system.
+    sync
+
+    if ! umount "$mp" 2>/dev/null; then
+        # Not lazy here, deliberately: the device is still present, so
+        # a busy mount means something is genuinely using it and
+        # detaching the tree underneath it would lose that program's
+        # writes. Say what is wrong instead.
+        die "${mp} is busy -- something still has a file open there"
+    fi
+    rmdir "$mp" 2>/dev/null || true
+    msg "unmounted ${mp}"
+
+    disk="$(parent_disk "$dev")"
+    if power_down "$disk"; then
+        msg "${disk} powered down -- safe to unplug"
+    else
+        msg "${disk} could not be powered down; the data is flushed and it is safe to unplug"
+    fi
+    logger -t novi-eject -p daemon.info "ejected ${dev} from ${mp}" 2>/dev/null || true
+    # The one notification in this program, and the only one that
+    # matters: "safe to unplug" is the sentence somebody is waiting for
+    # before they pull the stick out (RFC 0024).
+    if command -v novi-notify >/dev/null 2>&1; then
+        novi-notify -i eject "${mp##*/} is safe to unplug" >/dev/null 2>&1 || true
+    fi
+}
+
+case "${1:-}" in
+    ''|-l|--list) cmd_list ;;
+    -h|--help)
+        cat <<'USAGE'
+Usage:
+  novi-eject                    list removable volumes
+  novi-eject <name|dev|path>    flush, unmount and power down one
+
+Volumes are mounted under /run/media by novi-mount (RFC 0023).
+USAGE
+        ;;
+    *) cmd_eject "$1" ;;
+esac

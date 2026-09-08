@@ -92,6 +92,14 @@ fetch "https://ftp.gnu.org/gnu/make/make-${MAKE_VERSION}.tar.gz"
 # than freedesktop pkg-config: it is plain C with no dependencies,
 # where the original needs glib.
 fetch "https://distfiles.ariadne.space/pkgconf/pkgconf-${PKGCONF_VERSION}.tar.xz"
+
+# zlib and libpng, for novi-view. PNG is the only image
+# format anyone actually hands you, and decoding it needs both. zlib is
+# also the first general-purpose compression library in this image --
+# freetype was built with -Dzlib=internal precisely because there was
+# none.
+fetch "https://zlib.net/fossils/zlib-${ZLIB_VERSION}.tar.gz"
+fetch "https://download.sourceforge.net/libpng/libpng-${LIBPNG_VERSION}.tar.xz"
 fetch "https://ftp.gnu.org/gnu/gcc/gcc-${GCC_VERSION}/gcc-${GCC_VERSION}.tar.xz"
 fetch "https://musl.libc.org/releases/musl-${MUSL_VERSION}.tar.gz"
 
@@ -201,6 +209,15 @@ done
 # font from its real source (a FontForge/UFO project) would pull in
 # FontForge itself, wildly out of proportion to "install a terminal
 # font."
+INTER_ZIP="inter-${INTER_VERSION}.zip"
+if [ ! -f "${INTER_ZIP}" ]; then
+    echo "[fetch] ${INTER_ZIP}"
+    curl -fL --retry 3 -o "${INTER_ZIP}" \
+        "https://github.com/rsms/inter/releases/download/v${INTER_VERSION}/Inter-${INTER_VERSION}.zip"
+else
+    echo "[skip]  ${INTER_ZIP} already exists"
+fi
+
 JBMONO_ZIP="jetbrains-mono-${JETBRAINS_MONO_VERSION}.zip"
 if [ ! -f "${JBMONO_ZIP}" ]; then
     echo "[fetch] ${JBMONO_ZIP}"
@@ -234,6 +251,51 @@ fi
 # kernel.org serves one tarball; build/26-firmware.sh extracts only the
 # curated subset that ends up in the image.
 fetch "https://cdn.kernel.org/pub/linux/kernel/firmware/linux-firmware-${LINUX_FIRMWARE_VERSION}.tar.xz"
+
+# nftables and its two libraries (RFC 0016). netfilter.org publishes
+# these as plain tarballs, which is the easiest fetch in this file.
+# nftables is configured --with-mini-gmp --without-cli, so none of gmp,
+# readline or jansson is needed alongside them.
+fetch "https://netfilter.org/projects/libmnl/files/libmnl-${LIBMNL_VERSION}.tar.bz2"
+fetch "https://netfilter.org/projects/libnftnl/files/libnftnl-${LIBNFTNL_VERSION}.tar.xz"
+fetch "https://netfilter.org/projects/nftables/files/nftables-${NFTABLES_VERSION}.tar.xz"
+
+# WPA3 (RFC 0021). Fetched by git rather than as a tarball because
+# GitHub's /archive/refs/tags/ endpoint is not reachable from this
+# build environment (403) and wolfSSL publishes no release asset under
+# a predictable name -- fetch_git exists for exactly this.
+fetch_git "wolfssl" "${WOLFSSL_VERSION}" \
+    "https://github.com/wolfSSL/wolfssl" "v${WOLFSSL_VERSION}-stable"
+
+# HTTPS (RFC 0020): mbedTLS, curl, and the certificate authorities the
+# whole thing rests on.
+fetch "https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-${MBEDTLS_VERSION}/mbedtls-${MBEDTLS_VERSION}.tar.bz2"
+fetch "https://curl.se/download/curl-${CURL_VERSION}.tar.xz"
+
+# The CA bundle is HASH-PINNED, and it is only the second thing in this
+# project that is. The first is TweetNaCl, because it verifies package
+# signatures; this is the same argument. A CA bundle is a list of
+# parties whose word is accepted about who a server is -- if it arrives
+# modified, every HTTPS connection this system makes is validated
+# against a set somebody else chose. Fetching a *dated* file rather
+# than the rolling cacert.pem is what makes pinning possible at all.
+fetch_pinned "https://curl.se/ca/cacert-${CACERT_DATE}.pem" "${CACERT_SHA256}"
+
+# Developer tooling (RFC 0019): git, and the ssh client it needs to
+# reach anything. OpenSSH is built --without-openssl, which is the
+# whole reason it is allowed in this image at all.
+fetch "https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-${OPENSSH_VERSION}.tar.gz"
+fetch "https://cdn.kernel.org/pub/software/scm/git/git-${GIT_VERSION}.tar.xz"
+
+# Full-disk encryption (RFC 0018). popt and json-c are cryptsetup's
+# hard dependencies; util-linux and LVM2 are enormous trees fetched for
+# exactly one library each (libuuid, libdevmapper) -- see
+# build/34-cryptsetup.sh for why neither can be avoided.
+fetch "http://ftp.rpm.org/popt/releases/popt-1.x/popt-${POPT_VERSION}.tar.gz"
+fetch "https://s3.amazonaws.com/json-c_releases/releases/json-c-${JSON_C_VERSION}.tar.gz"
+fetch "https://www.kernel.org/pub/linux/utils/util-linux/v${UTIL_LINUX_VERSION%.*}/util-linux-${UTIL_LINUX_VERSION}.tar.xz"
+fetch "https://sourceware.org/ftp/lvm2/LVM2.${LVM2_VERSION}.tgz"
+fetch "https://cdn.kernel.org/pub/linux/utils/cryptsetup/v${CRYPTSETUP_VERSION%.*}/cryptsetup-${CRYPTSETUP_VERSION}.tar.xz"
 
 # WiFi: libnl (wpa_supplicant's nl80211 driver needs it), wpa_supplicant
 # and hostapd (same upstream tree; hostapd is test-only -- see

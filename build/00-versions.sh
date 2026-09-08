@@ -17,6 +17,8 @@ BINUTILS_VERSION="2.43"
 GCC_VERSION="14.2.0"
 MAKE_VERSION="4.4.1"          # GNU make, for the native (self-hosting) toolchain
 PKGCONF_VERSION="2.3.0"       # pkg-config implementation in C (no perl, no glib)
+ZLIB_VERSION="1.3.1"          # deflate; libpng needs it, and so will everything else
+LIBPNG_VERSION="1.6.43"       # PNG decode, for novi-view
 BUSYBOX_VERSION="1.36.1"
 
 # s6 ecosystem (skarnet.org)
@@ -61,6 +63,10 @@ TLLIST_VERSION="1.1.0"
 FCFT_VERSION="2.5.1"
 FOOT_VERSION="1.9.2"
 JETBRAINS_MONO_VERSION="2.304"
+# Inter, the UI sans (RFC 0025). GUI-DESIGN-LANGUAGE.md §2 specified it
+# and explicitly deferred adding it; this is that follow-up. OFL-1.1,
+# the same licence family as JetBrains Mono, so no new review.
+INTER_VERSION="4.1"
 
 # e2fsprogs: real mke2fs and e2fsck. BusyBox's mke2fs writes ext2 with
 # no journal, which on real hardware turns an unclean shutdown into a
@@ -73,6 +79,46 @@ E2FSPROGS_VERSION="1.47.1"
 # the same source tree and is built only to test against; it is not
 # installed into the image.
 LIBNL_VERSION="3.11.0"
+
+# nftables and its two libraries, for RFC 0016's declarative firewall.
+# The kernel has had CONFIG_NF_TABLES since it was written and the image
+# has never contained anything that could configure it.
+# WPA3 (RFC 0021). wolfSSL is the crypto backend wpa_supplicant 2.11
+# actually has (RFC 0020 established that mbedTLS is not), and it is
+# dual GPL-2.0 / commercial, so the GPL half is clean under this
+# project's own licence.
+WOLFSSL_VERSION="5.7.6"
+
+# HTTPS (RFC 0020). mbedTLS is dual Apache-2.0 / GPL-2.0-or-later, so
+# it is clean under this project's own GPLv2. The CA bundle is Mozilla's
+# set as curl.se publishes it, pinned by date AND by hash -- it is a
+# trust root, and the only other pinned source in this project is the
+# other trust root (TweetNaCl, RFC 0006).
+MBEDTLS_VERSION="3.6.2"
+CURL_VERSION="8.11.1"
+CACERT_DATE="2025-05-20"
+CACERT_SHA256="ab3ee3651977a4178a702b0b828a4ee7b2bbb9127235b0ab740e2e15974bf5db"
+
+# Developer tooling (RFC 0019). `pkg install novi-devel` puts a compiler
+# on the machine and nothing that can fetch something to compile.
+# Both are packages, never base image.
+OPENSSH_VERSION="9.9p2"
+GIT_VERSION="2.47.1"
+
+# Full-disk encryption (RFC 0018). The kernel has had CONFIG_DM_CRYPT
+# since the config was written and nothing could create a container.
+# Five upstreams, all small, all built static: cryptsetup links them and
+# the initramfs carries one binary instead of a loader and five
+# libraries.
+POPT_VERSION="1.19"              # cryptsetup's CLI argument parser
+JSON_C_VERSION="0.18"            # LUKS2 metadata is JSON; not optional
+UTIL_LINUX_VERSION="2.40.2"      # libuuid ONLY -- see build/34-cryptsetup.sh
+LVM2_VERSION="2.03.28"           # libdevmapper ONLY, same
+CRYPTSETUP_VERSION="2.7.5"
+
+LIBMNL_VERSION="1.0.5"
+LIBNFTNL_VERSION="1.2.6"
+NFTABLES_VERSION="1.0.9"
 WPA_SUPPLICANT_VERSION="2.11"
 IW_VERSION="6.9"
 
@@ -118,3 +164,79 @@ export SYSROOT="${BUILD_DIR}/sysroot"
 export ROOTFS="${BUILD_DIR}/rootfs"
 
 export PATH="${TOOLS}/bin:${PATH}"
+
+# ── harden_flags ──────────────────────────────────────────────────────
+#
+# Compile-time hardening for the code this project writes. Call it in a
+# stage before building; it exports CFLAGS/LDFLAGS, and every Makefile
+# here uses `CFLAGS +=`, so the stage's own flags are appended to these
+# rather than replacing them.
+#
+# This exists because the kernel config is hardened -- STACKPROTECTOR_
+# STRONG, RANDOMIZE_BASE, STRICT_KERNEL_RWX, FORTIFY_SOURCE,
+# INIT_ON_ALLOC_DEFAULT_ON are all set in kernel/config-x86_64 -- and
+# the userland it was protecting had none of it. Every binary in the
+# image was type=EXEC with no __stack_chk_fail symbol and no BIND_NOW:
+# no ASLR, no stack guard, no fortified string functions, and a GOT
+# that stayed writable for the life of the process.
+#
+# The project's stated security model (PLATFORM-ROADMAP §9) is "small
+# TCB by construction", which is an argument about how MANY binaries
+# can be attacked, not about how hard any one of them is to attack.
+# Alpine is the same libc and the same smallness argument and ships PIE
+# + SSP + fortify by default; there was no reason not to.
+#
+# What each one is for:
+#   -O2                    fortify is a no-op without optimisation, and
+#                          these clients were being built at -O0
+#   -fstack-protector-strong   a canary on any frame with an array or a
+#                          local whose address is taken
+#   -D_FORTIFY_SOURCE=2    musl's checked str*/mem*/sprintf variants
+#   -fPIE -pie             the binary can be loaded anywhere, so kernel
+#                          ASLR actually applies to it
+#   -Wl,-z,relro,-z,now    resolve every symbol at load, then make the
+#                          GOT read-only
+#   -Wl,-z,noexecstack     no executable stack (musl needs none)
+#
+# Deliberately NOT applied to the static binaries (BusyBox, novi-verify)
+# or to anything under kernel/: static PIE is a different flag with
+# different failure modes in PID 1's path, and the kernel has its own
+# hardening already set in its own config. Widening this is its own
+# change, with its own boot test.
+harden_flags() {
+    export CFLAGS="-O2 -fstack-protector-strong -D_FORTIFY_SOURCE=2 -fPIE ${CFLAGS:-}"
+    export LDFLAGS="-pie -Wl,-z,relro,-z,now -Wl,-z,noexecstack ${LDFLAGS:-}"
+}
+
+# ── require_desktop_headers ───────────────────────────────────────────
+#
+# Every stage that cross-compiles a Wayland client needs the headers and
+# .pc files that 06-wayland.sh put in the rootfs. 41-desktop-split.sh
+# takes them out again (RFC 0015 made them a package), so in a tree
+# where a full build has already run, rebuilding one client stops with
+# four "No such file or directory" lines from four different headers and
+# no indication of why or what to do.
+#
+# That is not a hypothetical. Chaining a rebuild into 40-repo.sh without
+# checking it succeeded packaged a rootfs with no desktop in it, and
+# 41-desktop-split.sh then deleted from the base exactly what that empty
+# manifest described -- leaving no desktop in the image AND none in the
+# repository. Recovering meant re-running the stages, which is the
+# documented mechanism and took fifteen minutes. One clear line at the
+# top of the stage is cheaper than that.
+require_desktop_headers() {
+    if [ -f "${ROOTFS}/usr/include/wayland-client.h" ]; then
+        return 0
+    fi
+    echo "ERROR: the desktop headers are not in ${ROOTFS}." >&2
+    echo "" >&2
+    echo "  41-desktop-split.sh has removed them (they ship as the" >&2
+    echo "  novi-headers package). Put them back before building a" >&2
+    echo "  client against them:" >&2
+    echo "" >&2
+    echo "      bash scripts/restore-build-inputs.sh" >&2
+    echo "" >&2
+    echo "  Then re-run this stage, and re-run 40-repo.sh and" >&2
+    echo "  41-desktop-split.sh before making an image." >&2
+    exit 1
+}

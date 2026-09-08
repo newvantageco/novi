@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-# 20-repo.sh — Build and sign the first-party package repository
+# 40-repo.sh — Build and sign the first-party package repository
 #
 # RFC 0006 gave `pkg` something to fetch from. RFC 0007 decides WHAT is
 # in it: the desktop, so the base image can stop carrying it.
@@ -64,6 +64,45 @@ if [[ ! -f "${KEY_FILE}" ]]; then
     chmod 600 "${KEY_FILE}"
 fi
 
+# ── Refuse to package a binary that lost its hardening ────────────────────
+#
+# Here rather than in scripts/lint.sh because this needs a built rootfs
+# and CI compiles nothing -- and here rather than at the end of the
+# build because this is the last moment every first-party binary is
+# still in the rootfs, before 41-desktop-split.sh moves them into
+# packages. Shipping an unhardened binary is not something to notice
+# afterwards.
+
+# REFUSE TO RUN ON AN ALREADY-SPLIT ROOTFS.
+#
+# pkgsplit computes the desktop from what is IN the rootfs. Run this
+# after 41-desktop-split.sh has already taken the desktop out and the
+# answer is "nothing leaves the base": an empty manifest, a repository
+# holding only the novi-desktop meta-package, and an ISO with no
+# desktop anywhere -- no error, because an empty answer is a valid
+# answer to the question that was asked.
+#
+# That is the same failure CLAUDE.md already records from the other
+# direction (chaining this stage after a client build that failed).
+# The guard is here rather than in a comment because the comment did
+# not stop it happening a second time. `bash build.sh` never trips it;
+# re-running stages by hand does.
+if [ ! -x "${ROOTFS}/usr/bin/novi-shell" ]; then
+    echo "ERROR: ${ROOTFS} has no desktop in it -- ${ROOTFS}/usr/bin/novi-shell" >&2
+    echo "       is missing, so 41-desktop-split.sh has already run here." >&2
+    echo "" >&2
+    echo "  Computing the split now would find nothing to move, write an" >&2
+    echo "  empty manifest, and produce an ISO with no desktop at all." >&2
+    echo "" >&2
+    echo "  Put the desktop back first:" >&2
+    echo "      bash build.sh --from 06 --to 29" >&2
+    echo "  then re-run this stage, 41-desktop-split.sh and" >&2
+    echo "  42-toolchain-repo.sh in that order." >&2
+    exit 1
+fi
+
+bash "${REPO_ROOT}/scripts/check-hardening.sh"
+
 # ── Work out the split and stage every package ────────────────────────────
 echo ">>> Computing the base/desktop split from the ELF dependency graph ..."
 rm -rf "${STAGE_DIR}" "${REPO_OUT}"
@@ -102,5 +141,21 @@ echo ""
 echo "Repository built: ${REPO_OUT}  ($(du -sh "${REPO_OUT}" | cut -f1))"
 echo "Desktop file manifest: ${MANIFEST} ($(wc -l < "${MANIFEST}") files)"
 echo ""
-echo "  bash build/21-desktop-split.sh   # remove those files from the base image"
+echo "  bash build/41-desktop-split.sh   # remove those files from the base image"
+echo "  bash build/42-toolchain-repo.sh  # this stage WIPED the toolchain packages"
 echo "  bash scripts/mkiso.sh            # the ISO carries this repo at /novi-repo"
+
+# Said out loud because the failure is silent. This stage removes
+# ${REPO_OUT} and rebuilds it from the rootfs, which drops anything
+# another stage published into it -- today that is the native
+# toolchain (28/42), 95 MB of it. build.sh runs the stages in order and
+# is fine; running this one by hand and stopping produces an ISO that
+# is simply smaller, with no error and nothing to say which packages a
+# repository was supposed to hold.
+if [ -d "${BUILD_DIR}/stage-toolchain" ] &&
+   ! ls "${REPO_OUT}"/novi-devel-*.pkg.tar.gz >/dev/null 2>&1; then
+    echo ""
+    echo "NOTE: /build/stage-toolchain exists but novi-devel is not in the"
+    echo "      repository -- this stage wiped it. Run build/42-toolchain-repo.sh"
+    echo "      before mkiso.sh, or the image ships without a compiler."
+fi

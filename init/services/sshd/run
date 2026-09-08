@@ -1,0 +1,101 @@
+#!/bin/sh
+# ============================================================
+# sshd service — run script
+#
+# RFC 0022. Declared by `services.sshd`, off by default, and inert
+# until `pkg install openssh-server` puts the binaries here: s6-rc
+# does not check that a run script's binary exists, so a
+# declared-off service pointing at a not-yet-installed program is
+# not broken (the same arrangement seatd and novi-shell have had
+# since the base/desktop split, RFC 0007).
+#
+# THE HOST KEY IS GENERATED HERE, ON FIRST START, AND NEVER AT BUILD
+# TIME. A distribution that ships a host key ships the same key to
+# every machine that installs it, which means anyone who has the
+# image can impersonate any of them and read the traffic; it has
+# happened to real distributions and to a lot of appliances. The
+# image therefore contains no key at all, and the first machine to
+# start this service makes its own.
+#
+# Ed25519 only, and that is not a default -- it is the whole of what
+# this OpenSSH can do. It is built --without-openssl (RFC 0019), so
+# there is no RSA and no ECDSA to generate. `ssh-keygen -A` would
+# have been shorter and would have printed failures for two key types
+# that cannot exist here; naming the one that can is clearer than
+# ignoring errors.
+# ============================================================
+
+HOSTKEY=/etc/ssh/ssh_host_ed25519_key
+
+# /usr/sbin/sshd spelled out, everywhere, and the exec below in
+# particular. sshd RE-EXECS ITSELF for each connection and refuses to
+# start at all if argv[0] is not absolute: `exec sshd -D -e` gave
+# "sshd requires execution with an absolute path" once a second,
+# forever, from a binary that `sshd -t` had just declared its config
+# perfect. PATH here contains /usr/sbin (04-s6.sh sets it), so the
+# bare name resolved fine -- it is argv[0] sshd objects to, not the
+# lookup.
+SSHD=/usr/sbin/sshd
+
+[ -x "$SSHD" ] || {
+    echo "sshd: not installed -- 'pkg install openssh-server'" >&2
+    exit 1
+}
+
+# The privilege-separation account. sshd's own message for this is
+# clear ("Privilege separation user sshd does not exist") and it comes
+# out at the end of a crash loop, three layers down in
+# /run/uncaught-logs, after `novi-state apply` has already reported a
+# service that would not start. Saying it here puts the cause next to
+# the attempt.
+#
+# It is checked rather than created: /etc/passwd is base content with
+# fixed UIDs (a squashed image's file modes depend on them), so a
+# missing entry means the base image predates RFC 0022 -- which a
+# service is not the thing to fix. Read from the file directly, as
+# every other account check in this project does: musl has no NSS, so
+# /etc/passwd IS the database.
+grep -q '^sshd:' /etc/passwd 2>/dev/null || {
+    echo "sshd: no 'sshd' account in /etc/passwd -- this base image predates RFC 0022" >&2
+    exit 1
+}
+
+if [ ! -f "$HOSTKEY" ]; then
+    mkdir -p /etc/ssh
+    echo "sshd: generating a host key for this machine (first start)" >&2
+    ssh-keygen -q -t ed25519 -N '' -C "" -f "$HOSTKEY" || {
+        echo "sshd: could not generate a host key" >&2
+        exit 1
+    }
+fi
+chmod 600 "$HOSTKEY"
+
+# sshd unshares into this and it must be empty, root-owned and
+# writable by nobody else. sshd checks and refuses to run otherwise --
+# a check worth letting fail loudly rather than pre-empting, except
+# for the directory simply not existing on a rootfs built before
+# RFC 0022.
+[ -d /var/empty ] || { mkdir -p /var/empty; chmod 755 /var/empty; }
+
+# Readiness means THE HOST KEY EXISTS, and it means nothing more than
+# that. It deliberately does not mean a socket is bound: sshd says
+# nothing when it starts listening, so claiming otherwise would be the
+# "up is not working" mistake this repo has now made four times
+# (RFC 0014). The host key is the one precondition anything else could
+# race on -- `ssh-keyscan` against a machine that has not made one yet
+# gets a refused connection and caches nothing.
+#
+# `timeout-up` beside this file is not tuning; it is the other half of
+# this decision. A longrun that declares notification-fd and never
+# signals makes `s6-rc -u change` wait FOREVER. With the package not
+# installed, the `exit 1` above became a crash loop, `novi-state
+# apply` hung on it, and the console session with it -- and boot
+# convergence would have hung the boot the same way. Every longrun
+# here that declares readiness also bounds how long anything waits.
+echo >&3
+
+# -D: do not fork, so s6 supervises the listener itself.
+# -e: log to stderr, which s6 hands to the catch-all logger, rather
+#     than to syslog -- one place for a service's output, the same
+#     arrangement every other longrun here has.
+exec "$SSHD" -D -e

@@ -232,3 +232,114 @@ build_meson xkeyboard-config "xkeyboard-config-${XKEYBOARD_CONFIG_VERSION}" \
 echo ""
 echo "Wayland/wlroots stack installed. Libraries:"
 find "${ROOTFS}/usr/lib" -maxdepth 1 -iname "libwlroots*" -o -iname "libseat*" -o -iname "libinput*"
+
+# ─────────────────────────────────────────────────────────────────────
+# Text rendering: freetype -> fontconfig -> fcft (+ tllist)
+# ─────────────────────────────────────────────────────────────────────
+#
+# These live here, with the rest of the shared library stack, because
+# three separate clients need them: novi-launcher (stage 08),
+# novi-panel (stage 10) and foot (stage 09). They were originally built
+# in 09-foot.sh, on the assumption that foot was their only consumer;
+# once the launcher and panel gained real anti-aliased text they became
+# a dependency of stages that run *earlier*, and a clean build stopped
+# at stage 08 with `cannot find -lfcft`. Nothing noticed, because a
+# from-scratch build is rare and CI compiles nothing.
+#
+# Same rule as everywhere else in this file: a library that more than
+# one thing links belongs in the library stage, not inside whichever
+# application happened to need it first.
+
+# ── 1. freetype ─────────────────────────────────────────────────────
+#
+# -Dzlib=internal: freetype bundles its own minimal gzip decompressor
+# (src/gzip/) specifically so consumers don't need a system zlib just
+# to read gzip-compressed font tables -- avoids pulling in zlib as a
+# whole separate new dependency for this one feature. harfbuzz/brotli/
+# bzip2/png are all optional advanced-hinting/format features this
+# terminal-font use case doesn't need; disabled to keep the dependency
+# chain from growing any further than it already has.
+build_meson freetype "VER-${FREETYPE_VERSION}" \
+    -Dzlib=internal -Dharfbuzz=disabled -Dbrotli=disabled \
+    -Dbzip2=disabled -Dpng=disabled -Dtests=disabled
+
+# ── 2. fontconfig ────────────────────────────────────────────────────
+#
+# -Dxml-backend=expat: already built (build/06-wayland.sh step 2),
+# avoids needing libxml2 as a second, redundant XML parser in the
+# rootfs. -Dcache-build=disabled: that option runs fc-cache at `ninja
+# install` time on the BUILD machine, which would try to execute a
+# freshly cross-compiled TARGET fc-cache binary directly on this x86_64
+# Linux host -- same architecture, so it wouldn't even fail loudly, it
+# would just scan and cache the *host's* font directories into the
+# rootfs's cache path instead of the rootfs's own fonts (which aren't
+# installed yet at this point in the build anyway). Cache is built
+# correctly, chrooted, after the font is installed -- see below.
+build_meson fontconfig "${FONTCONFIG_VERSION}" \
+    -Dnls=disabled -Dtests=disabled -Dtests-external-fonts=disabled \
+    -Dxml-backend=expat -Ddoc=disabled -Dcache-build=disabled
+
+# ── 3. tllist (header-only, used by both fcft and foot) ─────────────
+build_meson tllist "${TLLIST_VERSION}" -d tllist
+
+# ── 4. fcft ───────────────────────────────────────────────────────────
+#
+# Pinned to the 2.x line in 00-versions.sh (not latest) because foot
+# 1.9.2 requires fcft <3.0.0 -- confirmed by reading foot's own
+# meson.build, not assumed. grapheme-shaping=disabled and
+# run-shaping=disabled together avoid needing harfbuzz or libutf8proc
+# at all: this is a monospace terminal font (Latin text, no complex
+# script shaping), so neither buys anything for this use case. (fcft
+# 2.5.1 -- unlike the 3.x line -- has no SVG/color-emoji option at all,
+# so there's nothing to disable there; confirmed by reading this exact
+# version's meson_options.txt after -Dsvg-backend=none, copied from
+# having inspected the 3.x tag instead of this one, failed with
+# "Unknown option: svg-backend".)
+build_meson fcft "${FCFT_VERSION}" -d fcft \
+    -Dgrapheme-shaping=disabled -Drun-shaping=disabled \
+    -Ddocs=disabled -Dexamples=false -Dtest-text-shaping=false
+
+# ── 5. libnl ──────────────────────────────────────────────────────────
+#
+# HERE, not in 25-wifi.sh where it used to be, and the move is RFC
+# 0005's rule applied to the letter: a library more than one client
+# links belongs in the library stage, not inside whichever application
+# happened to need it first.
+#
+# libnl had exactly one consumer -- wpa_supplicant, built in stage 25 --
+# right up until novi-panel's network indicator started asking the
+# kernel for a WiFi signal over nl80211. novi-panel is stage 10. In a
+# warm tree that is invisible; a clean `bash build.sh` stops at stage
+# 10, which is exactly how novi-launcher/fcft failed before it.
+#
+# The error it gives is worth recording, because it names the wrong
+# thing. pkg-config was asked for `wayland-client fcft libnl-genl-3.0`
+# in one query, and a query with ONE missing package fails as a whole:
+# it reported all three as not found, and the build died on
+# "wayland-client.h: No such file or directory" with wayland-client.pc
+# sitting right there in the rootfs. One missing .pc file, three
+# libraries blamed.
+#
+# --disable-cli drops nl-* tools nothing here runs.
+echo ">>> Building libnl ${LIBNL_VERSION} ..."
+rm -rf "${SOURCES}/libnl-${LIBNL_VERSION}"
+tar -xf "${SOURCES}/libnl-${LIBNL_VERSION}.tar.gz" -C "${SOURCES}"
+(
+    cd "${SOURCES}/libnl-${LIBNL_VERSION}"
+    ./configure --host="${TARGET_TRIPLE}" --prefix=/usr \
+        --disable-static --disable-cli >/dev/null
+    make -j"$(nproc)" >/dev/null
+    make install DESTDIR="${ROOTFS}" >/dev/null
+)
+# libtool leaves .la files pointing at build-tree paths; nothing on the
+# target reads them and they are a classic source of confusing link
+# failures later.
+rm -f "${ROOTFS}"/usr/lib/libnl*.la
+
+# libnl builds six libraries; wpa_supplicant, iw and novi-panel link
+# two of them. The other four -- route, nf, xfrm, idiag -- are 3 MB of
+# netlink families nothing in this image speaks.
+rm -f "${ROOTFS}"/usr/lib/libnl-route-3.so* \
+      "${ROOTFS}"/usr/lib/libnl-nf-3.so* \
+      "${ROOTFS}"/usr/lib/libnl-xfrm-3.so* \
+      "${ROOTFS}"/usr/lib/libnl-idiag-3.so*

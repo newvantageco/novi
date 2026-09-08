@@ -99,6 +99,26 @@ if [ -f /etc/fstab ]; then
     mount -a || echo 'rc.init: some /etc/fstab entries could not be mounted' 1>&2
 fi
 
+### 1b. Converge the handful of declared keys that have to be true
+### BEFORE anything starts listening -- today that is the firewall and
+### nothing else (RFC 0016).
+###
+### Step 4 below is the real convergence and it has to stay where it
+### is; the reason is spelled out there. But it returns only after the
+### runlevel transition has finished, by which point `network` holds a
+### DHCP lease and any declared service that listens on a port is
+### listening. Loading the ruleset there means the machine is briefly
+### reachable and unfiltered on every boot -- measured, not supposed:
+### the table appeared a second or two after the login prompt.
+###
+### `--early` is not a general "apply this key" hook. novi-state
+### decides which keys qualify (EARLY_KEYS, and the rule is that
+### converging them must need nothing from s6-rc), so this stays one
+### writer converging one document, twice.
+if command -v novi-state >/dev/null 2>&1; then
+    novi-state boot --early || true
+fi
+
 ### 2. Start the s6-rc-managed services into the already-running
 ### scandir (/run/service, seeded by s6-linux-init from run-image).
 s6-rc-init -c /etc/s6-rc/compiled -l /run/s6-rc /run/service

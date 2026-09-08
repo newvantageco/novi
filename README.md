@@ -34,6 +34,7 @@ $ cat /etc/novi/system.conf          # this IS your system's config
 hostname = novi
 network.dhcp = on
 network.dns = auto
+network.firewall = on
 services.novi-shell = off
 
 $ novi-state diff                    # has anything drifted?
@@ -322,7 +323,27 @@ $ novi-state set network.wifi on && novi-state apply
 `system.conf` says *that* this machine uses WiFi. `/etc/novi/wifi.conf`
 says *which* networks, at mode 0600. `novi-state diff` can tell you the
 supplicant should be running; it cannot tell anyone your passphrase.
-WPA2 only for now — see [RFC 0009](docs/rfcs/0009-wifi.md).
+WPA2 and WPA3-Personal, from one stored block — the machine takes
+whichever the access point offers, with nothing to choose. See
+[RFC 0009](docs/rfcs/0009-wifi.md) and [RFC 0021](docs/rfcs/0021-wpa3.md).
+
+**Nothing opens a port on your behalf.** Novi's firewall drops
+everything inbound it did not ask for, and turning on a daemon does not
+change that — because a firewall that opens itself when a service
+starts is not a firewall:
+
+```console
+$ pkg install openssh-server
+$ novi-state set services.sshd on && novi-state apply
+warning: services.sshd is on, but the firewall does not allow port 22
+warning:     add it:  novi-state set network.firewall.allow 22 && novi-state apply
+```
+
+Two decisions, two lines in the same document, both in the same diff
+and the same rollback. The host key is generated on that machine the
+first time the service starts — no Novi image contains one, so no two
+machines share one. Root cannot log in over ssh at all. See
+[RFC 0022](docs/rfcs/0022-sshd.md).
 
 **It tries to work on hardware it has never seen.** Nothing in this
 system used to load a driver it had not been told about in advance —
@@ -431,15 +452,17 @@ $ novi-state rollback        # foot comes back, from the mirror
 ```
 
 **The base image is console-only.** `/usr/lib` in it holds three
-libraries and nothing else: `libskarnet` for s6, `libnl` for the WiFi
-supplicant, and `libasound` for audio — each one there because a
-console system genuinely needs it. The desktop (compositor, panel,
-launcher, terminal, fonts, and the whole Wayland/wlroots stack) is 25
-packages, and the installation medium carries the signed repository, so
-installing it needs no network at all:
+libraries and nothing else: `libskarnet` for s6, `libnl` and
+`libwolfssl` for the WiFi supplicant, and `libasound` for audio — each
+one there because a console system genuinely needs it. The desktop is packages: eleven
+programs — compositor, panel, launcher, settings, terminal, text
+editor, file manager, image viewer, lock screen, screenshot tool and
+the font — plus the Wayland/wlroots stack they link. The installation
+medium carries the signed repository, so installing it needs no network
+at all:
 
 ```console
-$ pkg install novi-desktop        # 25 packages, ~7 seconds, from the ISO
+$ pkg install novi-desktop        # from the ISO, no network
 ```
 
 Which files leave the base is **computed** from the ELF dependency
@@ -447,11 +470,60 @@ graph, not listed by hand, and the build fails if anything left behind
 still links against something being moved out — see
 [RFC 0007](docs/rfcs/0007-base-desktop-split.md).
 
-Build your own repository with `bash build/20-repo.sh` and serve the
+Build your own repository with `bash build/40-repo.sh` and serve the
 directory over HTTP, or point `mirror` at a local directory. There is
 no default public mirror: there is no public Novi repository yet, and
 pointing a package manager at a host that does not exist is worse than
 pointing it at nothing.
+
+## The applications
+
+The desktop's programs are first-party and written against raw
+xdg-shell, drawing with pixman and fcft — there is no GUI toolkit on
+this system, because adding one is a decision with an RFC behind it and
+nobody has made it yet.
+
+**`novi-edit`** is a text editor with the two properties an editor has
+to have before it can be trusted with a config file. It has undo and
+redo (`^Z`/`^Y`), as whole-document snapshots on a bounded budget
+rather than an operation log — a snapshot puts back precisely what was
+there by construction, and the failure mode of a wrong inverse
+operation is silent corruption of somebody's file. And `^Q` on a
+modified buffer asks before discarding, rather than throwing the work
+away on one keypress. Selection is shift-arrows and `^A`; saving is
+atomic (temp file, `fsync`, `rename`) and preserves the original's
+mode, so a config file at 0600 does not come back 0644.
+
+**`novi-files`** browses, and changes things. Enter opens a file in the
+right program — `.png` goes to the viewer, everything else to the
+editor, and the row icon is derived from that same decision so it
+cannot disagree with what Enter will do. `F2` renames and refuses a
+name that already exists, rather than silently replacing it the way a
+bare `rename(2)` would. Delete removes a file or an empty directory on
+`y`; a directory with things in it counts the tree first and asks
+
+```
+delete 'project' and 214 files in 31 folders?   type yes:
+```
+
+There is no trash on this system and no undo in that program, so the
+confirmation names what is about to go, and a count that could not be
+finished refuses the delete instead of guessing.
+
+**`novi-view`** displays PNG, BMP and PPM, sniffing the format from the
+magic bytes rather than the extension, and decoding *before* it opens a
+window — so an unreadable file prints a line and exits rather than
+flashing up an empty one.
+
+**Copy and paste work between programs**, over core-Wayland
+`wl_data_device_manager` — the same mechanism foot speaks, because that
+is the only way copying in a terminal and pasting in an editor can
+possibly work. And the selection outlives the program that made it:
+copy in the editor, close the editor, paste anywhere. That is not free
+— a Wayland selection belongs to the client that set it and dies with
+it — so novi-shell keeps its own copy and re-offers it when the owner
+exits, reading and writing on the compositor's event loop because a
+blocking pipe in the compositor freezes every window on the screen.
 
 ## Install it
 
@@ -514,16 +586,31 @@ small static GPT writer) and e2fsprogs' `mke2fs`. See
 | Kernel | Linux 6.10.3-novi | tinyconfig + custom, 280+ options |
 | Compiler | GCC 14.2 + musl | Full C/C++ cross-compiler |
 | Packages | pkg / .pkg.tar.gz | Custom minimal format |
+| Firewall | nftables 1.0.9 | One declared key, one policy file, no daemon |
+| Removable media | novi-mount / novi-eject | ext4/FAT/exFAT/NTFS3/UDF, no udisks, no D-Bus |
+| Notifications | novi-notify / novi-notifyd | A datagram socket, no message bus |
+| UI type | Inter + JetBrains Mono | Language vs. machine values; one token header |
+| Encryption | LUKS2 (cryptsetup 2.7.5) | One static binary, kernel AF_ALG crypto, no OpenSSL |
+| Dev tools | git 2.47.1 + OpenSSH 9.9p2 | Packages, not base; ssh built without OpenSSL |
+| TLS | mbedTLS 3.6.2 + curl 8.11.1 | Packages, not base; CA bundle hash-pinned |
+| WiFi | wpa_supplicant 2.11 + wolfSSL 5.7.6 | WPA2 and WPA3-SAE; no OpenSSL |
+| Remote access | sshd 9.9p2 | A package; host key made on first start; root refused |
 
 ## OS Identity
 
+`/etc/os-release`, a relative symlink to `/usr/lib/os-release`, which
+`build/03-base.sh` generates from `build/00-versions.sh` — so the
+machine's idea of its own version cannot drift from the build's:
+
 ```
 NAME="Novi"
-VERSION="0.1.0"
 ID=novi
+VERSION="0.1.0 (Axiom)"
+VERSION_ID=0.1.0
 VERSION_CODENAME=Axiom
 PRETTY_NAME="Novi Linux 0.1.0 (Axiom)"
 HOME_URL="https://novilinux.org"
+BUG_REPORT_URL="https://github.com/newvantageco/novi/issues"
 ```
 
 `uname -r` → `6.10.3-novi`
@@ -540,17 +627,48 @@ HOME_URL="https://novilinux.org"
 - [x] Signed package repository (`pkg sync`, `novi-verify`, `packages.*`, RFC 0006)
 - [x] Console-only base; the desktop is packages (RFC 0007)
 - [x] UEFI/GPT install + journalled ext4 root (RFC 0008)
-- [x] WiFi (`network.wifi`, `novi-wifi`, WPA2, RFC 0009)
+- [x] WiFi (`network.wifi`, `novi-wifi`, WPA2 + WPA3, RFC 0009, RFC 0021)
 - [x] Real upgrades + index freshness (`pkg update`, `valid-until`, RFC 0010)
 - [x] Hardware enablement (`novi-hwdetect`, firmware, ALSA, power, RFC 0011)
 - [x] Hotplug — devices that arrive after boot (`novi-hotplug`, RFC 0012)
 - [x] Lid, power button, and a shutdown that finishes (RFC 0013)
 - [x] `novi-state health` — "up" is not "working" (RFC 0014)
 - [x] Native toolchain — Novi compiles its own C and C++ (RFC 0015)
+- [x] Applications — text editor, file manager, image viewer, with undo,
+      real file operations, and a confirmation that names what it will delete
+- [x] A clipboard that works between programs, and outlives the one that filled it
+- [x] A firewall in the same document as your hostname (`network.firewall`,
+      nftables, default-drop input, on by default, RFC 0016)
+- [x] WiFi from the desktop — scan, pick, type the passphrase, connected
+      (Settings → Network, RFC 0017)
+- [x] Full-disk encryption — `novi-install --encrypt`, LUKS2, unlocked by
+      the initramfs; both firmware paths verified (RFC 0018)
+- [x] `pkg install git` — git over ssh, and an OpenSSH client built without
+      OpenSSL (ed25519 only) (RFC 0019)
+- [x] HTTPS — mbedTLS, curl and a hash-pinned Mozilla CA bundle, as packages;
+      no TLS library reaches the base image from it (RFC 0020)
+- [x] WPA3-Personal — wolfSSL, SAE, PMF; one stored block joins WPA2 or
+      WPA3, verified against an SAE-only access point (RFC 0021)
+- [x] `pkg install openssh-server` — a daemon whose host key is made on
+      the machine, and a firewall hole you have to declare (RFC 0022)
+- [x] A network indicator in the panel — wired, wifi with signal bars, or
+      offline, with the icon geometry testable without booting anything
+- [x] Removable media — plug in a stick and it is there; exFAT and NTFS
+      because that is what sticks actually are (`novi-eject`, RFC 0023)
+- [x] A places sidebar in the file manager — volumes appear and vanish
+      live, with eject, while the window is open
+- [x] A mouse in the file manager — click to select, double-click to open,
+      wheel to scroll, click a device to open it or its glyph to eject
+- [x] Notifications — a datagram socket and a toast, no message bus; the
+      system can finally say one sentence (RFC 0024)
+- [x] The design language, implemented — Inter for language and JetBrains
+      Mono for machine values, one shared token header, a real desktop
+      background instead of a flat fill
 - [ ] **Boot it on real hardware** ← next, and nothing here replaces it
 - [ ] A published repository + offline release key
-- [ ] A Microsoft-signed shim (real Secure Boot); WPA3 (needs mbedTLS)
-- [ ] Automount + `novi-eject`; idle-suspend and low-battery; Mesa
+- [ ] A Microsoft-signed shim (real Secure Boot); OWE and SAE-PK
+      (compiled in, untested)
+- [ ] Idle-suspend and low-battery; Mesa; notification history
 - [ ] More state domains: keybindings, static IP
 - [ ] Boot splash
 

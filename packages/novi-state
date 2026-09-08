@@ -32,6 +32,10 @@ set -eu
 
 STATE_FILE="${NOVI_STATE_FILE:-/etc/novi/system.conf}"
 GEN_DIR="${NOVI_STATE_GENERATIONS:-/var/lib/novi-state/generations}"
+# The ruleset network.firewall loads (RFC 0016). A path, not a rule
+# language in system.conf: the escape hatch for anything this key
+# cannot express is editing a real file in nftables' real format.
+FIREWALL_RULES="${NOVI_FIREWALL_RULES:-/etc/novi/firewall.nft}"
 
 msg()  { printf '==> %s\n'    "$*" >&2; }
 info() { printf '  -> %s\n'   "$*" >&2; }
@@ -194,6 +198,102 @@ observe_service() {
 # makes changing either show up as real drift -- and gives `apply`
 # something to do about it -- instead of the change silently having no
 # effect until the next reboot.
+# ---------------------------------------------------------------------------
+# Firewall holes (RFC 0022)
+#
+# `network.firewall.allow = 22, 123/udp` is a list of ports the input
+# chain accepts. It is a SEPARATE key from `services.<name>` on
+# purpose: enabling a daemon must not open a port. That something
+# listens and that the world may reach it are two decisions, and a
+# firewall that opens itself because a service started is not a
+# firewall -- it is a service registry with a policy file attached.
+# The cost is that turning ssh on is two keys, and `apply` says the
+# second one out loud rather than leaving it to be discovered.
+# ---------------------------------------------------------------------------
+
+# Services that listen, and on what. Used ONLY to warn -- nothing here
+# opens anything. A service absent from this list is not assumed
+# silent; it is simply not something this file knows the port of.
+LISTENING_SERVICES="sshd:22"
+
+# Canonicalise a port list so a declared value and an observed one can
+# be compared as strings: "22, 80/tcp,123/udp" and "80,22,123/udp"
+# describe the same holes and must not read as drift. Sorted
+# numerically per protocol, tcp bare, udp suffixed, "none" when empty.
+# Returns 1 on anything it cannot parse, printing nothing.
+#
+# NUMBERS ONLY, deliberately. nft resolves a name like `ssh` through
+# /etc/services, which BusyBox does not ship -- so a name would work on
+# a build host and fail on the machine, which is the worst of the three
+# possible outcomes. A lookup table that exists in one place and not
+# the other is worse than typing 22.
+firewall_ports_canon() {
+    local raw="$1" tok port proto tcp="" udp="" out="" oldifs
+    raw="$(printf '%s' "$raw" | tr -d ' \t')"
+    case "$raw" in ''|none) printf 'none'; return 0 ;; esac
+    oldifs="$IFS"; IFS=','
+    for tok in $raw; do
+        IFS="$oldifs"
+        case "$tok" in
+            '')    IFS=','; continue ;;
+            */udp) port="${tok%/udp}"; proto=udp ;;
+            */tcp) port="${tok%/tcp}"; proto=tcp ;;
+            */*)   return 1 ;;
+            *)     port="$tok"; proto=tcp ;;
+        esac
+        case "$port" in ''|*[!0-9]*) return 1 ;; esac
+        [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || return 1
+        if [ "$proto" = tcp ]; then
+            tcp="$tcp$port
+"
+        else
+            udp="$udp$port
+"
+        fi
+        IFS=','
+    done
+    IFS="$oldifs"
+    for port in $(printf '%s' "$tcp" | sort -un); do out="$out,$port"; done
+    for port in $(printf '%s' "$udp" | sort -un); do out="$out,$port/udp"; done
+    [ -n "$out" ] || { printf 'none'; return 0; }
+    printf '%s' "${out#,}"
+}
+
+# The elements of one nft set, as space-separated words. nft wraps long
+# element lists across lines, so the whole `elements = { ... }` block is
+# collapsed before it is read rather than assuming one line.
+#
+# `[^}]*` and not `.*` for the captured part, and that is the whole of
+# a bug that got as far as a live boot. A sed range whose start line
+# also matches the end pattern does NOT end on that line -- it runs on
+# to the next `}`, which is the set's own closing brace. So the
+# collapsed text was `elements = { 22 } }`, and a greedy `.*` ran to
+# the LAST brace and captured `22 } `. That reached the parser as an
+# unparseable value, `diff` reported permanent drift against a set
+# that was exactly right, and `apply` rewrote the same port three
+# times and gave up. Stopping at the first `}` is the fix.
+firewall_set_elements() {
+    nft list set inet novi "$1" 2>/dev/null |
+        sed -n '/elements = {/,/}/p' |
+        tr '\n' ' ' |
+        sed -n 's/.*elements = {\([^}]*\)}.*/\1/p' |
+        tr ',' ' '
+}
+
+# What the kernel is actually allowing, in the same canonical form.
+# "unsupported" when the sets are not there at all -- an /etc/novi/
+# firewall.nft older than RFC 0022 loads fine and simply has no holes
+# to fill, and reporting that as "none" would let `diff` call a machine
+# converged when the key it declared can never take effect.
+firewall_live_ports() {
+    local e raw=""
+    nft list set inet novi open_tcp >/dev/null 2>&1 || { printf 'unsupported'; return 0; }
+    nft list set inet novi open_udp >/dev/null 2>&1 || { printf 'unsupported'; return 0; }
+    for e in $(firewall_set_elements open_tcp); do raw="$raw,$e"; done
+    for e in $(firewall_set_elements open_udp); do raw="$raw,$e/udp"; done
+    firewall_ports_canon "${raw#,}" 2>/dev/null || printf 'unparseable'
+}
+
 observe_network() {
     local sub="$1"
     case "$sub" in
@@ -209,6 +309,56 @@ observe_network() {
         # at 0600 holds them, and novi-wifi manages it. Configuration
         # is declared; secrets are not (RFC 0005).
         wifi) observe_service wifi ;;
+        # `network.firewall` has no service behind it -- the kernel
+        # holds the ruleset, so there is nothing to supervise (RFC
+        # 0016). The observation is therefore the only honest one
+        # available: ask the kernel whether the table exists.
+        #
+        # `nft list table inet novi` and not a marker file, and not
+        # `nft list ruleset | grep`: the first would make `diff` report
+        # what novi-state last did rather than what is true, and the
+        # second would claim somebody else's table. The name `novi` is
+        # what scopes this key to its own ruleset.
+        #
+        # `nft` missing is reported as `unsupported`, not `off`. A
+        # machine that cannot filter is not a machine that is not
+        # filtering, and `off` would let `diff` call it converged.
+        firewall)
+            if ! command -v nft >/dev/null 2>&1; then
+                printf 'unsupported'
+            elif nft list table inet novi >/dev/null 2>&1; then
+                printf 'on'
+            else
+                printf 'off'
+            fi
+            ;;
+        # The holes, compared as canonical port lists (RFC 0022).
+        #
+        # When the live sets match what was declared, the DECLARED
+        # string is echoed back verbatim rather than the canonical
+        # form -- otherwise `network.firewall.allow = 22, 80` would
+        # report eternal drift against an identical `80,22`, and
+        # `apply` would rewrite the same two ports on every run. When
+        # they do not match, the canonical live list is the answer,
+        # which is the one a person needs to see.
+        firewall.allow)
+            local live declared
+            # No table means no holes to be out of step with -- the
+            # same call `network.interface` makes with the service
+            # down. Permanent unfixable drift on a machine that simply
+            # is not filtering would be a worse answer than silence.
+            if [ "$(observe_network firewall)" != "on" ]; then
+                state_get "network.$sub"
+                return 0
+            fi
+            live="$(firewall_live_ports)"
+            declared="$(firewall_ports_canon "$(state_get network.firewall.allow)" 2>/dev/null || printf '?')"
+            if [ "$live" = "$declared" ]; then
+                state_get "network.$sub"
+            else
+                printf '%s' "$live"
+            fi
+            ;;
         wifi.interface)
             if [ "$(observe_service wifi)" != "on" ]; then
                 state_get "network.$sub"
@@ -422,6 +572,46 @@ observe_key() {
                 *) printf 'unsupported' ;;
             esac
             ;;
+        # power.blank is the same shape again -- novi-shell re-reads it
+        # when the idle period elapses, so nothing holds it, it cannot
+        # drift, and `apply` has nothing to converge. Seconds, or `off`.
+        #
+        # An unusable value is reported as drift for the same reason as
+        # power.lid: converge_key never runs for these keys, so the
+        # observer is the only place a typo can surface. novi-shell
+        # falls back to its built-in default on a bad value rather than
+        # to "never" -- a typo in this key should not silently disable
+        # the thing it configures -- and this is where a person finds
+        # out that is what happened.
+        power.blank)
+            case "$(state_get "$key")" in
+                off) printf 'off' ;;
+                ''|*[!0-9]*) printf 'unsupported' ;;
+                *) state_get "$key" ;;
+            esac
+            ;;
+        # storage.automount is the same shape as power.lid, for the
+        # same reason: novi-mount reads it when a device arrives, so
+        # there is no daemon holding it, it cannot drift, and `apply`
+        # has nothing to converge. That also means converge_key never
+        # runs to reject a typo, so an unusable value has to be
+        # reported as drift here or it would sit in the document
+        # reading as converged while sticks silently did not mount.
+        #
+        # Reported `unsupported` rather than `off` when novi-mount is
+        # missing -- a machine that cannot mount is not a machine that
+        # has chosen not to, the same distinction network.firewall
+        # makes about a missing `nft` (RFC 0016).
+        storage.automount)
+            if ! command -v novi-mount >/dev/null 2>&1; then
+                printf 'unsupported'
+            else
+                case "$(state_get "$key")" in
+                    on|off) state_get "$key" ;;
+                    *) printf 'unsupported' ;;
+                esac
+            fi
+            ;;
         # `state.*` keys configure this engine itself (see cmd_boot),
         # not the machine -- there is no external fact to go and look
         # at, so the declared value IS the observation and they never
@@ -468,11 +658,115 @@ converge_service() {
     esac
 }
 
+# The firewall (RFC 0016). No service, no daemon: `nft -f` hands the
+# ruleset to the kernel and exits, and the kernel keeps it until
+# something takes it away. So this converger is the whole mechanism,
+# and boot convergence is what reinstates it after a reboot.
+#
+# Two things worth not undoing:
+#
+#   - nf_tables is a module here, and `nft` relies on the kernel
+#     autoloading it through request_module when the netlink subsystem
+#     is first addressed. That works, but it makes the first failure
+#     mode of a missing module an obscure netlink error. modprobe it
+#     first and a missing module says so.
+#   - Turning it OFF must succeed when it is already off. `nft delete
+#     table` on a table that does not exist is an error, which would
+#     make `apply` fail on a machine that is already in the declared
+#     state -- the one case convergence must treat as success.
+converge_firewall() {
+    local want="$1"
+    command -v nft >/dev/null 2>&1 ||
+        die "network.firewall: nft not found -- this image cannot filter"
+
+    case "$want" in
+        on)
+            modprobe nf_tables 2>/dev/null || true
+            [ -r "$FIREWALL_RULES" ] ||
+                die "network.firewall: $FIREWALL_RULES not found"
+            # -f replaces nothing on its own: the file's own `table inet
+            # novi` is additive to whatever is already in that table, so
+            # a reload after an edit that REMOVED a rule would leave the
+            # removed rule in place. Delete first, ignoring the failure
+            # when there is nothing to delete.
+            nft delete table inet novi 2>/dev/null || true
+            nft -f "$FIREWALL_RULES" ||
+                die "network.firewall: $FIREWALL_RULES was rejected"
+            ;;
+        off)
+            nft delete table inet novi 2>/dev/null || true
+            ;;
+        *)
+            die "network.firewall: value must be 'on' or 'off', got '$want'"
+            ;;
+    esac
+}
+
+# Fill the two sets the shipped ruleset declares (RFC 0022).
+#
+# `flush set` then `add element`, never a diff of the two lists:
+# whatever is in the kernel was either put there by this function or by
+# somebody bypassing the document, and in both cases the document wins.
+#
+# This runs AFTER converge_firewall in the same pass, because
+# `state_keys` is sorted and `network.firewall` is a prefix of
+# `network.firewall.allow`. That ordering matters: turning the firewall
+# on reloads the table, which empties the sets, and the allow key is
+# observed after that has happened rather than before.
+converge_firewall_allow() {
+    local want="$1" canon port
+    command -v nft >/dev/null 2>&1 ||
+        die "network.firewall.allow: nft not found -- this image cannot filter"
+    canon="$(firewall_ports_canon "$want")" ||
+        die "network.firewall.allow: '$want' is not a port list (numbers, each optionally /tcp or /udp, comma separated, or 'none')"
+
+    # Nothing to fill and nothing to complain about: the key is inert
+    # while the firewall is off, exactly as the observer reports it.
+    nft list table inet novi >/dev/null 2>&1 || return 0
+
+    nft list set inet novi open_tcp >/dev/null 2>&1 &&
+    nft list set inet novi open_udp >/dev/null 2>&1 ||
+        die "network.firewall.allow: the novi table has no open_tcp/open_udp set -- $FIREWALL_RULES predates RFC 0022"
+
+    nft flush set inet novi open_tcp || die "network.firewall.allow: could not flush open_tcp"
+    nft flush set inet novi open_udp || die "network.firewall.allow: could not flush open_udp"
+    [ "$canon" = "none" ] && return 0
+
+    for port in $(printf '%s' "$canon" | tr ',' ' '); do
+        case "$port" in
+            */udp) nft add element inet novi open_udp "{ ${port%/udp} }" ||
+                       die "network.firewall.allow: nft refused udp port ${port%/udp}" ;;
+            *)     nft add element inet novi open_tcp "{ $port }" ||
+                       die "network.firewall.allow: nft refused tcp port $port" ;;
+        esac
+    done
+}
+
+# A declared service that listens, with its port shut, is the one thing
+# this split makes possible that nobody wants. It is not drift -- both
+# keys are exactly as declared -- so `diff` cannot report it and
+# `apply` cannot fix it. Saying it is the whole remedy.
+firewall_hole_note() {
+    [ "$(state_get network.firewall)" = "on" ] || return 0
+    local entry name port open
+    open=",$(firewall_ports_canon "$(state_get network.firewall.allow)" 2>/dev/null || printf '?'),"
+    for entry in $LISTENING_SERVICES; do
+        name="${entry%%:*}"
+        port="${entry##*:}"
+        [ "$(state_get "services.$name")" = "on" ] || continue
+        case "$open" in *",$port,"*) continue ;; esac
+        warn "services.$name is on, but the firewall does not allow port $port"
+        warn "    add it:  novi-state set network.firewall.allow $port && novi-state apply"
+    done
+}
+
 converge_network() {
     local sub="$1" want="$2"
     case "$sub" in
         dhcp) converge_service network "$want" ;;
         wifi) converge_service wifi "$want" ;;
+        firewall) converge_firewall "$want" ;;
+        firewall.allow) converge_firewall_allow "$want" ;;
         wifi.interface)
             if s6-rc -a list 2>/dev/null | grep -qx wifi; then
                 s6-rc -d change wifi ||
@@ -622,6 +916,23 @@ converge_key() {
                 *) die "$key: must be 'suspend', 'poweroff' or 'ignore', got '$want'" ;;
             esac
             ;;
+        # Read when the idle period elapses, by novi-shell. Nothing to
+        # converge; `apply` is where the typo is reported.
+        power.blank)
+            case "$want" in
+                off) : ;;
+                ''|*[!0-9]*) die "$key: must be a number of seconds or 'off', got '$want'" ;;
+                *) : ;;
+            esac
+            ;;
+        # Read at event time by novi-mount, like power.lid -- nothing
+        # to converge, everything to check.
+        storage.automount)
+            case "$want" in
+                on|off) : ;;
+                *) die "$key: must be 'on' or 'off', got '$want'" ;;
+            esac
+            ;;
         # Nothing to converge: a state.* key is read by this engine when
         # it next runs, so declaring it is already the whole effect.
         state.*)    : ;;
@@ -766,9 +1077,11 @@ cmd_diff() {
     if [ "$drift" -eq 0 ]; then
         msg "system matches declared state"
         diff_health_note
+        firewall_hole_note
         return 0
     fi
     diff_health_note
+    firewall_hole_note
     return 1
 }
 
@@ -802,6 +1115,7 @@ cmd_apply() {
     # changed here," not "someone ran apply."
     if cmd_diff >/dev/null 2>&1; then
         msg "already converged -- nothing to apply"
+        firewall_hole_note
         return 0
     fi
 
@@ -831,11 +1145,33 @@ cmd_apply() {
     # one special case in the sort order. Bounded, because a converger
     # that never satisfies its own observer would otherwise spin
     # forever, and saying so is more useful than hanging.
-    local pass=0 total=0
+    # A key that CANNOT converge must not take the rest of the document
+    # with it, and this is the third safeguard on the list below rather
+    # than a nicety. `converge_key` reports an impossible value by
+    # calling `die`, which ends the script -- so a single unusable key
+    # abandoned every key sorted after it, silently, with an exit status
+    # nobody was reading.
+    #
+    # It cost five boots to find. `power.governor = schedutil` was
+    # declared on a machine with no cpufreq driver; `power` sorts before
+    # `services`, so `services.graphical` was never converged and the
+    # desktop simply did not start. The machine came up to a console
+    # login prompt with one ERROR line in a boot log, and nothing
+    # connecting the two -- the failure was three sections of the
+    # document away from the symptom.
+    #
+    # So: each converge runs in a SUBSHELL, whose exit status is a
+    # value instead of the end of the program. `converge_key` sets no
+    # globals (its effects are on the system -- files, s6-rc), so
+    # nothing is lost by isolating it. A key that fails is recorded and
+    # SKIPPED in later passes, or a document with one bad key would
+    # print the same error three times over.
+    local pass=0 total=0 failed="" failed_n=0
     while [ "$pass" -lt 3 ]; do
         pass=$((pass + 1))
         changed=0
         for key in $(state_keys); do
+            case " $failed " in *" $key "*) continue ;; esac
             # Re-primed each iteration because the previous converge may
             # have moved more than the one service it named: s6-rc brings
             # up a service's declared dependencies with it (novi-shell
@@ -846,7 +1182,13 @@ cmd_apply() {
             have="$(observe_key "$key")"
             [ "$want" = "$have" ] && continue
             info "$key: $have -> $want"
-            converge_key "$key" "$want"
+            if ! ( converge_key "$key" "$want" ); then
+                failed="$failed $key"
+                failed_n=$((failed_n + 1))
+                warn "$key could not be applied -- continuing with the rest"
+                SERVICE_LIST_LOADED=0
+                continue
+            fi
             SERVICE_LIST_LOADED=0
             changed=$((changed + 1))
         done
@@ -858,6 +1200,16 @@ cmd_apply() {
         warn "state did not settle after $pass passes -- 'novi-state diff' will show what is still drifting"
     fi
     msg "applied $total change(s)"
+    firewall_hole_note
+    # Said again at the end, because the per-key ERROR scrolled past
+    # several sections ago and this is the line a person is still
+    # looking at. Non-zero exit: the document was not reached in full,
+    # and a caller that checks (boot convergence does not -- it must
+    # always exit 0) should hear about it.
+    if [ "$failed_n" -ne 0 ]; then
+        warn "$failed_n key(s) could not be applied:$failed"
+        return 1
+    fi
 }
 
 # Converge at boot, so the document is what the machine actually boots
@@ -878,6 +1230,57 @@ cmd_apply() {
 #
 # `state.apply_on_boot = off` in the document turns it off the ordinary
 # way, for anyone who wants convergence to stay a manual act.
+# The keys that have to be true BEFORE any service starts.
+#
+# Boot convergence deliberately runs after `s6-rc change` returns (see
+# cmd_boot, and the comment in init/skel/rc.init explaining why an
+# s6-rc oneshot cannot do it). That is right for everything whose
+# convergence *is* a service transition, and wrong for the firewall:
+# by the time the transition has returned, `network` has a DHCP lease
+# and anything declared on that listens on a port is already
+# listening. Measured on a live boot, the ruleset landed a second or
+# two after the login prompt -- harmless on a base image where nothing
+# listens, and exactly backwards the moment somebody installs
+# something that does.
+#
+# So the firewall converges in two places, not one, and it is still
+# one writer and one document: `novi-state boot --early` before the
+# transition, and the ordinary full convergence after, which finds it
+# already correct and reports no drift.
+#
+# A key belongs here only if converging it needs nothing from s6-rc.
+# The firewall qualifies because the kernel holds the ruleset and
+# there is no service behind it (RFC 0016); `network.dhcp` does not,
+# and putting it here would deadlock exactly as the oneshot did.
+# network.firewall.allow rides along for the same reason and must
+# come second: the ruleset reload empties the sets, so filling them
+# before it would fill sets that are about to be replaced.
+EARLY_KEYS="network.firewall network.firewall.allow"
+
+# Same guarantee as cmd_boot: this runs from PID 1's stage 2 under
+# `-e`, so it exits 0 whatever happens, and cmd_boot's own comment on
+# the subshell applies verbatim -- die() would otherwise take the boot
+# script down with it.
+cmd_boot_early() {
+    local key want have
+    if [ -r /proc/cmdline ] && grep -qw 'novi.state=off' /proc/cmdline; then
+        return 0
+    fi
+    [ -f "$STATE_FILE" ] || return 0
+    [ "$(state_get state.apply_on_boot)" = "off" ] && return 0
+
+    for key in $EARLY_KEYS; do
+        want="$(state_get "$key")"
+        [ -z "$want" ] && continue
+        have="$(observe_key "$key" 2>/dev/null || true)"
+        [ "$want" = "$have" ] && continue
+        info "$key: $have -> $want (early)"
+        ( converge_key "$key" "$want" ) ||
+            warn "early convergence of $key failed -- continuing boot"
+    done
+    return 0
+}
+
 cmd_boot() {
     local problems
     if [ -r /proc/cmdline ] && grep -qw 'novi.state=off' /proc/cmdline; then
@@ -977,7 +1380,8 @@ Usage:
   novi-state apply [--dry-run]    make actual match declared
   novi-state history              list saved generations
   novi-state rollback [gen]       restore a generation and apply it
-  novi-state boot                 converge at boot (s6-rc oneshot; never fails)
+  novi-state boot                 converge at boot (from rc.init; never fails)
+  novi-state boot --early         converge only what must precede services
 
 Keys:
   hostname                        the system hostname
@@ -987,10 +1391,14 @@ Keys:
   network.dns                     auto | 1.1.1.1,9.9.9.9
   network.wifi                    on | off  (the supplicant; see novi-wifi)
   network.wifi.interface          auto | <name>
+  network.firewall                on | off  (/etc/novi/firewall.nft)
+  network.firewall.allow          none | 22 | 22,123/udp  (ports let in)
   users.<name>.shell              /bin/sh | absent  (declares the account)
   users.<name>.groups             wheel,video,input | none
   packages.<name>                 present | absent
+  power.blank                     <seconds> | off  (idle screen blank)
   power.governor                  performance | powersave | schedutil | ...
+  storage.automount               on | off  (removable media -> /run/media)
   state.apply_on_boot             on | off  (converge on every boot)
 
 Recovery:
@@ -1136,7 +1544,19 @@ case "${1:-}" in
     apply)    shift; cmd_apply "$@" ;;
     history)  shift; cmd_history "$@" ;;
     rollback) shift; cmd_rollback "$@" ;;
-    boot)     shift; cmd_boot "$@" ;;
+    boot)
+        shift
+        # `boot --early` converges only EARLY_KEYS and returns; rc.init
+        # calls it before starting services and then calls plain `boot`
+        # after. Not a general "apply these keys" flag on purpose --
+        # partial convergence on demand is how a client ends up owning
+        # half the document.
+        if [ "${1:-}" = "--early" ]; then
+            shift; cmd_boot_early "$@"
+        else
+            cmd_boot "$@"
+        fi
+        ;;
     health)   shift; cmd_health "$@" ;;
     *)        usage ;;
 esac

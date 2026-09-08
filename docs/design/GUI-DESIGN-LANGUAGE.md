@@ -337,6 +337,19 @@ can actually back them with — checked directly against
 
 ### What the compositor actually implements today
 
+> **Corrected, third pass.** Everything in this subsection describes
+> the compositor as it was when this document was written, and most of
+> it is now false: decorations exist, all three dots are wired, pointer
+> input reaches them, and the title bar is drawn by `novi-shell`
+> itself (`novi-shell/decoration.c`) exactly as the "Consequence"
+> subsection below recommends. It is kept as-written because the
+> reasoning that follows from it is what produced the implementation —
+> but do not read any sentence below as a statement about the code
+> today. The one item still genuinely absent is a "minimize is
+> non-interactive" caveat that stopped applying the moment
+> novi-panel's taskbar gave a minimized window somewhere to be
+> restored from.
+
 - **No window decorations exist at all.** `struct novi_toplevel`'s
   listener set is `map / unmap / commit / destroy / request_move /
   request_resize / request_maximize / request_fullscreen` — there is
@@ -516,6 +529,89 @@ component that needs one.
 ---
 
 ## 8. Gap From Today, Sequenced by Leverage
+
+> **Update, September 2026 (second pass).** Items 1, 3, 5 and most of
+> 2 are now done, and so is §2's UI sans — the thing this document
+> recommended and explicitly deferred. What shipped, and the two
+> places it deliberately diverges from what is written above:
+>
+> - **Inter is installed** (`build/09-foot.sh`), and every client asks
+>   for it by name. **Static Regular/Medium/SemiBold, not the variable
+>   font §2 recommends.** InterVariable is one 880 KB file against
+>   three static ones at ~1.2 MB, which is not a difference worth
+>   caring about — but selecting a weight out of a variable font
+>   depends on fontconfig's named-instance handling, and a build where
+>   that quietly does not work gives you Regular everywhere with no
+>   error to notice. Static files match by weight through a code path
+>   this image has exercised since it had a terminal.
+> - **`common/theme.h`** is §1–§3 as C constants, and every client now
+>   includes it. Before it, novi-panel called the card background
+>   `0xff232430`, novi-files called it `0xff232430` too, novi-notifyd
+>   called it `0xff1b1b26`, and nothing connected any of them to the
+>   token they were all trying to be. A palette copied into six files
+>   is a palette that drifts, and it had.
+> - **The split between the two families is by what the text IS**, not
+>   by where it sits: a filename is language and is Inter, a *path* and
+>   a *size in bytes* are machine values and stay monospace. novi-edit's
+>   buffer stays monospace for the obvious reason; only its chrome
+>   changed.
+> - **`novi-bg`** paints the desktop, as a layer-shell client rather
+>   than a colour in the compositor — a `wlr_scene_rect` is one solid
+>   colour by construction, and teaching novi-shell to rasterise a
+>   gradient is exactly the UI work RFC 0001 says does not belong
+>   there. Generated, not an image file: no asset, no decoder, no
+>   resolution to be wrong at.
+> - **A correction to §1's application, not to §1 itself.** The first
+>   pass made directories accent-coloured in novi-files — teal icon,
+>   teal label — which put the one signal colour in the palette on
+>   every second row, beside the accent-tinted selection that was
+>   trying to mean something. §1 already says accent is a signal
+>   colour and never a large fill; a folder is not a signal. Hierarchy
+>   between directories and files is by brightness now, and accent
+>   means exactly one thing per window.
+>
+> Still open at the time of that pass: **§4 drop shadows** (nothing in
+> `novi-shell` drew one — an earlier note in `CLAUDE.md` claiming it
+> did was wrong), **rounded window corners**, and **§6's title text**
+> — the title bar existed and was empty.
+
+> **Update, third pass.** Those three are done, and two things this
+> document asserted are no longer true — see §6, which has been
+> corrected rather than left to schedule work that is finished.
+>
+> - **`novi-shell/decoration.c`** draws the whole of a window's chrome:
+>   the title in Inter, `radius-lg` on the top corners only (§6's own
+>   recommendation — the body below is square, so rounding all four
+>   would round a corner with no window at it), a `border-subtle`
+>   hairline under the bar, three round monochrome control dots with a
+>   hover state, and the **elevation-1 drop shadow §4 specifies**,
+>   built exactly the way §4 says to build it: a nine-slice of sprites
+>   rendered once for the whole compositor and scaled by the scene
+>   graph, never a live blur. The centre slice is deliberately absent
+>   because the window is opaque and covers it.
+> - **The dots' hit target is 16px around an 8px dot.** §6 specifies
+>   the 8px diameter and says nothing about the target, which is a gap
+>   in the spec rather than in the implementation: the scene graph
+>   hit-tests a buffer node by its box, so an 8px sprite would mean an
+>   8px target, and landing a pointer on eight pixels is a thing people
+>   fail at. The sprite is 16px with the dot centred in it and the rest
+>   transparent, which is also the dot gap, so two neighbouring targets
+>   meet exactly and never overlap.
+> - **The launcher grew a result list**, which §7's launcher-overlay
+>   pattern had assumed all along and the implementation never had. It
+>   showed nothing until you typed and then exactly one match, so it
+>   could not answer "what is installed" — half of what a launcher is
+>   for.
+> - **A second accent had appeared.** An audit for raw colour literals
+>   found `novi-settings`, `novi-lockscreen`, `novi-edit` and
+>   `novi-view` still carrying private palettes, and Settings defining
+>   both its accent and its focus ring as `0xff8ab4f8` — a blue that is
+>   in no part of §1. Two windows of the same system gave two answers
+>   to "which thing is active?". The second pass's note above says a
+>   palette copied into six files is a palette that drifts; this is
+>   that, caught a second time, and it is worth stating that **finding
+>   it took a mechanical grep, not looking at screenshots** — the blue
+>   looked deliberate.
 
 > **Update since this doc was written:** item 1 below (fcft text
 > rendering) is now done — both `novi-panel/main.c` and

@@ -1,6 +1,8 @@
 #include "text.h"
 
 #include <stdint.h>
+#include <stdio.h>
+#include <string.h>
 
 struct fcft_font *novi_text_load_font(const char *fontname) {
 	const char *names[] = {fontname};
@@ -101,4 +103,31 @@ int novi_text_width(struct fcft_font *font, const char *text) {
 		x += glyph_advance(font, cp);
 	}
 	return x;
+}
+
+void novi_text_truncate(struct fcft_font *font, const char *text,
+		int max_w, char *out, size_t out_size) {
+	if (out_size == 0) {
+		return;
+	}
+	if (novi_text_width(font, text) <= max_w) {
+		snprintf(out, out_size, "%s", text);
+		return;
+	}
+	size_t len = strlen(text);
+	while (len > 0) {
+		len--;
+		while (len > 0 && (text[len] & 0xC0) == 0x80) {
+			len--;
+		}
+		char candidate[512];
+		size_t copy_len = len < sizeof(candidate) - 4 ? len : sizeof(candidate) - 4;
+		memcpy(candidate, text, copy_len);
+		memcpy(candidate + copy_len, "\xE2\x80\xA6", 4); /* U+2026, NUL-terminated */
+		if (len == 0 || novi_text_width(font, candidate) <= max_w) {
+			snprintf(out, out_size, "%s", candidate);
+			return;
+		}
+	}
+	snprintf(out, out_size, "\xE2\x80\xA6");
 }
