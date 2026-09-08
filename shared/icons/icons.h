@@ -32,6 +32,8 @@ enum novi_icon_id {
 	ICON_HOUSE,          /* files: the home place */
 	ICON_HARD_DRIVE,     /* files: a mounted volume */
 	ICON_EJECT,          /* files: take a volume out */
+	ICON_SEARCH,         /* launcher: the input line */
+	ICON_CALCULATOR,     /* launcher: an expression that evaluated */
 	NOVI_ICON_COUNT,
 };
 

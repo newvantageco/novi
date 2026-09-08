@@ -64,6 +64,17 @@ static const struct icon_job JOBS[] = {
 	{ "ICON_HOUSE",         "icon_house_px",         "svg/house.svg",         16 },
 	{ "ICON_HARD_DRIVE",    "icon_hard_drive_px",    "svg/hard-drive.svg",    16 },
 	{ "ICON_EJECT",         "icon_eject_px",         "svg/eject.svg",         16 },
+	/* novi-launcher. The magnifier sits beside the input line at chrome
+	 * size; the calculator sits in a RESULT ROW next to app icons, so
+	 * it takes the 24 px app-grid size to match them.
+	 *
+	 * Not a free choice: at 16 px the calculator's keys fall below one
+	 * pixel and it rasterises to a plain rounded box with a line in it,
+	 * which is worse than drawing no icon at all. Checked against the
+	 * ASCII preview `make generate` prints, which is what that preview
+	 * is for. */
+	{ "ICON_SEARCH",        "icon_search_px",        "svg/search.svg",        16 },
+	{ "ICON_CALCULATOR",    "icon_calculator_px",    "svg/calculator.svg",    24 },
 };
 
 /* nanosvg parses colors from a fixed keyword/hex table and has no notion

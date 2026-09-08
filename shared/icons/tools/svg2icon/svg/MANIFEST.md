@@ -33,9 +33,14 @@ icon here was vendored.
 | `house.svg` | `house` | files: the home place |
 | `hard-drive.svg` | `hard-drive` | files: a mounted volume |
 | `eject.svg` | `eject` | files: take a volume out |
+| `search.svg` | `search` | launcher: the input line |
+| `calculator.svg` | `calculator` | launcher: an expression that evaluated |
 
-The last three were fetched at the same pinned commit as everything
-above, on 2026-09-08, for `novi-files`' places sidebar (RFC 0023).
+`house.svg`, `hard-drive.svg` and `eject.svg` were fetched at the same
+pinned commit as everything above, on 2026-09-08, for `novi-files`'
+places sidebar (RFC 0023). `search.svg` and `calculator.svg` were
+fetched the same way, at the same commit, on the same day, for
+`novi-launcher`'s rebuilt result list.
 Lucide renamed `home` to `house` at some point between then and now --
 `icons/home.svg` is a 404 at this commit and `icons/house.svg` is not,
 which is worth recording because "the icon is called what you expect"

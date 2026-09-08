@@ -11,7 +11,7 @@
  * GUI apps -- packages/pkg-format.md's "GUI Application Registration"
  * convention has each launchable app ship a small usr/share/novi/
  * apps/<name>.app descriptor (plain name=/exec= text), which
- * load_apps() scans at startup and find_app_match() searches against
+ * load_apps() scans at startup and rebuild_results() searches against
  * typed input. `pkg` doesn't install anything through this path yet
  * (no real GUI apps are packaged), but foot -- baked into the base
  * rootfs directly by build/09-foot.sh, not pkg-installed -- registers
@@ -66,35 +66,53 @@
 #include "../shared/icons/icon_blit.h"
 #include "../shared/icons/icons.h"
 
-/* The visible card's own size -- unchanged from before the shadow was
- * added. The wl_shm buffer/layer-shell surface are now larger than
- * this (see BUFFER_WIDTH/BUFFER_HEIGHT) to leave room for the shadow
- * to extend past the card's edges; every draw call that used to be
- * card-relative now adds SHADOW_MARGIN to land in the same place
- * within the bigger buffer. */
-#define CARD_WIDTH 560
-#define CARD_HEIGHT 120
-/* These are still plain 0xAARRGGBB literals with A=0xff -- a fully
- * opaque premultiplied-alpha pixel is numerically identical to a
- * straight-alpha one (premultiplying by 255/255 is a no-op), so
- * switching the buffer format to real ARGB8888 (see surface_draw_
- * frame()) needed no change here. Only the corner pixels
- * apply_rounded_corners() touches actually carry alpha < 0xff. */
-#define BG_COLOR 0xff202030u
-#define BORDER_COLOR 0xff4a4a6au
-#define INPUT_COLOR 0xffe0e0f0u
-#define RESULT_COLOR 0xff8ab4f8u
-#define CURSOR_COLOR 0xffe0e0f0u
-/* Real app-grid icon (shared/icons/, ICON-PIPELINE.md Stage 1/2), drawn
- * next to a matched app's result text when its .app descriptor names one
- * (pkg-format.md's icon= field). 24px is the app-grid size the generated
- * bitmaps were rasterized at (shared/icons/tools/svg2icon's JOBS[]) --
- * not a resize, an exact match. Same visual color as the result text
- * itself (RESULT_COLOR), just opaque: an icon glyph reads better solid
- * than at the text's own slightly-muted tone. */
+/* The visible card's own size. The wl_shm buffer/layer-shell surface
+ * are larger than this (see BUFFER_WIDTH/BUFFER_HEIGHT) to leave room
+ * for the shadow to extend past the card's edges; every draw call that
+ * is card-relative adds SHADOW_MARGIN to land in the same place within
+ * the bigger buffer.
+ *
+ * The card's HEIGHT is variable now, and that is the change that made
+ * this launcher usable. It used to be a fixed 120px box holding one
+ * input line and, once you typed, ONE result -- so Alt+Space opened an
+ * empty rectangle with a cursor in it that told you nothing about what
+ * it could do or what was installed. It grows to fit its result list
+ * instead, up to MAX_ROWS.
+ *
+ * The surface stays a fixed BUFFER_HEIGHT and the card is drawn at the
+ * top of it, rather than the client resizing its own layer surface on
+ * every keystroke. A resize is a set_size/commit/configure round trip
+ * per character typed, which is both flicker and a protocol dance to
+ * get wrong; growing downward inside a fixed surface is what a
+ * launcher looks like anyway. */
+#define CARD_WIDTH 640
+/* The input line: a 15px display face with NOVI_SP_LG above and below
+ * it, the magnifier sharing that band. */
+#define HEADER_H 52
+#define ROW_H 40
+#define MAX_ROWS 6
+#define LIST_PAD NOVI_SP_SM
+/* Header + its hairline + padded list. The tallest the card can get,
+ * and therefore how much buffer has to exist. */
+#define CARD_MAX_HEIGHT (HEADER_H + 1 + 2 * LIST_PAD + MAX_ROWS * ROW_H)
+
+/* Every colour here used to be a local hex literal -- including a
+ * result row in 0xff8ab4f8, which is Google's blue and belongs to no
+ * palette this project has. common/theme.h exists to stop exactly
+ * that; see CLAUDE.md's design-system section. */
+
+/* Icons. 24px is the app-grid size shared/icons rasterises at, so a
+ * result row's icon is an exact match rather than a resize; the
+ * magnifier beside the input is chrome-sized at 16. */
 #define RESULT_ICON_SIZE 24
-#define RESULT_ICON_GAP 8
-#define RESULT_ICON_COLOR 0xff8ab4f8u
+#define SEARCH_ICON_SIZE 16
+/* One left rail for both: the 16px magnifier and the 24px row icons
+ * share a centre at x=24, so their columns line up optically even
+ * though they are different sizes, and every label starts at the same
+ * x below the input it filters. */
+#define ICON_CENTER_X 24
+#define TEXT_X 48
+
 /* GUI-DESIGN-LANGUAGE.md §3's radius-lg token: "Floating cards, the
  * launcher panel, notification toasts, window corners." */
 #define CORNER_RADIUS 12
@@ -112,7 +130,7 @@
  * pixels on the shorter sides). */
 #define SHADOW_MARGIN (SHADOW_FEATHER + SHADOW_OFFSET_Y)
 #define BUFFER_WIDTH (CARD_WIDTH + 2 * SHADOW_MARGIN)
-#define BUFFER_HEIGHT (CARD_HEIGHT + 2 * SHADOW_MARGIN)
+#define BUFFER_HEIGHT (CARD_MAX_HEIGHT + 2 * SHADOW_MARGIN)
 
 #define INPUT_MAX 127
 
@@ -160,6 +178,35 @@ static int resolve_icon_name(const char *name) {
 	return -1;
 }
 
+/* One row of the result list. A single kind-tagged type rather than
+ * three parallel lists, because the selection is one index and the
+ * keyboard should not have to know which of three things it is moving
+ * through. `copy` is what Enter puts on the clipboard, empty for a row
+ * that launches something instead. */
+enum result_kind {
+	RESULT_APP,
+	RESULT_CALC,
+	RESULT_SYMBOL,
+};
+
+struct result {
+	enum result_kind kind;
+	char primary[APP_NAME_MAX + 1]; /* the label */
+	char meta[48];                  /* muted, right-aligned */
+	/* What Enter copies, or "". 32 is not arbitrary: `primary` holds
+	 * "= " plus this for a calculator row, and at 64 the compiler is
+	 * right that the concatenation can overflow even though "%.10g" of
+	 * a double never exceeds ~17 characters. Sizing it so the sum
+	 * cannot overflow beats asserting that the value will be short --
+	 * the same -Wformat-truncation class of bug that -O2 first
+	 * surfaced in this repo, one of which had been silently cutting a
+	 * .app descriptor's exec= line. */
+	char copy[32];
+	int icon_id;                    /* enum novi_icon_id, or -1 */
+	uint32_t codepoint;             /* symbol rows: drawn in the icon column */
+	const struct app_entry *app;    /* app rows: what Enter launches */
+};
+
 struct novi_launcher {
 	struct wl_display *display;
 	struct wl_registry *registry;
@@ -177,7 +224,13 @@ struct novi_launcher {
 	struct xkb_keymap *xkb_keymap;
 	struct xkb_state *xkb_state;
 
+	/* Three faces, by what the text IS (CLAUDE.md's design-system
+	 * rule): the query you are typing is display-sized, a result's
+	 * name is body text, and its right-hand column is a machine value
+	 * -- a command name, a codepoint -- so it is mono. */
 	struct fcft_font *font;
+	struct fcft_font *font_row;
+	struct fcft_font *font_meta;
 
 	uint32_t width, height;
 	bool configured;
@@ -197,6 +250,15 @@ struct novi_launcher {
 
 	struct app_entry apps[APP_MAX];
 	size_t app_count;
+
+	/* Rebuilt from `input` on every edit; `selected` indexes it and is
+	 * clamped there, so nothing else has to range-check it. card_h is
+	 * derived from result_count -- the card is as tall as its
+	 * contents. */
+	struct result results[MAX_ROWS];
+	size_t result_count;
+	size_t selected;
+	int card_h;
 };
 
 /* ── Shared-memory buffer allocation ────────────────────────────── */
@@ -461,30 +523,6 @@ static bool app_name_matches(const char *name, const char *query) {
 	return false;
 }
 
-/* First registered app whose id (the descriptor's filename stem, e.g.
- * "foot") or display name (e.g. "Terminal") contains the typed input,
- * or NULL if input is empty or nothing matches. Checking id as well as
- * name matters whenever the two don't read alike -- a user typing the
- * binary/package name they already know ("foot") should find it even
- * though its display name doesn't contain that substring at all. Only
- * the first match is used (v1: no result list, no up/down selection)
- * -- matches this launcher's existing one-result-at-a-time calculator
- * display instead of adding new UI plumbing for a feature with, right
- * now, exactly one real app (foot) to ever produce more than one match
- * against. */
-static struct app_entry *find_app_match(struct novi_launcher *state) {
-	if (state->input_len == 0) {
-		return NULL;
-	}
-	for (size_t i = 0; i < state->app_count; i++) {
-		if (app_name_matches(state->apps[i].id, state->input) ||
-				app_name_matches(state->apps[i].name, state->input)) {
-			return &state->apps[i];
-		}
-	}
-	return NULL;
-}
-
 /* Splits app->exec on spaces into an execvp() argv (no shell -- see
  * pkg-format.md's field table: no quoting/globbing/$VAR support in
  * v1, a path containing a space isn't representable), forks, and
@@ -606,21 +644,6 @@ static void utf8_encode(uint32_t cp, char out[5]) {
 	}
 }
 
-/* Same one-result convention as find_app_match(): the first name match,
- * no ranked/multi-result list. */
-static const struct symbol_entry *find_symbol_match(
-		const struct novi_launcher *state) {
-	if (state->input_len == 0) {
-		return NULL;
-	}
-	for (size_t i = 0; i < sizeof(SYMBOLS) / sizeof(SYMBOLS[0]); i++) {
-		if (app_name_matches(SYMBOLS[i].name, state->input)) {
-			return &SYMBOLS[i];
-		}
-	}
-	return NULL;
-}
-
 /* Put `utf8` on the clipboard. The mechanism is common/clipboard.c --
  * core-Wayland wl_data_device_manager, which novi-shell already creates
  * (wlr_data_device_manager_create() in novi-shell/main.c).
@@ -635,6 +658,110 @@ static void copy_to_clipboard(struct novi_launcher *state, const char *utf8) {
 		fprintf(stderr, "novi-launcher: no clipboard support "
 			"(wl_data_device_manager or wl_seat missing)\n");
 	}
+}
+
+/* ── The result list ───────────────────────────────────────────────
+ *
+ * This used to be find_app_match(): the FIRST app whose name contained
+ * the query, and nothing else -- no list, no selection, and nothing at
+ * all until you had typed something. Its own comment defended that as
+ * matching the calculator's one-result display, with "exactly one real
+ * app (foot) to ever produce more than one match against". There are
+ * five now, and the honest problem was never the count: a launcher
+ * that shows nothing on an empty query cannot tell you what is
+ * installed, which is half of what a launcher is for.
+ *
+ * So: an empty query lists everything, a typed one filters, and the
+ * calculator is one more row in the same list rather than a separate
+ * display mode. */
+
+static void push_result(struct novi_launcher *state, const struct result *r) {
+	if (state->result_count < MAX_ROWS) {
+		state->results[state->result_count++] = *r;
+	}
+}
+
+static void rebuild_results(struct novi_launcher *state) {
+	state->result_count = 0;
+
+	if (state->symbol_mode) {
+		for (size_t i = 0; i < sizeof(SYMBOLS) / sizeof(SYMBOLS[0]) &&
+				state->result_count < MAX_ROWS; i++) {
+			if (state->input_len > 0 &&
+					!app_name_matches(SYMBOLS[i].name, state->input)) {
+				continue;
+			}
+			struct result r = { .kind = RESULT_SYMBOL, .icon_id = -1 };
+			r.codepoint = SYMBOLS[i].codepoint;
+			snprintf(r.primary, sizeof(r.primary), "%s", SYMBOLS[i].name);
+			snprintf(r.meta, sizeof(r.meta), "U+%04X", SYMBOLS[i].codepoint);
+			utf8_encode(SYMBOLS[i].codepoint, r.copy);
+			push_result(state, &r);
+		}
+	} else {
+		for (size_t i = 0; i < state->app_count &&
+				state->result_count < MAX_ROWS; i++) {
+			/* id as well as name: someone typing the binary or package
+			 * name they already know ("foot") should find it even
+			 * though its display name ("Terminal") contains no part of
+			 * it. */
+			if (state->input_len > 0 &&
+					!app_name_matches(state->apps[i].id, state->input) &&
+					!app_name_matches(state->apps[i].name, state->input)) {
+				continue;
+			}
+			struct result r = { .kind = RESULT_APP };
+			r.app = &state->apps[i];
+			r.icon_id = state->apps[i].icon_id;
+			snprintf(r.primary, sizeof(r.primary), "%s", state->apps[i].name);
+			snprintf(r.meta, sizeof(r.meta), "%s", state->apps[i].id);
+			push_result(state, &r);
+		}
+		/* After the apps, not instead of them: an expression and an app
+		 * name are different enough that they never really compete
+		 * (evaluate() rejects "foot" at the first letter), and putting
+		 * the calculator last means a query that is somehow both shows
+		 * the app first, which is what Enter should do. */
+		double value;
+		if (state->input_len > 0 && evaluate(state->input, &value)) {
+			struct result r = { .kind = RESULT_CALC,
+				.icon_id = ICON_CALCULATOR };
+			snprintf(r.copy, sizeof(r.copy), "%.10g", value);
+			snprintf(r.primary, sizeof(r.primary), "= %s", r.copy);
+			snprintf(r.meta, sizeof(r.meta), "Enter to copy");
+			push_result(state, &r);
+		}
+	}
+
+	if (state->selected >= state->result_count) {
+		state->selected = 0;
+	}
+	state->card_h = HEADER_H;
+	if (state->result_count > 0) {
+		state->card_h += 1 + 2 * LIST_PAD +
+			(int)state->result_count * ROW_H;
+	}
+}
+
+/* Runs the selected row. Returns true if it put something on the
+ * clipboard, which the caller needs to know: this process has to
+ * outlive its own window in that case, because a Wayland selection
+ * dies with the client that owns it and nothing has pasted yet. */
+static bool activate_selected(struct novi_launcher *state) {
+	if (state->result_count == 0) {
+		return false;
+	}
+	const struct result *r = &state->results[state->selected];
+	switch (r->kind) {
+	case RESULT_APP:
+		launch_app(r->app);
+		return false;
+	case RESULT_CALC:
+	case RESULT_SYMBOL:
+		copy_to_clipboard(state, r->copy);
+		return true;
+	}
+	return false;
 }
 
 /* ── Rendering ───────────────────────────────────────────────────── */
@@ -764,9 +891,9 @@ static double rounded_box_sdf(double px, double py, double half_w,
  * purely vertical) is ever visible, which is exactly the intended
  * "elevated card" look. */
 static void draw_drop_shadow(uint32_t *px, uint32_t stride_px,
-		uint32_t buf_w, uint32_t buf_h) {
+		uint32_t buf_w, uint32_t buf_h, int card_h) {
 	double half_w = CARD_WIDTH / 2.0;
-	double half_h = CARD_HEIGHT / 2.0;
+	double half_h = card_h / 2.0;
 	double center_x = SHADOW_MARGIN + half_w;
 	double center_y = SHADOW_MARGIN + SHADOW_OFFSET_Y + half_h;
 
@@ -804,127 +931,155 @@ static void draw_drop_shadow(uint32_t *px, uint32_t stride_px,
 static void render(struct novi_launcher *state, uint32_t *px,
 		uint32_t stride_px) {
 	uint32_t w = state->width, h = state->height;
+	int card_h = state->card_h > 0 ? state->card_h : HEADER_H;
 
 	/* Shadow first, directly into the (freshly zero-filled, so already
 	 * fully transparent) output buffer -- see draw_drop_shadow()'s own
 	 * comment for why this has to happen before the card, not after. */
-	draw_drop_shadow(px, stride_px, w, h);
+	draw_drop_shadow(px, stride_px, w, h, card_h);
 
-	/* The card itself is built in its own small, card-sized buffer --
-	 * background/border opaque, corners punched transparent -- then
+	/* The card is built in its own card-sized buffer and then
 	 * alpha-composited onto the shadow already sitting in `px`, rather
-	 * than drawn directly into `px` with raw overwrites. A raw overwrite
-	 * would blow away the shadow pixels wherever the card is opaque
-	 * (fine, that's supposed to happen) but ALSO wherever the card's own
-	 * corners are transparent (not fine -- see apply_rounded_corners()'s
-	 * comment: that would erase the shadow there too, showing a hole
-	 * through to the desktop instead of the shadow peeking through). A
-	 * static buffer, not a stack one: CARD_WIDTH*CARD_HEIGHT*4 is ~262KB,
-	 * too large for a stack frame, and this function is only ever called
-	 * from the single-threaded main loop, so reusing one buffer across
-	 * calls is safe. */
-	static uint32_t card_buf[CARD_WIDTH * CARD_HEIGHT];
-	draw_rect(card_buf, CARD_WIDTH, CARD_WIDTH, CARD_HEIGHT,
-		0, 0, CARD_WIDTH, CARD_HEIGHT, BORDER_COLOR);
-	draw_rect(card_buf, CARD_WIDTH, CARD_WIDTH, CARD_HEIGHT,
-		3, 3, CARD_WIDTH - 6, CARD_HEIGHT - 6, BG_COLOR);
-	apply_rounded_corners(card_buf, CARD_WIDTH, CARD_WIDTH, CARD_HEIGHT,
-		CORNER_RADIUS);
+	 * than drawn directly into `px` with raw overwrites. A raw
+	 * overwrite would blow away the shadow pixels wherever the card is
+	 * opaque (fine, that's supposed to happen) but ALSO wherever the
+	 * card's own corners are transparent (not fine -- see
+	 * apply_rounded_corners()'s comment: that would erase the shadow
+	 * there too, showing a hole through to the desktop instead of the
+	 * shadow peeking through). A static buffer, not a stack one:
+	 * CARD_WIDTH*CARD_MAX_HEIGHT*4 is ~790KB, far too large for a
+	 * stack frame, and this function is only ever called from the
+	 * single-threaded main loop, so reusing one buffer across calls is
+	 * safe. Rows past card_h may hold stale pixels from a taller
+	 * earlier render and are simply never composited. */
+	static uint32_t card_buf[CARD_WIDTH * CARD_MAX_HEIGHT];
+	const uint32_t cw = CARD_WIDTH;
+
+	/* A ONE-pixel border, not the three the first version drew. A 3px
+	 * light rim on a dark card reads as a debug rectangle;
+	 * border-subtle at 1px reads as an edge. */
+	draw_rect(card_buf, cw, cw, card_h, 0, 0, (int)cw, card_h,
+		NOVI_BORDER_SUBTLE);
+	draw_rect(card_buf, cw, cw, card_h, 1, 1, (int)cw - 2, card_h - 2,
+		NOVI_BG_CARD);
+
+	/* Selection wash and its accent rail, under everything else in the
+	 * row. Accent means exactly one thing in this window -- "this is
+	 * what Enter will do" -- which is why the row's own label stays
+	 * text-primary rather than turning teal as well. */
+	int list_top = HEADER_H + 1 + LIST_PAD;
+	if (state->result_count > 0) {
+		draw_rect(card_buf, cw, cw, card_h, 1, HEADER_H, (int)cw - 2, 1,
+			NOVI_BORDER_SUBTLE);
+		for (size_t i = 0; i < state->result_count; i++) {
+			if (i != state->selected) {
+				continue;
+			}
+			int y = list_top + (int)i * ROW_H;
+			draw_rect(card_buf, cw, cw, card_h, 1, y, (int)cw - 2, ROW_H,
+				NOVI_ACCENT_SUBTLE);
+			draw_rect(card_buf, cw, cw, card_h, 1, y, 2, ROW_H, NOVI_ACCENT);
+		}
+	}
+
+	/* Icons next: draw_icon() blends OVER what is already there, so the
+	 * fills above have to exist first or a selected row's icon would
+	 * composite against nothing. */
+	draw_icon(card_buf, cw, cw, (uint32_t)card_h,
+		ICON_CENTER_X - SEARCH_ICON_SIZE / 2,
+		(HEADER_H - SEARCH_ICON_SIZE) / 2, ICON_SEARCH,
+		state->input_len > 0 ? NOVI_TEXT_SECONDARY : NOVI_TEXT_MUTED);
+	for (size_t i = 0; i < state->result_count; i++) {
+		const struct result *r = &state->results[i];
+		if (r->icon_id < 0) {
+			continue;
+		}
+		int y = list_top + (int)i * ROW_H;
+		draw_icon(card_buf, cw, cw, (uint32_t)card_h,
+			ICON_CENTER_X - RESULT_ICON_SIZE / 2,
+			y + (ROW_H - RESULT_ICON_SIZE) / 2,
+			(enum novi_icon_id)r->icon_id,
+			i == state->selected ? NOVI_ACCENT : NOVI_TEXT_SECONDARY);
+	}
+
+	pixman_image_t *card = pixman_image_create_bits_no_clear(
+		PIXMAN_a8r8g8b8, (int)cw, card_h, card_buf, (int)cw * 4);
+
+	/* ── The input line ─────────────────────────────────────────── */
+	int input_baseline = (HEADER_H - state->font->height) / 2 +
+		state->font->ascent;
+	if (state->input_len == 0) {
+		/* A PLACEHOLDER, which is the other half of why an empty
+		 * launcher told you nothing: a bare cursor on a bare card is
+		 * not an invitation, it is a puzzle. This says what the box
+		 * accepts, in text-muted so it reads as a prompt and not as
+		 * something already typed. */
+		draw_rect(card_buf, cw, cw, card_h, TEXT_X, (HEADER_H - 20) / 2, 2,
+			20, NOVI_ACCENT);
+		novi_text_draw(card, state->font, TEXT_X + NOVI_SP_SM,
+			input_baseline,
+			state->symbol_mode ? "Search symbols" : "Search apps, or type a sum",
+			NOVI_PIX(NOVI_TEXT_MUTED));
+	} else {
+		int end_x = novi_text_draw(card, state->font, TEXT_X, input_baseline,
+			state->input, NOVI_PIX(NOVI_TEXT_PRIMARY));
+		draw_rect(card_buf, cw, cw, card_h, end_x + 1, (HEADER_H - 20) / 2, 2,
+			20, NOVI_ACCENT);
+	}
+
+	/* ── The rows ───────────────────────────────────────────────── */
+	for (size_t i = 0; i < state->result_count; i++) {
+		const struct result *r = &state->results[i];
+		int y = list_top + (int)i * ROW_H;
+		int baseline = y + (ROW_H - state->font_row->height) / 2 +
+			state->font_row->ascent;
+
+		/* A symbol has no icon and does not want one: the glyph itself
+		 * is the preview of exactly what Enter copies, so it goes in
+		 * the icon column where an app's icon would be. */
+		if (r->kind == RESULT_SYMBOL) {
+			char glyph[5];
+			utf8_encode(r->codepoint, glyph);
+			int gw = novi_text_width(state->font, glyph);
+			novi_text_draw(card, state->font, ICON_CENTER_X - gw / 2,
+				y + (ROW_H - state->font->height) / 2 + state->font->ascent,
+				glyph, i == state->selected
+					? NOVI_PIX(NOVI_ACCENT) : NOVI_PIX(NOVI_TEXT_PRIMARY));
+		}
+
+		char shown[APP_NAME_MAX + 8];
+		int meta_w = r->meta[0] != '\0'
+			? novi_text_width(state->font_meta, r->meta) : 0;
+		int label_room = (int)cw - TEXT_X - NOVI_SP_LG - meta_w - NOVI_SP_LG;
+		novi_text_truncate(state->font_row, r->primary, label_room,
+			shown, sizeof(shown));
+		novi_text_draw(card, state->font_row, TEXT_X, baseline, shown,
+			NOVI_PIX(NOVI_TEXT_PRIMARY));
+
+		if (meta_w > 0) {
+			/* Right-aligned, muted, mono: a command name and a
+			 * codepoint are machine values, and putting them in the
+			 * same face as the label would make the row read as two
+			 * competing names. */
+			novi_text_draw(card, state->font_meta,
+				(int)cw - NOVI_SP_LG - meta_w,
+				y + (ROW_H - state->font_meta->height) / 2 +
+					state->font_meta->ascent,
+				r->meta, NOVI_PIX(NOVI_TEXT_MUTED));
+		}
+	}
+	pixman_image_unref(card);
+
+	/* Corners last, so anything drawn near one is masked with it. */
+	apply_rounded_corners(card_buf, cw, cw, (uint32_t)card_h, CORNER_RADIUS);
 
 	pixman_image_t *dest = pixman_image_create_bits_no_clear(
 		PIXMAN_a8r8g8b8, (int)w, (int)h, px, (int)stride_px * 4);
 	pixman_image_t *card_src = pixman_image_create_bits_no_clear(
-		PIXMAN_a8r8g8b8, CARD_WIDTH, CARD_HEIGHT, card_buf, CARD_WIDTH * 4);
+		PIXMAN_a8r8g8b8, (int)cw, card_h, card_buf, (int)cw * 4);
 	pixman_image_composite32(PIXMAN_OP_OVER, card_src, NULL, dest,
-		0, 0, 0, 0, SHADOW_MARGIN, SHADOW_MARGIN, CARD_WIDTH, CARD_HEIGHT);
+		0, 0, 0, 0, SHADOW_MARGIN, SHADOW_MARGIN, (int)cw, card_h);
 	pixman_image_unref(card_src);
-
-	static const pixman_color_t input_color = {
-		.red = 0xe000, .green = 0xe000, .blue = 0xf000, .alpha = 0xffff,
-	};
-	static const pixman_color_t result_color = {
-		.red = 0x8a00, .green = 0xb400, .blue = 0xf800, .alpha = 0xffff,
-	};
-
-	/* All card-relative coordinates from here on need the same
-	 * SHADOW_MARGIN offset the card itself was composited at -- the
-	 * card's interior is now fully opaque at this point (just painted
-	 * above), so a raw draw_rect() for the cursor bar is exactly
-	 * equivalent to a blend there and doesn't need its own pixman call. */
-	int text_x = SHADOW_MARGIN + 16;
-	int line_height = state->font->height;
-	int input_y = SHADOW_MARGIN + 16;
-	int baseline_y = input_y + state->font->ascent;
-	int cursor_w = 3;
-
-	if (state->input_len == 0) {
-		/* Empty input: just a blinking-style cursor block -- pure
-		 * geometry, no glyph needed. */
-		draw_rect(px, stride_px, w, h, text_x, input_y, cursor_w,
-			line_height, CURSOR_COLOR);
-	} else {
-		int end_x = novi_text_draw(dest, state->font, text_x, baseline_y,
-			state->input, input_color);
-		draw_rect(px, stride_px, w, h, end_x, input_y, cursor_w,
-			line_height, CURSOR_COLOR);
-	}
-
-	if (state->symbol_mode) {
-		const struct symbol_entry *sym_match = find_symbol_match(state);
-		if (sym_match != NULL) {
-			/* Glyph first (exactly what Enter would copy), then its
-			 * name -- no "-> " prefix here, unlike app search: the
-			 * rendered glyph itself already IS the preview of what
-			 * gets copied, "-> " would just be visual noise in front
-			 * of it. */
-			char glyph_utf8[5];
-			utf8_encode(sym_match->codepoint, glyph_utf8);
-			int result_top = input_y + line_height + 16;
-			int end_x = novi_text_draw(dest, state->font, text_x,
-				result_top + state->font->ascent, glyph_utf8, result_color);
-			novi_text_draw(dest, state->font, end_x + RESULT_ICON_GAP,
-				result_top + state->font->ascent, sym_match->name, result_color);
-		}
-		pixman_image_unref(dest);
-		return;
-	}
-
-	/* App match takes priority over the calculator result when both
-	 * would otherwise show something -- typing a name like "foot"
-	 * never parses as an expression anyway (evaluate() would reject it
-	 * at the first non-digit/operator character), so in practice these
-	 * two never actually compete for the same input, but checking the
-	 * app match first keeps that priority explicit rather than
-	 * incidental. */
-	struct app_entry *app = find_app_match(state);
-	if (app != NULL) {
-		int result_top = input_y + line_height + 16;
-		int result_text_x = text_x;
-		/* Real ICON-PIPELINE.md Stage 2 icon, not a placeholder: only
-		 * drawn when the descriptor named a recognized icon= (see
-		 * resolve_icon_name()) -- an app with no icon set, or an
-		 * unrecognized name, still shows its text-only result exactly
-		 * as before this feature existed. */
-		if (app->icon_id >= 0) {
-			int icon_y = result_top + (line_height - RESULT_ICON_SIZE) / 2;
-			draw_icon(px, stride_px, w, h, text_x, icon_y,
-				(enum novi_icon_id)app->icon_id, RESULT_ICON_COLOR);
-			result_text_x = text_x + RESULT_ICON_SIZE + RESULT_ICON_GAP;
-		}
-		char buf[APP_NAME_MAX + 16];
-		snprintf(buf, sizeof(buf), "-> %s", app->name);
-		novi_text_draw(dest, state->font, result_text_x,
-			result_top + state->font->ascent, buf, result_color);
-	} else {
-		double result;
-		if (evaluate(state->input, &result)) {
-			char buf[64];
-			snprintf(buf, sizeof(buf), "= %.6g", result);
-			novi_text_draw(dest, state->font, text_x,
-				input_y + line_height + 16 + state->font->ascent, buf, result_color);
-		}
-	}
-
 	pixman_image_unref(dest);
 }
 
@@ -1045,18 +1200,35 @@ static void keyboard_key(void *data, struct wl_keyboard *kb, uint32_t serial,
 		state->running = false;
 		return;
 	}
+
+	/* Move the selection. Wrapping in both directions, because a list
+	 * this short is faster to reach from the bottom than to page
+	 * through, and Shift+Tab is what people press when Tab went one
+	 * too far. */
+	if (sym == XKB_KEY_Down || sym == XKB_KEY_Tab) {
+		if (state->result_count > 0) {
+			state->selected = (state->selected + 1) % state->result_count;
+			surface_draw_frame(state);
+		}
+		return;
+	}
+	if (sym == XKB_KEY_Up || sym == XKB_KEY_ISO_Left_Tab) {
+		if (state->result_count > 0) {
+			state->selected = (state->selected + state->result_count - 1) %
+				state->result_count;
+			surface_draw_frame(state);
+		}
+		return;
+	}
+
 	if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter) {
-		if (state->symbol_mode) {
-			const struct symbol_entry *sym_match = find_symbol_match(state);
-			if (sym_match != NULL) {
-				char utf8[5];
-				utf8_encode(sym_match->codepoint, utf8);
-				copy_to_clipboard(state, utf8);
-			}
-			/* Hide the overlay immediately -- copy_to_clipboard() (if
-			 * it ran) already claimed the selection, which is what
-			 * actually keeps the process alive past this point, not
-			 * the surface staying mapped. */
+		bool copied = activate_selected(state);
+		if (copied) {
+			/* Hide the overlay immediately, but do not exit: owning the
+			 * selection is what keeps this process alive past here, and
+			 * a Wayland selection dies with the client that owns it.
+			 * The surface going away is not what ends the copy; the
+			 * paste is (see main()'s loop condition). */
 			if (state->layer_surface != NULL) {
 				zwlr_layer_surface_v1_destroy(state->layer_surface);
 				state->layer_surface = NULL;
@@ -1065,37 +1237,37 @@ static void keyboard_key(void *data, struct wl_keyboard *kb, uint32_t serial,
 				wl_surface_destroy(state->surface);
 				state->surface = NULL;
 			}
-			state->running = false;
-			return;
 		}
-		struct app_entry *app = find_app_match(state);
-		if (app != NULL) {
-			launch_app(app);
-		}
-		/* No result to "launch" for a bare calculator expression (see
-		 * evaluate()) or file search (doesn't exist yet) -- Enter just
-		 * dismisses the overlay in those cases, same as Escape. */
+		/* Enter on nothing dismisses, same as Escape -- there is no
+		 * result to act on and leaving the overlay up would be a key
+		 * that appears to do nothing. */
 		state->running = false;
 		return;
 	}
+
 	if (sym == XKB_KEY_BackSpace) {
 		if (state->input_len > 0) {
 			state->input[--state->input_len] = '\0';
+			rebuild_results(state);
 			surface_draw_frame(state);
 		}
 		return;
 	}
 
-	/* Any printable ASCII is now valid input -- app names need letters
-	 * that the calculator grammar alone never did (see file header:
-	 * input is either a calculator expression or an app-name search
-	 * query, and there's no calculator character class to filter
-	 * against that wouldn't also reject e.g. "foot"). fcft renders any
-	 * printable glyph fine (unlike the old bitmap font this replaced). */
+	/* Any printable ASCII is valid input: the box is either a search
+	 * query or an arithmetic expression, and there is no character
+	 * class that admits one without rejecting the other ("foot" is not
+	 * expressible in the calculator grammar). fcft renders any
+	 * printable glyph. */
 	if (sym >= 32 && sym < 127) {
 		if (state->input_len < INPUT_MAX) {
 			state->input[state->input_len++] = (char)sym;
 			state->input[state->input_len] = '\0';
+			/* A new query is a new list, so the old selection index
+			 * means nothing -- rebuild_results() resets it rather than
+			 * leaving the highlight on whatever row happens to sit at
+			 * that position now. */
+			rebuild_results(state);
 			surface_draw_frame(state);
 		}
 	}
@@ -1248,10 +1420,19 @@ int main(int argc, char *argv[]) {
 		state.data_device_manager, state.seat);
 
 	state.font = novi_text_load_font(NOVI_FONT_DISPLAY);
-	if (state.font == NULL) {
-		fprintf(stderr, "novi-launcher: failed to load JetBrains Mono\n");
+	state.font_row = novi_text_load_font(NOVI_FONT_BODY);
+	state.font_meta = novi_text_load_font(NOVI_FONT_MONO_SM);
+	if (state.font == NULL || state.font_row == NULL ||
+			state.font_meta == NULL) {
+		fprintf(stderr, "novi-launcher: failed to load a UI font "
+			"(Inter and JetBrains Mono are both required)\n");
 		return 1;
 	}
+
+	/* Seed the list before the first configure: with an empty query
+	 * this is every app, and it is what the card is sized from -- so
+	 * it has to exist before anything asks how tall the card is. */
+	rebuild_results(&state);
 
 	state.surface = wl_compositor_create_surface(state.compositor);
 	state.layer_surface = zwlr_layer_shell_v1_get_layer_surface(
@@ -1306,6 +1487,12 @@ int main(int argc, char *argv[]) {
 	}
 	if (state.font != NULL) {
 		fcft_destroy(state.font);
+	}
+	if (state.font_row != NULL) {
+		fcft_destroy(state.font_row);
+	}
+	if (state.font_meta != NULL) {
+		fcft_destroy(state.font_meta);
 	}
 	wl_display_disconnect(state.display);
 	return 0;
