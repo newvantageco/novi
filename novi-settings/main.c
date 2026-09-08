@@ -114,7 +114,13 @@
 #define NOVI_STATE_BIN "/usr/bin/novi-state"
 #define STATE_MAX_ENTRIES 32
 #define STATE_KEY_MAX 63
-#define STATE_VAL_MAX 31
+/* Was 31, which a real value could exceed -- `network.firewall.allow`
+ * with five ports, or a DNS list -- and load_state_file() SKIPS a line
+ * it cannot hold, so the row simply vanished from the panel with
+ * nothing said. The skip is still right (see its comment), but it
+ * should be rare and it should be visible, so: a bigger cap, and a
+ * count reported in the footer when it still bites. */
+#define STATE_VAL_MAX 95
 #define ROW_HEIGHT 26
 
 enum novi_panel {
@@ -216,7 +222,29 @@ struct novi_settings {
 
 	struct state_entry entries[STATE_MAX_ENTRIES];
 	int entry_count;
+	/* Lines load_state_file() had to skip because the key or value did
+	 * not fit. Reported rather than swallowed: a settings panel that
+	 * silently omits a row is lying about the document it claims to
+	 * show. */
+	int skipped_count;
 	int selected;
+	/* First visible row. The list used to start at 0 and stop at
+	 * whatever fitted, so on a 400px window everything past
+	 * network.wifi.interface -- the firewall, its open ports, users,
+	 * packages -- was in the document, named in the panel's own
+	 * heading, and unreachable. A settings panel that shows the first
+	 * fourteen of your settings is not showing your settings. */
+	int top;
+
+	/* Inline editing of the selected key's value. The System panel
+	 * could only ever flip on/off, so every key with a VALUE --
+	 * hostname, the DNS list, the firewall's open ports, the automount
+	 * mode -- answered "edit it in the file". That made the GUI a
+	 * viewer with three switches on it, and made "the GUI and a text
+	 * editor write the same document" a claim only half kept. */
+	bool editing;
+	char edit_buf[STATE_VAL_MAX + 1];
+	size_t edit_len;
 
 	/* ── Network panel ── */
 	char wifi_iface[32];             /* "" = no wireless device */
@@ -456,6 +484,7 @@ static int run_novi_state(char *const argv[]) {
  * comments, blank lines and indentation allowed. */
 static void load_state_file(struct novi_settings *state) {
 	state->entry_count = 0;
+	state->skipped_count = 0;
 	FILE *f = fopen(STATE_FILE, "r");
 	if (f == NULL) {
 		return;
@@ -501,6 +530,7 @@ static void load_state_file(struct novi_settings *state) {
 		 * is worse than omitting the row. */
 		size_t key_len = strlen(key), value_len = strlen(value);
 		if (key_len > STATE_KEY_MAX || value_len > STATE_VAL_MAX) {
+			state->skipped_count++;
 			continue;
 		}
 
@@ -597,7 +627,7 @@ static void toggle_selected(struct novi_settings *state) {
 	}
 	struct state_entry *e = &state->entries[state->selected];
 	if (!entry_is_toggleable(e)) {
-		set_status(state, "Not a toggle -- edit it in the file", true);
+		set_status(state, "Not a toggle -- press e to edit its value", true);
 		return;
 	}
 	const char *next = strcmp(e->value, "on") == 0 ? "off" : "on";
@@ -611,6 +641,76 @@ static void toggle_selected(struct novi_settings *state) {
 	/* Re-read rather than trusting our own in-memory edit: the file is
 	 * the truth, and this is also the cheapest way to notice if
 	 * something else changed it underneath us. */
+	refresh_system(state);
+	set_status(state, "Declared -- press Enter to apply", false);
+}
+
+/* ── Editing a declared value ──────────────────────────────────────
+ *
+ * Same rule as every other write in this program: the value goes to
+ * `novi-state set`, never to the file. state_set() is the one edit
+ * that preserves the document's comments and ordering, and a second
+ * writer here would be exactly the parallel truth this whole feature
+ * exists to abolish (CLAUDE.md's novi-state section).
+ */
+
+static void begin_edit(struct novi_settings *state) {
+	if (state->entry_count == 0) {
+		return;
+	}
+	const struct state_entry *e = &state->entries[state->selected];
+	snprintf(state->edit_buf, sizeof(state->edit_buf), "%s", e->value);
+	state->edit_len = strlen(state->edit_buf);
+	state->editing = true;
+	set_status(state, NULL, false);
+}
+
+static void cancel_edit(struct novi_settings *state) {
+	state->editing = false;
+	state->edit_len = 0;
+	state->edit_buf[0] = '\0';
+	set_status(state, NULL, false);
+}
+
+static void commit_edit(struct novi_settings *state) {
+	struct state_entry *e = &state->entries[state->selected];
+	/* Trim, because a trailing space is invisible and `key = value `
+	 * is not the same string as `key = value` to anything comparing
+	 * declared against observed. */
+	while (state->edit_len > 0 && state->edit_buf[state->edit_len - 1] == ' ') {
+		state->edit_buf[--state->edit_len] = '\0';
+	}
+	const char *val = state->edit_buf;
+	while (*val == ' ') {
+		val++;
+	}
+	if (*val == '\0') {
+		/* novi-state set refuses an empty value too; saying so here
+		 * beats forking to be told. */
+		set_status(state, "A value cannot be empty", true);
+		return;
+	}
+	/* A '#' would start a comment when the file is read back, so a
+	 * value containing one truncates its own line -- the GUI would
+	 * have corrupted the document it is meant to be a view of. Refused
+	 * rather than escaped, the same call the package index makes about
+	 * '|'. */
+	if (strchr(val, '#') != NULL) {
+		set_status(state, "A value cannot contain '#'", true);
+		return;
+	}
+	char *const argv[] = {
+		(char *)"novi-state", (char *)"set", e->key, (char *)val, NULL,
+	};
+	if (run_novi_state(argv) != 0) {
+		set_status(state, "Failed to write system.conf", true);
+		return;
+	}
+	state->editing = false;
+	state->edit_len = 0;
+	/* Re-read rather than trusting our own edit, for the same reason
+	 * toggle_selected() does: the file is the truth, and novi-state
+	 * may have normalised what it wrote. */
 	refresh_system(state);
 	set_status(state, "Declared -- press Enter to apply", false);
 }
@@ -1371,12 +1471,30 @@ static void render_system(struct novi_settings *state, uint32_t *px,
 
 	int list_y = 84;
 	int drifted = 0;
-	for (int i = 0; i < state->entry_count; i++) {
+	/* Scroll window, clamped here rather than in the key handler
+	 * because this is where the height is known -- and clamping on
+	 * every draw means a window resize cannot leave `top` pointing
+	 * somewhere that no longer exists. */
+	int rows = ((int)h - 46 - list_y) / ROW_HEIGHT;
+	if (rows < 1) {
+		rows = 1;
+	}
+	if (state->selected < state->top) {
+		state->top = state->selected;
+	}
+	if (state->selected >= state->top + rows) {
+		state->top = state->selected - rows + 1;
+	}
+	if (state->top > state->entry_count - rows) {
+		state->top = state->entry_count - rows;
+	}
+	if (state->top < 0) {
+		state->top = 0;
+	}
+	for (int i = state->top;
+			i < state->entry_count && i < state->top + rows; i++) {
 		struct state_entry *e = &state->entries[i];
-		int y = list_y + i * ROW_HEIGHT;
-		if (y + ROW_HEIGHT > (int)h - 46) {
-			break;
-		}
+		int y = list_y + (i - state->top) * ROW_HEIGHT;
 		if (i == state->selected) {
 			draw_rect(px, stride_px, w, h, CONTENT_X - 8, y - 3,
 				FIELD_WIDTH + 16, ROW_HEIGHT, ROW_SELECTED_COLOR);
@@ -1389,15 +1507,38 @@ static void render_system(struct novi_settings *state, uint32_t *px,
 		 * a marker -- "declared X, actually something else" is
 		 * information no other desktop's settings app can show at all,
 		 * so it gets the emphasis. */
+		if (state->editing && i == state->selected) {
+			/* The row being edited shows the buffer, LEFT-aligned in
+			 * the value column with a caret after it -- right-aligning
+			 * a string that changes on every keystroke would slide the
+			 * text under the cursor as you type. */
+			int box_x = CONTENT_X + FIELD_WIDTH / 2;
+			draw_rect(px, stride_px, w, h, box_x - 6, y - 3,
+				FIELD_WIDTH / 2 + 14, ROW_HEIGHT, FIELD_BG_COLOR);
+			int end_x = novi_text_draw(dest, state->font_small, box_x,
+				y + state->font_small->ascent, state->edit_buf, TEXT_PIX);
+			draw_rect(px, stride_px, w, h, end_x + 1, y - 1, 2,
+				ROW_HEIGHT - 4, ACCENT_COLOR);
+			continue;
+		}
+
 		int val_w = novi_text_width(state->font_small, e->value);
 		int val_x = CONTENT_X + FIELD_WIDTH - val_w - 8;
 		novi_text_draw(dest, state->font_small, val_x,
 			y + state->font_small->ascent, e->value,
 			e->drifted ? ACCENT_PIX : (i == state->selected ? TEXT_PIX : LABEL_PIX));
 		if (e->drifted) {
-			drifted++;
 			novi_text_draw(dest, state->font_small, val_x - 18,
 				y + state->font_small->ascent, "*", ACCENT_PIX);
+		}
+	}
+
+	/* Counted over every entry, not just the visible ones: "3 pending"
+	 * has to mean the document, or scrolling would change the number
+	 * of things wrong with your machine. */
+	for (int i = 0; i < state->entry_count; i++) {
+		if (state->entries[i].drifted) {
+			drifted++;
 		}
 	}
 
@@ -1406,16 +1547,32 @@ static void render_system(struct novi_settings *state, uint32_t *px,
 		novi_text_draw(dest, state->font_small, CONTENT_X,
 			footer_y + state->font_small->ascent, state->status,
 			state->status_is_error ? ERROR_PIX : SUCCESS_PIX);
+	} else if (state->editing) {
+		char buf[STATE_KEY_MAX + 64];
+		snprintf(buf, sizeof(buf), "%s -- Enter saves, Esc cancels",
+			state->entries[state->selected].key);
+		novi_text_draw(dest, state->font_small, CONTENT_X,
+			footer_y + state->font_small->ascent, buf, ACCENT_PIX);
 	} else if (drifted > 0) {
 		char buf[96];
 		snprintf(buf, sizeof(buf),
 			"* %d pending -- Enter applies them", drifted);
 		novi_text_draw(dest, state->font_small, CONTENT_X,
 			footer_y + state->font_small->ascent, buf, ACCENT_PIX);
+	} else if (state->skipped_count > 0) {
+		/* Said out loud rather than swallowed: these rows exist in the
+		 * document and are not on screen, and a panel that quietly
+		 * omits them is not showing you your system. */
+		char buf[96];
+		snprintf(buf, sizeof(buf),
+			"%d line(s) too long to show -- edit those in %s",
+			state->skipped_count, STATE_FILE);
+		novi_text_draw(dest, state->font_small, CONTENT_X,
+			footer_y + state->font_small->ascent, buf, ERROR_PIX);
 	} else {
 		novi_text_draw(dest, state->font_small, CONTENT_X,
 			footer_y + state->font_small->ascent,
-			"Space toggles, Enter applies", LABEL_PIX);
+			"Space toggles, e edits, Enter applies", LABEL_PIX);
 	}
 }
 
@@ -1585,6 +1742,15 @@ static void keyboard_key(void *data, struct wl_keyboard *kb, uint32_t serial,
 	 * inside the Account form, so the sidebar needs its own key rather
 	 * than overloading that one. */
 	if (sym == XKB_KEY_Left || sym == XKB_KEY_Right) {
+		/* Leaving the panel abandons an edit in progress. This check
+		 * runs BEFORE the modal edit branch below, so without it
+		 * `editing` would survive the switch: come back to System
+		 * later and the panel is still in edit mode, with a stale
+		 * buffer pointed at whatever row `selected` has become. Same
+		 * reasoning as the Network panel clearing its passphrase field
+		 * on the way out -- a mode you cannot see you are in is worse
+		 * than no mode. */
+		cancel_edit(state);
 		state->panel = sym == XKB_KEY_Right ?
 			(state->panel + 1) % PANEL_COUNT :
 			(state->panel + PANEL_COUNT - 1) % PANEL_COUNT;
@@ -1668,8 +1834,36 @@ static void keyboard_key(void *data, struct wl_keyboard *kb, uint32_t serial,
 		return;
 	}
 
+	if (state->panel == PANEL_SYSTEM && state->editing) {
+		/* Editing is modal, and this branch runs FIRST so it stays
+		 * that way: Space has to insert a space, not toggle the key
+		 * being edited, and Enter has to save rather than apply the
+		 * whole document. A mode whose keys leak into the mode below
+		 * it is worse than no mode at all. */
+		if (sym == XKB_KEY_Escape) {
+			cancel_edit(state);
+		} else if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter) {
+			commit_edit(state);
+		} else if (sym == XKB_KEY_BackSpace) {
+			if (state->edit_len > 0) {
+				state->edit_buf[--state->edit_len] = '\0';
+			}
+		} else if (sym >= 32 && sym < 127) {
+			if (state->edit_len < STATE_VAL_MAX) {
+				state->edit_buf[state->edit_len++] = (char)sym;
+				state->edit_buf[state->edit_len] = '\0';
+			}
+		}
+		surface_draw_frame(state);
+		return;
+	}
+
 	if (state->panel == PANEL_SYSTEM) {
 		switch (sym) {
+		case XKB_KEY_e:
+		case XKB_KEY_E:
+			begin_edit(state);
+			break;
 		case XKB_KEY_Up:
 			if (state->selected > 0) {
 				state->selected--;

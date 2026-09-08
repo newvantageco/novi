@@ -157,6 +157,31 @@ the whole script — and the boot step — down with it.
 
 Three smaller things worth knowing before extending this:
 
+- **The System panel edits VALUES now, not just on/off.** It could
+  only flip booleans, so every key with a value — the hostname, the
+  DNS list, `network.firewall.allow`, `storage.automount` — answered
+  "edit it in the file", which made "the GUI and a text editor write
+  the same document" a claim only half kept. `e` opens an inline
+  editor on the selected row; the write still goes through
+  `novi-state set`, never to the file. Three things it has to get
+  right: the edit branch runs BEFORE the panel's other keys (Space
+  must type a space, not toggle the row being edited), leaving the
+  panel with Left/Right cancels the edit (that check runs first, so
+  without it `editing` survives the switch and the panel is silently
+  modal when you come back), and a value containing `#` is REFUSED —
+  it would start a comment when the file is read back, so the GUI
+  would corrupt the document it is a view of.
+- **The panel could only ever show its first fourteen keys.** No
+  scrolling, a hard `break` at the window's bottom edge — so
+  `network.firewall.allow` and everything after it was in the
+  document, named in the panel's own heading, and unreachable. The
+  scroll window is clamped in the draw, where the height is known, so
+  a resize cannot leave it pointing at a row that no longer exists.
+  Two things that must stay counted over the WHOLE document rather
+  than the visible rows: the drift tally (scrolling must not change
+  how many things are wrong with your machine) and the count of lines
+  `load_state_file()` skipped for being too long, which used to vanish
+  silently and is now reported.
 - The GUI's `novi-state` calls **block the Wayland event loop**. Fine
   for a `set` (one awk pass) or an `apply` (a couple of s6-rc
   transitions); not fine once a domain converges something slow, like a
