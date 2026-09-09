@@ -243,6 +243,14 @@ struct result {
 	 * .app descriptor's exec= line. */
 	char copy[32];
 	int icon_id;                    /* enum novi_icon_id, or -1 */
+	/* Theme rows draw a swatch in the icon column instead of a glyph:
+	 * this theme's own ground with its own accent inside it. A list of
+	 * names is not a person seeing their themes, which is the half of
+	 * RFC 0030's picker that names alone could not do. `has_swatch`
+	 * rather than a sentinel colour, because 0 is a legal colour. */
+	bool has_swatch;
+	uint32_t swatch_bg;
+	uint32_t swatch_accent;
 	uint32_t codepoint;             /* symbol rows: drawn in the icon column */
 	const struct app_entry *app;    /* app rows: what Enter launches */
 	/* Power rows: the command Enter runs. A pointer to a string
@@ -942,7 +950,16 @@ static void rebuild_results(struct novi_launcher *state) {
 					!app_name_matches(themes[i].name, state->input)) {
 				continue;
 			}
+			struct novi_palette pal;
 			struct result r = { .kind = RESULT_THEME, .icon_id = -1 };
+			/* Read from the file, not from the live palette: the
+			 * swatch has to show what THAT theme looks like
+			 * whichever one is currently running. */
+			if (novi_theme_read(themes[i].name, &pal)) {
+				r.has_swatch = true;
+				r.swatch_bg = pal.bg_card;
+				r.swatch_accent = pal.accent;
+			}
 			/* An explicit precision, not a bare %s: the name lives in
 			 * an array element and the compiler cannot prove its NUL
 			 * is inside that element, so it assumes the string may
@@ -1303,10 +1320,30 @@ static void render(struct novi_launcher *state, uint32_t *px,
 		state->input_len > 0 ? NOVI_TEXT_SECONDARY : NOVI_TEXT_MUTED);
 	for (size_t i = 0; i < state->result_count; i++) {
 		const struct result *r = &state->results[i];
+		int y = list_top + (int)i * state->row_h;
+		if (r->has_swatch) {
+			/* A paint chip: the theme's card colour with its accent
+			 * inside, and a border so a light theme's near-white
+			 * ground does not vanish into a light row. Squares
+			 * rather than icons because draw_icon() blends a
+			 * monochrome glyph in ONE colour -- it has no way to
+			 * express two, which is the whole information here. */
+			int sx = ICON_CENTER_X - RESULT_ICON_SIZE / 2;
+			int sy = y + (state->row_h - RESULT_ICON_SIZE) / 2;
+			int sz = RESULT_ICON_SIZE;
+			int in = sz / 2;
+			draw_rect(card_buf, cw, cw, card_h, sx, sy, sz, sz,
+				NOVI_BORDER_STRONG);
+			draw_rect(card_buf, cw, cw, card_h, sx + 1, sy + 1,
+				sz - 2, sz - 2, r->swatch_bg);
+			draw_rect(card_buf, cw, cw, card_h,
+				sx + (sz - in) / 2, sy + (sz - in) / 2, in, in,
+				r->swatch_accent);
+			continue;
+		}
 		if (r->icon_id < 0) {
 			continue;
 		}
-		int y = list_top + (int)i * state->row_h;
 		draw_icon(card_buf, cw, cw, (uint32_t)card_h,
 			ICON_CENTER_X - RESULT_ICON_SIZE / 2,
 			y + (state->row_h - RESULT_ICON_SIZE) / 2,

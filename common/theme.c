@@ -28,6 +28,7 @@
 #include <stddef.h>
 #include <sys/stat.h>
 #include <stdio.h>
+#include <stdbool.h>
 #include <string.h>
 
 struct novi_palette novi_theme = {
@@ -189,12 +190,75 @@ static int load_file(const char *path, struct novi_palette *p)
  * of bss. */
 static char active_name[64];
 
+/* A theme name becomes a path, so it is checked rather than trusted.
+ * `..` survives a plain character filter because dots are legal in a
+ * name -- the trap novi-mount's safe_name() records from the other
+ * direction (RFC 0023). */
+static bool name_ok(const char *name)
+{
+	size_t i;
+
+	if (name == NULL || name[0] == '\0' || name[0] == '.' ||
+	    strchr(name, '/') != NULL) {
+		return false;
+	}
+	for (i = 0; name[i] != '\0'; i++) {
+		if (!isalnum((unsigned char)name[i]) &&
+		    name[i] != '-' && name[i] != '_' && name[i] != '.') {
+			return false;
+		}
+	}
+	return i < 64;
+}
+
+/* The compiled-in defaults as a value, so novi_theme_read() can start
+ * from them without depending on what the caller is currently drawing
+ * with. `novi_theme` itself is initialised from the same digits above;
+ * they are the same palette written twice, which is the price of
+ * having both a live global and a pure read. */
+static const struct novi_palette BUILTIN = {
+	.bg_base        = 0xff0a0a0fu,
+	.bg_panel       = 0xff15161du,
+	.bg_card        = 0xff1b1c26u,
+	.bg_card_raised = 0xff232430u,
+	.accent         = 0xff2dd4bfu,
+	.accent_hover   = 0xff5eead4u,
+	.accent_active  = 0xff14b8a6u,
+	.accent_subtle  = 0xff17302cu,
+	.text_on_accent = 0xff071310u,
+	.text_primary   = 0xfff2f3f7u,
+	.text_secondary = 0xffa3a7b7u,
+	.text_muted     = 0xff6b6f80u,
+	.border_subtle  = 0xff292b35u,
+	.border_strong  = 0xff3a3d4au,
+	.status_success = 0xff22c55eu,
+	.status_warning = 0xfff59e0bu,
+	.status_error   = 0xffef4444u,
+};
+
+bool novi_theme_read(const char *name, struct novi_palette *out)
+{
+	char path[256];
+
+	/* Starts from the BUILT-IN palette, not the live one: reading
+	 * theme X must give the same answer whichever theme happens to be
+	 * running, or a picker's swatches would shift as you switched. */
+	*out = BUILTIN;
+	if (!name_ok(name)) {
+		return false;
+	}
+	if ((size_t)snprintf(path, sizeof path, "%s/%s.theme",
+			     NOVI_THEME_DIR, name) >= sizeof path) {
+		return false;
+	}
+	return load_file(path, out) != 0;
+}
+
 const char *novi_theme_load(void)
 {
 	char name[64], path[256];
 	struct novi_palette next = novi_theme;
 	FILE *f;
-	size_t n;
 
 	/* The name comes from the file novi-state's converger published,
 	 * not from an environment variable: a client started later --
@@ -212,17 +276,8 @@ const char *novi_theme_load(void)
 	fclose(f);
 	strip(name);
 
-	/* A theme name becomes a path, so it is checked rather than
-	 * trusted. `..` survives a plain character filter (dots are
-	 * legal in a name), which is the trap novi-mount's safe_name()
-	 * records from the other direction (RFC 0023). */
-	if (!*name || name[0] == '.' || strchr(name, '/'))
+	if (!name_ok(name))
 		return NULL;
-	for (n = 0; name[n]; n++) {
-		if (!isalnum((unsigned char)name[n]) &&
-		    name[n] != '-' && name[n] != '_')
-			return NULL;
-	}
 
 	if ((size_t)snprintf(path, sizeof path, "%s/%s.theme",
 			     NOVI_THEME_DIR, name) >= sizeof path)

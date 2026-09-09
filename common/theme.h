@@ -130,6 +130,18 @@ const char *novi_theme_load(void);
  * repaints only on input has nowhere to hang this. */
 bool novi_theme_reload(void);
 
+/* Load a NAMED theme into `out` without touching the live palette.
+ *
+ * `out` starts from the BUILT-IN palette, so a theme file naming only
+ * three colours still yields a complete one, and reading theme X gives
+ * the same answer whichever theme happens to be running. Returns true
+ * if the file was readable.
+ *
+ * This exists for a picker. Showing a list of theme NAMES is not
+ * showing a person their themes, and the only way to draw a swatch of
+ * one you are not running is to read it. */
+bool novi_theme_read(const char *name, struct novi_palette *out);
+
 /* Where the active theme's name is published, by novi-state's
  * converger for display.theme. A file rather than an environment
  * variable, for the same reason the network interface and the health

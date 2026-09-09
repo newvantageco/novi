@@ -126,14 +126,39 @@ Enter runs `novi-state set display.theme X && novi-state apply` as
 document `set` had not finished writing — and the launcher's own
 `spawn_command()` splits on spaces and cannot express a sequence.
 
-**novi-panel follows a switch live**, because it is the surface a
-person is looking at while switching and it already redraws once a
-second: `novi_theme_reload()` is one `stat(2)` per tick and a parse
-only when the published name actually changed. Measured on a booted
-machine: the panel went from `#15161d` to `#0f1018` within eight
-seconds of pressing Enter, with nothing restarted. Everything else
-still picks the palette up when it next starts — a window that
-repaints only on input has nowhere to hang a poll.
+Each row draws a **swatch** rather than a glyph: that theme's own card
+colour with its own accent inside it, read from the file by
+`novi_theme_read()` so it shows what the theme looks like whichever one
+is currently running. Two squares and not an icon because
+`draw_icon()` blends a monochrome glyph in ONE colour and has no way to
+express two, which is the whole information here. On the shipped set
+you can see at a glance that `paper` is light.
+
+**The panel and the background both follow a switch live**, by
+different mechanisms, and the difference is the interesting part.
+
+novi-panel already redraws once a second, so `novi_theme_reload()` is
+one `stat(2)` on a tick it already had. novi-bg had *nothing* to poll —
+its own comment said so, and that was a property worth keeping: a timer
+would wake an idle wallpaper tens of thousands of times a day to learn
+nothing. It gets an **inotify** fd instead: one descriptor, zero
+wakeups.
+
+The watch is on the DIRECTORY, not the file. `novi-state` publishes by
+writing `theme.new` and renaming it over `theme`, so a watch on the
+file follows the old inode into oblivion — it would fire once, for the
+deletion, and never again. `IN_MOVED_TO` on `/run/novi` is the event a
+rename actually produces. And the fd is **drained** on every wake
+whatever it says, because the watch covers a whole directory and an
+unread inotify fd stays readable — which would spin the loop at 100%
+CPU, silent, visible only as a hot laptop. That is the same shape as
+the `POLLPRI` trap novi-files hit on `/proc/mounts`.
+
+Measured on a booted machine, one Enter, nothing restarted: the panel
+went `#15161d` → `#0f1018` and the background `#121a1f` → `#11121c`
+(teal-tinted to indigo-tinted) within ten seconds. Everything else
+still picks the palette up when it next starts — a window that repaints
+only on input has nowhere to hang either mechanism.
 
 The reload records the file's mtime and size **before** attempting the
 load, not after. A theme file that fails to parse would otherwise be
@@ -248,15 +273,12 @@ argument for shipping `paper`, made concrete on the first run.
 
 ## Roadmap
 
-1. **Live reload beyond the panel.** novi-bg is the other surface that
-   would matter and has no timer to hang it on — it repaints only on
-   configure. A watch would need an fd in its event loop.
-2. **Seeing the colours in the picker.** A swatch of each theme's own
-   accent in the icon column, which is the half of "choosing a palette
-   from a list of names is not choosing" that this does not yet fix.
-   It needs a way to draw a solid rect where the icon blitter expects
-   a glyph.
-3. **Light-mode auditing that is not a screenshot.** Both bugs here
+1. **Live reload in the clients that have an event loop.** novi-files,
+   novi-edit and novi-settings all poll already; the same inotify fd
+   would work in each. They were left out because a re-render there is
+   not one function call, and the panel plus the background is what a
+   person watches while switching.
+2. **Light-mode auditing that is not a screenshot.** Both bugs here
    were found by looking. A host test that renders each theme through
    the same geometry the icon test uses would find the next one
    without booting anything.

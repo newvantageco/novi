@@ -787,12 +787,23 @@ palette is a runtime table loaded from a plain-text file.
   caught that a longer name would be truncated in the field
   `apply_theme()` acts on and would apply A DIFFERENT THEME than the
   row selected.
-- **novi-panel follows a switch LIVE**; nothing else does.
-  `novi_theme_reload()` is one `stat(2)` on the 1 Hz tick it already
-  has, and it records mtime and size BEFORE attempting the load — a
-  theme file that fails to parse would otherwise be retried every
-  tick, turning a typo into 86,400 file opens a day. Everything else
-  picks the palette up at its next start.
+- **The panel and the background follow a switch LIVE, by different
+  mechanisms.** novi-panel already redraws at 1 Hz, so
+  `novi_theme_reload()` is one `stat(2)` on a tick it had anyway; it
+  records mtime and size BEFORE attempting the load, or a theme file
+  that fails to parse is retried every tick — 86,400 file opens a day
+  from one typo. novi-bg had NOTHING to poll and that was worth
+  keeping, so it gets an **inotify** fd: one descriptor, zero wakeups.
+  Two traps there: the watch is on the DIRECTORY because novi-state
+  publishes by rename and a watch on the file follows the old inode
+  into oblivion (`IN_MOVED_TO` is the event a rename produces); and
+  the fd must be DRAINED on every wake whatever it says, because an
+  unread inotify fd stays readable and the loop spins at 100% CPU —
+  the same shape as the POLLPRI trap on `/proc/mounts`. Everything
+  else picks the palette up at its next start.
+- **A theme swatch is two rects, not an icon.** `draw_icon()` blends a
+  monochrome glyph in one colour and cannot express a ground plus an
+  accent, which is the whole information a swatch carries.
 - **`usr/share/novi` is no longer claimed wholesale by novi-launcher**
   in pkgsplit's `DATA_FILES`. That list is walked in full for every
   entry rather than first-match, so a parent and a child both listed

@@ -31,6 +31,8 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <time.h>
+#include <poll.h>
+#include <sys/inotify.h>
 #include <unistd.h>
 
 #include <wayland-client.h>
@@ -301,11 +303,95 @@ int main(void) {
 		&layer_surface_listener, &b);
 	wl_surface_commit(b.surface);
 
-	/* Nothing to poll: no timer, no socket, no input. The only events
-	 * this ever sees are a configure when the output resolution
-	 * changes and the compositor going away. */
-	while (b.running && wl_display_dispatch(b.display) != -1) {
-		;
+	/* ── The event loop ───────────────────────────────────────────
+	 *
+	 * This used to be a bare `wl_display_dispatch()` under a comment
+	 * saying "nothing to poll: no timer, no socket, no input", which
+	 * was true and is the property worth keeping. A theme switch
+	 * (RFC 0030) has to reach the background, and the two obvious ways
+	 * both give that property up: a timer wakes an idle wallpaper
+	 * tens of thousands of times a day to learn nothing, and having
+	 * the compositor restart this client makes novi-shell watch a file
+	 * on its behalf.
+	 *
+	 * INOTIFY costs one fd and zero wakeups. The watch is on the
+	 * DIRECTORY, not the file: novi-state publishes by writing
+	 * `theme.new` and renaming it over `theme` (so a reader never sees
+	 * half a name), and a watch on the file itself follows the old
+	 * inode into oblivion -- it would fire once, for the deletion, and
+	 * never again. IN_MOVED_TO on /run/novi is the event that rename
+	 * actually produces.
+	 */
+	int inotify_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+	if (inotify_fd >= 0 &&
+			inotify_add_watch(inotify_fd, "/run/novi",
+				IN_MOVED_TO | IN_CLOSE_WRITE) < 0) {
+		/* /run/novi may not exist yet on a machine where nothing has
+		 * published anything. Not fatal, and not worth retrying: the
+		 * background is correct either way, it just will not follow a
+		 * switch until it restarts. */
+		close(inotify_fd);
+		inotify_fd = -1;
+	}
+
+	while (b.running) {
+		while (wl_display_prepare_read(b.display) != 0) {
+			if (wl_display_dispatch_pending(b.display) < 0) {
+				b.running = false;
+				break;
+			}
+		}
+		if (!b.running) {
+			wl_display_cancel_read(b.display);
+			break;
+		}
+		wl_display_flush(b.display);
+
+		struct pollfd fds[2] = {
+			{.fd = wl_display_get_fd(b.display), .events = POLLIN},
+			{.fd = inotify_fd, .events = POLLIN},
+		};
+		int nfds = inotify_fd >= 0 ? 2 : 1;
+		if (poll(fds, (nfds_t)nfds, -1) < 0) {
+			/* cancel_read on EVERY path that does not read, poll
+			 * errors included, or the next prepare_read blocks
+			 * forever -- the trap RFC 0017 records. */
+			wl_display_cancel_read(b.display);
+			if (errno == EINTR) {
+				continue;
+			}
+			break;
+		}
+
+		if (fds[0].revents & POLLIN) {
+			wl_display_read_events(b.display);
+		} else {
+			wl_display_cancel_read(b.display);
+		}
+		if (wl_display_dispatch_pending(b.display) < 0) {
+			break;
+		}
+
+		if (nfds == 2 && (fds[1].revents & POLLIN)) {
+			/* Drain it whatever it says. The watch covers a whole
+			 * directory, so most events are about some other file in
+			 * /run/novi -- and an unread inotify fd stays readable,
+			 * which would spin this loop at 100% CPU. Silent, and
+			 * visible only as a hot laptop: the same shape as the
+			 * POLLPRI trap novi-files hit on /proc/mounts. */
+			char buf[4096]
+				__attribute__((aligned(__alignof__(struct inotify_event))));
+			while (read(inotify_fd, buf, sizeof buf) > 0) {
+				;
+			}
+			if (novi_theme_reload()) {
+				draw(&b);
+				wl_surface_commit(b.surface);
+			}
+		}
+	}
+	if (inotify_fd >= 0) {
+		close(inotify_fd);
 	}
 	wl_display_disconnect(b.display);
 	return 0;
