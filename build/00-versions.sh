@@ -111,6 +111,22 @@ CACERT_SHA256="ab3ee3651977a4178a702b0b828a4ee7b2bbb9127235b0ab740e2e15974bf5db"
 OPENSSH_VERSION="9.9p2"
 GIT_VERSION="2.47.1"
 
+# CPython. Until this, the system had no scripting language at all --
+# not a slow one, none: no Python, no Perl, no Ruby. Every tool in the
+# image is C or BusyBox ash.
+#
+# 3.11 specifically, and the reason is the build rather than the
+# language. Cross-compiling CPython needs a working interpreter of the
+# SAME major.minor on the build host (--with-build-python; it runs
+# `setup.py`, freezes modules and byte-compiles the standard library).
+# Debian/Ubuntu's `python3` is 3.11 or 3.12 depending on release; 3.11
+# is the version this build host has as `python3` and the one available
+# as a distro package on the widest range of hosts this project asks
+# people to build on. Picking a version whose interpreter the host does
+# not have means building a native CPython first, which is a second
+# multi-minute build for no gain.
+PYTHON_VERSION="3.11.16"
+
 # Full-disk encryption (RFC 0018). The kernel has had CONFIG_DM_CRYPT
 # since the config was written and nothing could create a container.
 # Five upstreams, all small, all built static: cryptsetup links them and

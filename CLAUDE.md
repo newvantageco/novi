@@ -92,6 +92,13 @@ below for why `/build` is hardcoded and unrelated to the repo checkout path.
   `43-devtools-repo.sh`. Packages, never base. Also builds `sshd`
   into `/build/ssh-test/` as the test peer, deliberately not into the
   image
+- `bash build/38-python.sh` — CPython, cross-compiled against musl and
+  staged into `/build/stage-devtools` for `43-devtools-repo.sh` to
+  publish (RFC 0026). A package, never base. It reads zlib, libffi and
+  expat out of `${ROOTFS}`, so it must run before
+  `41-desktop-split.sh` takes them out, and it needs a **`python3.11`
+  on the build host** — cross-compiling CPython runs an interpreter of
+  the same major.minor during `make`
 - **`bash build/16-s6-rc-db.sh` after ANY change under `init/`** (see below),
   then `bash scripts/mkinitramfs.sh --output build/initramfs.cpio.gz` and
   `bash scripts/mkiso.sh` to get it into a bootable image
@@ -536,6 +543,67 @@ novi-shell will ever take.
   exports none of them. The error names the wrong thing entirely.
   `lib-meson-cross.sh` sets this globally for meson builds; the client
   Makefiles link with `$(CC)` directly and so each one rediscovers it.
+
+## Architecture: Python, and the module it does not have
+
+RFC 0026 (`docs/rfcs/0026-python.md`). CPython 3.11.16 as the `python`
+package — the first scripting language this system has ever had.
+
+- **There is no `ssl` module, and it is not an oversight.** CPython's
+  `_ssl` and `_hashlib` are written against OpenSSL specifically, and
+  this project has carried none since RFC 0006. mbedTLS (RFC 0020) and
+  wolfSSL (RFC 0021) are both here and CPython has a backend for
+  neither. So `import ssl` fails and `urllib` cannot do https; `curl`
+  is the supported path and was verified from the interpreter.
+  `hashlib` still works — md5/sha1/sha2/sha3/blake2 are ordinary
+  built-in C modules and owe OpenSSL nothing. **Say this wherever
+  "Novi has Python" is said**, because most networked Python does
+  `import ssl` on its first line.
+- **A stub `ssl.py` that raises a friendlier error was rejected.** It
+  reads better once and lies permanently:
+  `importlib.util.find_spec("ssl")` would start returning a spec, so
+  code that feature-detects properly gets the wrong answer. A missing
+  module should be missing.
+- **The build host needs `python3.11`, not just any python.**
+  Cross-compiling CPython RUNS Python during `make` (freezing
+  importlib, generating C, byte-compiling the stdlib), and
+  `--with-build-python` requires an exact major.minor match — the
+  marshal format differs between minors. Checked up front like
+  `depmod` and `mako`.
+- **`harden_flags()` cannot be used here, and no LDFLAGS variable can
+  carry `-pie`.** `Makefile.pre.in`'s `LDSHARED` and `BLDSHARED` both
+  append `$(PY_CORE_LDFLAGS)` = `CONFIGURE_LDFLAGS` + `LDFLAGS_NODIST`,
+  so every LDFLAGS-shaped variable reaches ~40 `-shared` links. **gcc
+  given `-shared -pie` does not warn**: it drops the `-shared`, links
+  an executable, and dies on `undefined reference to 'main'` from
+  `Scrt1.o`. `LINKFORSHARED` is the only variable used solely on the
+  two executable links, so `-pie` goes there — carrying its
+  configure-chosen `-Xlinker -export-dynamic` through, not replacing
+  it.
+- **CPython prints missing modules and exits 0.** Correct for a
+  language that runs everywhere, and exactly the failure shape this
+  repo keeps getting caught by. `38-python.sh` diffs that list against
+  the set it expects and reports the rest loudly — not fatally, since
+  the module list shifts between point releases. Its first version
+  reported twelve words of English as missing modules: the block ends
+  with the sentence "To find the necessary bits, look in setup.py...",
+  not a blank line, so a `sed` range to `/^$/` swallowed it.
+- **`sys.implementation._multiarch` says `x86_64-linux-gnu`** on musl,
+  so extension modules are named `*.cpython-311-x86_64-linux-gnu.so`.
+  Cosmetically wrong, functionally harmless (the interpreter computes
+  the same suffix it built with). Do not "fix" it as a rename; it
+  matters only when binary wheels become possible, and there is no pip.
+- **`idle3` is deleted from the staged tree, not merely unbuilt.**
+  `make install` writes the launcher whether or not tkinter exists, and
+  a command that cannot start is worse than a command that is absent.
+- **When a test reports a bug the code says was fixed, check the test
+  is running the artifact you think it is.** `pkg sync` failed on a
+  live boot with `/run/live` missing while `/proc/mounts` showed it
+  mounted — RFC 0003's buried-mount signature exactly. Half an hour
+  went into mount IDs and `s6-linux-init -N` before the cause: the
+  QEMU launcher pointed at a five-day-old `/build/initramfs.cpio.gz`
+  rather than the `build/initramfs.cpio.gz` just written in the repo.
+  The old image had the bug; the shipped one does not.
 
 ## Architecture: the keys, and the sheet that lists them
 

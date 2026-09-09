@@ -288,6 +288,9 @@ fetch_pinned "https://curl.se/ca/cacert-${CACERT_DATE}.pem" "${CACERT_SHA256}"
 fetch "https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-${OPENSSH_VERSION}.tar.gz"
 fetch "https://cdn.kernel.org/pub/software/scm/git/git-${GIT_VERSION}.tar.xz"
 
+# CPython (RFC 0026). A package, like every other developer tool here.
+fetch "https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tar.xz"
+
 # Full-disk encryption (RFC 0018). popt and json-c are cryptsetup's
 # hard dependencies; util-linux and LVM2 are enormous trees fetched for
 # exactly one library each (libuuid, libdevmapper) -- see
