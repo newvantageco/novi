@@ -670,9 +670,9 @@ BUG_REPORT_URL="https://github.com/newvantageco/novi/issues"
 - [x] `novi-recon` — DNS, WHOIS, TLS certificates, HTTP security headers,
       robots.txt, breached passwords, a connect scan. Standard library
       only, and the first Python program in this OS (RFC 0028)
-- [x] Themes — `display.theme = nocturne`, and the whole desktop follows.
-      Four palettes, one of them light, which found two real bugs no dark
-      theme could have (RFC 0030)
+- [x] Themes — Super+T picks one, the panel follows live and everything
+      else at its next start. Four palettes, one of them light, which
+      found two real bugs no dark theme could have (RFC 0030)
 - [x] An interface for automated actors — `novi-agent describe` is one
       JSON document; `novi-agent do` changes the machine only within a
       list you declared, and every attempt is audited (RFC 0029)

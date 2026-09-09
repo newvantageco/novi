@@ -49,6 +49,7 @@
 #define NOVI_THEME_H
 
 #include <pixman.h>
+#include <stdbool.h>
 #include <stdint.h>
 
 #define NOVI_R(c) (((c) >> 16) & 0xff)
@@ -116,12 +117,32 @@ extern struct novi_palette novi_theme;
  * tool can report which theme is live. */
 const char *novi_theme_load(void);
 
+/* Reload only if the published theme has CHANGED since the last call.
+ *
+ * Returns true if the palette was replaced, so a caller that repaints
+ * on a timer can do `if (novi_theme_reload()) redraw();` without
+ * re-parsing a file every tick. The check is one stat(2); the parse
+ * happens only on a real change.
+ *
+ * This is what makes a theme switch visible on a long-lived surface
+ * (the panel, the background) without restarting it. Everything else
+ * still picks the palette up when it next starts -- a window that
+ * repaints only on input has nowhere to hang this. */
+bool novi_theme_reload(void);
+
 /* Where the active theme's name is published, by novi-state's
  * converger for display.theme. A file rather than an environment
  * variable, for the same reason the network interface and the health
  * verdict are files (RFC 0009, RFC 0014): a client that starts later
  * has to be able to find out. */
 #define NOVI_THEME_ACTIVE "/run/novi/theme"
+/* The palette compiled into common/theme.c, by name. It is here so
+ * that the ONE place that knows "the built-in colours are axiom's" is
+ * this header: a picker showing which theme is live has to be able to
+ * say so on a machine where display.theme was never declared and
+ * nothing was ever published, and the alternative is that name
+ * appearing a second time inside the picker. */
+#define NOVI_THEME_DEFAULT "axiom"
 #define NOVI_THEME_DIR    "/usr/share/novi/themes"
 
 #define NOVI_BG_BASE        (novi_theme.bg_base)

@@ -226,6 +226,7 @@ enum result_kind {
 	RESULT_SYMBOL,
 	RESULT_POWER,
 	RESULT_KEY,
+	RESULT_THEME,
 };
 
 struct result {
@@ -290,6 +291,7 @@ struct novi_launcher {
 	 * dispatches from -- see that header for why a sheet maintained
 	 * separately from the bindings was not acceptable. */
 	bool keys_mode;
+	bool themes_mode;
 	struct novi_clipboard *clipboard;
 	uint32_t last_key_serial;
 
@@ -753,6 +755,141 @@ static const struct {
 	{ "Shut down", "poweroff",        "/sbin/poweroff" },
 };
 
+/* ── Themes ────────────────────────────────────────────────────────
+ *
+ * RFC 0030 made the palette a runtime table and left choosing one to
+ * `novi-state set display.theme <name>` typed at a shell -- which is
+ * the roadmap item that said choosing a palette from a list of names
+ * without seeing it is not choosing. This is half of that fixed: the
+ * list, at least, is a list of what is actually installed rather than
+ * something you have to know.
+ *
+ * SCANNED, NEVER HARDCODED. A menu naming four themes would be a menu
+ * that lies the moment somebody drops a fifth into the directory, and
+ * a hardcoded list beside a directory of files is the drift this
+ * project keeps writing tests to prevent.
+ */
+#define THEME_DIR "/usr/share/novi/themes"
+#define THEME_ACTIVE "/run/novi/theme"
+/* 31, not 32, and that is `copy`'s size minus its NUL.
+ *
+ * `copy` is what apply_theme() acts on, and it is 32 bytes for the
+ * calculator's own overflow reasoning (see struct result). A name that
+ * did not fit would be silently truncated there and would APPLY A
+ * DIFFERENT THEME than the row the person selected -- or none. GCC's
+ * -Wformat-truncation said so on the first build; CLAUDE.md already
+ * records that -O2 turning this warning on found three real bugs in
+ * this repository, one of them cutting a .app descriptor's exec= line.
+ *
+ * scan_themes() skips anything longer rather than truncating it, so a
+ * name that cannot be applied correctly is never offered. */
+#define THEME_NAME_MAX 31
+
+struct theme_entry {
+	char name[THEME_NAME_MAX + 1];
+};
+
+static int theme_cmp(const void *a, const void *b) {
+	return strcmp(((const struct theme_entry *)a)->name,
+		((const struct theme_entry *)b)->name);
+}
+
+/* Fills `out`, returns how many were found. Sorted, because readdir
+ * order is filesystem order and a menu whose rows move between
+ * openings is one you cannot build muscle memory for. */
+static size_t scan_themes(struct theme_entry *out, size_t cap) {
+	DIR *d = opendir(THEME_DIR);
+	size_t n = 0;
+	if (d == NULL) {
+		return 0;
+	}
+	struct dirent *e;
+	while ((e = readdir(d)) != NULL && n < cap) {
+		const char *dot = strrchr(e->d_name, '.');
+		if (dot == NULL || strcmp(dot, ".theme") != 0) {
+			continue;
+		}
+		size_t len = (size_t)(dot - e->d_name);
+		if (len == 0 || len > THEME_NAME_MAX) {
+			continue;
+		}
+		memcpy(out[n].name, e->d_name, len);
+		out[n].name[len] = '\0';
+		n++;
+	}
+	closedir(d);
+	qsort(out, n, sizeof(out[0]), theme_cmp);
+	return n;
+}
+
+/* The name novi-state published, or "" if none. Not the DECLARED value
+ * out of system.conf: what is on screen is what the clients read, and
+ * those are different the moment somebody sets the key without
+ * applying it. */
+static void active_theme(char *out, size_t cap) {
+	FILE *f = fopen(THEME_ACTIVE, "re");
+	out[0] = '\0';
+	if (f != NULL) {
+		if (fgets(out, (int)cap, f) != NULL) {
+			out[strcspn(out, "\r\n")] = '\0';
+		}
+		fclose(f);
+	}
+	/* Nothing published means display.theme was never declared, which
+	 * is the SHIPPED state -- and the desktop is still drawing a
+	 * palette, the one compiled into common/theme.c. Reporting no
+	 * active theme there would leave the picker showing four rows and
+	 * no answer to "which of these am I looking at", on the exact
+	 * machine most people open it on. */
+	if (out[0] == '\0') {
+		snprintf(out, cap, "%s", NOVI_THEME_DEFAULT);
+	}
+}
+
+/* Declare it, then apply it -- and it has to be one child, because two
+ * spawns race and `apply` would run against a document `set` had not
+ * finished writing.
+ *
+ * /bin/sh rather than the launcher's own spawn_command(), which splits
+ * on spaces and cannot express a two-command sequence. The name is
+ * re-validated here even though novi-state validates it too: it is
+ * about to be pasted into a shell command line, and the check is four
+ * lines. It cannot fail in practice -- scan_themes() built it from a
+ * filename -- which is exactly the kind of "cannot happen" that stops
+ * being true when somebody adds a second caller. */
+static void apply_theme(const char *name) {
+	char cmd[160];
+
+	for (const char *p = name; *p != '\0'; p++) {
+		bool ok = (*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+			(*p >= '0' && *p <= '9') || *p == '-' || *p == '_' || *p == '.';
+		if (!ok) {
+			return;
+		}
+	}
+	if (name[0] == '\0' || name[0] == '.') {
+		return;
+	}
+	if ((size_t)snprintf(cmd, sizeof(cmd),
+			"novi-state set display.theme %s && novi-state apply", name)
+			>= sizeof(cmd)) {
+		return;
+	}
+
+	pid_t pid = fork();
+	if (pid < 0) {
+		return;
+	}
+	if (pid == 0) {
+		setsid();
+		execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
+		_exit(127);
+	}
+	/* novi-shell reaps it: this process is about to exit anyway, and
+	 * waiting here would hold the overlay on screen for the length of
+	 * an `apply`. */
+}
+
 /* ── The result list ───────────────────────────────────────────────
  *
  * This used to be find_app_match(): the FIRST app whose name contained
@@ -793,6 +930,31 @@ static void rebuild_results(struct novi_launcher *state) {
 			r.command = POWER_ACTIONS[i].command;
 			snprintf(r.primary, sizeof(r.primary), "%s", POWER_ACTIONS[i].name);
 			snprintf(r.meta, sizeof(r.meta), "%s", POWER_ACTIONS[i].meta);
+			push_result(state, &r);
+		}
+	} else if (state->themes_mode) {
+		struct theme_entry themes[32];
+		char active[THEME_NAME_MAX + 1];
+		size_t n = scan_themes(themes, sizeof(themes) / sizeof(themes[0]));
+		active_theme(active, sizeof(active));
+		for (size_t i = 0; i < n; i++) {
+			if (state->input_len > 0 &&
+					!app_name_matches(themes[i].name, state->input)) {
+				continue;
+			}
+			struct result r = { .kind = RESULT_THEME, .icon_id = -1 };
+			/* An explicit precision, not a bare %s: the name lives in
+			 * an array element and the compiler cannot prove its NUL
+			 * is inside that element, so it assumes the string may
+			 * run to the end of the whole array. */
+			snprintf(r.primary, sizeof(r.primary), "%.*s",
+				THEME_NAME_MAX, themes[i].name);
+			/* The active one says so. A picker that cannot tell you
+			 * which one you are looking at is a list, not a picker. */
+			snprintf(r.meta, sizeof(r.meta), "%s",
+				strcmp(themes[i].name, active) == 0 ? "active" : "");
+			snprintf(r.copy, sizeof(r.copy), "%.*s",
+				THEME_NAME_MAX, themes[i].name);
 			push_result(state, &r);
 		}
 	} else if (state->keys_mode) {
@@ -895,6 +1057,9 @@ static bool activate_selected(struct novi_launcher *state) {
 		return false;
 	case RESULT_POWER:
 		spawn_command(r->command);
+		return false;
+	case RESULT_THEME:
+		apply_theme(r->copy);
 		return false;
 	case RESULT_CALC:
 	case RESULT_SYMBOL:
@@ -1165,9 +1330,11 @@ static void render(struct novi_launcher *state, uint32_t *px,
 			20, NOVI_ACCENT);
 		novi_text_draw(card, state->font, TEXT_X + NOVI_SP_SM,
 			input_baseline,
+			state->themes_mode ? "Applies at each window's next start" :
 			state->power_mode ? "End this session" :
 				state->symbol_mode ? "Search symbols" :
-					state->keys_mode ? "Search shortcuts" :
+					state->themes_mode ? "Pick a theme" :
+			state->keys_mode ? "Search shortcuts" :
 						"Search apps, or type a sum",
 			NOVI_PIX(NOVI_TEXT_MUTED));
 	} else {
@@ -1573,10 +1740,12 @@ int main(int argc, char *argv[]) {
 	 * everyone except the person who does not yet know any of them --
 	 * which is exactly who it is for. */
 	state.keys_mode = argc > 1 && strcmp(argv[1], "--keys") == 0;
+	state.themes_mode = argc > 1 && strcmp(argv[1], "--themes") == 0;
 	state.row_cap = state.keys_mode ? MAX_ROWS_KEYS : MAX_ROWS;
 	state.row_h   = state.keys_mode ? ROW_H_KEYS : ROW_H;
 
-	if (!state.symbol_mode && !state.power_mode && !state.keys_mode) {
+	if (!state.symbol_mode && !state.power_mode && !state.keys_mode &&
+			!state.themes_mode) {
 		load_apps(&state);
 	}
 

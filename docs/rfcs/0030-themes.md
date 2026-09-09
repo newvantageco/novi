@@ -102,7 +102,45 @@ machine, which has no themes installed because they ship with the
 desktop, does not report permanent drift against a file it was never
 going to have.
 
-### 7. Four themes, and one of them is light on purpose.
+### 7. A picker, and the one surface that follows live.
+
+`novi-launcher --themes` (Super+T, and a `Theme` row in the Apps list
+for people who do not know Super+T yet — the KDE lesson this repo
+already records: never hide a feature behind only the thing that
+documents it). It **scans** `/usr/share/novi/themes` rather than
+naming the four, because a hardcoded menu beside a directory of files
+is the drift this project keeps writing tests to prevent, and it marks
+the one that is live.
+
+Marking it correctly on a stock machine took a little care.
+`display.theme` is undeclared by default (decision 6), so nothing is
+published and the desktop is drawing the palette compiled into
+`theme.c`. Reporting "no active theme" there would leave the picker
+showing four rows and no answer to "which of these am I looking at",
+on the exact machine most people open it on. `NOVI_THEME_DEFAULT`
+names the compiled-in palette in the header, so exactly one place
+knows that the built-in colours are axiom's.
+
+Enter runs `novi-state set display.theme X && novi-state apply` as
+**one** `/bin/sh` child. Two spawns would race — `apply` against a
+document `set` had not finished writing — and the launcher's own
+`spawn_command()` splits on spaces and cannot express a sequence.
+
+**novi-panel follows a switch live**, because it is the surface a
+person is looking at while switching and it already redraws once a
+second: `novi_theme_reload()` is one `stat(2)` per tick and a parse
+only when the published name actually changed. Measured on a booted
+machine: the panel went from `#15161d` to `#0f1018` within eight
+seconds of pressing Enter, with nothing restarted. Everything else
+still picks the palette up when it next starts — a window that
+repaints only on input has nowhere to hang a poll.
+
+The reload records the file's mtime and size **before** attempting the
+load, not after. A theme file that fails to parse would otherwise be
+retried on every tick, which turns a typo into a busy loop opening a
+file 86,400 times a day.
+
+### 8. Four themes, and one of them is light on purpose.
 
 `axiom` (the design language's own), `nocturne` (near-black, indigo),
 `ember` (warm, amber), `paper` (light).
@@ -197,15 +235,27 @@ argument for shipping `paper`, made concrete on the first run.
   the palettes are not.
 - **Three greps now, not two.** The palette audit in CLAUDE.md gains
   the byte-triple form.
+- **A sixteenth keybinding**, `Super + T`, in the shared table — so it
+  is in the shortcut sheet by construction rather than by somebody
+  remembering to add it (RFC's own rule: there is no display-only row).
+- **`THEME_NAME_MAX` is 31, not 32**, and that is `copy`'s size minus
+  its NUL. `-Wformat-truncation` caught it on the first build: a
+  32-character name would have been truncated in the field
+  `apply_theme()` acts on and would have applied **a different theme
+  than the row the person selected**. `scan_themes()` skips a longer
+  name rather than truncating it, so one that cannot be applied
+  correctly is never offered.
 
 ## Roadmap
 
-1. **Live reload.** A watch on `/run/novi/theme` in each client, and a
-   full re-render on change. The panel and the background are the two
-   that would matter most.
-2. **A theme picker in novi-settings.** The Appearance panel does not
-   exist; the System panel could grow the key, but choosing a palette
-   from a list of names without seeing it is not choosing.
+1. **Live reload beyond the panel.** novi-bg is the other surface that
+   would matter and has no timer to hang it on — it repaints only on
+   configure. A watch would need an fd in its event loop.
+2. **Seeing the colours in the picker.** A swatch of each theme's own
+   accent in the icon column, which is the half of "choosing a palette
+   from a list of names is not choosing" that this does not yet fix.
+   It needs a way to draw a solid rect where the icon blitter expects
+   a glyph.
 3. **Light-mode auditing that is not a screenshot.** Both bugs here
    were found by looking. A host test that renders each theme through
    the same geometry the icon test uses would find the next one

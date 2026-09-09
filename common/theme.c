@@ -26,6 +26,7 @@
 
 #include <ctype.h>
 #include <stddef.h>
+#include <sys/stat.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -237,4 +238,35 @@ const char *novi_theme_load(void)
 	novi_theme = next;
 	snprintf(active_name, sizeof active_name, "%s", name);
 	return active_name;
+}
+
+/* mtime and size of the published name at the last successful load.
+ * Two fields rather than one because a same-second rewrite is exactly
+ * what `novi-state apply` does -- set, then apply, inside a second --
+ * and mtime alone would miss it whenever the two names are the same
+ * length. Size is not a strong check either; together they catch every
+ * case that matters here, and the cost of a false negative is a stale
+ * palette until the next change rather than anything worse. */
+static struct timespec last_mtime;
+static off_t last_size = -1;
+
+bool novi_theme_reload(void)
+{
+	struct stat st;
+
+	if (stat(NOVI_THEME_ACTIVE, &st) != 0) {
+		return false;
+	}
+	if (last_size == st.st_size &&
+	    last_mtime.tv_sec == st.st_mtim.tv_sec &&
+	    last_mtime.tv_nsec == st.st_mtim.tv_nsec) {
+		return false;
+	}
+	/* Record BEFORE loading, not after: a theme file that fails to
+	 * parse would otherwise be retried on every single tick, which
+	 * turns a typo into a busy loop opening a file 86,400 times a
+	 * day. One attempt per change is the right number. */
+	last_mtime = st.st_mtim;
+	last_size = st.st_size;
+	return novi_theme_load() != NULL;
 }

@@ -75,6 +75,23 @@ description=Every keyboard shortcut this desktop has
 EOF
 echo "   done: ${APPS_DIR}/shortcuts.app"
 
+# Reachable with a mouse and no prior knowledge, like the shortcut
+# sheet. Same argument, recorded in CLAUDE.md as the KDE lesson: never
+# hide a feature behind only the thing that documents it. Super+T is
+# for people who already know; this row is for everyone else.
+#
+# icon=settings rather than a palette glyph, because there is no
+# palette glyph -- new icons go through shared/icons/tools/svg2icon at
+# the pinned Lucide commit, and inventing one inline is exactly what
+# that rule exists to stop.
+cat > "${APPS_DIR}/themes.app" <<'EOF'
+name=Theme
+exec=/usr/bin/novi-launcher --themes
+icon=settings
+description=Change the desktop colour palette
+EOF
+echo "   done: ${APPS_DIR}/themes.app"
+
 echo ""
 echo "novi-launcher installed:"
 ls -la "${ROOTFS}/usr/bin/novi-launcher"

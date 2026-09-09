@@ -1299,6 +1299,14 @@ int main(void) {
 		if (fds[1].revents & POLLIN) {
 			uint64_t expirations;
 			if (read(timer_fd, &expirations, sizeof(expirations)) > 0) {
+				/* One stat(2) per second, and a parse only when the
+				 * published theme actually changed (RFC 0030). The
+				 * panel is the surface a person looks at while
+				 * switching themes, and it is already redrawing here,
+				 * so it is the one client that can follow a switch
+				 * live for the price of a syscall. Everything else
+				 * picks the palette up when it next starts. */
+				novi_theme_reload();
 				surface_draw_frame(&panel);
 			}
 		}

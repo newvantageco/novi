@@ -150,6 +150,7 @@
  * feature is broken when it is fine are worse than none. */
 #define NOVI_IDLE_FILE "/run/novi/idle"
 #define NOVI_DEFAULT_POWER_MENU "novi-launcher --power"
+#define NOVI_DEFAULT_THEMES "novi-launcher --themes"
 #define NOVI_DEFAULT_LOCK "novi-lockscreen"
 /* The zwlr_layer_surface_v1 namespace novi-lockscreen identifies itself
  * with (its get_layer_surface() call's namespace argument) -- how
@@ -955,6 +956,8 @@ static void run_action(struct novi_server *server, enum novi_action action,
 		run_spawn("NOVI_LOCK", NOVI_DEFAULT_LOCK); break;
 	case NOVI_ACT_POWER_MENU:
 		run_spawn("NOVI_POWER_MENU", NOVI_DEFAULT_POWER_MENU); break;
+	case NOVI_ACT_THEMES:
+		run_spawn("NOVI_THEMES", NOVI_DEFAULT_THEMES); break;
 	case NOVI_ACT_QUIT:
 		/* Not part of RFC 0001's spec -- a development convenience for
 		 * exiting cleanly under QEMU. Listed in the sheet anyway: a key

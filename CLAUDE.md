@@ -778,6 +778,21 @@ palette is a runtime table loaded from a plain-text file.
     raised layer is always lighter, so the difference was always
     positive and this was invisible for the life of the file. Every
     title bar came out in bands of orange and red.
+- **`novi-launcher --themes` (Super+T) SCANS the directory**, never a
+  hardcoded list of four — a menu beside a directory of files is the
+  drift this project keeps writing tests to prevent. Enter runs
+  `set && apply` as ONE `/bin/sh` child: two spawns race, and
+  `spawn_command()` splits on spaces and cannot express a sequence.
+  `THEME_NAME_MAX` is 31 because `copy` is 32 — `-Wformat-truncation`
+  caught that a longer name would be truncated in the field
+  `apply_theme()` acts on and would apply A DIFFERENT THEME than the
+  row selected.
+- **novi-panel follows a switch LIVE**; nothing else does.
+  `novi_theme_reload()` is one `stat(2)` on the 1 Hz tick it already
+  has, and it records mtime and size BEFORE attempting the load — a
+  theme file that fails to parse would otherwise be retried every
+  tick, turning a typo into 86,400 file opens a day. Everything else
+  picks the palette up at its next start.
 - **`usr/share/novi` is no longer claimed wholesale by novi-launcher**
   in pkgsplit's `DATA_FILES`. That list is walked in full for every
   entry rather than first-match, so a parent and a child both listed
