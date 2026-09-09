@@ -240,9 +240,9 @@ static void render(struct novi_lockscreen *state, uint32_t *px,
 	/* Written with the shift-left-8 bug NOVI_PIX() exists to rule out
 	 * (0xe0 -> 0xe000 rather than 0xe0e0), on top of not being palette
 	 * colours in the first place. */
-	static const pixman_color_t text_color = NOVI_PIX(NOVI_TEXT_PRIMARY);
-	static const pixman_color_t hint_color = NOVI_PIX(NOVI_TEXT_MUTED);
-	static const pixman_color_t error_color = NOVI_PIX(NOVI_STATUS_ERROR);
+#define text_color NOVI_PIX(NOVI_TEXT_PRIMARY)
+#define hint_color NOVI_PIX(NOVI_TEXT_MUTED)
+#define error_color NOVI_PIX(NOVI_STATUS_ERROR)
 
 	const char *label = "Locked";
 	int label_w = novi_text_width(state->font, label);
@@ -525,6 +525,11 @@ static const struct wl_registry_listener registry_listener = {
 };
 
 int main(void) {
+	/* Colours are a runtime table now (RFC 0030). Load the active
+	 * theme BEFORE anything computes a colour; on failure the
+	 * compiled-in defaults stay in force, so this cannot leave the
+	 * client worse off than it was. */
+	novi_theme_load();
 	struct novi_lockscreen state = {0};
 	state.running = true;
 

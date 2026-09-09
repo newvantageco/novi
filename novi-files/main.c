@@ -115,15 +115,14 @@
  * exactly one thing in this window: this row is selected. */
 #define ICON_DIR_COLOR  NOVI_TEXT_SECONDARY
 #define ICON_FILE_COLOR NOVI_TEXT_MUTED
-
-static const pixman_color_t NAME_PIX    = NOVI_PIX(NOVI_TEXT_SECONDARY);
-static const pixman_color_t DIR_PIX     = NOVI_PIX(NOVI_TEXT_PRIMARY);
-static const pixman_color_t SIZE_PIX    = NOVI_PIX(NOVI_TEXT_MUTED);
-static const pixman_color_t PATH_PIX    = NOVI_PIX(NOVI_TEXT_SECONDARY);
-static const pixman_color_t STATUS_PIX  = NOVI_PIX(NOVI_TEXT_SECONDARY);
-static const pixman_color_t ERROR_PIX   = NOVI_PIX(NOVI_STATUS_ERROR);
-static const pixman_color_t PLACE_PIX   = NOVI_PIX(NOVI_TEXT_SECONDARY);
-static const pixman_color_t PLACE_HEAD_PIX = NOVI_PIX(NOVI_TEXT_MUTED);
+#define NAME_PIX NOVI_PIX(NOVI_TEXT_SECONDARY)
+#define DIR_PIX NOVI_PIX(NOVI_TEXT_PRIMARY)
+#define SIZE_PIX NOVI_PIX(NOVI_TEXT_MUTED)
+#define PATH_PIX NOVI_PIX(NOVI_TEXT_SECONDARY)
+#define STATUS_PIX NOVI_PIX(NOVI_TEXT_SECONDARY)
+#define ERROR_PIX NOVI_PIX(NOVI_STATUS_ERROR)
+#define PLACE_PIX NOVI_PIX(NOVI_TEXT_SECONDARY)
+#define PLACE_HEAD_PIX NOVI_PIX(NOVI_TEXT_MUTED)
 
 /* A prompt takes over the status bar and the keyboard until it is
  * answered. There is exactly one at a time and it is never nested. */
@@ -2002,6 +2001,11 @@ static const struct wl_registry_listener registry_listener = {
 };
 
 int main(int argc, char **argv) {
+	/* Colours are a runtime table now (RFC 0030). Load the active
+	 * theme BEFORE anything computes a colour; on failure the
+	 * compiled-in defaults stay in force, so this cannot leave the
+	 * client worse off than it was. */
+	novi_theme_load();
 	struct novi_files s = {0};
 	s.running = true;
 	s.width = WINDOW_WIDTH;

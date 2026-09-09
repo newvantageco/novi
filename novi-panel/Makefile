@@ -62,8 +62,8 @@ wlr-foreign-toplevel-management-unstable-v1-protocol.h: $(FOREIGN_TOPLEVEL_XML)
 wlr-foreign-toplevel-management-unstable-v1-protocol.c: $(FOREIGN_TOPLEVEL_XML)
 	$(WAYLAND_SCANNER) private-code $< $@
 
-novi-panel: main.c netstat.c icons.c ../common/text.c wlr-layer-shell-unstable-v1-protocol.c wlr-layer-shell-unstable-v1-protocol.h xdg-shell-protocol.c wlr-foreign-toplevel-management-unstable-v1-protocol.c wlr-foreign-toplevel-management-unstable-v1-protocol.h
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ main.c netstat.c icons.c ../common/text.c wlr-layer-shell-unstable-v1-protocol.c xdg-shell-protocol.c wlr-foreign-toplevel-management-unstable-v1-protocol.c $(LDLIBS)
+novi-panel: main.c netstat.c icons.c ../common/text.c ../common/theme.c wlr-layer-shell-unstable-v1-protocol.c wlr-layer-shell-unstable-v1-protocol.h xdg-shell-protocol.c wlr-foreign-toplevel-management-unstable-v1-protocol.c wlr-foreign-toplevel-management-unstable-v1-protocol.h
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ main.c netstat.c icons.c ../common/text.c ../common/theme.c wlr-layer-shell-unstable-v1-protocol.c xdg-shell-protocol.c wlr-foreign-toplevel-management-unstable-v1-protocol.c $(LDLIBS)
 
 # Renders every icon state as ASCII and asserts the properties that
 # make them right -- on the BUILD host, with the host compiler, linking

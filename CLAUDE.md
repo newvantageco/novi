@@ -741,6 +741,50 @@ is one JSON document saying what this machine is; `novi-agent do
   as converged would hide `pkg.instal` from exactly the diff a person
   would look at.
 
+## Architecture: themes, and the light one that finds bugs
+
+RFC 0030 (`docs/rfcs/0030-themes.md`). `display.theme = <name>`; the
+palette is a runtime table loaded from a plain-text file.
+
+- **Colour is runtime; type, spacing and radius are NOT.** A theme that
+  can move a 12px gap to 11 reintroduces exactly what §3 of the design
+  language exists to forbid, in a place no reviewer looks.
+- **The defaults are compiled into `common/theme.c`**, so a client that
+  never loads a theme, or whose theme file is missing or garbage, draws
+  what it always drew. The loader parses into a COPY and commits only
+  on success: a half-applied theme (new background, old text colour)
+  is the one outcome worse than not switching, because it can be
+  unreadable.
+- **A token is no longer a constant expression.** 31 file-scope
+  `static const pixman_color_t X = NOVI_PIX(TOKEN);` became
+  `#define X NOVI_PIX(TOKEN)`. Do not reintroduce one — the compiler
+  says "initializer element is not constant", which does not explain
+  itself.
+- **The active theme is a published file** (`/run/novi/theme`,
+  temp-and-rename), not an environment variable: a client started
+  later has to be able to find out. Same argument as
+  `/run/novi/network.device`. Clients read it at STARTUP, so a change
+  reaches open windows only when they reopen — `apply` says so.
+- **SHIP A LIGHT THEME, AND IT IS NOT FOR PREFERENCE.** Every dark
+  palette can get the elevation order backwards and still look
+  plausible; on a light ground the background layers get darker as
+  they rise. `paper` found two bugs on its first run, both of which
+  predate the RFC and neither of which any dark theme could surface:
+  - novi-bg's hardcoded accent (see the palette audit's third grep);
+  - **novi-shell's title bar wrapped an unsigned subtraction.**
+    `NOVI_R()` yields an UNSIGNED int, so
+    `NOVI_R(top) - (int)NOVI_R(card)` promotes the int back to
+    unsigned and `231u - 255u` is ~4.29e9. On a dark palette the
+    raised layer is always lighter, so the difference was always
+    positive and this was invisible for the life of the file. Every
+    title bar came out in bands of orange and red.
+- **`usr/share/novi` is no longer claimed wholesale by novi-launcher**
+  in pkgsplit's `DATA_FILES`. That list is walked in full for every
+  entry rather than first-match, so a parent and a child both listed
+  put the same file in two packages. Named subdirectories:
+  `usr/share/novi/apps` (launcher), `usr/share/novi/themes`
+  (novi-themes).
+
 ## Architecture: the keys, and the sheet that lists them
 
 `common/keybindings.h` is every keyboard shortcut this desktop has,
@@ -894,6 +938,21 @@ kept private palettes — found by `grep`ing every client for
   `novi-gpt`, whose eight-hex constants are a CRC polynomial and GPT
   header fields. A hit is a question, not a verdict — an alpha mask or
   a format constant is fine; a colour is not.
+
+  **A THIRD grep, added by RFC 0030**, because the first two missed
+  the most visible surface on the desktop:
+
+  ```sh
+  # a colour written as three separate bytes
+  grep -rn '0x[0-9a-fA-F]\{2\}, 0x[0-9a-fA-F]\{2\}, 0x[0-9a-fA-F]\{2\}' \
+      --include=*.c $CLIENTS
+  ```
+
+  novi-bg's background gradient carried `{ 0x2d, 0xd4, 0xbf }` under a
+  comment that said `/* NOVI_ACCENT */`, so the desktop behind every
+  window kept its teal glow on every palette while the panel above it
+  switched correctly. A colour written as separate bytes looks nothing
+  like a colour to either of the other two greps.
 
   The eight-hex grep alone reported novi-panel clean while it held
   **five** hand-written `pixman_color_t` literals, every one of them

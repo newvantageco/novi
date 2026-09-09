@@ -1,0 +1,36 @@
+# axiom — the design language's own palette, and the default.
+#
+# docs/design/GUI-DESIGN-LANGUAGE.md §1. These values are also compiled
+# into common/theme.c as the fallback, so this file and that struct say
+# the same thing twice on purpose: the compiled copy is what a client
+# draws when /run/novi/theme is missing or a theme file cannot be read,
+# and there has to be a state in which this desktop has colours no
+# matter what is on disk.
+#
+# Format: `key = value`, `#` starts a comment at the start of a line
+# only -- it is also the first character of every value here. Colours
+# are #rrggbb or #aarrggbb. An unknown key is ignored and a bad value
+# leaves that one token at its default, so a newer theme file does not
+# stop an older client drawing.
+
+bg.base        = #0a0a0f
+bg.panel       = #15161d
+bg.card        = #1b1c26
+bg.card-raised = #232430
+
+accent         = #2dd4bf
+accent.hover   = #5eead4
+accent.active  = #14b8a6
+accent.subtle  = #17302c
+text.on-accent = #071310
+
+text.primary   = #f2f3f7
+text.secondary = #a3a7b7
+text.muted     = #6b6f80
+
+border.subtle  = #292b35
+border.strong  = #3a3d4a
+
+status.success = #22c55e
+status.warning = #f59e0b
+status.error   = #ef4444

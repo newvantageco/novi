@@ -1,0 +1,31 @@
+# paper — a light theme, and the one that actually tests the tokens.
+#
+# Every other palette here is dark, so every one of them can get the
+# elevation order backwards and still look plausible. This one cannot:
+# on a light ground the background layers have to get DARKER as they
+# rise, `text.on-accent` has to be light rather than dark, and anything
+# that assumed "background is nearly black" shows up immediately.
+#
+# It is shipped for that reason as much as for preference.
+
+bg.base        = #eceef2
+bg.panel       = #f6f7f9
+bg.card        = #ffffff
+bg.card-raised = #e7eaf0
+
+accent         = #0d9488
+accent.hover   = #0f766e
+accent.active  = #115e59
+accent.subtle  = #d3ece8
+text.on-accent = #ffffff
+
+text.primary   = #14161c
+text.secondary = #4a4f5c
+text.muted     = #7c8291
+
+border.subtle  = #d6dae2
+border.strong  = #b3b9c6
+
+status.success = #15803d
+status.warning = #b45309
+status.error   = #b91c1c

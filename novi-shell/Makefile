@@ -71,7 +71,7 @@ xdg-shell-protocol.c: $(XDG_SHELL_XML)
 wlr-layer-shell-unstable-v1-protocol.h: $(LAYER_SHELL_XML)
 	$(WAYLAND_SCANNER) server-header $< $@
 
-SRCS = main.c decoration.c ../common/text.c xdg-shell-protocol.c
+SRCS = main.c decoration.c ../common/text.c ../common/theme.c xdg-shell-protocol.c
 
 novi-shell: $(SRCS) xdg-shell-protocol.h wlr-layer-shell-unstable-v1-protocol.h
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(SRCS) $(LDLIBS)

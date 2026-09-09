@@ -81,9 +81,8 @@
 #define ACCENT_NORMAL NOVI_ACCENT
 #define ACCENT_CRIT   NOVI_STATUS_ERROR
 #define ICON_COLOR    NOVI_TEXT_SECONDARY
-
-static const pixman_color_t SUMMARY_PIX = NOVI_PIX(NOVI_TEXT_PRIMARY);
-static const pixman_color_t BODY_PIX    = NOVI_PIX(NOVI_TEXT_SECONDARY);
+#define SUMMARY_PIX NOVI_PIX(NOVI_TEXT_PRIMARY)
+#define BODY_PIX NOVI_PIX(NOVI_TEXT_SECONDARY)
 
 enum urgency { URG_LOW = 0, URG_NORMAL, URG_CRITICAL };
 
@@ -808,6 +807,11 @@ static void expire_toasts(struct notifyd *n) {
 }
 
 int main(void) {
+	/* Colours are a runtime table now (RFC 0030). Load the active
+	 * theme BEFORE anything computes a colour; on failure the
+	 * compiled-in defaults stay in force, so this cannot leave the
+	 * client worse off than it was. */
+	novi_theme_load();
 	struct notifyd n;
 	memset(&n, 0, sizeof(n));
 	n.running = true;

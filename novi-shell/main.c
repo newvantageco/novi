@@ -3178,6 +3178,11 @@ static void server_new_xdg_popup(struct wl_listener *listener, void *data) {
 }
 
 int main(int argc, char *argv[]) {
+	/* Colours are a runtime table now (RFC 0030). Load the active
+	 * theme BEFORE anything computes a colour; on failure the
+	 * compiled-in defaults stay in force, so this cannot leave the
+	 * client worse off than it was. */
+	novi_theme_load();
 	/* Before anything can be spawned. See reap_children() for why this
 	 * exists and what it cost to not have it. */
 	struct sigaction sa_chld = {0};

@@ -1547,6 +1547,11 @@ static const struct wl_registry_listener registry_listener = {
 };
 
 int main(int argc, char *argv[]) {
+	/* Colours are a runtime table now (RFC 0030). Load the active
+	 * theme BEFORE anything computes a colour; on failure the
+	 * compiled-in defaults stay in force, so this cannot leave the
+	 * client worse off than it was. */
+	novi_theme_load();
 	struct novi_launcher state = {0};
 	state.running = true;
 	/* --symbols: the symbol-picker half of RFC 0001 decision 7's

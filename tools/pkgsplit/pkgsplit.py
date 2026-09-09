@@ -236,7 +236,13 @@ DATA_FILES = [
     ("fonts-jetbrains-mono", "usr/share/fonts/jetbrains-mono"),
     ("fonts-inter", "usr/share/fonts/inter"),
     ("foot", "usr/share/terminfo"),
-    ("novi-launcher", "usr/share/novi"),
+    # NAMED SUBDIRECTORIES, not "usr/share/novi". DATA_FILES is walked
+    # in full for every entry rather than first-match, so a parent and
+    # a child both listed would put the same file in two packages --
+    # and the parent was already the wrong owner: the .app descriptors
+    # are the launcher's, the palettes are not.
+    ("novi-launcher", "usr/share/novi/apps"),
+    ("novi-themes", "usr/share/novi/themes"),
 ]
 
 # Packages that exist only to pull others in.
@@ -244,7 +250,7 @@ META_PACKAGES = [
     ("novi-desktop", "OS", "The Novi desktop: compositor, panel, launcher, terminal",
      ["novi-shell", "novi-panel", "novi-launcher", "novi-settings", "novi-edit", "novi-files", "novi-view",
       "novi-lockscreen", "novi-screenshot", "novi-notifyd", "novi-bg",
-      "novi-glinfo", "foot",
+      "novi-glinfo", "foot", "novi-themes",
       "fonts-jetbrains-mono", "fonts-inter"]),
 ]
 

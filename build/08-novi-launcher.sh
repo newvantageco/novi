@@ -54,6 +54,17 @@ make clean
 # exactly the person it is for. Apps is a button on the panel, so this
 # is reachable with a mouse and nothing else.
 echo "==> Registering the keyboard-shortcut sheet as a launchable app"
+# The colour palettes (RFC 0030). Installed here rather than in a stage
+# of their own because there is no free stage number below 40 and these
+# are four text files -- but they are their OWN package (novi-themes in
+# pkgsplit's DATA_FILES), because "which package do I uninstall to stop
+# having these" should have an answer that matches what they are.
+THEMES_SRC="${REPO_ROOT}/rootfs/usr/share/novi/themes"
+THEMES_DIR="${ROOTFS}/usr/share/novi/themes"
+mkdir -p "${THEMES_DIR}"
+install -m 644 "${THEMES_SRC}"/*.theme "${THEMES_DIR}/"
+echo "themes: $(ls -1 "${THEMES_DIR}" | tr '\n' ' ')"
+
 APPS_DIR="${ROOTFS}/usr/share/novi/apps"
 mkdir -p "${APPS_DIR}"
 cat > "${APPS_DIR}/shortcuts.app" <<'EOF'

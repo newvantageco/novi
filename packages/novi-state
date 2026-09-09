@@ -36,6 +36,11 @@ GEN_DIR="${NOVI_STATE_GENERATIONS:-/var/lib/novi-state/generations}"
 # language in system.conf: the escape hatch for anything this key
 # cannot express is editing a real file in nftables' real format.
 FIREWALL_RULES="${NOVI_FIREWALL_RULES:-/etc/novi/firewall.nft}"
+# The desktop's colour palettes (RFC 0030). display.theme names one of
+# these by basename; the converger publishes the resolved name to
+# THEME_ACTIVE, which is what every client reads at startup.
+THEME_DIR="${NOVI_THEME_DIR:-/usr/share/novi/themes}"
+THEME_ACTIVE="${NOVI_THEME_ACTIVE:-/run/novi/theme}"
 
 # The shell JSON escaper (RFC 0029), shared with novi-agent. Sourced
 # with a guard rather than bare: `.` is a SPECIAL BUILTIN, so in ash a
@@ -666,6 +671,29 @@ observe_key() {
                 *) printf 'unsupported' ;;
             esac
             ;;
+        # display.theme IS observable, unlike every other display.* key:
+        # the converger publishes the resolved name to /run/novi/theme
+        # and that file is what the clients actually read, so "what
+        # theme is this machine running" has a real answer to compare
+        # against. Reading the declared value back would make this key
+        # permanently converged and the file permanently unchecked.
+        #
+        # A theme that is declared but not installed reports
+        # `missing`, not the name: `apply` genuinely cannot fix it (the
+        # file is not there to publish), and reporting the name would
+        # call a machine drawing the default palette converged on a
+        # theme it does not have.
+        display.theme)
+            local want_theme
+            want_theme="$(state_get "$key")"
+            if [ ! -f "${THEME_DIR}/${want_theme}.theme" ]; then
+                printf 'missing'
+            elif [ -r "$THEME_ACTIVE" ]; then
+                cat "$THEME_ACTIVE"
+            else
+                printf 'unset'
+            fi
+            ;;
         power.blank)
             case "$(state_get "$key")" in
                 off) printf 'off' ;;
@@ -1009,6 +1037,32 @@ converge_key() {
                 pixman|gles2|auto) : ;;
                 *) die "$key: must be 'pixman', 'gles2' or 'auto', got '$want'" ;;
             esac
+            ;;
+        # Publishing the name is the whole convergence. Clients read
+        # THEME_ACTIVE when they START, so a change reaches a window
+        # that is already open only when that window reopens -- stated
+        # here rather than left to be discovered, and the reason
+        # `apply` prints the note below.
+        #
+        # A theme name becomes a path in every client that reads it, so
+        # it is validated HERE, once, rather than trusted seventeen
+        # times. `..` survives a plain character filter because dots
+        # are legal in a name -- the trap RFC 0023 records from the
+        # other direction.
+        display.theme)
+            case "$want" in
+                ''|.*|*/*|*[!A-Za-z0-9._-]*)
+                    die "$key: '$want' is not a theme name" ;;
+            esac
+            [ -f "${THEME_DIR}/${want}.theme" ] || \
+                die "$key: no such theme '${want}' in ${THEME_DIR} (have: $(cd "$THEME_DIR" 2>/dev/null && printf '%s ' *.theme))"
+            mkdir -p "$(dirname "$THEME_ACTIVE")"
+            # Temp file and rename: a client reading this while it is
+            # being written must never see half a name. Same rule as
+            # the health service's /run/novi/health (RFC 0014).
+            printf '%s\n' "$want" > "${THEME_ACTIVE}.new"
+            mv "${THEME_ACTIVE}.new" "$THEME_ACTIVE"
+            info "theme '${want}' published; open windows keep the old palette until they restart"
             ;;
         power.blank)
             case "$want" in
@@ -1551,6 +1605,7 @@ Keys:
   users.<name>.groups             wheel,video,input | none
   packages.<name>                 present | absent
   display.renderer                pixman | gles2 | auto  (compositor renderer)
+  display.theme                   a file in /usr/share/novi/themes (colours)
   power.blank                     <seconds> | off  (idle screen blank)
   power.governor                  performance | powersave | schedutil | ...
   storage.automount               on | off  (removable media -> /run/media)

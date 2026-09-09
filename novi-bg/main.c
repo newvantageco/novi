@@ -75,13 +75,42 @@ static uint8_t clamp8(double v) {
  * a visible ring at the radius, which is the exact artefact that makes
  * a generated background look generated.
  */
+/* Three colours out of the palette, and NONE of them a literal.
+ *
+ * All three used to be hand-written byte triples, one of them under a
+ * comment that said `NOVI_ACCENT` beside the digits 0x2d, 0xd4, 0xbf.
+ * That is the palette-drift bug this repository already documents
+ * twice over (CLAUDE.md, "the palette drifts unless something
+ * checks") wearing a disguise its two greps cannot see: a colour
+ * written as three separate two-digit bytes looks nothing like a
+ * colour to a grep for eight-hex constants or for `.red =`.
+ *
+ * It cost the whole point of RFC 0030 on the most visible surface
+ * there is. The panel switched theme correctly and the desktop behind
+ * it stayed teal on every palette, because this function had its own
+ * opinion about what the accent was.
+ *
+ * The gradient's top and bottom are bg.card and bg.base -- a card-ish
+ * lift at the top settling to the true base at the bottom, which is
+ * what the original literals were: 0x11121b sat between bg.panel and
+ * bg.card, 0x07070b just under bg.base. Naming them costs a shade of
+ * accuracy against the old image and buys a background that follows
+ * the theme, which is the entire feature. */
+static void chan(uint32_t argb, double out[3]) {
+	out[0] = (argb >> 16) & 0xff;
+	out[1] = (argb >> 8) & 0xff;
+	out[2] = argb & 0xff;
+}
+
 static void paint(uint32_t *px, int w, int h, int stride_px) {
-	const double top[3]    = { 0x11, 0x12, 0x1b };
-	const double bottom[3] = { 0x07, 0x07, 0x0b };
+	double top[3], bottom[3], gcol[3];
+
+	chan(NOVI_BG_CARD, top);
+	chan(NOVI_BG_BASE, bottom);
+	chan(NOVI_ACCENT, gcol);
 
 	const double gx = w * 0.32, gy = h * 0.22;
 	const double gr = (w > h ? w : h) * 0.95;
-	const double gcol[3] = { 0x2d, 0xd4, 0xbf };  /* NOVI_ACCENT */
 	const double gpeak = 0.06;
 
 	for (int y = 0; y < h; y++) {
@@ -225,6 +254,11 @@ static const struct wl_registry_listener registry_listener = {
 };
 
 int main(void) {
+	/* Colours are a runtime table now (RFC 0030). Load the active
+	 * theme BEFORE anything computes a colour; on failure the
+	 * compiled-in defaults stay in force, so this cannot leave the
+	 * client worse off than it was. */
+	novi_theme_load();
 	struct bg b;
 	memset(&b, 0, sizeof(b));
 	b.running = true;

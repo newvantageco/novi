@@ -1272,11 +1272,11 @@ static const char *FIELD_LABELS[FIELD_COUNT] = {
 /* Every one of these was ALSO written with the shift-left-8 bug
  * NOVI_PIX() exists to rule out: 0xe0 became 0xe000 instead of 0xe0e0,
  * so nothing here was ever quite the colour it claimed. */
-static const pixman_color_t TEXT_PIX    = NOVI_PIX(NOVI_TEXT_PRIMARY);
-static const pixman_color_t LABEL_PIX   = NOVI_PIX(NOVI_TEXT_SECONDARY);
-static const pixman_color_t ERROR_PIX   = NOVI_PIX(NOVI_STATUS_ERROR);
-static const pixman_color_t SUCCESS_PIX = NOVI_PIX(NOVI_STATUS_SUCCESS);
-static const pixman_color_t ACCENT_PIX  = NOVI_PIX(NOVI_ACCENT);
+#define TEXT_PIX NOVI_PIX(NOVI_TEXT_PRIMARY)
+#define LABEL_PIX NOVI_PIX(NOVI_TEXT_SECONDARY)
+#define ERROR_PIX NOVI_PIX(NOVI_STATUS_ERROR)
+#define SUCCESS_PIX NOVI_PIX(NOVI_STATUS_SUCCESS)
+#define ACCENT_PIX NOVI_PIX(NOVI_ACCENT)
 
 static void render_sidebar(struct novi_settings *state, uint32_t *px,
 		uint32_t stride_px, pixman_image_t *dest) {
@@ -2150,6 +2150,11 @@ static const struct wl_registry_listener registry_listener = {
 };
 
 int main(void) {
+	/* Colours are a runtime table now (RFC 0030). Load the active
+	 * theme BEFORE anything computes a colour; on failure the
+	 * compiled-in defaults stay in force, so this cannot leave the
+	 * client worse off than it was. */
+	novi_theme_load();
 	struct novi_settings state = {0};
 	state.running = true;
 	state.job_fd = -1;   /* 0 is stdin, and a zeroed struct would poll it */
