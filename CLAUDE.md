@@ -475,7 +475,16 @@ one, none -- and no program wanting OpenGL could run here in principle.
   front, like `05-kernel.sh` checks for `depmod`.
 - **`-Dglx=disabled` means no desktop `libGL`.** EGL + GLESv2 is what
   wlroots wants and is NOT enough for most existing OpenGL games. Do
-  not let the word "Mesa" imply a gaming stack.
+  not let the word "Mesa" imply a gaming stack. (EGL itself DOES
+  report `client APIs: OpenGL OpenGL_ES`, so the capability is there;
+  what is missing is the `libGL.so.1` an existing program links
+  against.)
+- **virgl ships UNVERIFIED, and so does everything else that needs a
+  GPU.** Checked rather than assumed: this QEMU offers
+  `virtio-gpu-pci` and no `virtio-gpu-gl`, there is no virglrenderer
+  on the host, and the host has no `/dev/dri`. softpipe is the only
+  driver here that has ever run. Anything claiming otherwise about
+  this stack is claiming more than has been tested.
 - **`$14` in POSIX sh is `$1` followed by `4`.** A benchmark reading
   utime+stime out of `/proc/<pid>/stat` with `set --` and `$14`
   silently measured the pid minus itself and reported 0 CPU ticks
