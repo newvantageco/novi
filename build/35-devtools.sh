@@ -294,6 +294,24 @@ if [ "$ONLY" = "all" ] || [ "$ONLY" = "ca" ]; then
         "Mozilla's CA root store (${CACERT_DATE}) -- 143 certificates")"
     install -D -m 644 "${src}" "${files}/etc/ssl/certs/ca-certificates.crt"
 
+    # /etc/ssl/cert.pem -> certs/ca-certificates.crt.
+    #
+    # OpenSSL (RFC 0027) is configured --openssldir=/etc/ssl, so its
+    # DEFAULT verify paths are ${SSL_CERT_FILE:-/etc/ssl/cert.pem} and
+    # ${SSL_CERT_DIR:-/etc/ssl/certs}. The directory lookup is by
+    # subject hash and finds nothing in a directory holding one bundle
+    # file, so without this symlink `python3 -c "import ssl;
+    # ssl.create_default_context()"` loads ZERO certificates and every
+    # https connection fails to verify -- on a machine where the
+    # bundle is sitting right there. curl is unaffected (it is built
+    # with the bundle path compiled in), which is exactly the kind of
+    # asymmetry that makes this look like a Python bug.
+    #
+    # It belongs to this package rather than to openssl because it is a
+    # statement about where the cert store is, and this package is the
+    # cert store. Alpine ships the same link for the same reason.
+    ln -sf certs/ca-certificates.crt "${files}/etc/ssl/cert.pem"
+
     mkdir -p "${files}/usr/share/doc/ca-certificates"
     cat > "${files}/usr/share/doc/ca-certificates/README" <<DOC
 ca-certificates — Mozilla's root store, ${CACERT_DATE}.

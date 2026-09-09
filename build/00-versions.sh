@@ -111,6 +111,14 @@ CACERT_SHA256="ab3ee3651977a4178a702b0b828a4ee7b2bbb9127235b0ab740e2e15974bf5db"
 OPENSSH_VERSION="9.9p2"
 GIT_VERSION="2.47.1"
 
+# OpenSSL (RFC 0027). A PACKAGE, never the base image, and never on
+# the package-verification path -- novi-verify stays static, ~10 KB and
+# OpenSSL-free, which is what RFC 0006's rule actually protects. 3.5 is
+# an LTS branch, which is the right shape for a distribution: a
+# security-fix stream that does not move APIs under the things linking
+# it.
+OPENSSL_VERSION="3.5.8"
+
 # CPython. Until this, the system had no scripting language at all --
 # not a slow one, none: no Python, no Perl, no Ruby. Every tool in the
 # image is C or BusyBox ash.

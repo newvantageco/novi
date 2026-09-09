@@ -15,7 +15,7 @@
 #
 #   bash build/38-python.sh
 #
-# A PACKAGE, NEVER THE BASE IMAGE. ~50 MB installed. RFC 0007 keeps
+# A PACKAGE, NEVER THE BASE IMAGE. ~32 MB installed. RFC 0007 keeps
 # the base console-only and small; a language runtime is exactly the
 # kind of thing that belongs behind `pkg install`. It stages into
 # ${BUILD_DIR}/stage-devtools alongside git and the ssh client, so
@@ -28,28 +28,25 @@
 # those are still there -- i.e. before 41-desktop-split.sh takes them
 # out.
 #
-# ── The thing to know before reading further: there is no ssl. ────────
+# ── ssl comes from OpenSSL, which is a package of its own ─────────────
 #
-# CPython's `_ssl` and `_hashlib` modules are written against OpenSSL
-# specifically, and this project has refused to carry OpenSSL since
-# RFC 0006 (novi-verify exists, all ~10 KB of it, so that checking a
-# package signature does not mean linking libcrypto). RFC 0020 chose
-# mbedTLS for curl and RFC 0021 chose wolfSSL for wpa_supplicant;
-# CPython can use neither. So:
+# CPython's `_ssl` and `_hashlib` are written against OpenSSL
+# specifically -- not "a TLS library", but OpenSSL, whose API they track
+# version by version. mbedTLS (RFC 0020) and wolfSSL (RFC 0021) are
+# both already in this build and CPython has a backend for neither;
+# LibreSSL has been explicitly unsupported since CPython 3.10.
 #
-#   import ssl          -> ModuleNotFoundError
-#   urllib.request.urlopen("https://...")  -> fails
+# This shipped WITHOUT ssl first, on the grounds that RFC 0006 had
+# refused OpenSSL since the beginning. That was the vague version of
+# the rule. The precise version -- RFC 0006 is about the trust path
+# (verifying a package signature must not need TLS), RFC 0020 is about
+# the base image (no TLS library ships in the console base) -- forbids
+# neither an OpenSSL package nor Python linking it. RFC 0027 makes that
+# argument properly; 32-openssl.sh builds it, into
+# ${BUILD_DIR}/openssl-target for linking and into its own package for
+# the target, never into ${ROOTFS}.
 #
-# `hashlib` still works -- md5, sha1, sha2, sha3 and blake2 are
-# ordinary built-in C modules in CPython and owe OpenSSL nothing; only
-# the `_hashlib` accelerator and `pbkdf2_hmac`/`scrypt` are lost.
-# HTTPS from a Python program on this system means `curl`, which is
-# already a package and already verifies certificates properly.
-#
-# This is stated here, in the RFC, and in the package description
-# rather than left to be discovered, because a Python that cannot
-# reach an https:// URL is a Python that fails at the first line of
-# most of the programs somebody would install it for.
+# So `import ssl` works, and `python` depends on `openssl`.
 # ============================================================
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -122,6 +119,19 @@ require_lib zlib.h   libz.so     "zlib"
 require_lib ffi.h    libffi.so   "libffi"
 require_lib expat.h  libexpat.so "expat"
 
+# OpenSSL is not in ${ROOTFS} and must not be: it lives in its own
+# linking prefix, like mbedTLS. A different message, because the fix is
+# a different stage rather than restore-build-inputs.sh.
+OPENSSL_PREFIX="${BUILD_DIR}/openssl-target/usr"
+if [ ! -f "${OPENSSL_PREFIX}/include/openssl/ssl.h" ]; then
+    echo "ERROR: OpenSSL not found at ${OPENSSL_PREFIX}." >&2
+    echo "       Without it CPython builds with no ssl module at all," >&2
+    echo "       silently -- it prints a paragraph and exits 0." >&2
+    echo "" >&2
+    echo "      bash build/32-openssl.sh" >&2
+    exit 1
+fi
+
 rm -rf "${WORK}"
 mkdir -p "${WORK}" "${STAGE_DIR}"
 echo ">>> Unpacking CPython ${PYTHON_VERSION} ..."
@@ -144,7 +154,14 @@ tar xf "${SOURCES}/Python-${PYTHON_VERSION}.tar.xz" -C "${WORK}"
 # this file.
 export CFLAGS="-O2 -fstack-protector-strong -D_FORTIFY_SOURCE=2"
 export CPPFLAGS="-I${ROOTFS}/usr/include"
-export LDFLAGS="-L${ROOTFS}/usr/lib -Wl,-z,relro,-z,now -Wl,-z,noexecstack -Wl,-rpath-link,${ROOTFS}/usr/lib"
+export CPPFLAGS="${CPPFLAGS} -I${OPENSSL_PREFIX}/include"
+# -rpath-link for BOTH prefixes, and this is the fifth time in this
+# repository. -L is consulted only for a library named directly with
+# -l; the linker will not use it to resolve a shared library's own
+# DT_NEEDED entries, and libssl.so names libcrypto.so.3.
+export LDFLAGS="-L${ROOTFS}/usr/lib -L${OPENSSL_PREFIX}/lib \
+    -Wl,-z,relro,-z,now -Wl,-z,noexecstack \
+    -Wl,-rpath-link,${ROOTFS}/usr/lib -Wl,-rpath-link,${OPENSSL_PREFIX}/lib"
 
 # -pie is deliberately NOT in LDFLAGS, and there is no variable it
 # could go in. Read Makefile.pre.in: LDSHARED and BLDSHARED -- the
@@ -195,6 +212,8 @@ echo ">>> Configuring ..."
         --with-build-python="${BUILD_PYTHON}" \
         --with-system-ffi \
         --with-system-expat \
+        --with-openssl="${OPENSSL_PREFIX}" \
+        --with-openssl-rpath=no \
         --with-ensurepip=no \
         --disable-test-modules \
         --enable-shared \
@@ -225,7 +244,7 @@ make -C "${SRC}" -j"${JOBS}" LINKFORSHARED="${LINKFORSHARED}" \
 # a hard failure -- CPython's module list shifts between point releases
 # and a build that stops because `_dbm` moved would be worse than one
 # that says so.
-EXPECTED_MISSING="_ssl _hashlib _sqlite3 _bz2 _lzma _curses _curses_panel _tkinter _gdbm _dbm _uuid readline nis ossaudiodev spwd _crypt"
+EXPECTED_MISSING="_sqlite3 _bz2 _lzma _curses _curses_panel _tkinter _gdbm _dbm _uuid readline nis ossaudiodev spwd _crypt"
 # The block ends with a sentence, not a blank line -- "To find the
 # necessary bits, look in setup.py ..." -- and ranging to /^$/ swallows
 # it, so every word of that sentence came back as an unexpected missing
@@ -246,6 +265,20 @@ if [ -n "${UNEXPECTED}" ]; then
     echo "        (grep 'optional modules' ${WORK}/build.log for the whole list)"
     echo ""
 fi
+
+# _ssl specifically is a HARD failure, not a warning.
+#
+# It is the whole reason 32-openssl.sh exists, and it is the module
+# whose absence a person discovers at the top of somebody else's
+# program rather than here. Everything else on the missing list is a
+# convenience; this one is the feature.
+for m in ${MISSING}; do
+    if [ "$m" = "_ssl" ] || [ "$m" = "_hashlib" ]; then
+        echo "ERROR: CPython did not build ${m}, despite --with-openssl." >&2
+        echo "       grep -n -A12 'optional modules' ${WORK}/build.log" >&2
+        exit 1
+    fi
+done
 
 # ── Stage ─────────────────────────────────────────────────────────────
 D="${STAGE_DIR}/python"
@@ -287,8 +320,8 @@ rm -rf "${D}/files/usr/lib/python${PY_XY}/test" \
     echo "name=python"
     echo "version=${PYTHON_VERSION}"
     echo "arch=${TARGET_ARCH}"
-    echo "depends=zlib,libffi,expat"
-    echo "description=CPython ${PYTHON_VERSION} -- no ssl module (this system carries no OpenSSL); use curl for https"
+    echo "depends=zlib,libffi,expat,openssl"
+    echo "description=CPython ${PYTHON_VERSION} -- the interpreter and the standard library"
 } > "${D}/MANIFEST"
 
 # ── Check the artifact, not the flags ─────────────────────────────────

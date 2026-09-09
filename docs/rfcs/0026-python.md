@@ -1,16 +1,20 @@
 # RFC 0026 — Python, and the https it cannot do
 
-**Status:** Implemented
+**Status:** Implemented; decision 3 superseded by RFC 0027
 **Depends on:** RFC 0006 (package repository), RFC 0007 (base/desktop split), RFC 0015 (native toolchain), RFC 0019 (developer tooling), RFC 0020 (HTTPS)
 
 > **Summary.** CPython 3.11.16, cross-compiled against musl and shipped
 > as the `python` package. It is the first scripting language this
-> operating system has ever had. It has **no `ssl` module**, because
-> this project carries no OpenSSL and CPython's TLS is written against
-> OpenSSL specifically; https from Python means `curl`, which is
-> already a package and already verifies certificates. That gap is the
-> most important thing in this document and is stated everywhere a
-> person might meet it.
+> operating system has ever had.
+>
+> **As first shipped it had no `ssl` module**, and decision 3 below is
+> the argument for why. **RFC 0027 answered that question and Python
+> has `ssl` now**: OpenSSL is a package, the base image still carries
+> no TLS library, and the package trust root is still static
+> TweetNaCl. Decision 3 is kept as written because its reasoning about
+> what RFC 0006's rule actually forbids is what RFC 0027 had to get
+> right, and because the alternative it rejected — a stub `ssl.py`
+> raising a friendlier error — is still the wrong answer.
 
 ## Motivation & Problem Statement
 
@@ -67,6 +71,12 @@ see a finished tree. This stage puts nothing in `${ROOTFS}`, but it
 are still there, i.e. before `41-desktop-split.sh` moves them out.
 
 ### 3. There is no `ssl` module, and that is a consequence, not an oversight.
+
+> **Superseded by RFC 0027.** What follows was true as shipped and is
+> no longer. The `python` package depends on `openssl` now, `import
+> ssl` works, and the default trust store loads the same 143
+> certificates curl uses. Read on for why it was not simply done in
+> the first place — the answer is the distinction RFC 0027 turns on.
 
 CPython's `_ssl` and `_hashlib` are written against OpenSSL
 specifically. This project has refused to carry OpenSSL since RFC 0006:
@@ -238,9 +248,10 @@ running the artifact you think it is.
 
 ## Roadmap
 
-1. **The `ssl` question**, on its own terms and in its own RFC. Until
-   it is answered, "Novi has Python" needs the qualifier attached
-   wherever it is said.
+1. ~~**The `ssl` question**, on its own terms and in its own RFC.~~
+   **Done: RFC 0027.** OpenSSL as a package, CPython rebuilt against
+   it, and the verification triple run from the interpreter against a
+   local TLS server.
 2. **ncurses and readline.** A REPL where the up-arrow prints `^[[A` is
    a visibly unfinished interpreter, and `curses` is how a large class
    of terminal tooling draws. Two small autotools builds; the only

@@ -92,6 +92,11 @@ below for why `/build` is hardcoded and unrelated to the repo checkout path.
   `43-devtools-repo.sh`. Packages, never base. Also builds `sshd`
   into `/build/ssh-test/` as the test peer, deliberately not into the
   image
+- `bash build/32-openssl.sh` — OpenSSL 3.5 LTS (RFC 0027), into
+  `/build/openssl-target` for linking and into the `openssl` package
+  for the target. Never `${ROOTFS}`: the base image still ships no TLS
+  library, and `novi-verify` is still static TweetNaCl. It exists
+  because CPython's `ssl` accepts no other implementation
 - `bash build/38-python.sh` — CPython, cross-compiled against musl and
   staged into `/build/stage-devtools` for `43-devtools-repo.sh` to
   publish (RFC 0026). A package, never base. It reads zlib, libffi and
@@ -549,21 +554,36 @@ novi-shell will ever take.
 RFC 0026 (`docs/rfcs/0026-python.md`). CPython 3.11.16 as the `python`
 package — the first scripting language this system has ever had.
 
-- **There is no `ssl` module, and it is not an oversight.** CPython's
-  `_ssl` and `_hashlib` are written against OpenSSL specifically, and
-  this project has carried none since RFC 0006. mbedTLS (RFC 0020) and
-  wolfSSL (RFC 0021) are both here and CPython has a backend for
-  neither. So `import ssl` fails and `urllib` cannot do https; `curl`
-  is the supported path and was verified from the interpreter.
-  `hashlib` still works — md5/sha1/sha2/sha3/blake2 are ordinary
-  built-in C modules and owe OpenSSL nothing. **Say this wherever
-  "Novi has Python" is said**, because most networked Python does
-  `import ssl` on its first line.
-- **A stub `ssl.py` that raises a friendlier error was rejected.** It
-  reads better once and lies permanently:
+- **`ssl` comes from OpenSSL, which is a package (RFC 0027).** CPython's
+  `_ssl` and `_hashlib` are written against OpenSSL *specifically* —
+  mbedTLS (RFC 0020) and wolfSSL (RFC 0021) are both in this build and
+  CPython has a backend for neither, and LibreSSL has been unsupported
+  since CPython 3.10. It shipped without `ssl` first, on the vague
+  reading of "no OpenSSL". **The precise reading is what matters and
+  this project has now had to recover it three times**: RFC 0006 is
+  about the TRUST PATH (checking a signature must not need TLS —
+  `novi-verify` is still static TweetNaCl), RFC 0020 is about the BASE
+  IMAGE (no TLS library in the console base — still true, checked with
+  `find`). Neither forbids a package. RFC 0021 made the identical
+  correction for wolfSSL. Get the rule right before invoking it.
+- **A stub `ssl.py` that raises a friendlier error was rejected**, and
+  still would be. It reads better once and lies permanently:
   `importlib.util.find_spec("ssl")` would start returning a spec, so
   code that feature-detects properly gets the wrong answer. A missing
   module should be missing.
+- **`/etc/ssl/cert.pem` is a symlink shipped by `ca-certificates`, and
+  without it Python verifies against NOTHING.** OpenSSL's default
+  verify paths are `/etc/ssl/cert.pem` and the *hash-indexed*
+  directory `/etc/ssl/certs`; the CA package ships one bundle file in
+  that directory, which the hash lookup cannot use.
+  `create_default_context().cert_store_stats()` returned `{'x509': 0}`
+  with the store installed and correct. **curl is unaffected** (bundle
+  path compiled in), which is exactly what makes it look like a Python
+  bug. 143 certificates after the fix.
+- **This system carries three TLS implementations now** — mbedTLS
+  (curl, git), wolfSSL (wpa_supplicant), OpenSSL (Python) — each
+  because its consumer accepts only it. All three are packages; the
+  base image has none.
 - **The build host needs `python3.11`, not just any python.**
   Cross-compiling CPython RUNS Python during `make` (freezing
   importlib, generating C, byte-compiling the stdlib), and
