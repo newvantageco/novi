@@ -22,6 +22,7 @@
  */
 #include <assert.h>
 #include <errno.h>
+#include <signal.h>
 #include <fcntl.h>
 #include <getopt.h>
 #include <linux/input-event-codes.h>
@@ -57,6 +58,9 @@
 #include <wlr/util/log.h>
 #include <xkbcommon/xkbcommon.h>
 
+/* The one list of keyboard shortcuts, shared with novi-launcher
+ * --keys so the sheet and the dispatcher cannot disagree. */
+#include "keybindings.h"
 #include "decoration.h"
 #include "../common/theme.h"
 
@@ -81,6 +85,22 @@
  * keyboard_handle_key()'s separate check below), matching what every
  * PrintScreen key on real keyboards already means. */
 #define NOVI_DEFAULT_SCREENSHOT "novi-screenshot"
+/* The keys above the number row. `novi-volume` is a base-image shell
+ * tool over amixer (RFC 0011's ALSA userland), so the compositor
+ * neither links libasound nor knows what a mixer control is -- the
+ * same front-end arrangement every other binding here uses.
+ *
+ * Three commands rather than one taking a direction, because the
+ * argument would then be the only thing distinguishing them and a
+ * typo in it is a key that silently does nothing. */
+#define NOVI_DEFAULT_VOLUME_UP   "novi-volume up"
+#define NOVI_DEFAULT_VOLUME_DOWN "novi-volume down"
+#define NOVI_DEFAULT_VOLUME_MUTE "novi-volume mute"
+/* Super+/ : the list of every key on this page. The same launcher
+ * binary a fourth time, for the same reason --symbols and --power
+ * reuse it: the overlay, the list, the search and the keys are
+ * already written, and only the rows differ. */
+#define NOVI_DEFAULT_SHORTCUTS "novi-launcher --keys"
 /* RFC 0001 decision 7: Super+L session lock -- another separate
  * client (novi-lockscreen/), not compositor code, same split as every
  * other binding above. Unlike those, a lock is a real security
@@ -745,6 +765,42 @@ static void keyboard_handle_modifiers(
 
 /* Spawns `cmd` via /bin/sh -c, same fork+exec shape main()'s -s startup
  * command already uses. Used by keybindings, not just at startup. */
+/* Every spawned child has to be reaped, and nothing did.
+ *
+ * `spawn()` forks and never waits, so each launcher, symbol picker,
+ * screenshot, power menu and terminal left a zombie for the life of
+ * the session. Invisible while spawning was a rare, deliberate act --
+ * a handful of dead entries in `ps` that nobody reads.
+ *
+ * The volume keys changed the arithmetic. They spawn on every press,
+ * so the leak went from a handful per session to one per keystroke:
+ * measured on a booted machine, twelve presses of volume-up produced
+ * exactly twelve zombies. Somebody adjusting the volume through a
+ * working day would walk the PID table.
+ *
+ * A handler with waitpid(WNOHANG) rather than signal(SIGCHLD, SIG_IGN):
+ * SIG_IGN also works and is shorter, but it makes every future
+ * waitpid() in this process fail with ECHILD, which is a trap laid for
+ * whoever next wants a child's exit status. SA_RESTART so the event
+ * loop's poll() is resumed rather than returning EINTR, and
+ * SA_NOCLDSTOP because a child merely stopping is not news here.
+ *
+ * The loop matters: signals are not queued, so several children
+ * exiting close together deliver ONE SIGCHLD, and a handler that reaps
+ * a single child leaks the rest -- which for keys that repeat is the
+ * same bug at a slower rate. */
+static void reap_children(int sig) {
+	(void)sig;
+	/* errno is saved and restored: this interrupts arbitrary code,
+	 * and waitpid() setting ECHILD underneath a syscall that was about
+	 * to have its own errno read is a genuinely miserable bug. */
+	int saved = errno;
+	while (waitpid(-1, NULL, WNOHANG) > 0) {
+		/* nothing -- the exit status is deliberately not wanted */
+	}
+	errno = saved;
+}
+
 static void spawn(const char *cmd) {
 	pid_t pid = fork();
 	if (pid < 0) {
@@ -753,9 +809,13 @@ static void spawn(const char *cmd) {
 	}
 	if (pid == 0) {
 		/* Detach into its own session so it isn't killed by whatever
-		 * signal eventually stops novi-shell itself, and so its
-		 * lifetime isn't tied to being a direct child novi-shell has
-		 * to reap. */
+		 * signal eventually stops novi-shell itself.
+		 *
+		 * It is STILL a direct child that has to be reaped -- setsid()
+		 * changes the session, not the parent -- and this comment used
+		 * to claim otherwise, which is exactly how nothing ever reaped
+		 * one. See reap_children() at the bottom of main() for the
+		 * measurement. */
 		setsid();
 		/* Start in the user's home, not wherever novi-shell happens to
 		 * be running from. s6 starts this compositor with its cwd set
@@ -843,103 +903,121 @@ static int workspace_digit_for_keysym(xkb_keysym_t sym) {
 	}
 }
 
-/* RFC 0001 decision 7's default keybindings, all implemented:
- * Alt+Tab/Shift+Tab (window switching), Super+Return/Super+Q (terminal/
- * close), Super+[1-9]/Super+Shift+[1-9] (workspaces -- see
- * NOVI_WORKSPACE_COUNT's own comment for the per-server, not per-output,
- * scoping), Super+. (symbol picker), PrintScreen (screenshot, checked
- * separately in keyboard_handle_key() since it takes no modifier), and
- * Super+L (lock). All of this is compositor-internal default behavior
- * for now; RFC 0001 calls for these to move to a user-editable config
- * file, a follow-up, not implemented here yet. */
+/* RFC 0001 decision 7's default keybindings. The list itself lives in
+ * common/keybindings.h, NOT here, and that move is the point rather
+ * than tidiness: novi-launcher --keys shows the user the same table
+ * this function dispatches from, so the shortcut sheet cannot tell
+ * them a key that does not work. See that header for why a
+ * separately-maintained sheet was not acceptable.
+ *
+ * Still compositor-internal defaults; RFC 0001 calls for a
+ * user-editable config file, which is a follow-up and not this. The
+ * table is the shape that change would need anyway.
+ */
+static void run_spawn(const char *env, const char *def) {
+	const char *cmd = getenv(env);
+	spawn(cmd != NULL ? cmd : def);
+}
+
+static void run_action(struct novi_server *server, enum novi_action action,
+		int digit) {
+	switch (action) {
+	case NOVI_ACT_CYCLE_NEXT:  cycle_toplevel(server, true); break;
+	case NOVI_ACT_CYCLE_PREV:  cycle_toplevel(server, false); break;
+	case NOVI_ACT_TERMINAL:
+		run_spawn("NOVI_TERMINAL", NOVI_DEFAULT_TERMINAL); break;
+	case NOVI_ACT_CLOSE:       close_focused_toplevel(server); break;
+	case NOVI_ACT_WORKSPACE:      switch_workspace(server, digit); break;
+	case NOVI_ACT_WORKSPACE_MOVE: move_focused_to_workspace(server, digit); break;
+	case NOVI_ACT_LAUNCHER:
+		/* A separate layer-shell client spawned fresh each time, not
+		 * toggled -- it exits itself on Escape or Enter. */
+		run_spawn("NOVI_LAUNCHER", NOVI_DEFAULT_LAUNCHER); break;
+	case NOVI_ACT_SYMBOLS:
+		run_spawn("NOVI_SYMBOL_PICKER", NOVI_DEFAULT_SYMBOL_PICKER); break;
+	case NOVI_ACT_SHORTCUTS:
+		run_spawn("NOVI_SHORTCUTS", NOVI_DEFAULT_SHORTCUTS); break;
+	case NOVI_ACT_SCREENSHOT:
+		run_spawn("NOVI_SCREENSHOT", NOVI_DEFAULT_SCREENSHOT); break;
+	case NOVI_ACT_VOLUME_UP:
+		run_spawn("NOVI_VOLUME_UP", NOVI_DEFAULT_VOLUME_UP); break;
+	case NOVI_ACT_VOLUME_DOWN:
+		run_spawn("NOVI_VOLUME_DOWN", NOVI_DEFAULT_VOLUME_DOWN); break;
+	case NOVI_ACT_VOLUME_MUTE:
+		run_spawn("NOVI_VOLUME_MUTE", NOVI_DEFAULT_VOLUME_MUTE); break;
+	case NOVI_ACT_LOCK:
+		/* novi-lockscreen sets server->locked itself once its surface
+		 * actually maps (server_new_layer_surface()'s namespace check)
+		 * rather than this setting it directly -- if the client fails
+		 * to start, or refuses to lock because no password is set, the
+		 * compositor must never believe it is locked when no real lock
+		 * surface exists to back that up. */
+		run_spawn("NOVI_LOCK", NOVI_DEFAULT_LOCK); break;
+	case NOVI_ACT_POWER_MENU:
+		run_spawn("NOVI_POWER_MENU", NOVI_DEFAULT_POWER_MENU); break;
+	case NOVI_ACT_QUIT:
+		/* Not part of RFC 0001's spec -- a development convenience for
+		 * exiting cleanly under QEMU. Listed in the sheet anyway: a key
+		 * that ends the session is one people should be able to look
+		 * up after pressing it by accident. */
+		wl_display_terminate(server->wl_display); break;
+	}
+}
+
+/* Our modifier bits from wlroots' -- the shared header may not depend
+ * on wlroots, since novi-launcher includes it and links none. */
+static unsigned novi_mods_from_wlr(uint32_t modifiers) {
+	unsigned mods = 0;
+	if (modifiers & WLR_MODIFIER_ALT)   { mods |= NOVI_MOD_ALT; }
+	if (modifiers & WLR_MODIFIER_LOGO)  { mods |= NOVI_MOD_LOGO; }
+	if (modifiers & WLR_MODIFIER_SHIFT) { mods |= NOVI_MOD_SHIFT; }
+	return mods;
+}
+
+/* One row against one keysym, modifiers already decided by the caller.
+ * Returns the workspace digit through `digit` for the two DIGIT_RANGE
+ * rows and leaves it alone otherwise. */
+static bool binding_key_matches(const struct novi_binding *b,
+		xkb_keysym_t sym, int *digit) {
+	if (b->flags & NOVI_BIND_DIGIT_RANGE) {
+		int n = workspace_digit_for_keysym(sym);
+		if (n == 0) {
+			return false;
+		}
+		*digit = n;
+		return true;
+	}
+	/* Lowercased so a letter binding survives Caps Lock without the
+	 * sheet needing a second row for the capital. Non-letters are
+	 * unaffected: xkb_keysym_to_lower() is the identity on them. */
+	return xkb_keysym_to_lower(sym) == b->sym;
+}
+
+/* Exact modifiers first, then a subset -- see common/keybindings.h for
+ * why neither pass alone is correct. */
 static bool handle_keybinding(struct novi_server *server, uint32_t modifiers,
 		xkb_keysym_t sym) {
-	if (modifiers & WLR_MODIFIER_ALT) {
-		switch (sym) {
-		case XKB_KEY_Escape:
-			/* Not part of RFC 0001's spec -- kept as a development/
-			 * test convenience for exiting the compositor cleanly
-			 * under QEMU, where there's no other way to do so yet. */
-			wl_display_terminate(server->wl_display);
-			return true;
-		case XKB_KEY_Tab:
-			cycle_toplevel(server, true);
-			return true;
-		case XKB_KEY_ISO_Left_Tab:
-			/* Most keyboard layouts report Shift+Tab as this keysym,
-			 * not as Tab with the shift modifier bit set. */
-			cycle_toplevel(server, false);
-			return true;
-		case XKB_KEY_space:
-			/* RFC 0001 decision 7: global search/launcher overlay.
-			 * novi-launcher is a separate layer-shell client (overlay
-			 * layer, exclusive keyboard interactivity) spawned fresh
-			 * each time, not toggled -- it exits itself on Escape or
-			 * Enter, so double-spawning only happens if Alt+Space is
-			 * pressed again while one is already open, an edge case
-			 * not worth extra state for yet. */
-			spawn(getenv("NOVI_LAUNCHER") ?
-				getenv("NOVI_LAUNCHER") : NOVI_DEFAULT_LAUNCHER);
-			return true;
-		default:
-			break;
-		}
-	}
-	if (modifiers & WLR_MODIFIER_LOGO) {
-		/* RFC 0001 decision 7: Super+[1-9] switch workspace,
-		 * Super+Shift+[1-9] move the focused window to one -- checked
-		 * here, before the switch below, rather than as switch cases:
-		 * workspace_digit_for_keysym() already covers both a digit's
-		 * shifted and unshifted keysym (see its own comment for why
-		 * that's required at all), so this one check replaces what
-		 * would otherwise need to be 18 separate case labels. */
-		int workspace_n = workspace_digit_for_keysym(sym);
-		if (workspace_n != 0) {
-			if (modifiers & WLR_MODIFIER_SHIFT) {
-				move_focused_to_workspace(server, workspace_n);
-			} else {
-				switch_workspace(server, workspace_n);
+	unsigned held = novi_mods_from_wlr(modifiers);
+
+	for (int exact = 1; exact >= 0; exact--) {
+		for (size_t i = 0; i < NOVI_BINDINGS_COUNT; i++) {
+			const struct novi_binding *b = &NOVI_BINDINGS[i];
+			if (exact ? (b->mods != held)
+					: ((b->mods & held) != b->mods)) {
+				continue;
 			}
+			/* While locked, only rows that say so. The flag is on the
+			 * row rather than in a branch here, so "what works on the
+			 * lock screen" is answered where the bindings are. */
+			if (server->locked && !(b->flags & NOVI_BIND_WHEN_LOCKED)) {
+				continue;
+			}
+			int digit = 0;
+			if (!binding_key_matches(b, sym, &digit)) {
+				continue;
+			}
+			run_action(server, b->action, digit);
 			return true;
-		}
-		switch (sym) {
-		case XKB_KEY_Return:
-			spawn(getenv("NOVI_TERMINAL") ?
-				getenv("NOVI_TERMINAL") : NOVI_DEFAULT_TERMINAL);
-			return true;
-		case XKB_KEY_q:
-		case XKB_KEY_Q:
-			close_focused_toplevel(server);
-			return true;
-		case XKB_KEY_l:
-		case XKB_KEY_L:
-			/* RFC 0001 decision 7: session lock. novi-lockscreen sets
-			 * server->locked itself once its surface actually maps
-			 * (server_new_layer_surface()'s namespace check) rather
-			 * than this setting it directly -- if the client fails to
-			 * start, or refuses to lock because no password is set
-			 * (see novi-lockscreen/main.c), the compositor should never
-			 * believe it's locked when no real lock surface exists to
-			 * back that up. */
-			spawn(getenv("NOVI_LOCK") ? getenv("NOVI_LOCK") : NOVI_DEFAULT_LOCK);
-			return true;
-		case XKB_KEY_Escape:
-			/* Escape, not a letter: it is the one key that already
-			 * means "get me out of this" everywhere else in this
-			 * desktop, and no shifted form of it can collide the way
-			 * Super+Shift+digit did (see shifted_digit() above). */
-			spawn(getenv("NOVI_POWER_MENU") ?
-				getenv("NOVI_POWER_MENU") : NOVI_DEFAULT_POWER_MENU);
-			return true;
-		case XKB_KEY_period:
-			/* RFC 0001 decision 7: symbol picker. Same spawn-fresh-
-			 * overlay pattern as Alt+Space above, just a different
-			 * argv -- novi-launcher decides what that means. */
-			spawn(getenv("NOVI_SYMBOL_PICKER") ?
-				getenv("NOVI_SYMBOL_PICKER") : NOVI_DEFAULT_SYMBOL_PICKER);
-			return true;
-		default:
-			break;
 		}
 	}
 	return false;
@@ -970,38 +1048,29 @@ static void keyboard_handle_key(
 
 	bool handled = false;
 	uint32_t modifiers = wlr_keyboard_get_modifiers(keyboard->wlr_keyboard);
-	/* While locked, no compositor keybinding fires at all -- every key
-	 * just falls through to the final wlr_seat_keyboard_notify_key()
-	 * below, which delivers only to whatever holds seat keyboard focus.
-	 * That's always novi-lockscreen's own surface while locked (it
-	 * grabbed focus on map, and focus_toplevel()'s own guard stops
-	 * anything from stealing it back) -- so this is the other half of
-	 * making Super+L a real lock, not just an overlay: without this,
-	 * Super+Q or another Alt+Space while "locked" would still run,
-	 * since handle_keybinding() normally runs before any focus check at
-	 * all. See novi_server.locked's own comment for the full picture. */
-	if (!server->locked &&
-			(modifiers & (WLR_MODIFIER_ALT | WLR_MODIFIER_LOGO)) &&
-			event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
-		/* If Alt or Super (Logo) is held down and this key was
-		 * _pressed_, attempt to process it as a compositor keybinding
-		 * before ever considering passing it to the focused client. */
+
+	/* ONE call, for every binding, with no modifier gate in front of
+	 * it. There used to be three blocks here -- an Alt/Super-gated
+	 * loop, a PrintScreen loop because it takes no modifier, and a
+	 * media-key loop because those take no modifier AND have to run
+	 * while locked. Each new binding that did not fit the previous
+	 * block's shape grew another block, and the lock policy ended up
+	 * spread across all three.
+	 *
+	 * handle_keybinding() answers all of it from common/keybindings.h
+	 * now: a row's modifiers decide whether it needs Alt or Super or
+	 * nothing, and NOVI_BIND_WHEN_LOCKED decides whether it survives
+	 * the lock screen. Refusing everything else while locked is the
+	 * other half of making Super+L a real lock rather than an overlay
+	 * -- without it, Super+Q or Alt+Space would still run, because
+	 * bindings are dispatched before any focus check at all. Anything
+	 * not handled falls through to the notify_key() below, which
+	 * delivers only to whatever holds seat keyboard focus, and while
+	 * locked that is always novi-lockscreen's own surface. See
+	 * novi_server.locked's own comment for the full picture. */
+	if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
 		for (int i = 0; i < nsyms; i++) {
 			if (handle_keybinding(server, modifiers, syms[i])) {
-				handled = true;
-			}
-		}
-	}
-
-	if (!server->locked && !handled &&
-			event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
-		/* PrintScreen needs no modifier (see NOVI_DEFAULT_SCREENSHOT's
-		 * comment) so it can't live inside the Alt/Super-gated loop
-		 * above -- check it unconditionally instead. */
-		for (int i = 0; i < nsyms; i++) {
-			if (syms[i] == XKB_KEY_Print) {
-				spawn(getenv("NOVI_SCREENSHOT") ?
-					getenv("NOVI_SCREENSHOT") : NOVI_DEFAULT_SCREENSHOT);
 				handled = true;
 			}
 		}
@@ -3109,6 +3178,17 @@ static void server_new_xdg_popup(struct wl_listener *listener, void *data) {
 }
 
 int main(int argc, char *argv[]) {
+	/* Before anything can be spawned. See reap_children() for why this
+	 * exists and what it cost to not have it. */
+	struct sigaction sa_chld = {0};
+	sa_chld.sa_handler = reap_children;
+	sa_chld.sa_flags = SA_RESTART | SA_NOCLDSTOP;
+	sigemptyset(&sa_chld.sa_mask);
+	if (sigaction(SIGCHLD, &sa_chld, NULL) != 0) {
+		wlr_log_errno(WLR_ERROR, "could not install the SIGCHLD handler -- "
+			"spawned children will accumulate as zombies");
+	}
+
 	wlr_log_init(WLR_DEBUG, NULL);
 	char *startup_cmd = NULL;
 

@@ -254,6 +254,7 @@ novi-state health                 # are the services actually running?
 novi-hwdetect --report            # what hardware was found, what loaded
 pkg install novi-desktop          # the Wayland desktop, offline from the ISO
 pkg install novi-devel            # gcc, make, pkg-config, headers
+pkg install python                # CPython 3.11, with ssl (RFC 0026, 0027)
 novi-install install --disk /dev/vda   # install to the qcow2 (with --disk)
 ```
 
@@ -661,6 +662,10 @@ BUG_REPORT_URL="https://github.com/newvantageco/novi/issues"
       wheel to scroll, click a device to open it or its glyph to eject
 - [x] Notifications — a datagram socket and a toast, no message bus; the
       system can finally say one sentence (RFC 0024)
+- [x] Python — CPython 3.11 against musl, as a package; the first scripting
+      language this system has had (RFC 0026)
+- [x] `import ssl` — OpenSSL 3.5 LTS as a package, the base image still
+      TLS-free and the package trust root still static (RFC 0027)
 - [x] The design language, implemented — Inter for language and JetBrains
       Mono for machine values, one shared token header, a real desktop
       background instead of a flat fill

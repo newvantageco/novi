@@ -12,6 +12,7 @@
  * are simple enough that the code IS the description.
  */
 #include <math.h>
+#include <stddef.h>  /* NULL -- the volume glyph tolerates a null ctx */
 
 #include "icons.h"
 
@@ -285,6 +286,90 @@ double novi_warn_coverage(double x, double y, const void *ctx) {
 	double dot = novi_stroke_coverage(sqrt(dx * dx + dy * dy), WARN_DOT_HALF);
 	if (dot > best) {
 		best = dot;
+	}
+	return best;
+}
+
+/* ── The volume glyph ─────────────────────────────────────────────────
+ *
+ * A speaker, and either the sound coming out of it or a cross where
+ * that sound would be. Same stroked-outline treatment as every other
+ * glyph on this bar, so it does not read as a different family of
+ * icon sitting next to them.
+ *
+ * The body is a CLOSED POLYLINE through Lucide's own six points, not
+ * a rounded box unioned with a triangle. The union is the obvious way
+ * to build a speaker and it is wrong here for a specific reason: the
+ * throat and the cone meet at a shoulder, and two shapes overlapping
+ * at that shoulder each draw their own edge through the join --
+ * visible at this size as a hairline scar across the middle of the
+ * speaker. A polyline has no interior edges because there is only one
+ * shape.
+ */
+static const double VOL_BODY[VOL_BODY_POINTS][2] = {
+	{ -0.8, -5.5 },
+	{ -4.7, -2.3 },
+	{ -7.8, -2.3 },
+	{ -7.8,  2.3 },
+	{ -4.7,  2.3 },
+	{ -0.8,  5.5 },
+};
+
+double novi_volume_coverage(double x, double y, const void *ctx) {
+	const struct vol_glyph *g = ctx;
+	double cx = VOL_ICON_W / 2.0;
+	double cy = VOL_ICON_H / 2.0;
+	double dx = x - cx;
+	double dy = y - cy;
+	double half_stroke = VOL_ICON_STROKE / 2.0;
+
+	/* The body, as the nearest of its six edges. The modulo closes the
+	 * polygon: the last segment runs from point 5 back to point 0, and
+	 * leaving it out opens the speaker's flat left end into a C. */
+	double d = seg_distance(dx, dy,
+		VOL_BODY[VOL_BODY_POINTS - 1][0], VOL_BODY[VOL_BODY_POINTS - 1][1],
+		VOL_BODY[0][0], VOL_BODY[0][1]);
+	for (int i = 0; i + 1 < VOL_BODY_POINTS; i++) {
+		double e = seg_distance(dx, dy, VOL_BODY[i][0], VOL_BODY[i][1],
+			VOL_BODY[i + 1][0], VOL_BODY[i + 1][1]);
+		if (e < d) {
+			d = e;
+		}
+	}
+	double best = novi_stroke_coverage(d, half_stroke);
+
+	if (g == NULL) {
+		return best;
+	}
+
+	if (g->muted) {
+		/* Two crossed segments to the right of the cone. Drawn instead
+		 * of the arcs, never alongside them. */
+		double mx = dx - VOL_X_CX;
+		double a = seg_distance(mx, dy, -VOL_X_HALF, -VOL_X_HALF,
+			VOL_X_HALF, VOL_X_HALF);
+		double b = seg_distance(mx, dy, -VOL_X_HALF, VOL_X_HALF,
+			VOL_X_HALF, -VOL_X_HALF);
+		double cross = novi_stroke_coverage(a < b ? a : b, half_stroke);
+		return cross > best ? cross : best;
+	}
+
+	/* The arcs, centred on the cone's tip and opening to the right --
+	 * the mirror of the wifi fan's test, which opens upward. `dx >=
+	 * slope * r` is what keeps them arcs rather than full rings. */
+	double ax = dx - VOL_TIP_X;
+	double r = sqrt(ax * ax + dy * dy);
+	if (ax >= VOL_FAN_SLOPE * r) {
+		static const double radii[2] = { VOL_ARC1, VOL_ARC2 };
+		for (unsigned i = 0; i < 2; i++) {
+			if (!(g->arcs & (1u << i))) {
+				continue;
+			}
+			double arc = novi_stroke_coverage(r - radii[i], half_stroke);
+			if (arc > best) {
+				best = arc;
+			}
+		}
 	}
 	return best;
 }

@@ -42,6 +42,12 @@ LIBEVDEV_VERSION="1.13.3"
 MTDEV_VERSION="1.1.7"
 LIBINPUT_VERSION="1.26.2"
 LIBDRM_VERSION="2.4.122"
+# Mesa: the GL stack. 24.2 is the release contemporary with wlroots
+# 0.18 / libdrm 2.4.122 / Wayland 1.23 above -- and the era matters
+# more than newness here, because Mesa's driver set has been moving
+# toward a hard Rust dependency and toward LLVM for more of itself,
+# and neither is a thing this cross-toolchain has.
+MESA_VERSION="24.2.8"
 SEATD_VERSION="0.9.3"
 LIBDISPLAY_INFO_VERSION="0.2.0"
 WLROOTS_VERSION="0.18.0"
@@ -104,6 +110,30 @@ CACERT_SHA256="ab3ee3651977a4178a702b0b828a4ee7b2bbb9127235b0ab740e2e15974bf5db"
 # Both are packages, never base image.
 OPENSSH_VERSION="9.9p2"
 GIT_VERSION="2.47.1"
+
+# OpenSSL (RFC 0027). A PACKAGE, never the base image, and never on
+# the package-verification path -- novi-verify stays static, ~10 KB and
+# OpenSSL-free, which is what RFC 0006's rule actually protects. 3.5 is
+# an LTS branch, which is the right shape for a distribution: a
+# security-fix stream that does not move APIs under the things linking
+# it.
+OPENSSL_VERSION="3.5.8"
+
+# CPython. Until this, the system had no scripting language at all --
+# not a slow one, none: no Python, no Perl, no Ruby. Every tool in the
+# image is C or BusyBox ash.
+#
+# 3.11 specifically, and the reason is the build rather than the
+# language. Cross-compiling CPython needs a working interpreter of the
+# SAME major.minor on the build host (--with-build-python; it runs
+# `setup.py`, freezes modules and byte-compiles the standard library).
+# Debian/Ubuntu's `python3` is 3.11 or 3.12 depending on release; 3.11
+# is the version this build host has as `python3` and the one available
+# as a distro package on the widest range of hosts this project asks
+# people to build on. Picking a version whose interpreter the host does
+# not have means building a native CPython first, which is a second
+# multi-minute build for no gain.
+PYTHON_VERSION="3.11.16"
 
 # Full-disk encryption (RFC 0018). The kernel has had CONFIG_DM_CRYPT
 # since the config was written and nothing could create a container.

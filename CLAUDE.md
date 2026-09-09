@@ -92,6 +92,18 @@ below for why `/build` is hardcoded and unrelated to the repo checkout path.
   `43-devtools-repo.sh`. Packages, never base. Also builds `sshd`
   into `/build/ssh-test/` as the test peer, deliberately not into the
   image
+- `bash build/32-openssl.sh` — OpenSSL 3.5 LTS (RFC 0027), into
+  `/build/openssl-target` for linking and into the `openssl` package
+  for the target. Never `${ROOTFS}`: the base image still ships no TLS
+  library, and `novi-verify` is still static TweetNaCl. It exists
+  because CPython's `ssl` accepts no other implementation
+- `bash build/38-python.sh` — CPython, cross-compiled against musl and
+  staged into `/build/stage-devtools` for `43-devtools-repo.sh` to
+  publish (RFC 0026). A package, never base. It reads zlib, libffi and
+  expat out of `${ROOTFS}`, so it must run before
+  `41-desktop-split.sh` takes them out, and it needs a **`python3.11`
+  on the build host** — cross-compiling CPython runs an interpreter of
+  the same major.minor during `make`
 - **`bash build/16-s6-rc-db.sh` after ANY change under `init/`** (see below),
   then `bash scripts/mkinitramfs.sh --output build/initramfs.cpio.gz` and
   `bash scripts/mkiso.sh` to get it into a bootable image
@@ -429,6 +441,287 @@ that wanted none is not there to ask.
   two pixels into the terminal. Measure the geometry off a screendump
   before concluding the code is wrong.
 
+## Architecture: Mesa, and a default chosen by measurement
+
+RFC 0025 (`docs/rfcs/0025-mesa.md`). EGL, GLESv2 and GBM, softpipe and
+virgl, no LLVM. Before this there was no GL stack at all -- not a slow
+one, none -- and no program wanting OpenGL could run here in principle.
+
+- **Both renderers ship and the default is MEASURED.** wlroots'
+  auto-detection picks gles2 whenever the DRM backend reports a render
+  node (`render/wlr_renderer.c` gates the pixman branch on
+  `!has_render_node`), on the assumption that a render node means
+  hardware acceleration. In a plain QEMU it does not: virtio_gpu offers
+  `/dev/dri/renderD128` and what answers is softpipe. Measured under
+  identical load, novi-shell's own CPU over 20s: **pixman 363 ticks,
+  gles2/softpipe 1998 -- 5.5x more.** Software rasterisation THROUGH a
+  GL API is strictly more work than pixman drawing 2D directly. The
+  default is `display.renderer = pixman` and it is a KEY, because on
+  real hardware the answer inverts and nobody here can measure that.
+- **`libgallium` is invisible to the dependency graph.** libEGL loads
+  it by name at runtime, so nothing NEEDs it and `closure()` cannot
+  reach it -- the same dlopen blind spot as libdrm_amdgpu. It is
+  claimed by `PACKAGE_TABLE`, which is exactly why that table exists
+  beside the graph.
+- **Mesa is the first C++ in this image**, so libgallium names
+  `libstdc++.so.6` and `libgcc_s.so.1` and nothing shipped them. They
+  live in the toolchain's `lib64`, which musl's loader never searches
+  (RFC 0015's trap again). RFC 0015's `gcc` package already shipped
+  those exact paths, so they became their own `gcc-libs` package and
+  `gcc` depends on it -- one path, one owner.
+- **zlib moved from stage 21 into the library stage**, because
+  libgallium links it and Mesa has to precede wlroots. A library built
+  after its consumer is invisible in a warm tree and fatal in a clean
+  one: the novi-launcher/fcft bug and the novi-panel/libnl bug, for a
+  THIRD time. `21-imagelibs.sh` now fails loudly if zlib is missing.
+- **`needs_exe_wrapper = true` in the meson cross file.** Meson
+  otherwise auto-detects, correctly concludes it can run target
+  binaries directly (this host has `/lib/ld-musl-x86_64.so.1` symlinked
+  at the sysroot's libc), and runs them without the wrapper's
+  `LD_LIBRARY_PATH` -- so a C++ target binary died on "Error loading
+  shared library libstdc++.so.6" while g++ worked perfectly, reported
+  as "Executables created by cpp compiler ... are not runnable".
+  Exporting `LD_LIBRARY_PATH` globally was rejected: it would apply to
+  the host's own glibc-linked meson, ninja and python.
+- **Mesa's build needs Python `mako` on the BUILD HOST.** Checked up
+  front, like `05-kernel.sh` checks for `depmod`.
+- **`-Dglx=disabled` means no desktop `libGL`.** EGL + GLESv2 is what
+  wlroots wants and is NOT enough for most existing OpenGL games. Do
+  not let the word "Mesa" imply a gaming stack. (EGL itself DOES
+  report `client APIs: OpenGL OpenGL_ES`, so the capability is there;
+  what is missing is the `libGL.so.1` an existing program links
+  against.)
+- **virgl ships UNVERIFIED, and so does everything else that needs a
+  GPU.** Checked rather than assumed: this QEMU offers
+  `virtio-gpu-pci` and no `virtio-gpu-gl`, there is no virglrenderer
+  on the host, and the host has no `/dev/dri`. softpipe is the only
+  driver here that has ever run. Anything claiming otherwise about
+  this stack is claiming more than has been tested.
+- **`$14` in POSIX sh is `$1` followed by `4`.** A benchmark reading
+  utime+stime out of `/proc/<pid>/stat` with `set --` and `$14`
+  silently measured the pid minus itself and reported 0 CPU ticks
+  twice, which read as "the load never reached the compositor".
+  `${14}`.
+
+## Architecture: a GL client, and the third list
+
+`novi-glinfo` (build/37) is the client half of RFC 0025. The compositor
+was verified end to end and nothing at all was known about a CLIENT,
+which takes a different path -- EGL's Wayland platform and buffer
+sharing back to the compositor -- and is the path everything except
+novi-shell will ever take.
+
+- **It works, under BOTH renderers, and the reason matters more than
+  the result.** A compositor needs a GL renderer to import a client's
+  GPU buffers, so the obvious worry was that RFC 0025's measured-best
+  default (`pixman`) made GL applications impossible. It does not
+  here: softpipe has no GPU, so Mesa renders into shared memory and
+  hands over an ordinary `wl_shm` buffer that any renderer can
+  composite -- no dmabuf traffic appears in the log under either
+  setting. **On real hardware that inverts**: a client would produce
+  GPU buffers needing dmabuf import, which pixman cannot do. Expect
+  `display.renderer = pixman` on a machine with a working driver to
+  cost GL clients, not just compositor speed. Reasoned from the
+  mechanism, not measured -- nothing here has a GPU.
+- **`EGL client APIs` says `OpenGL OpenGL_ES`.** Desktop GL IS
+  available through EGL despite `-Dglx=disabled`; what is missing is
+  the `libGL.so.1` an existing program links against, not the
+  capability. Do not repeat the stronger claim.
+- **META_PACKAGES is a THIRD list a desktop client must be added to**,
+  after `DESKTOP_BINARIES` and `PACKAGE_TABLE` -- and it is the one
+  that fails SILENTLY. novi-glinfo was built, packaged, indexed and
+  signed correctly and simply was not on the machine:
+  `novi-glinfo: not found` on a desktop that had just installed the
+  desktop. The other two fail loudly (a missing seed fires the
+  straddle check; a missing table entry is a hard "no package owns
+  these files"). pkgsplit now derives a check from the table -- every
+  `OS`-category package must be named by some meta-package -- and
+  refuses to run otherwise. Verified by removing the entry and
+  watching it fail, because a check nobody has seen fail is a check
+  nobody knows works.
+- **`-Wl,-rpath-link` for the FOURTH time** (nftables, git/curl, the
+  meson cross file, now here). `libEGL.so` names libgallium, libgbm,
+  libglapi, libexpat, libdrm and libwayland-server in its DT_NEEDED,
+  and `-L` does not resolve those: the link fails on `undefined
+  reference to XML_ErrorString` and `wl_resource_post_error`, symbols
+  belonging to libraries sitting in the rootfs, from a libEGL that
+  exports none of them. The error names the wrong thing entirely.
+  `lib-meson-cross.sh` sets this globally for meson builds; the client
+  Makefiles link with `$(CC)` directly and so each one rediscovers it.
+
+## Architecture: Python, and the module it does not have
+
+RFC 0026 (`docs/rfcs/0026-python.md`). CPython 3.11.16 as the `python`
+package — the first scripting language this system has ever had.
+
+- **`ssl` comes from OpenSSL, which is a package (RFC 0027).** CPython's
+  `_ssl` and `_hashlib` are written against OpenSSL *specifically* —
+  mbedTLS (RFC 0020) and wolfSSL (RFC 0021) are both in this build and
+  CPython has a backend for neither, and LibreSSL has been unsupported
+  since CPython 3.10. It shipped without `ssl` first, on the vague
+  reading of "no OpenSSL". **The precise reading is what matters and
+  this project has now had to recover it three times**: RFC 0006 is
+  about the TRUST PATH (checking a signature must not need TLS —
+  `novi-verify` is still static TweetNaCl), RFC 0020 is about the BASE
+  IMAGE (no TLS library in the console base — still true, checked with
+  `find`). Neither forbids a package. RFC 0021 made the identical
+  correction for wolfSSL. Get the rule right before invoking it.
+- **A stub `ssl.py` that raises a friendlier error was rejected**, and
+  still would be. It reads better once and lies permanently:
+  `importlib.util.find_spec("ssl")` would start returning a spec, so
+  code that feature-detects properly gets the wrong answer. A missing
+  module should be missing.
+- **`/etc/ssl/cert.pem` is a symlink shipped by `ca-certificates`, and
+  without it Python verifies against NOTHING.** OpenSSL's default
+  verify paths are `/etc/ssl/cert.pem` and the *hash-indexed*
+  directory `/etc/ssl/certs`; the CA package ships one bundle file in
+  that directory, which the hash lookup cannot use.
+  `create_default_context().cert_store_stats()` returned `{'x509': 0}`
+  with the store installed and correct. **curl is unaffected** (bundle
+  path compiled in), which is exactly what makes it look like a Python
+  bug. 143 certificates after the fix.
+- **This system carries three TLS implementations now** — mbedTLS
+  (curl, git), wolfSSL (wpa_supplicant), OpenSSL (Python) — each
+  because its consumer accepts only it. All three are packages; the
+  base image has none.
+- **The build host needs `python3.11`, not just any python.**
+  Cross-compiling CPython RUNS Python during `make` (freezing
+  importlib, generating C, byte-compiling the stdlib), and
+  `--with-build-python` requires an exact major.minor match — the
+  marshal format differs between minors. Checked up front like
+  `depmod` and `mako`.
+- **`harden_flags()` cannot be used here, and no LDFLAGS variable can
+  carry `-pie`.** `Makefile.pre.in`'s `LDSHARED` and `BLDSHARED` both
+  append `$(PY_CORE_LDFLAGS)` = `CONFIGURE_LDFLAGS` + `LDFLAGS_NODIST`,
+  so every LDFLAGS-shaped variable reaches ~40 `-shared` links. **gcc
+  given `-shared -pie` does not warn**: it drops the `-shared`, links
+  an executable, and dies on `undefined reference to 'main'` from
+  `Scrt1.o`. `LINKFORSHARED` is the only variable used solely on the
+  two executable links, so `-pie` goes there — carrying its
+  configure-chosen `-Xlinker -export-dynamic` through, not replacing
+  it.
+- **CPython prints missing modules and exits 0.** Correct for a
+  language that runs everywhere, and exactly the failure shape this
+  repo keeps getting caught by. `38-python.sh` diffs that list against
+  the set it expects and reports the rest loudly — not fatally, since
+  the module list shifts between point releases. Its first version
+  reported twelve words of English as missing modules: the block ends
+  with the sentence "To find the necessary bits, look in setup.py...",
+  not a blank line, so a `sed` range to `/^$/` swallowed it.
+- **`sys.implementation._multiarch` says `x86_64-linux-gnu`** on musl,
+  so extension modules are named `*.cpython-311-x86_64-linux-gnu.so`.
+  Cosmetically wrong, functionally harmless (the interpreter computes
+  the same suffix it built with). Do not "fix" it as a rename; it
+  matters only when binary wheels become possible, and there is no pip.
+- **`idle3` is deleted from the staged tree, not merely unbuilt.**
+  `make install` writes the launcher whether or not tkinter exists, and
+  a command that cannot start is worse than a command that is absent.
+- **When a test reports a bug the code says was fixed, check the test
+  is running the artifact you think it is.** `pkg sync` failed on a
+  live boot with `/run/live` missing while `/proc/mounts` showed it
+  mounted — RFC 0003's buried-mount signature exactly. Half an hour
+  went into mount IDs and `s6-linux-init -N` before the cause: the
+  QEMU launcher pointed at a five-day-old `/build/initramfs.cpio.gz`
+  rather than the `build/initramfs.cpio.gz` just written in the repo.
+  The old image had the bug; the shipped one does not.
+
+## Architecture: the keys, and the sheet that lists them
+
+`common/keybindings.h` is every keyboard shortcut this desktop has,
+once. novi-shell DISPATCHES from it; `novi-launcher --keys` (Super+/)
+DISPLAYS it.
+
+- **Undiscoverable keys are unusable keys.** Every binding lived only
+  in novi-shell's own switch statement, so a person who booted this
+  image had no way to learn Alt+Space, Super+L or Super+Escape short of
+  reading the source. GNOME and Pop!_OS both ship exactly this window;
+  it was the most conspicuous thing missing from this desktop.
+- **A sheet maintained separately from the bindings drifts, and a
+  drifted sheet is worse than none** -- it is a document that
+  confidently tells you the wrong key. Same argument as
+  `restore-build-inputs.sh` restoring what the MANIFEST names rather
+  than "everything except a blocklist": a derived answer cannot rot.
+  So there is no display-only row. The two workspace rows carry
+  `NOVI_BIND_DIGIT_RANGE` and drive dispatch like every other row,
+  rather than sitting beside a hand-written special case.
+- **A shortcut sheet reachable only by a shortcut is a bootstrapping
+  paradox.** It is also `usr/share/novi/apps/shortcuts.app`, so the
+  Apps button reaches it with a mouse and no prior knowledge -- which
+  is the entire audience. That is the KDE lesson (never hide a feature
+  behind only the thing it documents); the grouping and type discipline
+  are elementary's; the sheet itself is GNOME's and Pop!_OS's.
+- **Matching is exact-modifiers-then-subset, and neither pass alone
+  works.** Subset alone cannot tell Super+3 from Super+Shift+3, so
+  moving a window to a workspace would merely switch to it. Exact alone
+  breaks Alt+Shift+Tab, which most layouts deliver as `ISO_Left_Tab`
+  with the shift bit ALSO set. Letters are compared through
+  `xkb_keysym_to_lower()` so Caps Lock does not need a second row.
+- **`NOVI_BIND_WHEN_LOCKED` is on the row, not in a branch.** "Which
+  keys work on the lock screen" is a security question, and one
+  answered by control flow three functions away is one nobody re-reads.
+- **The header may depend only on what BOTH binaries have.**
+  novi-launcher links xkbcommon and no wlroots, so the modifier bits
+  are ours and novi-shell maps them onto `WLR_MODIFIER_*` at the point
+  of comparison.
+- **The sheet's rows are 32px, not the launcher's 40.** Sixteen 40px
+  rows plus header and shadows come to ~780px, which does not fit a
+  1366x768 laptop -- a very common panel nobody would think to test on.
+  `CARD_MAX_HEIGHT` is taken over BOTH modes, because the sheet has
+  more rows and shorter ones, so neither count nor height alone gives
+  the right answer.
+
+## Architecture: nothing reaped the compositor's children
+
+`spawn()` forked and never waited, and novi-shell installed no SIGCHLD
+handler, so **every** launcher, symbol picker, screenshot, power menu
+and terminal left a zombie for the life of the session. The comment in
+`spawn()` actively said otherwise -- that `setsid()` meant the child's
+"lifetime isn't tied to being a direct child novi-shell has to reap" --
+which is wrong: setsid changes the SESSION, not the parent. A comment
+asserting the bug away is how it survived.
+
+Invisible while spawning was a rare, deliberate act. The volume keys
+changed the arithmetic: they spawn on every press, so the leak went
+from a handful per session to one per keystroke. **Measured on a booted
+machine: twelve presses of volume-up produced exactly twelve zombies;
+after the fix, fifteen presses produced none.**
+
+- **A handler with `waitpid(WNOHANG)`, not `signal(SIGCHLD, SIG_IGN)`.**
+  SIG_IGN is shorter and also works, but it makes every future
+  `waitpid()` in the process fail with ECHILD -- a trap laid for
+  whoever next wants a child's exit status.
+- **The handler LOOPS.** Signals are not queued, so several children
+  exiting together deliver one SIGCHLD; reaping a single child leaks
+  the rest, which for a key that repeats is the same bug more slowly.
+- `SA_RESTART` so the event loop's `poll()` resumes instead of
+  returning EINTR, and `errno` is saved and restored around the reap.
+
+## Architecture: the QEMU test harness lies quietly
+
+`send-key` returns an error for an unknown QKeyCode and **the harness
+was discarding the response**, so an invalid keycode pressed NOTHING
+while the test read an unchanged screen as "the feature is broken".
+That produced three separate false failures on bindings that were fine,
+and cost more time than any real bug in the same session.
+
+- **The names are not the obvious ones**: `shift`, `ctrl`, `alt` (NOT
+  `shift_l`/`ctrl_l`/`alt_l`), `dot` (NOT `period`), `meta_l` (NOT
+  `super`, which CLAUDE.md already recorded and which is the same trap
+  a second time). `spc`, `ret`, `esc`, `print`.
+- **Make the harness raise on a QMP error.** This is the fix that
+  generalises; the keycode list will be got wrong again.
+- **Modifiers do not persist across separate QMP commands.** Holding
+  one in `input-send-event` and pressing the key in a second call
+  delivers an unmodified keypress -- verified by watching plain `2`s
+  arrive in a terminal where `@` was expected. Send the whole chord in
+  one command, or use `send-key` with all its keys at once.
+- **Check the observable answers the question.** "Did the window move
+  to another workspace" was first tested by looking at the TASKBAR,
+  which lists every toplevel regardless of workspace and therefore
+  could not have shown the difference either way.
+- The screenshot key writes `/root/screenshot-*.bmp`, not `.png` --
+  a test that globbed `*.png` reported a working binding as broken.
+
 ## Architecture: a launcher has to answer "what is installed"
 
 `novi-launcher` showed nothing on an empty query and exactly one match
@@ -548,6 +841,68 @@ base image, `novi-notifyd` drawing toasts on the desktop.
   while the table's sweep moves them out, and the straddle check fires
   on fourteen unrelated libraries: a correct error pointing nowhere
   near the cause.
+
+## Architecture: the keys above the number row
+
+`novi-volume` (base image) over `amixer`, bound to the XF86Audio*
+keysyms by novi-shell, with a speaker glyph in the panel. ALSA had
+been in this image since RFC 0011 and the only way to change the
+volume was to type a mixer control name at a shell.
+
+- **NEVER hardcode `Master`.** This file already recorded that QEMU's
+  emulated USB audio card invents `Audio Output Volume Control` where
+  `alsactl init` expects `Master Playback Volume`. A tool assuming the
+  standard name works on every real machine and fails on the only one
+  this project can test on, which is the worst way round.
+  `pick_control()` prefers Master/PCM/Speaker/Headphone and otherwise
+  takes the first control ALSA reports with `pvolume` in its
+  Capabilities — a control with only `pswitch` is a mute toggle with
+  nothing to turn.
+- **`amixer` inside the `while read` loop needs `</dev/null`.** Any
+  child that reads stdin inside a loop fed by a pipe eats the loop's
+  own input; the symptom is a control list that ends early for no
+  visible reason.
+- **Volume-up unmutes; volume-down does not.** Pressing the loud key
+  on a muted machine means "I want to hear this"; pressing the quiet
+  key does not, and unmuting on the way down makes the quiet key
+  briefly loud. Verified both ways.
+- **`set N` does not always read back N, and that is ALSA.** A
+  percentage is a position in the card's own raw range, so `set 40` on
+  a 64-step control lands on 41. `refresh` prints what the card holds,
+  never what was asked for.
+- **Media keys fire WHILE LOCKED**, unlike every other binding in
+  `handle_keybinding()`. Changing the volume discloses nothing and
+  unlocks nothing; refusing it means you cannot silence a machine you
+  have just locked and walked away from. Both halves were tested, and
+  the second is the one that could have gone wrong quietly: three
+  volume presses on the lock screen, then the **plain** password
+  unlocked on the first try — so the keys were swallowed, not typed
+  into the password field.
+- **The panel reads `/run/novi/volume`, and never forks amixer.** Same
+  published-state arrangement as the network interface (RFC 0009) and
+  the health verdict (RFC 0014); the panel repaints once a second and
+  a fork per repaint is what that pattern exists to avoid. The cost is
+  that `amixer` run by hand is not reflected until the next
+  `novi-volume` call. `rc.init` publishes once after `alsactl restore`
+  so the indicator exists before the first keypress — without it the
+  glyph appears the first time somebody changes the volume, which
+  reads as a bug in the indicator rather than as the absence of a
+  reading.
+- **Display only, like the health glyph.** Every click on this bar
+  OPENS something (Apps, settings, the power menu); a click that
+  toggled mute would be the one control there that changes the machine
+  instead of showing it.
+- **`mkvm.sh --display none` now attaches a sound card** on QEMU's
+  null audio backend. Without one the only thing a headless run can
+  check is that the code correctly says "no sound card", which is the
+  one answer that proves nothing.
+- **The icon host test earned its keep again**, and on both axes this
+  time: the glyph bled into the top and bottom border rows, then into
+  the left column, and the border assertion caught each in turn — a
+  speaker clipped flat just reads as a boxy speaker. It also failed on
+  a *bad probe of mine*: the muted cross reaches as far right as the
+  outer arc, so "muted draws no arc" probed at the arc's rightmost
+  point can never fail. Probe at 45 degrees instead.
 
 ## Architecture: the places sidebar, and polling /proc/mounts
 

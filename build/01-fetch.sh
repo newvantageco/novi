@@ -154,6 +154,7 @@ else
 fi
 fetch "https://gitlab.freedesktop.org/libinput/libinput/-/archive/${LIBINPUT_VERSION}/libinput-${LIBINPUT_VERSION}.tar.gz"
 fetch "https://gitlab.freedesktop.org/mesa/drm/-/archive/libdrm-${LIBDRM_VERSION}/drm-libdrm-${LIBDRM_VERSION}.tar.gz"
+fetch "https://archive.mesa3d.org/mesa-${MESA_VERSION}.tar.xz"
 fetch "https://gitlab.freedesktop.org/emersion/libdisplay-info/-/archive/${LIBDISPLAY_INFO_VERSION}/libdisplay-info-${LIBDISPLAY_INFO_VERSION}.tar.gz"
 fetch "https://gitlab.freedesktop.org/wlroots/wlroots/-/archive/${WLROOTS_VERSION}/wlroots-${WLROOTS_VERSION}.tar.gz"
 # xkeyboard-config: the runtime keyboard layout database (rules/symbols/
@@ -286,6 +287,13 @@ fetch_pinned "https://curl.se/ca/cacert-${CACERT_DATE}.pem" "${CACERT_SHA256}"
 # whole reason it is allowed in this image at all.
 fetch "https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-${OPENSSH_VERSION}.tar.gz"
 fetch "https://cdn.kernel.org/pub/software/scm/git/git-${GIT_VERSION}.tar.xz"
+
+# OpenSSL (RFC 0027). A package: it is what CPython's ssl module is
+# written against, and there is no other implementation it accepts.
+fetch "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz"
+
+# CPython (RFC 0026). A package, like every other developer tool here.
+fetch "https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tar.xz"
 
 # Full-disk encryption (RFC 0018). popt and json-c are cryptsetup's
 # hard dependencies; util-linux and LVM2 are enormous trees fetched for

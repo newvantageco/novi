@@ -41,9 +41,19 @@ chmod +x "${TOOLS}/bin/${TARGET_TRIPLE}-pkg-config"
 # during configure-time feature checks. Target arch == this build
 # host's arch, so musl's own loader can run them directly (it doubles
 # as its own ld.so) -- no QEMU user-mode emulation needed.
+# lib64 is on that path because the CROSS TOOLCHAIN's own runtime
+# libraries live there -- libstdc++.so.6 and libgcc_s.so.1 -- and
+# without it this wrapper could only run target binaries written in C.
+# Mesa is the first package here with any C++ in it, and meson's very
+# first act is a "can I run what the C++ compiler produces" sanity
+# check, which failed with "Executables created by cpp compiler
+# x86_64-linux-musl-g++ are not runnable" while g++ was working
+# perfectly. Same lib64 trap RFC 0015 records for the target: GCC
+# installs its runtime there and musl's loader looks only in
+# /lib:/usr/local/lib:/usr/lib.
 cat > "${TOOLS}/bin/${TARGET_TRIPLE}-exe-wrapper" <<WRAP
 #!/bin/sh
-export LD_LIBRARY_PATH="${ROOTFS}/usr/lib:\${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="${ROOTFS}/usr/lib:${TOOLS}/${TARGET_TRIPLE}/lib64:\${LD_LIBRARY_PATH:-}"
 exec "${ROOTFS}/lib/ld-musl-x86_64.so.1" "\$@"
 WRAP
 chmod +x "${TOOLS}/bin/${TARGET_TRIPLE}-exe-wrapper"
@@ -66,6 +76,23 @@ endian = 'little'
 
 [properties]
 sys_root = '${ROOTFS}'
+# Force every target binary meson wants to RUN through the exe_wrapper.
+#
+# Without this meson auto-detects, and auto-detection concludes it can
+# run them directly -- because this build host has
+# /lib/ld-musl-x86_64.so.1 symlinked at the sysroot's libc, so a
+# musl-linked x86_64 binary really does execute. It executes without
+# the wrapper's LD_LIBRARY_PATH, though, which is where the cross
+# toolchain's own lib64 runtime is named. A C++ target binary
+# therefore died on "Error loading shared library libstdc++.so.6"
+# while g++ was working perfectly, and meson reported it as
+# "Executables created by cpp compiler ... are not runnable".
+#
+# The alternative -- exporting LD_LIBRARY_PATH globally -- was
+# rejected: it would apply to the HOST's own glibc-linked meson,
+# ninja and python too, and pointing those at a directory full of musl
+# libraries is a much worse failure than the one being fixed.
+needs_exe_wrapper = true
 
 [built-in options]
 # The static linker only consults -L when resolving a DIRECTLY named

@@ -34,6 +34,7 @@ enum novi_icon_id {
 	ICON_EJECT,          /* files: take a volume out */
 	ICON_SEARCH,         /* launcher: the input line */
 	ICON_CALCULATOR,     /* launcher: an expression that evaluated */
+	ICON_KEYBOARD,       /* launcher: the keyboard-shortcut sheet */
 	NOVI_ICON_COUNT,
 };
 

@@ -80,6 +80,7 @@ DESKTOP_BINARIES = [
     "usr/bin/novi-view",
     "usr/bin/novi-lockscreen",
     "usr/bin/novi-screenshot",
+    "usr/bin/novi-glinfo",
     "usr/bin/foot",
     "usr/bin/footclient",
     "usr/bin/seatd",
@@ -170,6 +171,29 @@ PACKAGE_TABLE = [
      [r"^novi-notifyd$"]),
     ("novi-bg",          "OS",            "Desktop background",
      [r"^novi-bg$"]),
+    ("novi-glinfo",      "OS",            "What GL this machine actually has (RFC 0025)",
+     [r"^novi-glinfo$"]),
+    # Mesa. libgallium is the reason this entry cannot be left to the
+    # dependency graph: libEGL loads it by NAME at runtime, so nothing
+    # NEEDs it and closure() cannot see it -- the same dlopen blind
+    # spot as libdrm_amdgpu/nouveau/radeon, which is why the table
+    # claims what is ours rather than trusting reachability alone.
+    ("mesa",             "MESA",          "OpenGL ES and EGL implementation (softpipe, virgl)",
+     [r"^libEGL\.so", r"^libGLESv2\.so", r"^libgbm\.so",
+      r"^libglapi\.so", r"^libgallium-"]),
+    # The GCC runtime, as its OWN package rather than part of either
+    # mesa or the toolchain.
+    #
+    # Mesa is the first thing in the image with C++ in it, and RFC
+    # 0015's `gcc` package was already shipping these exact paths --
+    # /usr/lib/libstdc++.so.6* and /usr/lib/libgcc_s.so.1 -- so
+    # claiming them here without changing that would give one path two
+    # owners. 28-native-toolchain.sh drops them from `gcc` and depends
+    # on this instead. Splitting the runtime out from the compiler is
+    # what every distribution does, for exactly this reason: things
+    # need to RUN C++ far more often than they need to compile it.
+    ("gcc-libs",         "GCC",           "GCC runtime libraries (libstdc++, libgcc_s)",
+     [r"^libstdc\+\+\.so", r"^libgcc_s\.so"]),
 ]
 
 # Data directories that belong to a package but contain no ELF, so the
@@ -219,9 +243,47 @@ DATA_FILES = [
 META_PACKAGES = [
     ("novi-desktop", "OS", "The Novi desktop: compositor, panel, launcher, terminal",
      ["novi-shell", "novi-panel", "novi-launcher", "novi-settings", "novi-edit", "novi-files", "novi-view",
-      "novi-lockscreen", "novi-screenshot", "novi-notifyd", "novi-bg", "foot",
+      "novi-lockscreen", "novi-screenshot", "novi-notifyd", "novi-bg",
+      "novi-glinfo", "foot",
       "fonts-jetbrains-mono", "fonts-inter"]),
 ]
+
+
+def _check_meta_covers_first_party():
+    """Every first-party desktop program must be in a meta-package.
+
+    This is the THIRD list a new desktop client has to be added to --
+    DESKTOP_BINARIES seeds the closure, PACKAGE_TABLE claims the file,
+    and META_PACKAGES is what `pkg install novi-desktop` actually
+    pulls. The first two fail loudly when you forget them: a missing
+    seed fires the straddle check, and a missing table entry is a hard
+    "no package owns these files".
+
+    The third fails SILENTLY, which is why it needs this. novi-glinfo
+    was built, packaged, indexed and signed correctly, and then simply
+    was not on the machine -- `novi-glinfo: not found` on a desktop
+    that had just installed the desktop, with nothing anywhere saying
+    a package had been left out. Nobody would think to look here.
+
+    Derived from the table rather than a fourth hand-written list: the
+    "OS" category IS the marker for a first-party program, so this
+    cannot drift out of step with the thing it checks.
+    """
+    covered = set()
+    for _, _, _, deps in META_PACKAGES:
+        covered.update(deps)
+    missing = sorted(name for name, category, _, _ in PACKAGE_TABLE
+                     if category == "OS" and name not in covered)
+    if missing:
+        raise SystemExit(
+            "ERROR: these first-party desktop programs are packaged but no\n"
+            "       meta-package installs them, so `pkg install novi-desktop`\n"
+            "       would silently leave them off the machine:\n"
+            + "".join("         %s\n" % m for m in missing)
+            + "       Add them to META_PACKAGES in tools/pkgsplit/pkgsplit.py.")
+
+
+_check_meta_covers_first_party()
 
 EXTRA_PACKAGE_DESCRIPTIONS = {
     "fonts-jetbrains-mono": ("JETBRAINS_MONO", "JetBrains Mono, the default terminal font"),

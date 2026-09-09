@@ -81,3 +81,8 @@ ehthumbs.db
 *~
 *.bak
 .cache/
+
+# Python bytecode. tools/pkgsplit is imported directly when testing its
+# own self-checks, which leaves a __pycache__ next to the source.
+__pycache__/
+*.pyc

@@ -583,6 +583,20 @@ observe_key() {
         # to "never" -- a typo in this key should not silently disable
         # the thing it configures -- and this is where a person finds
         # out that is what happened.
+        # display.renderer is read at use time too -- by
+        # init/services/novi-shell/run, at the moment the compositor
+        # starts -- so nothing holds it, it cannot drift, and `apply`
+        # has nothing to converge. Which also means converge_key never
+        # runs to reject a typo, so the observer is the only place one
+        # can surface. Changing it takes effect on the next start of
+        # the compositor, not immediately: this is the one
+        # read-at-use-time key whose "use" is a process launch.
+        display.renderer)
+            case "$(state_get "$key")" in
+                pixman|gles2|auto) state_get "$key" ;;
+                *) printf 'unsupported' ;;
+            esac
+            ;;
         power.blank)
             case "$(state_get "$key")" in
                 off) printf 'off' ;;
@@ -918,6 +932,15 @@ converge_key() {
             ;;
         # Read when the idle period elapses, by novi-shell. Nothing to
         # converge; `apply` is where the typo is reported.
+        # Read when novi-shell starts. Nothing to converge; `apply` is
+        # where the typo is reported, and the new value applies at the
+        # compositor's next start.
+        display.renderer)
+            case "$want" in
+                pixman|gles2|auto) : ;;
+                *) die "$key: must be 'pixman', 'gles2' or 'auto', got '$want'" ;;
+            esac
+            ;;
         power.blank)
             case "$want" in
                 off) : ;;
@@ -1396,6 +1419,7 @@ Keys:
   users.<name>.shell              /bin/sh | absent  (declares the account)
   users.<name>.groups             wheel,video,input | none
   packages.<name>                 present | absent
+  display.renderer                pixman | gles2 | auto  (compositor renderer)
   power.blank                     <seconds> | off  (idle screen blank)
   power.governor                  performance | powersave | schedutil | ...
   storage.automount               on | off  (removable media -> /run/media)

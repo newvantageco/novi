@@ -179,6 +179,34 @@
  * true". When somewhere exists for it to lead, it should lead there. */
 #define HEALTH_FILE "/run/novi/health"
 #define HEALTH_GAP 10
+/* The volume indicator, between the health glyph and the network one.
+ * `novi-volume` publishes `<percent> <muted> <control>` here whenever
+ * it changes the level, which is the same published-state arrangement
+ * the network indicator uses for the interface each service chose --
+ * and it is why this costs no fork in a repaint that happens once a
+ * second. The cost is that a level changed by running `amixer` by
+ * hand is not reflected until the next novi-volume call; the keys and
+ * this panel are the only things a person uses, and both go through
+ * that tool.
+ *
+ * DISPLAY ONLY, like the health glyph and unlike the three buttons.
+ * Every click on this bar OPENS something -- Apps the launcher, the
+ * network glyph novi-settings, the power glyph the power menu -- and
+ * a click that instead toggles mute would be the one control here
+ * that changes the machine rather than showing it. When there is an
+ * audio panel for it to open, it should open that.
+ *
+ * Absent means "nothing to say": no sound card, or nothing has set a
+ * level yet. Drawing a speaker at that point would be claiming a
+ * volume this panel does not know. */
+#define VOLUME_FILE "/run/novi/volume"
+#define VOLUME_GAP 10
+/* Where the arcs come and go. Below LOW the speaker is bare (a level
+ * that quiet has nothing to show), and the second arc arrives at
+ * HIGH -- so the glyph has four distinguishable states, matching what
+ * the four wifi bars do for signal. */
+#define VOLUME_ARC_LOW 1
+#define VOLUME_ARC_HIGH 50
 #define POWER_GAP 8
 #define NOVI_DEFAULT_POWER_MENU "novi-launcher --power"
 #define CLOCK_GAP 12 /* between the status area and the clock */
@@ -256,6 +284,13 @@ struct novi_panel {
 	/* Read once per repaint from HEALTH_FILE, like the clock reads the
 	 * time: cheap, and the panel already repaints every second. */
 	bool health_degraded;
+	/* Read from VOLUME_FILE the same way and at the same moment.
+	 * `volume_known` is false when the file is absent or unparseable,
+	 * which is not the same as a volume of zero and must not draw as
+	 * one. */
+	bool volume_known;
+	bool volume_muted;
+	int volume_pct;
 	bool net_button_pressed;
 	bool power_button_pressed;
 	/* Same press-then-release-in-bounds convention as apps_button_
@@ -372,6 +407,28 @@ static void layout_taskbar(struct novi_panel *panel) {
 	 * side: an entry drawn under the indicator would still hit-test as
 	 * an entry. An entry that does not fit gets w = 0, and both
 	 * render() and find_taskbar_entry_at() treat that as absent. */
+	/* One line, rewritten atomically by novi-volume. sscanf rather
+	 * than strtol-by-hand because the format is fixed and a partial
+	 * match has to leave `volume_known` false: a file with a control
+	 * name and no number is not a volume of zero. */
+	panel->volume_known = false;
+	{
+		FILE *vf = fopen(VOLUME_FILE, "r");
+		if (vf != NULL) {
+			char line[128];
+			if (fgets(line, sizeof(line), vf) != NULL) {
+				int pct = 0, muted = 0;
+				if (sscanf(line, "%d %d", &pct, &muted) == 2 &&
+						pct >= 0 && pct <= 100) {
+					panel->volume_pct = pct;
+					panel->volume_muted = muted != 0;
+					panel->volume_known = true;
+				}
+			}
+			fclose(vf);
+		}
+	}
+
 	int net_x, net_y, net_w, net_h;
 	net_button_rect(panel, &net_x, &net_y, &net_w, &net_h);
 	(void)net_y; (void)net_w; (void)net_h;
@@ -577,13 +634,42 @@ static void render(struct novi_panel *panel, uint32_t *px, uint32_t stride_px) {
 		&panel->net,
 		panel->net_button_hover ? NET_ICON_HOVER_COLOR : NET_ICON_COLOR);
 
+	/* The status glyphs march LEFTWARD from the network button, each
+	 * one placed against a running cursor rather than against a fixed
+	 * offset from net_x. Both of them are conditional, so a fixed
+	 * offset would leave a hole where the absent one would have been
+	 * -- and worse, would move the health glyph sideways depending on
+	 * whether the machine has a sound card. */
+	int status_x = net_x;
+
+	if (panel->volume_known) {
+		struct vol_glyph vol = { .arcs = 0u, .muted = panel->volume_muted };
+		if (!vol.muted) {
+			if (panel->volume_pct >= VOLUME_ARC_HIGH) {
+				vol.arcs = 0x3u;
+			} else if (panel->volume_pct >= VOLUME_ARC_LOW) {
+				vol.arcs = 0x1u;
+			}
+		}
+		status_x -= VOLUME_GAP + VOL_ICON_W;
+		/* Muted is text-secondary, not the warning colour: a muted
+		 * machine is a machine doing what it was told, not a machine
+		 * with something wrong with it. Accent is reserved for one
+		 * thing per window (GUI-DESIGN-LANGUAGE.md), and on this bar
+		 * that is the active taskbar entry. */
+		draw_icon(px, stride_px, w, h,
+			status_x, (int)h / 2 - VOL_ICON_H / 2,
+			VOL_ICON_W, VOL_ICON_H, novi_volume_coverage, &vol,
+			NET_ICON_COLOR);
+	}
+
 	/* Only when there is something to say. A status area that always
 	 * shows a warning glyph, greyed out, teaches people to stop
 	 * looking at it. */
 	if (panel->health_degraded) {
+		status_x -= HEALTH_GAP + WARN_ICON_W;
 		draw_icon(px, stride_px, w, h,
-			net_x - HEALTH_GAP - WARN_ICON_W,
-			(int)h / 2 - WARN_ICON_H / 2,
+			status_x, (int)h / 2 - WARN_ICON_H / 2,
 			WARN_ICON_W, WARN_ICON_H, novi_warn_coverage, NULL,
 			NOVI_STATUS_WARNING);
 	}

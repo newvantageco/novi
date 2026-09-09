@@ -79,6 +79,17 @@ if command -v alsactl >/dev/null 2>&1; then
     alsactl restore >/dev/null 2>&1 || true
 fi
 
+### Publish the level the two lines above just settled on, so anything
+### showing it has something to show before the first volume key is
+### ever pressed. /run/novi/volume follows novi-volume, and without
+### this the panel's indicator would be absent on every fresh boot and
+### appear the first time somebody changed the volume -- which reads
+### as a bug in the indicator rather than as the absence of a reading.
+### Silent and ignored on a machine with no card, like the two above.
+if command -v novi-volume >/dev/null 2>&1; then
+    novi-volume get >/dev/null 2>&1 || true
+fi
+
 ### 1b. Mount whatever /etc/fstab asks for.
 ###
 ### Nothing on this system had ever read /etc/fstab. s6-linux-init's

@@ -183,7 +183,7 @@ if [ "$ONLY" = "all" ] || [ "$ONLY" = "gcc" ]; then
             --with-native-system-header-dir=/usr/include >/dev/null
         make -j"${JOBS}" >/dev/null
     )
-    files="$(stage_pkg gcc "${GCC_VERSION}" "musl-dev,binutils" "GNU Compiler Collection (C and C++)")"
+    files="$(stage_pkg gcc "${GCC_VERSION}" "musl-dev,binutils,gcc-libs" "GNU Compiler Collection (C and C++)")"
     make -C "${WORK}/build-gcc" DESTDIR="${files}" install >/dev/null
     rm -rf "${files}/usr/share/info" "${files}/usr/share/man" "${files}/usr/share/locale" "${files}/usr/share/doc"
     # GCC installs its runtime libraries to /usr/lib64 on x86_64, from
@@ -198,6 +198,24 @@ if [ "$ONLY" = "all" ] || [ "$ONLY" = "gcc" ]; then
         cp -a "${files}/usr/lib64/." "${files}/usr/lib/"
         rm -rf "${files}/usr/lib64"
     fi
+
+    # The SHARED runtime belongs to gcc-libs, not to the compiler.
+    #
+    # It used to ship here, and once Mesa arrived that was one path
+    # with two owners: Mesa is the first thing in the image with C++
+    # in it, so libgallium names libstdc++.so.6 and libgcc_s.so.1, and
+    # 06-wayland.sh now installs them into the rootfs where pkgsplit
+    # claims them as `gcc-libs`. Two packages writing
+    # /usr/lib/libstdc++.so.6 is a mess whether or not the bytes agree.
+    #
+    # Splitting the runtime out from the compiler is what every
+    # distribution does anyway, and for the reason on display here:
+    # far more things need to RUN C++ than to compile it. The static
+    # archives and the .la/.so development symlinks stay -- those are
+    # the compiler's business.
+    rm -f "${files}/usr/lib/libstdc++.so.6" \
+          "${files}"/usr/lib/libstdc++.so.6.* \
+          "${files}/usr/lib/libgcc_s.so.1"
 
     # cc is what a great deal of software actually invokes.
     ln -sf gcc "${files}/usr/bin/cc"

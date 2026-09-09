@@ -1,0 +1,240 @@
+#!/bin/sh
+# novi-volume — the volume keys, and one answer to "how loud is it".
+#
+#   novi-volume up [STEP]     louder (default 5%)
+#   novi-volume down [STEP]   quieter
+#   novi-volume mute          toggle mute
+#   novi-volume set N         set to N percent
+#   novi-volume get           print `<percent> <muted 0|1> <control>`
+#   novi-volume control       print the mixer control this machine uses
+#
+# ALSA has been in this image since RFC 0011 and the only way to change
+# the volume was to type an `amixer` command with a control name in it.
+# The keys above the number row -- which is where every person who has
+# ever used a laptop looks first -- did nothing at all.
+#
+# Base image, not a package, for the same reason `novi-notify` is: a
+# machine with no desktop still has a volume, and `amixer` is base
+# content (build/27-audio.sh). novi-shell binds the XF86Audio* keysyms
+# to this; nothing about it needs a compositor.
+#
+# shellcheck disable=SC3043
+set -u
+
+warn() { printf 'WARN: %s\n'  "$*" >&2; }
+die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+
+usage() {
+    cat <<'USAGE'
+novi-volume — playback volume
+
+Usage:
+  novi-volume up [STEP]     louder (STEP is a percentage, default 5)
+  novi-volume down [STEP]   quieter
+  novi-volume mute          toggle mute
+  novi-volume set N         set the volume to N percent
+  novi-volume get           print `<percent> <muted 0|1> <control>`
+  novi-volume control       print the mixer control this machine uses
+
+The desktop binds XF86AudioRaiseVolume / XF86AudioLowerVolume /
+XF86AudioMute to the first three. Levels persist across reboots
+through `alsactl store`, which the shutdown path already runs.
+USAGE
+}
+
+# Which card. Default is ALSA's own default; an override exists because
+# a machine with a dock or an HDMI sink has more than one and only the
+# person at the keyboard knows which one they meant.
+CARD="${NOVI_VOLUME_CARD:-}"
+amix() {
+    if [ -n "$CARD" ]; then
+        amixer -c "$CARD" "$@"
+    else
+        amixer "$@"
+    fi
+}
+
+# The published level, for anything that wants to show it -- novi-panel
+# reads exactly this file rather than forking amixer in its repaint, the
+# same arrangement RFC 0009 uses for the network interface and RFC 0014
+# for the health verdict. Written to a temp name and renamed so a reader
+# on its own schedule never sees half a line.
+#
+# It follows this tool, so a level changed by running `amixer` by hand
+# is not reflected until the next novi-volume call. That is the honest
+# cost of not linking libasound into the panel, and it is the right
+# trade: the keys and the panel are the only things a person uses to
+# change the volume, and both go through here.
+VOLUME_FILE=/run/novi/volume
+
+publish() {
+    local pct="$1" muted="$2" ctl="$3" tmp="${VOLUME_FILE}.tmp"
+    mkdir -p /run/novi 2>/dev/null || return 0
+    printf '%s %s %s\n' "$pct" "$muted" "$ctl" > "$tmp" 2>/dev/null || return 0
+    mv -f "$tmp" "$VOLUME_FILE" 2>/dev/null || rm -f "$tmp"
+}
+
+# ── Which control ─────────────────────────────────────────────────
+#
+# NOT a hardcoded "Master", and this is the one thing in here that had
+# to be got right. CLAUDE.md already records that QEMU's emulated USB
+# audio card invents `Audio Output Volume Control` where `alsactl init`
+# expects `Master Playback Volume` -- so a tool that assumes the
+# standard name works on every real machine and fails on the only one
+# this project can test on, which is the worst way round.
+#
+# Preference order first (a card that has Master means Master), then
+# the first control that actually has a playback volume. `pvolume` in
+# amixer's Capabilities line is ALSA saying so; a control with only
+# `pswitch` is a mute toggle with nothing to turn.
+#
+# `</dev/null` is not decoration: this is called from inside a
+# `while read` loop fed by a pipe, and any child that reads stdin there
+# eats the loop's own input. amixer has no reason to read it, which is
+# exactly the kind of assumption that stops being true one release
+# later and shows up as a control list that mysteriously ends early.
+has_pvolume() {
+    amix sget "$1" </dev/null 2>/dev/null | grep -q 'Capabilities:.*pvolume'
+}
+
+pick_control() {
+    local name
+
+    for name in Master PCM Speaker Headphone; do
+        has_pvolume "$name" && { printf '%s' "$name"; return 0; }
+    done
+
+    # `amixer scontrols` prints:  Simple mixer control 'NAME',0
+    # The name may contain spaces, so it is cut between the quotes
+    # rather than by field position.
+    amix scontrols 2>/dev/null | while IFS= read -r line; do
+        name="${line#*\'}"
+        name="${name%\'*}"
+        [ -n "$name" ] || continue
+        if has_pvolume "$name"; then
+            printf '%s' "$name"
+            break
+        fi
+    done
+}
+
+# The control, resolved once per run. Empty means this machine has no
+# playback volume at all -- no card, or a card whose controls are all
+# switches. Reported as such rather than as a failure to set something:
+# a machine that cannot change its volume is not a broken command.
+CONTROL=""
+require_control() {
+    command -v amixer >/dev/null 2>&1 ||
+        die "amixer is not installed; this image has no ALSA userland"
+    CONTROL="$(pick_control)"
+    [ -n "$CONTROL" ] ||
+        die "no playback volume control on this machine (no sound card?)"
+}
+
+# ── Reading the level ─────────────────────────────────────────────
+#
+# amixer prints one line per channel:
+#   Front Left: Playback 87 [68%] [-25.50dB] [on]
+# The first `[NN%]` is the level and the last `[on]`/`[off]` is the
+# mute state. Taking the FIRST channel is deliberate: a card whose
+# channels are at different levels has been set that way by something
+# other than this tool, and averaging them would report a number no
+# channel is actually at.
+read_state() {
+    local out pct muted
+    out="$(amix sget "$CONTROL" 2>/dev/null)" || return 1
+
+    pct="$(printf '%s\n' "$out" | sed -n 's/.*\[\([0-9]*\)%\].*/\1/p' | head -1)"
+    [ -n "$pct" ] || return 1
+
+    # `[off]` on any channel counts as muted: the honest answer to
+    # "is sound coming out" when one side has been switched off is no.
+    if printf '%s\n' "$out" | grep -q '\[off\]'; then
+        muted=1
+    else
+        muted=0
+    fi
+
+    printf '%s %s' "$pct" "$muted"
+}
+
+refresh() {
+    local state
+    state="$(read_state)" || { warn "could not read $CONTROL"; return 0; }
+    publish "${state% *}" "${state#* }" "$CONTROL"
+    printf '%s %s\n' "$state" "$CONTROL"
+}
+
+# A step is a percentage, and it has to be a number: it goes into an
+# `amixer sset` argument, and a non-numeric one would be handed
+# straight to a program that would interpret it as something else.
+check_step() {
+    case "$1" in
+        ''|*[!0-9]*) die "step must be a number of percent, got '$1'" ;;
+    esac
+    [ "$1" -le 100 ] || die "step must be 0..100, got '$1'"
+}
+
+cmd_adjust() {
+    local dir="$1" step="${2:-5}"
+    check_step "$step"
+    require_control
+    # `unmute` alongside the change, and only when going UP. Pressing
+    # volume-up on a muted machine means "I want to hear this"; pressing
+    # volume-down does not, and un-muting on the way down would make the
+    # quiet key briefly loud.
+    if [ "$dir" = up ]; then
+        amix -q sset "$CONTROL" "${step}%+" unmute 2>/dev/null ||
+            die "could not raise $CONTROL"
+    else
+        amix -q sset "$CONTROL" "${step}%-" 2>/dev/null ||
+            die "could not lower $CONTROL"
+    fi
+    refresh
+}
+
+# The level that comes back is not always the one asked for, and that
+# is ALSA rather than a bug here: a percentage is a position in the
+# card's own raw range, which has a fixed number of steps, so `set 40`
+# on a 64-step control lands on 41. Reported honestly -- refresh prints
+# what the card actually holds, not what was requested.
+cmd_set() {
+    local pct="${1:-}"
+    [ -n "$pct" ] || die "usage: novi-volume set N"
+    check_step "$pct"
+    require_control
+    amix -q sset "$CONTROL" "${pct}%" unmute 2>/dev/null ||
+        die "could not set $CONTROL"
+    refresh
+}
+
+cmd_mute() {
+    require_control
+    # `toggle` rather than reading the state and choosing: ALSA does it
+    # atomically and two processes racing on the mute key cannot end up
+    # disagreeing about which way it went.
+    amix -q sset "$CONTROL" toggle 2>/dev/null ||
+        die "could not toggle mute on $CONTROL"
+    refresh
+}
+
+cmd_get() {
+    require_control
+    refresh
+}
+
+cmd_control() {
+    require_control
+    printf '%s\n' "$CONTROL"
+}
+
+case "${1:-}" in
+    up)      shift; cmd_adjust up "$@" ;;
+    down)    shift; cmd_adjust down "$@" ;;
+    mute)    cmd_mute ;;
+    set)     shift; cmd_set "$@" ;;
+    get)     cmd_get ;;
+    control) cmd_control ;;
+    ''|-h|--help|help) usage ;;
+    *)       usage; exit 1 ;;
+esac
