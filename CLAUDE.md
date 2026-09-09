@@ -482,6 +482,52 @@ one, none -- and no program wanting OpenGL could run here in principle.
   twice, which read as "the load never reached the compositor".
   `${14}`.
 
+## Architecture: a GL client, and the third list
+
+`novi-glinfo` (build/37) is the client half of RFC 0025. The compositor
+was verified end to end and nothing at all was known about a CLIENT,
+which takes a different path -- EGL's Wayland platform and buffer
+sharing back to the compositor -- and is the path everything except
+novi-shell will ever take.
+
+- **It works, under BOTH renderers, and the reason matters more than
+  the result.** A compositor needs a GL renderer to import a client's
+  GPU buffers, so the obvious worry was that RFC 0025's measured-best
+  default (`pixman`) made GL applications impossible. It does not
+  here: softpipe has no GPU, so Mesa renders into shared memory and
+  hands over an ordinary `wl_shm` buffer that any renderer can
+  composite -- no dmabuf traffic appears in the log under either
+  setting. **On real hardware that inverts**: a client would produce
+  GPU buffers needing dmabuf import, which pixman cannot do. Expect
+  `display.renderer = pixman` on a machine with a working driver to
+  cost GL clients, not just compositor speed. Reasoned from the
+  mechanism, not measured -- nothing here has a GPU.
+- **`EGL client APIs` says `OpenGL OpenGL_ES`.** Desktop GL IS
+  available through EGL despite `-Dglx=disabled`; what is missing is
+  the `libGL.so.1` an existing program links against, not the
+  capability. Do not repeat the stronger claim.
+- **META_PACKAGES is a THIRD list a desktop client must be added to**,
+  after `DESKTOP_BINARIES` and `PACKAGE_TABLE` -- and it is the one
+  that fails SILENTLY. novi-glinfo was built, packaged, indexed and
+  signed correctly and simply was not on the machine:
+  `novi-glinfo: not found` on a desktop that had just installed the
+  desktop. The other two fail loudly (a missing seed fires the
+  straddle check; a missing table entry is a hard "no package owns
+  these files"). pkgsplit now derives a check from the table -- every
+  `OS`-category package must be named by some meta-package -- and
+  refuses to run otherwise. Verified by removing the entry and
+  watching it fail, because a check nobody has seen fail is a check
+  nobody knows works.
+- **`-Wl,-rpath-link` for the FOURTH time** (nftables, git/curl, the
+  meson cross file, now here). `libEGL.so` names libgallium, libgbm,
+  libglapi, libexpat, libdrm and libwayland-server in its DT_NEEDED,
+  and `-L` does not resolve those: the link fails on `undefined
+  reference to XML_ErrorString` and `wl_resource_post_error`, symbols
+  belonging to libraries sitting in the rootfs, from a libEGL that
+  exports none of them. The error names the wrong thing entirely.
+  `lib-meson-cross.sh` sets this globally for meson builds; the client
+  Makefiles link with `$(CC)` directly and so each one rediscovers it.
+
 ## Architecture: the keys, and the sheet that lists them
 
 `common/keybindings.h` is every keyboard shortcut this desktop has,
