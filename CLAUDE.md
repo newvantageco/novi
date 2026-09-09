@@ -104,6 +104,12 @@ below for why `/build` is hardcoded and unrelated to the repo checkout path.
   `41-desktop-split.sh` takes them out, and it needs a **`python3.11`
   on the build host** — cross-compiling CPython runs an interpreter of
   the same major.minor during `make`
+- `bash build/39-novi-recon.sh` — `novi-recon` (RFC 0028), the recon
+  tool. Nothing to compile: it is a Python script, which is the point.
+  It runs the host test suite and parses the script with the target's
+  exact major.minor before packaging — a syntax error in Python is a
+  RUNTIME error, so without that the package builds, signs, verifies
+  and fails at the first invocation
 - **`bash build/16-s6-rc-db.sh` after ANY change under `init/`** (see below),
   then `bash scripts/mkinitramfs.sh --output build/initramfs.cpio.gz` and
   `bash scripts/mkiso.sh` to get it into a bootable image
@@ -624,6 +630,57 @@ package — the first scripting language this system has ever had.
   QEMU launcher pointed at a five-day-old `/build/initramfs.cpio.gz`
   rather than the `build/initramfs.cpio.gz` just written in the repo.
   The old image had the bug; the shipped one does not.
+
+## Architecture: novi-recon, and a licence that ended a plan
+
+RFC 0028 (`docs/rfcs/0028-recon.md`). `pkg install novi-recon` — DNS,
+WHOIS, TLS certificates, HTTP security headers, robots.txt, a
+breached-password check and a TCP connect scan.
+
+- **It exists because the tool to port could not be shipped.** The
+  "God's Eye" repository's `LICENCE` is, in full, `Copyright 2022 PAVEL
+  DAT. All rights reserved` — which grants nothing — and the other
+  GitHub project of that name has no licence file at all (same effect)
+  and is 136 lines of skeleton. **Check the licence before planning a
+  port**, and especially before putting anything in a repository this
+  project SIGNS: the signature is a statement that the contents are
+  what we meant to ship.
+- **Standard library only, and that is arithmetic rather than taste.**
+  The original needs six PyPI packages (two wanting an API key) plus
+  the nmap and httpie binaries, on a system with no pip. `depends=` is
+  one word: `python`.
+- **The DNS client is written out longhand**, and three things there
+  are load-bearing: compression pointers must be followed and the
+  chain BOUNDED (a two-byte packet can point a name at itself);
+  `TC` means ask again over TCP, not report half an answer; the
+  transaction ID is random and checked, or any host on the path can
+  answer first. Two more found by running it: a long TXT record is
+  always split into 255-byte chunks and reading only the first
+  silently truncates SPF and DKIM, and **the root name renders as `.`,
+  not the empty string** — a null MX is literally `0 .` and `0 ` reads
+  as a parse failure.
+- **CSP `frame-ancestors` OVERRIDES `X-Frame-Options`.** A clickjacking
+  check that reads only XFO gets both interesting cases backwards. The
+  verdict is three-valued, because "framable by these specific origins"
+  is a real answer a boolean cannot carry.
+- **The tests run on the BUILD HOST and that is where the interesting
+  cases are** — same argument as `novi-panel/icons-test.c`. A real
+  resolver never sends a compression loop or a mismatched ID, and a
+  live site exercises one row of the clickjacking table. DNS messages
+  are built and parsed back; every verdict is a table. `whois_chain`
+  takes an `ask` callable purely so the referral chase is testable
+  without the internet.
+- **A syntax error in Python is a runtime error.** `39-novi-recon.sh`
+  parses the script with the target's exact major.minor before
+  packaging, because otherwise the package builds, installs, signs and
+  verifies perfectly and dies at the first invocation.
+- **The installed shebang is `/usr/bin/python3`, not `/usr/bin/env
+  python3`.** `env` costs a PATH search per invocation, and a `$PATH`
+  that finds a different python3 first makes a system tool behave
+  differently for different users. The repo copy keeps `env` so it runs
+  out of a checkout.
+- `getservbyport` returns nothing here — BusyBox ships no
+  `/etc/services` — so `ports` prints numbers rather than pretending.
 
 ## Architecture: the keys, and the sheet that lists them
 

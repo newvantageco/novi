@@ -255,6 +255,7 @@ novi-hwdetect --report            # what hardware was found, what loaded
 pkg install novi-desktop          # the Wayland desktop, offline from the ISO
 pkg install novi-devel            # gcc, make, pkg-config, headers
 pkg install python                # CPython 3.11, with ssl (RFC 0026, 0027)
+pkg install novi-recon            # DNS, WHOIS, TLS, headers, ports (RFC 0028)
 novi-install install --disk /dev/vda   # install to the qcow2 (with --disk)
 ```
 
@@ -666,6 +667,9 @@ BUG_REPORT_URL="https://github.com/newvantageco/novi/issues"
       language this system has had (RFC 0026)
 - [x] `import ssl` — OpenSSL 3.5 LTS as a package, the base image still
       TLS-free and the package trust root still static (RFC 0027)
+- [x] `novi-recon` — DNS, WHOIS, TLS certificates, HTTP security headers,
+      robots.txt, breached passwords, a connect scan. Standard library
+      only, and the first Python program in this OS (RFC 0028)
 - [x] The design language, implemented — Inter for language and JetBrains
       Mono for machine values, one shared token header, a real desktop
       background instead of a flat fill

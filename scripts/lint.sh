@@ -86,4 +86,21 @@ if command -v cc >/dev/null 2>&1; then
 else
     echo ">>> no host cc -- skipping novi-panel icon geometry checks" >&2
 fi
+
+# novi-recon is pure Python and most of what can be wrong in it cannot
+# be shown by running it: a real resolver never sends a compression
+# pointer loop, a mismatched transaction ID, or a TXT record split
+# across chunks, and a live site exercises one row of the clickjacking
+# truth table. So the wire format is tested by building messages and
+# parsing them back. No network, no downloaded fixtures -- same
+# argument as the icon geometry test above.
+if command -v python3 >/dev/null 2>&1; then
+    echo ">>> novi-recon"
+    if ! python3 novi-recon/tests/test_recon.py; then
+        echo ">>> novi-recon checks failed -- run: python3 novi-recon/tests/test_recon.py" >&2
+        exit 1
+    fi
+else
+    echo ">>> no host python3 -- skipping novi-recon checks" >&2
+fi
 exit 0
