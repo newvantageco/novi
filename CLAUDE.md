@@ -500,6 +500,19 @@ one, none -- and no program wanting OpenGL could run here in principle.
   report `client APIs: OpenGL OpenGL_ES`, so the capability is there;
   what is missing is the `libGL.so.1` an existing program links
   against.)
+- **`libGL.so.1` REQUIRES X11, and libglvnd does not change that.**
+  Attempted and stopped: libglvnd 1.7.0 builds `src/GL` — the only
+  place `libGL.so.1` comes from — `if with_glx`, and `with_glx`
+  requires `dep_x11.found()`. So the roadmap item that says "add
+  libglvnd for desktop libGL" is really "add libX11, libxcb, libXau,
+  libXdmcp, libXext and xorgproto", in a distribution that has never
+  had X, for a library whose GLX half can never work here. What glvnd
+  gives WITHOUT X is `libOpenGL.so.0`, which nothing in this image
+  links — and getting it is not additive: `-Dglvnd=enabled` makes Mesa
+  ship `libEGL_mesa.so.0` as a vendor instead of `libEGL.so.1`, so
+  glvnd's dispatch becomes the library THE COMPOSITOR loads. Mesa's
+  own meson is fine with `-Dglvnd=enabled -Dglx=disabled`; libglvnd is
+  the obstacle. See RFC 0025's roadmap item 3 for the full finding.
 - **virgl ships UNVERIFIED, and so does everything else that needs a
   GPU.** Checked rather than assumed: this QEMU offers
   `virtio-gpu-pci` and no `virtio-gpu-gl`, there is no virglrenderer
