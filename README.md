@@ -670,6 +670,9 @@ BUG_REPORT_URL="https://github.com/newvantageco/novi/issues"
 - [x] `novi-recon` — DNS, WHOIS, TLS certificates, HTTP security headers,
       robots.txt, breached passwords, a connect scan. Standard library
       only, and the first Python program in this OS (RFC 0028)
+- [x] An interface for automated actors — `novi-agent describe` is one
+      JSON document; `novi-agent do` changes the machine only within a
+      list you declared, and every attempt is audited (RFC 0029)
 - [x] The design language, implemented — Inter for language and JetBrains
       Mono for machine values, one shared token header, a real desktop
       background instead of a flat fill

@@ -104,6 +104,9 @@ below for why `/build` is hardcoded and unrelated to the repo checkout path.
   `41-desktop-split.sh` takes them out, and it needs a **`python3.11`
   on the build host** — cross-compiling CPython runs an interpreter of
   the same major.minor during `make`
+- `bash build/15-novi-state.sh` also installs `/usr/lib/novi/json.sh`
+  and `novi-agent` (RFC 0029) — the agent interface is base image, not
+  a package
 - `bash build/39-novi-recon.sh` — `novi-recon` (RFC 0028), the recon
   tool. Nothing to compile: it is a Python script, which is the point.
   It runs the host test suite and parses the script with the target's
@@ -681,6 +684,62 @@ breached-password check and a TCP connect scan.
   out of a checkout.
 - `getservbyport` returns nothing here — BusyBox ships no
   `/etc/services` — so `ports` prints numbers rather than pretending.
+
+## Architecture: the interface an automated actor uses
+
+RFC 0029 (`docs/rfcs/0029-agent-interface.md`). `novi-agent describe`
+is one JSON document saying what this machine is; `novi-agent do
+<verb>` changes it within a declared list. Base image, ~21 KB of shell.
+
+- **Reading is free, writing is declared.** `describe`/`capabilities`/
+  `audit` are a formatted view of files any user can already read.
+  `do` needs `agent.enabled = on` AND the verb in `agent.allow` —
+  **two keys, not one**, which is RFC 0022's argument about
+  `network.firewall.allow` verbatim: a machine that grants powers
+  because a program was installed is a service registry with a policy
+  file attached.
+- **There is no `exec` verb and no `service.start`.** The first would
+  be the absence of a boundary wearing a policy file; the second is
+  drift by construction, and an agent that produces drift on purpose
+  defeats the engine it is talking to. `test-agent-verbs.sh` fails the
+  lint run if an `exec)`/`shell)`/`run)` branch ever appears — "we
+  agreed not to" is not a mechanism.
+- **`describe` COMPOSES and computes nothing.** State and drift from
+  `novi-state --json`, verdicts from `health --json`, the interface
+  from `/run/novi/network.device` (the file the service published, per
+  RFC 0009 — never a second walk of `/sys/class/net`), packages from
+  `pkg list`. A summary that computed its own answers would be a second
+  source of truth about a machine whose architecture exists to have
+  one. That is why `novi-state show`/`diff`/`health` gained `--json`.
+- **`/usr/lib/novi/json.sh` is the ONE escaper**, sourced by both
+  scripts. Two things in it are load-bearing and both were caught by
+  the test rather than by reading: **backslash is escaped before
+  quote** (the other order turns `"` into `\"` and then that backslash
+  into `\\`, so the quote ends the string — the injection this
+  exists to stop), and **tab/newline become a space BEFORE the length
+  cap**, because `cut` appends a newline to input that had none and
+  doing it after put a trailing space on every string this system
+  emits. Valid JSON, silently wrong.
+- **`.` is a SPECIAL BUILTIN.** Sourcing a missing file in ash ends the
+  script immediately — status 2, nothing on stderr that anyone would
+  connect to a missing library. Guard every `.` with `[ -f ... ]`.
+  Found writing this feature's own test.
+- **`f() { g "$1" && return 1; ... }` is a `set -e` trap.** The
+  AND-list's own failure becomes the function's status, and whether
+  that ends the script depends on whether the caller happened to put
+  the call in a condition. Same for `x="$(helper)"` where the helper
+  returns 1 for "this machine has no wifi" — an assignment from a
+  failing command substitution ends the script. One `case`, and an
+  explicit `return 0`.
+- **Refusals are audited**, at `/var/log/novi-agent.jsonl`, 0600, JSON
+  lines so `audit` is a `tail` and not a formatter. A boundary that
+  records only what it let through tells you nothing about what was
+  tried — RFC 0016's rule about silent refusals.
+- **`agent.enabled`/`agent.allow` are read-at-use-time keys**, so the
+  observer is the only place a typo surfaces. ONE unknown verb makes
+  the whole `agent.allow` line report `unsupported`: reporting the rest
+  as converged would hide `pkg.instal` from exactly the diff a person
+  would look at.
 
 ## Architecture: the keys, and the sheet that lists them
 

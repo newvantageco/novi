@@ -37,6 +37,17 @@ GEN_DIR="${NOVI_STATE_GENERATIONS:-/var/lib/novi-state/generations}"
 # cannot express is editing a real file in nftables' real format.
 FIREWALL_RULES="${NOVI_FIREWALL_RULES:-/etc/novi/firewall.nft}"
 
+# The shell JSON escaper (RFC 0029), shared with novi-agent. Sourced
+# with a guard rather than bare: `.` is a SPECIAL BUILTIN, so in ash a
+# missing file ends the script immediately with no message anyone would
+# connect to a missing library -- exit status 2 and nothing on stderr.
+# Found the hard way writing this file's own test.
+NOVI_JSON_LIB="${NOVI_JSON_LIB:-/usr/lib/novi/json.sh}"
+if [ -f "$NOVI_JSON_LIB" ]; then
+    # shellcheck disable=SC1090
+    . "$NOVI_JSON_LIB"
+fi
+
 msg()  { printf '==> %s\n'    "$*" >&2; }
 info() { printf '  -> %s\n'   "$*" >&2; }
 warn() { printf 'WARN: %s\n'  "$*" >&2; }
@@ -542,6 +553,39 @@ converge_governor() {
 # forward-compatibility case (a newer novi-state, a hand-written note),
 # not corruption, and `diff` should say so plainly instead of refusing
 # to run at all.
+# The verbs novi-agent will act on. Declared here as well as in
+# novi-agent because this is where a typo is CAUGHT, and a list that
+# lives only in the tool being configured cannot be validated by the
+# thing that validates the document. The two are checked against each
+# other by packages/tests/test-agent-verbs.sh, which is the answer to
+# "then they will drift".
+AGENT_VERBS="state.set state.apply state.rollback pkg.sync pkg.install"
+
+observe_agent_allow() {
+    local want v
+    want="$(state_get agent.allow)"
+    # `none` and an empty value are the same policy, and both are fine.
+    case "$want" in ''|none) printf 'none'; return 0 ;; esac
+    for v in $(printf '%s' "$want" | tr ',' ' '); do
+        case " $AGENT_VERBS " in
+            *" $v "*) ;;
+            # ONE unknown verb makes the whole line untrustworthy. A
+            # person who wrote `pkg.instal` believes installs are
+            # permitted; reporting the other four as converged hides
+            # that from exactly the diff they would look at.
+            *) printf 'unsupported'; return 0 ;;
+        esac
+    done
+    # Nothing holds this key, so there is no observed value to compare
+    # against and no canonical form to impose -- echoing the declared
+    # string back verbatim is what makes a valid policy converged and
+    # leaves the document's own spacing and ordering alone. Same as
+    # power.lid, and deliberately NOT the firewall's sorted comparison
+    # (RFC 0022), which exists because there the other side is the
+    # kernel.
+    printf '%s' "$want"
+}
+
 observe_key() {
     local key="$1"
     case "$key" in
@@ -591,6 +635,31 @@ observe_key() {
         # can surface. Changing it takes effect on the next start of
         # the compositor, not immediately: this is the one
         # read-at-use-time key whose "use" is a process launch.
+        # agent.enabled / agent.allow are read at use time by
+        # novi-agent, on every invocation of `novi-agent do` -- so
+        # nothing holds them, they cannot drift, and `apply` has
+        # nothing to converge. Same shape as power.lid, and the
+        # observer is again the only place a typo can surface.
+        #
+        # It matters more here than for a lid switch. `agent.allow =
+        # pkg.instal` is a policy file that looks like it permits
+        # something and permits nothing, and the failure shows up as a
+        # refusal three layers away from the typo. Reporting an
+        # unusable value as drift is where a person finds out.
+        agent.enabled)
+            case "$(state_get "$key")" in
+                on|off) state_get "$key" ;;
+                *) printf 'unsupported' ;;
+            esac
+            ;;
+        # Every named verb must be one novi-agent knows. A comma
+        # separated list, compared canonically so `state.set, pkg.sync`
+        # and `pkg.sync,state.set` are the same policy and neither
+        # reports eternal drift against the other -- the same call
+        # network.firewall.allow makes about port lists (RFC 0022).
+        agent.allow)
+            observe_agent_allow
+            ;;
         display.renderer)
             case "$(state_get "$key")" in
                 pixman|gles2|auto) state_get "$key" ;;
@@ -1058,7 +1127,30 @@ snapshot_generation() {
 # Commands
 # ---------------------------------------------------------------------------
 
+# Every --json command starts here. A JSON mode that silently emits a
+# broken document because the escaper is missing is worse than one that
+# is not offered: an agent parsing the output cannot tell the
+# difference between "this machine has no services" and "this string
+# had a quote in it".
+need_json_lib() {
+    command -v json_str >/dev/null 2>&1 \
+        || die "$NOVI_JSON_LIB is missing; --json needs it"
+}
+
 cmd_show() {
+    if [ "${1:-}" = "--json" ]; then
+        need_json_lib
+        [ -f "$STATE_FILE" ] || die "no state file at $STATE_FILE"
+        local key first=1
+        printf '{"state_file": %s, "declared": {' "$(json_str "$STATE_FILE")"
+        for key in $(state_keys); do
+            [ "$first" -eq 1 ] || printf ','
+            first=0
+            printf '%s: %s' "$(json_str "$key")" "$(json_str "$(state_get "$key")")"
+        done
+        printf '}}\n'
+        return 0
+    fi
     [ -f "$STATE_FILE" ] || die "no state file at $STATE_FILE"
     cat "$STATE_FILE"
 }
@@ -1082,8 +1174,47 @@ cmd_set() {
 # Declared vs. actual. Exit status is deliberately meaningful:
 # 0 = converged (no drift), 1 = drift found. That makes it usable as a
 # check in a script or a CI job, not just something a human reads.
+# The JSON form reports the SAME comparison as the text form and adds
+# nothing of its own -- one loop over state_keys, one observe_key per
+# key. A second implementation of "what is drifting" is a second answer
+# to a question that has one, which is the whole argument novi-state
+# exists to make.
+cmd_diff_json() {
+    need_json_lib
+    local key want have first=1 drift=0
+    [ -f "$STATE_FILE" ] || die "no state file at $STATE_FILE"
+    service_cache_load
+    printf '{"drift": ['
+    for key in $(state_keys); do
+        want="$(state_get "$key")"
+        have="$(observe_key "$key")"
+        [ "$want" = "$have" ] && continue
+        drift=1
+        [ "$first" -eq 1 ] || printf ','
+        first=0
+        printf '{"key": %s, "declared": %s, "actual": %s}' \
+            "$(json_str "$key")" "$(json_str "$want")" "$(json_str "$have")"
+    done
+    printf '], "converged": %s, "unhealthy": [' \
+        "$([ "$drift" -eq 0 ] && printf true || printf false)"
+    first=1
+    health_problems | while IFS= read -r l; do
+        [ -n "$l" ] || continue
+        [ "$first" -eq 1 ] || printf ','
+        first=0
+        printf '%s' "$(json_str "$l")"
+    done
+    printf ']}\n'
+    return "$drift"
+}
+
 cmd_diff() {
     local key want have drift=0
+    # `|| return $?` rather than `; return $?`: under `set -e` a bare
+    # call that returns 1 (which is what drift means here) ends the
+    # script before the `return` runs. Same exit status by luck today,
+    # and a trap for the next branch added below it.
+    [ "${1:-}" = "--json" ] && { cmd_diff_json || return $?; return 0; }
     [ -f "$STATE_FILE" ] || die "no state file at $STATE_FILE"
     # Nothing changes during a diff, so one snapshot of the live
     # service list serves every key.
@@ -1542,8 +1673,34 @@ health_problems() {
 # Exit 0 when every supervised service is doing its job, 1 when one is
 # not -- so this is the command a CI job or a health check runs, and
 # `diff` keeps meaning exactly "declared vs actual".
+cmd_health_json() {
+    need_json_lib
+    local n line name verdict detail first=1 bad=0
+    command -v s6-svstat >/dev/null 2>&1 || die "s6-svstat not found; cannot inspect services"
+    printf '{"services": ['
+    for n in $(health_services); do
+        line="$(service_health "$n")"
+        # service_health prints `<name> <verdict> <detail>`, and the
+        # detail may be `-`. Split on whitespace rather than parsing,
+        # because this is our own format and there is no third field
+        # that can contain a space.
+        # shellcheck disable=SC2086
+        set -- $line
+        name="${1:-$n}"; verdict="${2:-unknown}"; detail="${3:--}"
+        case "$verdict" in DOWN|CRASHLOOP|NOTREADY) bad=1 ;; esac
+        [ "$first" -eq 1 ] || printf ','
+        first=0
+        printf '{"service": %s, "verdict": %s, "detail": %s}' \
+            "$(json_str "$name")" "$(json_str "$verdict")" "$(json_str "$detail")"
+    done
+    printf '], "healthy": %s}\n' \
+        "$([ "$bad" -eq 0 ] && printf true || printf false)"
+    return "$bad"
+}
+
 cmd_health() {
     local n bad=0 line
+    [ "${1:-}" = "--json" ] && { cmd_health_json || return $?; return 0; }
     command -v s6-svstat >/dev/null 2>&1 || die "s6-svstat not found; cannot inspect services"
     for n in $(health_services); do
         line="$(service_health "$n")"

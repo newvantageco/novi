@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-# 15-novi-state.sh — Install novi-state, the declarative state engine
+# 15-novi-state.sh — Install novi-state, and the things that read it
 #
 # RFC 0002. Like build/11-pkg.sh there's nothing to cross-compile:
 # packages/novi-state is a plain POSIX shell script that runs under
@@ -33,6 +33,21 @@ install -D -m 644 "${REPO_ROOT}/rootfs/etc/novi/system.conf" \
     "${ROOTFS}/etc/novi/system.conf"
 mkdir -p "${ROOTFS}/var/lib/novi-state/generations"
 
+# The shell JSON escaper (RFC 0029), and novi-agent which composes
+# novi-state's --json output into one document. Both base image:
+# "what is this machine" and "change it within a declared list" are
+# how you talk to a Novi box, and a console-only install is exactly
+# the machine somebody drives from a program rather than a desktop.
+#
+# /usr/lib/novi/json.sh rather than a function copied into both
+# scripts: one escaper, one place to get the backslash-before-quote
+# order right. pkgsplit leaves it in the base because it matches no
+# PACKAGE_TABLE pattern (the same reason /usr/lib/os-release stays).
+install -D -m 644 "${REPO_ROOT}/packages/lib-json.sh" \
+    "${ROOTFS}/usr/lib/novi/json.sh"
+install -D -m 755 "${REPO_ROOT}/packages/novi-agent" "${ROOTFS}/usr/bin/novi-agent"
+
 echo ""
 echo "novi-state installed:"
-ls -la "${ROOTFS}/usr/bin/novi-state" "${ROOTFS}/etc/novi/system.conf"
+ls -la "${ROOTFS}/usr/bin/novi-state" "${ROOTFS}/usr/bin/novi-agent" \
+    "${ROOTFS}/usr/lib/novi/json.sh" "${ROOTFS}/etc/novi/system.conf"

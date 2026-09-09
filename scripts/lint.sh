@@ -103,4 +103,19 @@ if command -v python3 >/dev/null 2>&1; then
 else
     echo ">>> no host python3 -- skipping novi-recon checks" >&2
 fi
+
+# The shell JSON escaper (RFC 0029) is checked under the SHIPPED
+# busybox ash, not the host's bash, and against a real JSON parser
+# rather than a string comparison. Every JSON document this system
+# emits is assembled by a shell script out of strings the shell did
+# not choose. The verb-list check catches the other thing two files
+# can do to each other: novi-agent dispatches on a list novi-state
+# also carries, because that is where a typo in agent.allow is caught.
+for t in packages/tests/test-lib-json.sh packages/tests/test-agent-verbs.sh; do
+    echo ">>> ${t##*/}"
+    if ! bash "$t"; then
+        echo ">>> ${t} failed" >&2
+        exit 1
+    fi
+done
 exit 0
