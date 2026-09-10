@@ -117,6 +117,39 @@ did; case "${out}" in *"control characters"*) ;; *) note "control characters mus
 out="$(printf 'pkg.sync\n' | NOVI_AGENT="${TMP}/agent" "${SH[@]}" "${SERVE}" 2>&1)"
 did; case "${out}" in *"per-connection handler"*) ;; *) note "without PROTO=IPC it should explain what it is" ;; esac
 
+# ── 8. the CLIENT half: `novi-agent send` ────────────────────────────
+#
+# Driving this socket by hand is `s6-ipcclient <path> s6-ioconnect`
+# with the request on stdin, which works and which nobody would guess.
+# The audience for the non-root path is exactly the reader least
+# likely to know skarnet's tool names, so `send` is the same verb with
+# the same spelling as `do`.
+#
+# What is testable here is everything BEFORE the connection: the
+# checks that stop a request which would mean something different at
+# the other end. The round trip needs a running daemon and belongs on
+# a booted machine.
+send() {
+    NOVI_AGENT_SOCK="$1" NOVI_JSON_LIB="packages/lib-json.sh" \
+        "${SH[@]}" packages/novi-agent send "${@:2}" 2>&1
+}
+
+out="$(send /nonexistent/sock)"
+did; case "${out}" in *"usage: novi-agent send"*) ;; *) note "send with no verb should print its usage" ;; esac
+
+# AN ARGUMENT CONTAINING WHITESPACE CANNOT SURVIVE THE TRIP. The
+# protocol is one line split on whitespace, so `pkg.install "a b"`
+# would arrive as two arguments and the verb would act on something it
+# was never given. Refused here, where the caller still knows what was
+# meant.
+out="$(send /nonexistent/sock state.set hostname "two words")"
+did; case "${out}" in *"may not contain whitespace"*) ;; *) note "an argument with a space must be refused, not silently split" ;; esac
+
+# And the missing socket is named, with the key that creates it --
+# "connection refused" would send somebody looking at the wrong layer.
+out="$(send /nonexistent/sock pkg.sync)"
+did; case "${out}" in *"services.novi-agentd"*) ;; *) note "a missing socket should name the key that creates it" ;; esac
+
 if [ "${fail}" -ne 0 ]; then
     echo "agent socket: ${fail} check(s) FAILED of ${checks}" >&2
     exit 1

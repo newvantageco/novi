@@ -50,6 +50,19 @@ for v in ${agent_verbs}; do
         || note "verb '${v}' is in VERBS but has no branch in ${AGENT}"
 done
 
+# THE USAGE TEXT IS A THIRD LIST, and it had already drifted: wifi.join
+# was dispatched, permitted by novi-state and absent from `novi-agent`
+# with no arguments -- so the one place a person looks to find out what
+# this interface can do did not mention the newest thing it could do.
+# A capability nobody can discover is not one.
+usage_text=$(sed -n "/<<'USAGE'/,/^USAGE\$/p" "${AGENT}")
+for v in ${agent_verbs}; do
+    case "${usage_text}" in
+        *"${v}"*) ;;
+        *) note "verb '${v}' is dispatched but never named in novi-agent's usage" ;;
+    esac
+done
+
 # And nothing may claim to be a verb without being in the list -- a
 # branch for `exec)` would be exactly the hole this interface's whole
 # argument depends on not existing.

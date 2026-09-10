@@ -185,6 +185,49 @@ listening?" is genuinely knowable: `s6-ipcserver` binds before it
 signals. `timeout-up` is the other half — a longrun that declares
 readiness and never signals hangs `s6-rc` forever (RFC 0022).
 
+### 9. `novi-agent send` — the incantation is not the interface.
+
+Driving the socket by hand is `s6-ipcclient /run/novi/agent/sock
+s6-ioconnect` with the request on stdin. That works, and nobody would
+guess it. The audience for the non-root path is exactly the reader
+least likely to know skarnet's tool names, so `novi-agent send <verb>
+[args…]` is `novi-agent do <verb> [args…]` for a caller who is not
+root — same tool, same spellings, same JSON answer. It needs no
+privilege of its own: reaching the socket *is* the permission.
+
+Three things it does before connecting, and each is a message somebody
+would otherwise get wrong:
+
+- **An argument containing whitespace is refused.** The protocol is one
+  line split on whitespace, so `state.set hostname "two words"` would
+  arrive as two arguments and the verb would act on something it was
+  never given. The caller is the last party who still knows what was
+  meant.
+- **"Absent" and "unreachable" are told apart.** `test -S` cannot: for
+  somebody outside `agent` the socket directory is not searchable, so
+  the test fails exactly as it would if the daemon were off. The first
+  version told a non-member to `declare services.novi-agentd = on` —
+  a confident sentence pointing at the wrong layer, which is worse
+  than none. The directory is visible (its parent is `0755`); what a
+  non-member lacks is *search* permission on it.
+- **`capabilities` reports the socket** (`"socket": "/run/novi/agent/sock"`,
+  or `null`). Whether the non-root path exists is a capability, and an
+  agent that is not root has no other way to find out short of trying.
+
+### 10. A `finish` script, the only one in this repo.
+
+`s6-ipcserver` does not unlink the socket when it exits, so a stopped
+`novi-agentd` left a socket file with nothing behind it — and `send`'s
+"is the daemon running?" test is exactly a test for that file. The
+result was s6-ipcclient's raw `Connection refused` where the sentence
+naming the key belonged: a caller looking at a service they had turned
+off, told nothing about how to turn it on.
+
+The run script already removes it before binding, for the `EADDRINUSE`
+hazard. `finish` is the same removal from the other side. Nothing in
+this repo had needed one before; `s6-rc` compiles it for a longrun
+that has it.
+
 ## What was verified
 
 On a booted Novi (QEMU, TCG — this container has no `/dev/kvm`), from
@@ -206,10 +249,25 @@ an ISO built after the fixes above, with `users.ai.groups = agent`,
 | `wifi.join MyNet <passphrase>` | refused, **audited**, `"args": "<arguments withheld…>"`, `grep -c <passphrase> /var/log/novi-agent.jsonl` → `0` |
 | the glob | `state.set hostname *` audited as `"args": "hostname *"` — `set -f` holds on the real path, not only in the host test |
 
-Two things the run cost, both worth writing down:
+The client half, on the same machine:
+
+| | |
+|---|---|
+| `s6-setuidgid ai novi-agent send state.set hostname sent-ok` | `{"ok": true}` — one command, no skarnet incantation |
+| a verb outside `agent.allow`, over `send` | `{"ok": false, "reason": "not in agent.allow"}` |
+| an argument with a space | refused before connecting, naming the one-line protocol |
+| the same `send` as a **non-member** | *"/run/novi/agent is not reachable by you — membership of the 'agent' group is the grant"* |
+| `services.novi-agentd = off`, then `send` | the socket is **gone** (the `finish` script), and the message names the key that starts it |
+| `capabilities` | `"socket": "/run/novi/agent/sock"` when up, `null` when off |
+
+Three things the runs cost, all worth writing down:
 
 - **The socket was unreachable by the group it was for** (the setgid
   finding in decision 2). Everything reported healthy.
+- **A stale socket makes "off" look like "refused".** Found by
+  turning the service off and running `send`: the file outlived the
+  daemon and the friendly message was replaced by
+  `s6-ipcclient: Connection refused`. Decision 10.
 - **BusyBox `setuidgid` drops supplementary groups; `s6-setuidgid`
   keeps them.** `setuidgid ai …` gives `groups=1000(ai)` and
   `Permission denied`; `s6-setuidgid ai …` gives

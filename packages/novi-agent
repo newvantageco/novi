@@ -70,6 +70,7 @@ STATE="${NOVI_STATE:-novi-state}"
 PKG="${NOVI_PKG:-pkg}"
 WIFI="${NOVI_WIFI:-novi-wifi}"
 AUDIT="${NOVI_AGENT_AUDIT:-/var/log/novi-agent.jsonl}"
+SOCK="${NOVI_AGENT_SOCK:-/run/novi/agent/sock}"
 AUDIT_MAX="${NOVI_AGENT_AUDIT_MAX:-2000}"
 
 # `.` is a SPECIAL BUILTIN: in ash, sourcing a file that is not there
@@ -446,7 +447,19 @@ describe_agent() {
         first=0
         printf '%s' "$(json_str "$v")"
     done
-    printf ']}'
+    printf ']'
+    # WHETHER THE NON-ROOT PATH EXISTS IS A CAPABILITY, so it belongs
+    # in the document that answers "what may I do here". An agent that
+    # is not root has no other way to find out short of trying, and
+    # `null` distinguishes "novi-agentd is not running" from "it is,
+    # and here is where" -- which are different problems with different
+    # fixes (declare `services.novi-agentd = on`, versus join `agent`).
+    if [ -S "$SOCK" ]; then
+        printf ', "socket": %s' "$(json_str "$SOCK")"
+    else
+        printf ', "socket": null'
+    fi
+    printf '}'
     # `allow` is read but not emitted raw on purpose: what matters to a
     # caller is which verbs are actually permitted, and echoing the
     # declared string as well would invite reading the string instead
@@ -649,6 +662,75 @@ cmd_audit() {
     tail -n "$n" "$AUDIT"
 }
 
+# ---------------------------------------------------------------------------
+# `send` — the same verbs, from a process that is not root
+# ---------------------------------------------------------------------------
+#
+# RFC 0032 put the non-root path on a socket, and driving it by hand
+# means `s6-ipcclient /run/novi/agent/sock s6-ioconnect` with the
+# request on stdin. That works and nobody would guess it. A capability
+# reachable only by an incantation is the KDE lesson this repo already
+# recorded about the shortcut sheet: the audience for the non-root path
+# is exactly the reader least likely to know skarnet's tool names.
+#
+# So: `novi-agent send <verb> [args...]` is `novi-agent do <verb>
+# [args...]` for somebody who is not root. Same tool, same verb names,
+# same JSON answer -- the difference is which side of the socket the
+# policy is read on, and that difference is not the caller's to care
+# about.
+#
+# It needs NO privilege of its own. Reaching the socket is the whole
+# permission, and that is group membership (see RFC 0032): running this
+# as somebody outside `agent` fails at connect, which is the right
+# place and the right message.
+cmd_send() {
+    local sock="$SOCK" line
+    [ -n "${1:-}" ] || die "usage: novi-agent send <verb> [args...]"
+
+    # THE PROTOCOL IS ONE LINE SPLIT ON WHITESPACE, so an argument that
+    # CONTAINS whitespace cannot survive the trip: it would arrive as
+    # two arguments and the verb would be handed something it was not
+    # given. Refuse here rather than send it -- a request that means
+    # something different at the other end is worse than one that is
+    # rejected, and the caller is the only party who still knows what
+    # was meant.
+    for line in "$@"; do
+        case "$line" in
+            *[[:space:]]*) die "an argument may not contain whitespace: novi-agentd's protocol is one line" ;;
+            *[![:print:]]*) die "an argument may not contain control characters" ;;
+        esac
+    done
+
+    # ABSENT AND UNREACHABLE ARE DIFFERENT PROBLEMS WITH DIFFERENT
+    # FIXES, and `test -S` cannot tell them apart: for somebody outside
+    # the `agent` group the socket directory is not searchable, so the
+    # test fails exactly as it would if novi-agentd were off. The first
+    # version said "declare services.novi-agentd = on" to a caller
+    # looking at a running daemon -- a confident message pointing at
+    # the wrong layer, which is worse than none.
+    #
+    # The directory itself is visible (its parent is 0755); what a
+    # non-member lacks is SEARCH permission on it.
+    if [ ! -S "$sock" ]; then
+        local dir
+        # ${sock%/*} yields the path back unchanged when there is no
+        # slash in it, which would test the socket for searchability
+        # rather than its directory.
+        case "$sock" in */*) dir="${sock%/*}" ;; *) dir="." ;; esac
+        if [ -d "$dir" ] && [ ! -x "$dir" ]; then
+            die "${dir} is not reachable by you -- membership of the 'agent' group is the grant (RFC 0032)"
+        fi
+        die "no agent socket at ${sock} -- declare 'services.novi-agentd = on' and apply"
+    fi
+
+    # s6-ipcclient hands the connection to its child on fds 6 and 7;
+    # s6-ioconnect is the skarnet tool that joins those to stdin and
+    # stdout. Without it a child like `cat` reads the TERMINAL and the
+    # request never leaves the machine it was typed on -- which looks
+    # like a server that answered with an echo of the question.
+    printf '%s\n' "$*" | s6-ipcclient -- "$sock" s6-ioconnect
+}
+
 usage() {
     cat >&2 <<'USAGE'
 novi-agent — the interface an automated actor uses to this machine (RFC 0029)
@@ -657,6 +739,8 @@ novi-agent — the interface an automated actor uses to this machine (RFC 0029)
   novi-agent capabilities        whether `do` is enabled, and which verbs
   novi-agent audit [-n N]        what has been attempted, refusals included
   novi-agent do <verb> [args]    change the machine, within the declared list
+  novi-agent send <verb> [args]  the same, over novi-agentd's socket (RFC 0032),
+                                 for a caller who is not root but is in `agent`
 
 Reading is free. Writing requires `agent.enabled = on` in
 /etc/novi/system.conf AND the verb named in `agent.allow`.
@@ -667,6 +751,9 @@ Verbs:
   state.rollback [gen]       restore a previous generation and re-apply
   pkg.sync                   refresh the signed package index
   pkg.install <name>...      install a package
+  wifi.join <ssid>           join a network; PASSPHRASE ON STDIN, never in
+                             argv -- and not available over `send`, because
+                             a one-line request has nowhere to put a secret
 
 There is deliberately no `exec` verb and no `service.start`: an
 interface that runs arbitrary commands is not a boundary, and starting
@@ -681,5 +768,6 @@ case "${1:-}" in
     capabilities) shift; cmd_capabilities "$@" ;;
     audit)        shift; cmd_audit "$@" ;;
     do)           shift; cmd_do "$@" ;;
+    send)         shift; cmd_send "$@" ;;
     *)            usage ;;
 esac

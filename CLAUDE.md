@@ -963,6 +963,33 @@ decides that.
   default. Running the interface and exposing it to non-root callers
   are two decisions — RFC 0022's argument about
   `network.firewall.allow` for the third time.
+- **`novi-agent send` exists because the incantation is not the
+  interface.** Driving the socket by hand is `s6-ipcclient <path>
+  s6-ioconnect` with the request on stdin, which works and which
+  nobody would guess — and the audience for the non-root path is
+  exactly the reader least likely to know skarnet's tool names. Same
+  verbs, same spellings, same JSON as `do`. It refuses an argument
+  containing whitespace rather than sending it: the protocol is one
+  line split on whitespace, so it would arrive as two arguments and
+  the verb would act on something it was never given.
+- **"Absent" and "unreachable" are different problems and `test -S`
+  cannot tell them apart.** For somebody outside `agent` the socket
+  directory is not searchable, so the test fails exactly as it would
+  if the daemon were off — and the first version told a non-member to
+  turn on a service that was already running. Check `[ -d "$dir" ] &&
+  [ ! -x "$dir" ]`: the directory is visible, the search bit is what
+  is missing.
+- **`init/services/novi-agentd/finish` is the only `finish` script in
+  this repo**, and it unlinks the socket. `s6-ipcserver` leaves it
+  behind, so a *stopped* daemon left a socket file that made `send`'s
+  "is it running?" test say yes — and the caller got s6-ipcclient's
+  raw `Connection refused` instead of the sentence naming the key
+  that starts it. The run script's own `rm -f` before binding is the
+  same removal from the other side.
+- **The usage text is a THIRD list**, after `VERBS` and novi-state's
+  `AGENT_VERBS`, and it had already drifted: `wifi.join` was
+  dispatched, permitted, and unmentioned by `novi-agent` with no
+  arguments. `test-agent-verbs.sh` checks all three now.
 
 ## Architecture: themes, and the light one that finds bugs
 
