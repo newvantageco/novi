@@ -234,9 +234,10 @@ the heading, body, table and status line render in **Inter**, and
 selects Inter SemiBold. Both documented gaps were confirmed **on
 screen** rather than reasoned about: on the first pass a paragraph
 marked `<i>` rendered upright and a `font-family: serif` line rendered
-in Inter. Shipping the two italic faces fixed the first — the same page
-re-rendered with genuinely slanted emphasis — and the serif fallback
-remains, as designed.
+in Inter. Shipping the two italic faces fixed the first, confirmed on a clean
+06..39 rebuild: the same page re-rendered with `<i>` genuinely slanted
+and `<b><i>` in SemiBoldItalic, while the `font-family: serif` line
+still falls back to Inter, as designed.
 `netsurf-fb`'s `DT_NEEDED` gained `libfreetype.so.6`, and the package
 index carries
 `curl,openssl,libpng,zlib,expat,wayland,freetype,fonts-inter,fonts-jetbrains-mono`.
