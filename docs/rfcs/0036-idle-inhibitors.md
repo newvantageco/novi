@@ -163,13 +163,30 @@ tool that can report this state looks broken for five seconds.
 | the sheet's height | a `_Static_assert` on `BUFFER_HEIGHT`, confirmed by putting `ROW_H_KEYS` back to 40 and watching the build stop |
 | both binaries | cross-compiled clean at `-O2` with this project's hardening flags, so `-Wformat-truncation` had a chance to speak |
 
-**On a booted machine: NOT YET DONE.** This section is the honest
-state of it and is meant to be replaced, not left. What has to be
-shown is that the tick logs the transition, that `/run/novi/idle`
-reads `awake 1` after Super+A, that a machine past `power.blank` with
-the toggle on does not blank and does blank one timeout after it goes
-off, that the toast draws, and that the sheet renders its new row.
-Until that is here, this feature is compiled and not run.
+**On a booted machine, done:**
+
+| | |
+|---|---|
+| the global | novi-shell logs no "could not create the idle-inhibit manager", so `wlr_idle_inhibit_v1_create()` returned an object — the absence of that line is the only evidence available, since wlroots does not announce a global |
+| the format | `/run/novi/idle` reads the new key-value lines, `awake` and `inhibit` separate |
+| Super+A on | `idle: stay-awake ON (Super+A)` from the keypress, then `idle: inhibited (Super+A and 0 client surface(s)), first is "Super+A"` from the next tick — the transition line, once, not once per tick |
+| the toasts | both drew, with the power glyph, in the order they were pressed |
+| **the clock is HELD** | `power.blank = 10`, then **thirty seconds** untouched with the toggle on: `blanked 0` and `idle 0`. Three timeouts' worth of not blanking |
+| **and released** | Super+A off → `idle: no longer inhibited -- the clock restarts`, and twenty seconds later `blanked 1` with `idle: output Virtual-1 off committed`. The commit result, not the intent — RFC 0035's rule |
+| `novi-power idle` | on the target: `awake yes -- somebody pressed Super+A`, with `inhibit no` beside it, the two claims apart |
+| the sheet | Super+/ renders all nineteen rows, "Keep this machine awake (on/off) — Super + A" among them in the Session group, with no edit to novi-launcher |
+
+The console is on ttyS0 and is not a libinput device, so typing these
+commands does not reset the compositor's idle clock — which is what
+makes the thirty-second measurement mean anything.
+
+**One thing that had to be rebuilt twice, and it is a trap worth
+naming.** `novi-power idle` printed the command's *usage* on the first
+booted image: `packages/novi-power` is base content installed by
+`03-base.sh`, and the documented desktop recovery range is
+`--from 06 --to 39`, which does not reach it. The compositor half of
+this same change was live in that image, so one half of the feature
+had updated and the other silently had not. CLAUDE.md records it.
 
 And separately from all of the above: **the client half of the
 protocol has not been exercised by a client,

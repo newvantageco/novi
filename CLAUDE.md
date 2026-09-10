@@ -2220,6 +2220,21 @@ pkgsplit runs *and* refuses outright on an already-split rootfs — so
 confirmed by reverting the function to the old silent filter and
 watching it fail.
 
+**`--from 06 --to 39` DOES NOT REBUILD A BASE SCRIPT.** The recovery
+range above is about the desktop, and `packages/novi-power`,
+`novi-state`, `novi-wifi`, `novi-mount`, `pkg` and the rest of the
+base userland are installed by stages BELOW it — `novi-power` by
+`03-base.sh`, at `install -D -m 755`. So editing one of those scripts
+and then following the documented recovery ships the OLD copy, and the
+symptom is not a build error: `novi-power idle` printed the usage text
+for a subcommand that was right there in the repo. The compositor half
+of the same change was live in the same image, which is what makes it
+confusing — one half of a feature updated and the other silently not.
+Re-run the stage that owns the file (`bash build/03-base.sh`, then
+`16-s6-rc-db.sh`, which exists to repair `/sbin/init` after exactly
+that), or check `grep -c <the-new-thing> /build/rootfs/usr/bin/<script>`
+before believing a rebuild reached it.
+
 **`restore-build-inputs.sh` does not give you a tree every stage can
 run in.** It restores headers and `.pc` files, not target *binaries*
 that live in packages — so `09-foot.sh` aborts at

@@ -682,8 +682,10 @@ BUG_REPORT_URL="https://github.com/newvantageco/novi/issues"
       `zwp_idle_inhibit_manager_v1` for a program. Honoured only while
       the asking client's window is on screen, and never while the
       session is locked; the keypress survives a lock, because a person
-      asked. `novi-power idle` says which. Nothing in this image speaks
-      the protocol yet (RFC 0036)
+      asked. `novi-power idle` says which. Verified by leaving a machine
+      with a ten-second blank timeout untouched for thirty seconds and
+      watching it stay lit, then blank twenty seconds after the toggle
+      went off. Nothing in this image speaks the protocol yet (RFC 0036)
 - [x] Idle-suspend — `power.suspend = <seconds>`, off by default. The
       trigger is verified; the resume is not, because S3 does not come
       back under TCG and this container has no KVM. It locks the screen
