@@ -1630,12 +1630,33 @@ already had for `power.blank`, spawning `novi-power suspend`.
   suspends again — a machine that cannot be woken, from code that
   reads correctly. Resetting first also removes the need for an
   "already suspending" latch: the threshold is the debounce.
-- **It does NOT lock the screen first**, matching `power.lid =
-  suspend` rather than inventing a second behaviour for one verb —
-  but an idle machine is exactly the case where nobody is standing
-  over it, so `system.conf` says so beside the key. Doing it properly
-  means the compositor waiting for the lock surface to MAP before
-  triggering, which is its own key and its own problem.
+- **`power.suspend.lock` is ON by default**, the opposite call from
+  `power.suspend` itself: an idle suspend is by definition the one
+  path that fires with nobody standing over the machine. And it WAITS
+  FOR THE LOCK SURFACE TO MAP — spawning novi-lockscreen and freezing
+  in the same breath is a race the machine loses, because the resume
+  then shows the desktop for as long as the client takes to come up,
+  which is the whole thing the lock was for. `server->locked` already
+  flips on map, so there is a real answer to wait on.
+- **If the lock screen does not appear it does NOT suspend**, and
+  logs why. "Lock, then suspend" done without the first half is not a
+  degraded version of it — it is the one outcome the key exists to
+  prevent. A machine left awake is recoverable by anyone who walks up
+  to it; one that suspended unlocked is not. The retry is a full
+  timeout away, or a broken lock screen writes a log line every five
+  seconds forever.
+- **A lid-close suspend still does not lock.** Somebody closing a lid
+  is present, and that path is novi-power's — a base tool that runs on
+  machines with no compositor to ask.
+- **A machine with NO PASSWORD never idle-suspends** with the lock on,
+  and that is two correct behaviours composing into a surprising one:
+  novi-lockscreen refuses to run without a password (a lock nobody can
+  open is an unusable machine) and the compositor refuses to suspend
+  without the lock. The live image is exactly that machine. Verified
+  both ways — no password: three ticks of waiting, one ERROR, no
+  suspend, retried a full timeout later; after `passwd root`: the last
+  frame before the machine went down is the lock screen, and the next
+  poll found the guest suspended.
 - **QEMU's q35 has disabled S3 since 6.1**, so `mem` falls back to
   s2idle: the vCPU halts with no ACPI wake path and QMP
   `system_wakeup` has nothing to inject. `mkvm.sh` passes `-global

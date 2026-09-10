@@ -812,6 +812,18 @@ observe_key() {
                 *) state_get "$key" ;;
             esac
             ;;
+        # Whether an idle suspend locks the screen first. ON when
+        # undeclared, which is what novi-shell falls back to -- so a
+        # machine that has never heard of this key does not report
+        # drift on it, and one that HAS declared it gets its own word
+        # back.
+        power.suspend.lock)
+            case "$(state_get "$key")" in
+                ''|on) printf 'on' ;;
+                off) printf 'off' ;;
+                *) printf 'unsupported' ;;
+            esac
+            ;;
         # storage.automount is the same shape as power.lid, for the
         # same reason: novi-mount reads it when a device arrives, so
         # there is no daemon holding it, it cannot drift, and `apply`
@@ -1192,6 +1204,14 @@ converge_key() {
                 off) : ;;
                 ''|*[!0-9]*) die "$key: must be a number of seconds or 'off', got '$want'" ;;
                 *) : ;;
+            esac
+            ;;
+        # Read on novi-shell's idle tick, like power.blank. Nothing to
+        # converge; `apply` is where the typo is reported.
+        power.suspend.lock)
+            case "$want" in
+                on|off) : ;;
+                *) die "$key: must be 'on' or 'off', got '$want'" ;;
             esac
             ;;
         # Read at event time by novi-mount, like power.lid -- nothing
@@ -1733,6 +1753,7 @@ Keys:
   display.theme                   a file in /usr/share/novi/themes (colours)
   power.blank                     <seconds> | off  (idle screen blank)
   power.suspend                   <seconds> | off  (idle suspend; off by default)
+  power.suspend.lock              on | off  (lock before an idle suspend)
   power.governor                  performance | powersave | schedutil | ...
   storage.automount               on | off  (removable media -> /run/media)
   state.apply_on_boot             on | off  (converge on every boot)

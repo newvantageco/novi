@@ -152,6 +152,26 @@
  * that does not come back on its own) and syncs. The compositor's
  * part is the same as it is for a theme -- notice, and spawn. */
 #define NOVI_DEFAULT_SUSPEND "novi-power suspend"
+/* Lock the screen before an idle suspend (RFC 0035 roadmap 1).
+ *
+ * ON by default, which is the opposite call from `power.suspend`
+ * itself and for the same reason: an idle suspend is BY DEFINITION
+ * the case where nobody is standing over the machine, so coming back
+ * to an unlocked session is the wrong default for the one path that
+ * fires with no person involved. `power.lid = suspend` still does not
+ * lock -- somebody closing a lid is present, and that path belongs to
+ * novi-power, which runs on machines with no compositor to ask.
+ *
+ * Turning `power.suspend` off (the shipped default) makes this key
+ * inert, so defaulting it on costs nobody anything. */
+#define NOVI_SUSPEND_LOCK_KEY "power.suspend.lock"
+/* How many idle ticks to wait for the lock surface to actually MAP
+ * before giving up. Spawning novi-lockscreen and suspending in the
+ * same breath would race: the machine can freeze before the surface
+ * exists, and the resume then shows the desktop for as long as the
+ * client takes to come up. Three ticks is fifteen seconds, which is
+ * a very long time for a layer-shell client to map. */
+#define NOVI_SUSPEND_LOCK_MAX_TICKS 3
 #define NOVI_STATE_FILE "/etc/novi/system.conf"
 /* How often the idle clock advances and the declared timeout is
  * re-read. Five seconds is the granularity of blanking and the worst
@@ -335,6 +355,11 @@ struct novi_server {
 	 * before it can fire, which is both the debounce and the reason a
 	 * machine that resumes with no input eventually suspends again. */
 	int suspend_after;
+	/* Ticks spent waiting for the lock surface to map before an idle
+	 * suspend, or -1 when not waiting. The wait is a STATE rather than
+	 * a sleep because the compositor's event loop must keep running --
+	 * it is the thing that will notice the lock surface mapping. */
+	int suspend_lock_wait;
 	int idle_ms;
 	bool blanked;
 
@@ -571,13 +596,17 @@ static void idle_set_outputs(struct novi_server *server, bool on) {
  * re-read when the period elapsed, so changing 600 to 10 took ten
  * minutes to take effect. That is not "read at use time", it is read
  * at the least useful time available. */
-static int idle_read_seconds(const char *want_key, int fallback) {
+/* The raw declared value for one key, or false if it is not in the
+ * document. Split out of idle_read_seconds() because this tick reads a
+ * duration AND a flag now, and two copies of the parser would be two
+ * places to get `key = value  # comment` wrong. */
+static bool idle_read_value(const char *want_key, char *out, size_t cap) {
 	FILE *f = fopen(NOVI_STATE_FILE, "r");
 	if (f == NULL) {
-		return fallback;
+		return false;
 	}
 	char line[512];
-	int result = fallback;
+	bool found = false;
 	while (fgets(line, sizeof(line), f) != NULL) {
 		char *hash = strchr(line, '#');
 		if (hash != NULL) {
@@ -608,23 +637,48 @@ static int idle_read_seconds(const char *want_key, int fallback) {
 				vend[-1] == '\n' || vend[-1] == '\r')) {
 			*--vend = '\0';
 		}
-		if (strcmp(val, "off") == 0) {
-			result = 0;
-		} else {
-			char *num_end = NULL;
-			long v = strtol(val, &num_end, 10);
-			/* An unusable value falls back to the default rather than
-			 * to "never": a typo in this key should not silently
-			 * disable the thing it configures. novi-state's observer
-			 * reports it as drift, which is where a person finds out. */
-			if (num_end != val && *num_end == '\0' && v >= 0 && v <= 86400) {
-				result = (int)v;
-			}
-		}
+		snprintf(out, cap, "%s", val);
+		found = true;
 		break;
 	}
 	fclose(f);
-	return result;
+	return found;
+}
+
+static int idle_read_seconds(const char *want_key, int fallback) {
+	char val[64];
+	if (!idle_read_value(want_key, val, sizeof(val))) {
+		return fallback;
+	}
+	if (strcmp(val, "off") == 0) {
+		return 0;
+	}
+	char *num_end = NULL;
+	long v = strtol(val, &num_end, 10);
+	/* An unusable value falls back to the default rather than to
+	 * "never": a typo in this key should not silently disable the
+	 * thing it configures. novi-state's observer reports it as drift,
+	 * which is where a person finds out. */
+	if (num_end != val && *num_end == '\0' && v >= 0 && v <= 86400) {
+		return (int)v;
+	}
+	return fallback;
+}
+
+/* Same rule for a flag: anything that is not exactly `on` or `off`
+ * falls back to the default rather than being guessed at. */
+static bool idle_read_bool(const char *want_key, bool fallback) {
+	char val[64];
+	if (!idle_read_value(want_key, val, sizeof(val))) {
+		return fallback;
+	}
+	if (strcmp(val, "on") == 0) {
+		return true;
+	}
+	if (strcmp(val, "off") == 0) {
+		return false;
+	}
+	return fallback;
 }
 
 /* The timer is a plain TICK, not "fire once after the timeout". That
@@ -662,6 +716,10 @@ static void idle_arm(struct novi_server *server) {
  * a second answer to a question with one. */
 static void idle_notify_activity(struct novi_server *server) {
 	server->idle_ms = 0;
+	/* Somebody is here, so whatever the suspend path was waiting for
+	 * no longer matters. Left set, a half-finished wait would make the
+	 * NEXT idle period skip straight to the give-up branch. */
+	server->suspend_lock_wait = -1;
 	if (server->blanked) {
 		server->blanked = false;
 		idle_set_outputs(server, true);
@@ -690,6 +748,44 @@ static int idle_timer_fire(void *data) {
 	 * program having an opinion about somebody's machine. */
 	if (server->suspend_after > 0 &&
 			server->idle_ms >= server->suspend_after * 1000) {
+		/* Lock FIRST, and wait for the surface to actually map.
+		 * Spawning novi-lockscreen and suspending in the same breath
+		 * is a race the machine loses: it can freeze before the
+		 * surface exists, and the resume then shows the desktop for
+		 * however long the client takes to come up -- which is the
+		 * whole thing the lock was for. server->locked flips when the
+		 * surface maps, so this loop has a real answer to wait on. */
+		if (idle_read_bool(NOVI_SUSPEND_LOCK_KEY, true) && !server->locked) {
+			if (server->suspend_lock_wait < 0) {
+				wlr_log(WLR_INFO,
+					"idle: locking before suspend (power.suspend.lock)");
+				run_spawn("NOVI_LOCK", NOVI_DEFAULT_LOCK);
+				server->suspend_lock_wait = 0;
+			} else if (++server->suspend_lock_wait >
+					NOVI_SUSPEND_LOCK_MAX_TICKS) {
+				/* NOT suspending, deliberately. The declaration was
+				 * "lock, then suspend"; doing the second half without
+				 * the first is not a degraded version of that, it is
+				 * the one outcome the key exists to prevent. A machine
+				 * that stays awake is recoverable by anyone who walks
+				 * up to it; a machine that suspended unlocked is not.
+				 *
+				 * idle_ms is reset so the retry is one full timeout
+				 * away rather than once every tick -- a lock screen
+				 * that cannot start should not produce a line every
+				 * five seconds forever. */
+				wlr_log(WLR_ERROR,
+					"idle: the lock screen did not appear within %d ticks -- "
+					"NOT suspending (set power.suspend.lock = off to suspend anyway)",
+					NOVI_SUSPEND_LOCK_MAX_TICKS);
+				server->suspend_lock_wait = -1;
+				server->idle_ms = 0;
+			}
+			idle_publish(server);
+			idle_arm(server);
+			return 0;
+		}
+		server->suspend_lock_wait = -1;
 		wlr_log(WLR_INFO, "idle: %d second(s) idle, suspending",
 			server->idle_ms / 1000);
 		/* Reset BEFORE the spawn, not after the machine comes back.
@@ -3516,6 +3612,7 @@ int main(int argc, char *argv[]) {
 		NOVI_BLANK_DEFAULT_SECONDS);
 	server.suspend_after = idle_read_seconds(NOVI_SUSPEND_KEY,
 		NOVI_SUSPEND_DEFAULT_SECONDS);
+	server.suspend_lock_wait = -1;
 	idle_publish(&server);
 	server.idle_timer = wl_event_loop_add_timer(
 		wl_display_get_event_loop(server.wl_display), idle_timer_fire, &server);

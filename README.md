@@ -680,7 +680,9 @@ BUG_REPORT_URL="https://github.com/newvantageco/novi/issues"
       list you declared, and every attempt is audited (RFC 0029)
 - [x] Idle-suspend — `power.suspend = <seconds>`, off by default. The
       trigger is verified; the resume is not, because S3 does not come
-      back under TCG and this container has no KVM (RFC 0035)
+      back under TCG and this container has no KVM. It locks the screen
+      first and waits for the surface to map, and refuses to suspend if
+      it never does (RFC 0035)
 - [x] Notification history — Super + N, or the Apps grid. A toast is up
       for five seconds; before this, so was the fact of it (RFC 0034)
 - [x] A static address — `network.address = 192.168.1.50/24` and
@@ -699,7 +701,7 @@ BUG_REPORT_URL="https://github.com/newvantageco/novi/issues"
 - [ ] A published repository + offline release key
 - [ ] A Microsoft-signed shim (real Secure Boot); OWE and SAE-PK
       (compiled in, untested)
-- [ ] Low-battery; locking before suspend
+- [ ] Low-battery
 - [ ] More state domains: keybindings
 - [ ] Boot splash
 

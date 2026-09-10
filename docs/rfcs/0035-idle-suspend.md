@@ -89,22 +89,36 @@ Nothing enforces an ordering between the two values, though.
 declare — suspend quickly, never mind the panel — and refusing it would
 be this program having an opinion about somebody's machine.
 
-### 6. IT DOES NOT LOCK THE SCREEN FIRST.
+### 6. It locks first, and WAITS FOR THE SURFACE TO MAP.
 
-`power.lid = suspend` does not lock either, and this keeps that
-behaviour rather than inventing a different one for the same verb.
+`power.suspend.lock`, **on** when undeclared — the opposite call from
+`power.suspend` itself, and for the same reason. An idle suspend is by
+definition the one path that fires with nobody standing over the
+machine, so coming back to an unlocked session is the wrong default
+for it. `power.suspend` shipping `off` makes the key inert until
+somebody asks for suspend at all, so defaulting it on costs nobody
+anything.
 
-**But an idle machine is precisely the case where nobody is standing
-over it**, so this is worth saying rather than leaving to be
-discovered: a resume comes back to an unlocked session. It is stated in
-`system.conf` next to the key, where somebody turning it on will read
-it.
+**Spawning novi-lockscreen and suspending in the same breath is a race
+the machine loses.** It can freeze before the surface exists, and the
+resume then shows the desktop for however long the client takes to
+come up — which is the whole thing the lock was for. `server->locked`
+already flips when the lock surface *maps*, so there is a real answer
+to wait on: the tick spawns the client, and suspends on a later tick
+once the flag is set.
 
-Locking on suspend is not a line of code: the compositor would have to
-know the lock surface is actually *mapped* before triggering the
-suspend, or a resume shows the desktop for however long novi-lockscreen
-takes to come up. That is its own key and its own synchronisation
-problem — roadmap item 1, deliberately not smuggled in here.
+**If the lock screen does not appear, it does not suspend**, and says
+so. The declaration was "lock, then suspend"; doing the second half
+without the first is not a degraded version of it, it is the one
+outcome the key exists to prevent. A machine that stays awake is
+recoverable by anyone who walks up to it; a machine that suspended
+unlocked is not. The retry is a full timeout away rather than every
+tick, so a lock screen that cannot start does not produce a log line
+every five seconds forever.
+
+`power.lid = suspend` still does not lock. Somebody closing a lid is
+present, and that path belongs to novi-power — a base tool that runs
+on machines with no compositor to ask.
 
 ## What was verified, and what could not be
 
@@ -116,6 +130,21 @@ container**), with `power.suspend = 30`:
 | the trigger | the machine reached QEMU's `suspended` state on its own, with no input, at the declared timeout — observed through QMP `query-status` |
 | the default | `power.suspend = off` as shipped reports **zero drift** and never suspends |
 | the key's shape | `novi-state` accepts seconds and `off`, and reports anything else as drift, like `power.blank` |
+
+**The lock-then-suspend ordering is verified**, on a second run with
+`power.suspend = 30` and the shipped `power.suspend.lock = on`:
+
+| | |
+|---|---|
+| with **no root password** | novi-lockscreen refuses (*"root has no password set … refusing to lock"*), the compositor waits three ticks, logs *"the lock screen did not appear … NOT suspending"* and **does not suspend** — retried a full timeout later, twice, exactly as designed |
+| after `passwd root` | the last frame before the machine went down is the lock screen — **"Locked / Type your password, then press Enter"** — and the next poll found the guest `suspended` |
+
+The first of those is worth stating as a consequence rather than a
+quirk: **on the live image, where root has no password, an idle
+suspend with the lock on will never happen.** The log says why and
+names the escape. That is the design working, not failing — but it is
+the sort of thing that reads as a broken feature if nobody wrote it
+down.
 
 **The resume could not be verified, and that is a property of this
 container rather than of this feature.** The measurement, because "it
@@ -155,15 +184,20 @@ the mechanism, and it wants a KVM-capable host to become a fact.
   the thing every other operating system does and this one did not.
 - **`power.blank` and `power.suspend` are independent.** Neither
   implies the other and neither constrains the other's value.
-- **A resume comes back unlocked.** Decision 6.
+- **A resume comes back to the lock screen** unless
+  `power.suspend.lock = off`. A lid-close suspend still does not lock.
 - **The resume path is unverified**, here and on real hardware. The
   trigger is verified; what happens after is not, which is most of why
   the key ships `off`.
+- **A machine with no password never idle-suspends** while
+  `power.suspend.lock` is on, because the lock screen correctly
+  refuses to run without one. That is the live image, among others.
 
 ## Roadmap
 
-1. **Lock before suspending**, as its own key, with the compositor
-   waiting for the lock surface to map before it triggers.
+1. **Locking a lid-close suspend too**, which needs novi-power to be
+   able to ask a compositor that may not exist — the split-brain this
+   project avoids, so it wants a design rather than a flag.
 2. **Low battery.** The other half of RFC 0013's power story: QEMU
    emulates no battery, so it could be written and not verified.
 3. **Inhibitors.** A video player or a long build should be able to say
