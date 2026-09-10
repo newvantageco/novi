@@ -1614,6 +1614,50 @@ RFC 0013 (`docs/rfcs/0013-power-events.md`).
   incrementing. Do not "fix" this by restarting acpid on resume — the
   event never reaches the input layer at all.
 
+## Architecture: an idle machine, and a resume nobody has seen
+
+RFC 0035 (`docs/rfcs/0035-idle-suspend.md`). `power.suspend =
+<seconds> | off`, read at use time by novi-shell on the idle tick it
+already had for `power.blank`, spawning `novi-power suspend`.
+
+- **OFF by default, where `power.blank` is 600.** Turning a display
+  off is undone by moving the mouse; suspending is undone only by a
+  working wake path on hardware nobody here has tested.
+- **The idle clock is reset AT THE TRIGGER, not after the resume**,
+  and this is the whole bug the feature is about. The compositor's
+  clock does not advance while the kernel is frozen, so on resume
+  `idle_ms` is still over the threshold and the very next tick
+  suspends again — a machine that cannot be woken, from code that
+  reads correctly. Resetting first also removes the need for an
+  "already suspending" latch: the threshold is the debounce.
+- **It does NOT lock the screen first**, matching `power.lid =
+  suspend` rather than inventing a second behaviour for one verb —
+  but an idle machine is exactly the case where nobody is standing
+  over it, so `system.conf` says so beside the key. Doing it properly
+  means the compositor waiting for the lock surface to MAP before
+  triggering, which is its own key and its own problem.
+- **QEMU's q35 has disabled S3 since 6.1**, so `mem` falls back to
+  s2idle: the vCPU halts with no ACPI wake path and QMP
+  `system_wakeup` has nothing to inject. `mkvm.sh` passes `-global
+  ICH9-LPC.disable_s3=0` now, after which `/sys/power/mem_sleep` reads
+  `s2idle [deep]`.
+- **And the resume STILL does not complete under TCG.** Measured
+  rather than assumed: 258 non-black pixels of console before the
+  suspend, 0 after `system_wakeup`, 0 more after typing six characters
+  at the emulated keyboard, while QEMU reports the VM "running". This
+  container has no `/dev/kvm`.
+- **The check that made that finding usable was running the SAME
+  suspend from a console with no compositor**, which behaves
+  identically. Without it the honest reading was "this feature wedges
+  the machine", and the fix would have gone to something that was not
+  broken. **When a new feature appears to break the machine, run the
+  thing underneath it on its own before believing the feature did it.**
+- **"Nothing happened" proves nothing on a guest that never resumed.**
+  A 25-second observation that the machine did not re-suspend looked
+  like proof of the reset above and was worthless: a wedged guest also
+  does not re-suspend. That claim is reasoning from the mechanism now,
+  and says so.
+
 ## Architecture: "up" is not "working"
 
 RFC 0014 (`docs/rfcs/0014-service-health.md`). `s6-rc -a list` saying a

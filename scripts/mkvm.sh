@@ -266,6 +266,28 @@ QEMU_CMD=(
 
     # Machine & firmware
     -machine type=q35,accel=kvm:tcg,smm=on
+    # S3 (suspend-to-RAM), which QEMU's q35 machine types have DISABLED
+    # BY DEFAULT since 6.1. Without this the guest's `mem` sleep state
+    # falls back to s2idle -- the vCPU halts with no ACPI wake path, so
+    # QMP `system_wakeup` has nothing to inject and the guest never
+    # comes back. It looks exactly like a kernel that cannot resume:
+    # QEMU reports the VM "running" again while the serial console
+    # stays silent forever, which is how RFC 0035's first suspend test
+    # was read as a broken feature.
+    #
+    # It is NECESSARY AND NOT SUFFICIENT. With it the guest picks
+    # `deep` in /sys/power/mem_sleep and QEMU reports the VM
+    # "suspended"; the RESUME still does not complete under TCG on a
+    # host with no /dev/kvm -- measured, not assumed: 258 non-black
+    # pixels of console before the suspend, 0 after `system_wakeup`,
+    # and 0 more after typing six characters at the emulated keyboard.
+    # A plain `novi-power suspend` from a console does the same, so it
+    # is the platform and not anything Novi does.
+    #
+    # This is a TEST HARNESS setting, not a claim about anyone's
+    # hardware. It exists so that the suspend half can be exercised at
+    # all; real machines decide their own sleep states.
+    -global ICH9-LPC.disable_s3=0
     "${DRIVE_FIRMWARE_ARGS[@]}"
 
     # CPU & RAM

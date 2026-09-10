@@ -797,6 +797,21 @@ observe_key() {
                 *) state_get "$key" ;;
             esac
             ;;
+        # power.suspend (RFC 0035) is power.blank's shape exactly:
+        # novi-shell re-reads it on the idle tick, so nothing holds it,
+        # it cannot drift, and `apply` has nothing to converge -- which
+        # again makes this the only place a typo can surface.
+        #
+        # An UNDECLARED value is `off`, not the compositor's default,
+        # because the compositor's default IS off. A machine that has
+        # never heard of this key must not report drift on it forever.
+        power.suspend)
+            case "$(state_get "$key")" in
+                ''|off) printf 'off' ;;
+                *[!0-9]*) printf 'unsupported' ;;
+                *) state_get "$key" ;;
+            esac
+            ;;
         # storage.automount is the same shape as power.lid, for the
         # same reason: novi-mount reads it when a device arrives, so
         # there is no daemon holding it, it cannot drift, and `apply`
@@ -1172,7 +1187,7 @@ converge_key() {
             mv "${THEME_ACTIVE}.new" "$THEME_ACTIVE"
             info "theme '${want}' published; open windows keep the old palette until they restart"
             ;;
-        power.blank)
+        power.blank|power.suspend)
             case "$want" in
                 off) : ;;
                 ''|*[!0-9]*) die "$key: must be a number of seconds or 'off', got '$want'" ;;
@@ -1717,6 +1732,7 @@ Keys:
   display.renderer                pixman | gles2 | auto  (compositor renderer)
   display.theme                   a file in /usr/share/novi/themes (colours)
   power.blank                     <seconds> | off  (idle screen blank)
+  power.suspend                   <seconds> | off  (idle suspend; off by default)
   power.governor                  performance | powersave | schedutil | ...
   storage.automount               on | off  (removable media -> /run/media)
   state.apply_on_boot             on | off  (converge on every boot)

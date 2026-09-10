@@ -130,6 +130,28 @@
  * keystroke would not be. The screen is about to go dark anyway. */
 #define NOVI_BLANK_DEFAULT_SECONDS 600
 #define NOVI_BLANK_KEY "power.blank"
+/* Idle SUSPEND (RFC 0035), the other half of what an idle machine
+ * should do. Blanking saves the panel; suspending saves the battery,
+ * and it is what every laptop operating system does when nobody has
+ * touched it for a while.
+ *
+ * OFF BY DEFAULT, unlike blanking. Turning a display off is
+ * recoverable by moving the mouse; suspending a machine is not
+ * recoverable by anything the machine can do itself -- it needs a
+ * person, a working wake path, and a resume that this project has
+ * only ever seen on QEMU. RFC 0013 already records the power button
+ * not being delivered after an S3 resume there, which is exactly the
+ * kind of thing that makes an unattended suspend a trap rather than a
+ * saving. A person who wants it says so.
+ *
+ * Same read-at-use-time shape as power.blank, on the same tick. */
+#define NOVI_SUSPEND_KEY "power.suspend"
+#define NOVI_SUSPEND_DEFAULT_SECONDS 0
+/* Spawned, never reimplemented: novi-power already picks the sleep
+ * state the kernel offers, saves the mixer (the one piece of state
+ * that does not come back on its own) and syncs. The compositor's
+ * part is the same as it is for a theme -- notice, and spawn. */
+#define NOVI_DEFAULT_SUSPEND "novi-power suspend"
 #define NOVI_STATE_FILE "/etc/novi/system.conf"
 /* How often the idle clock advances and the declared timeout is
  * re-read. Five seconds is the granularity of blanking and the worst
@@ -306,6 +328,13 @@ struct novi_server {
 	 * session restarted. */
 	struct wl_event_source *idle_timer;
 	int blank_after;
+	/* RFC 0035. Seconds of idleness before the machine suspends, 0
+	 * meaning never -- read from the same document on the same tick as
+	 * blank_after. There is deliberately no "already suspended" latch:
+	 * the trigger resets idle_ms, so the timeout has to elapse again
+	 * before it can fire, which is both the debounce and the reason a
+	 * machine that resumes with no input eventually suspends again. */
+	int suspend_after;
 	int idle_ms;
 	bool blanked;
 
@@ -489,6 +518,11 @@ static void unminimize_toplevel(struct novi_toplevel *toplevel);
 static void switch_workspace(struct novi_server *server, int workspace);
 static void move_focused_to_workspace(struct novi_server *server, int workspace);
 
+/* Defined with the other spawn helpers further down; the idle tick
+ * needs it, and moving the whole spawn section above the idle section
+ * would put it before the server struct it does not use. */
+static void run_spawn(const char *env, const char *def);
+
 /* ── Idle blanking ─────────────────────────────────────────────────
  *
  * The screen never turned itself off. On a laptop that is the panel
@@ -537,13 +571,13 @@ static void idle_set_outputs(struct novi_server *server, bool on) {
  * re-read when the period elapsed, so changing 600 to 10 took ten
  * minutes to take effect. That is not "read at use time", it is read
  * at the least useful time available. */
-static int idle_read_timeout(void) {
+static int idle_read_seconds(const char *want_key, int fallback) {
 	FILE *f = fopen(NOVI_STATE_FILE, "r");
 	if (f == NULL) {
-		return NOVI_BLANK_DEFAULT_SECONDS;
+		return fallback;
 	}
 	char line[512];
-	int result = NOVI_BLANK_DEFAULT_SECONDS;
+	int result = fallback;
 	while (fgets(line, sizeof(line), f) != NULL) {
 		char *hash = strchr(line, '#');
 		if (hash != NULL) {
@@ -562,7 +596,7 @@ static int idle_read_timeout(void) {
 		while (kend > key && (kend[-1] == ' ' || kend[-1] == '\t')) {
 			*--kend = '\0';
 		}
-		if (strcmp(key, NOVI_BLANK_KEY) != 0) {
+		if (strcmp(key, want_key) != 0) {
 			continue;
 		}
 		char *val = eq + 1;
@@ -638,11 +672,39 @@ static void idle_notify_activity(struct novi_server *server) {
 static int idle_timer_fire(void *data) {
 	struct novi_server *server = data;
 	server->idle_ms += NOVI_IDLE_TICK_MS;
-	server->blank_after = idle_read_timeout();
+	server->blank_after = idle_read_seconds(NOVI_BLANK_KEY,
+		NOVI_BLANK_DEFAULT_SECONDS);
+	server->suspend_after = idle_read_seconds(NOVI_SUSPEND_KEY,
+		NOVI_SUSPEND_DEFAULT_SECONDS);
 	if (!server->blanked && server->blank_after > 0 &&
 			server->idle_ms >= server->blank_after * 1000) {
 		server->blanked = true;
 		idle_set_outputs(server, false);
+	}
+	/* Suspend AFTER blanking is considered on the same tick, so a
+	 * machine whose two timeouts are equal blanks and then suspends
+	 * rather than suspending with the panel lit. Nothing enforces an
+	 * ordering between the two values, though: `power.suspend` shorter
+	 * than `power.blank` is a legitimate thing to declare (suspend
+	 * quickly, and never mind the panel) and refusing it would be this
+	 * program having an opinion about somebody's machine. */
+	if (server->suspend_after > 0 &&
+			server->idle_ms >= server->suspend_after * 1000) {
+		wlr_log(WLR_INFO, "idle: %d second(s) idle, suspending",
+			server->idle_ms / 1000);
+		/* Reset BEFORE the spawn, not after the machine comes back.
+		 * The compositor's clock does not advance while the kernel is
+		 * frozen, so on resume idle_ms would still be over the
+		 * threshold and the very next tick would suspend again --
+		 * a machine that cannot be woken up, from code that looks
+		 * correct. Resetting here means the timeout has to elapse
+		 * again, which is also what makes an untouched machine
+		 * re-suspend rather than staying awake forever. */
+		server->idle_ms = 0;
+		idle_publish(server);
+		run_spawn("NOVI_SUSPEND", NOVI_DEFAULT_SUSPEND);
+		idle_arm(server);
+		return 0;
 	}
 	idle_publish(server);
 	idle_arm(server);
@@ -3450,7 +3512,10 @@ int main(int argc, char *argv[]) {
 	 * period is measured from a session that actually exists, and read
 	 * once here so a machine that never sees input still blanks. */
 	mkdir("/run/novi", 0755);
-	server.blank_after = idle_read_timeout();
+	server.blank_after = idle_read_seconds(NOVI_BLANK_KEY,
+		NOVI_BLANK_DEFAULT_SECONDS);
+	server.suspend_after = idle_read_seconds(NOVI_SUSPEND_KEY,
+		NOVI_SUSPEND_DEFAULT_SECONDS);
 	idle_publish(&server);
 	server.idle_timer = wl_event_loop_add_timer(
 		wl_display_get_event_loop(server.wl_display), idle_timer_fire, &server);
