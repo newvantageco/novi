@@ -1694,8 +1694,23 @@ answer is "nothing leaves the base": an empty manifest, a repository
 holding one meta-package, and a 95 MB-smaller ISO with no desktop
 anywhere — no error, because an empty answer is a valid answer.
 `bash build.sh` never trips it; re-running stages by hand does. The
-recovery is the stages, in order: `bash build.sh --from 06 --to 29`,
-then 40, 41, 42.
+recovery is the stages, in order: **`bash build.sh --from 06 --to 39`,
+then `bash build.sh --from 40`.**
+
+**That range used to say `--to 29`, and it silently shipped a broken
+desktop.** Content stages grew past 29 — novi-notifyd and novi-bg are
+36, novi-glinfo is 37 — so `--to 29` rebuilt most of the desktop and
+none of those, and 41 had already deleted them from the rootfs. The
+repository came out with 51 packages instead of 54, and **the
+`novi-desktop` meta-package's derived `depends=` simply omitted the
+three that were missing**: no error, because pkgsplit's META_PACKAGES
+check asks "is every OS package named by some meta-package", which is
+the opposite question. `pkg install novi-desktop` would have reported
+success and produced a desktop with no wallpaper and no notifications.
+Count the packages (`ls /build/repo/*.pkg.tar.gz | wc -l`) after any
+hand-run recovery, and **when a stage number is written into a
+document, the document is now something that can rot** — this line
+did.
 
 **`restore-build-inputs.sh` launders stale files forward.** It restores
 headers and `.pc` files *from the packages*, so anything that was in a
