@@ -678,6 +678,11 @@ BUG_REPORT_URL="https://github.com/newvantageco/novi/issues"
 - [x] An interface for automated actors — `novi-agent describe` is one
       JSON document; `novi-agent do` changes the machine only within a
       list you declared, and every attempt is audited (RFC 0029)
+- [x] A non-root path for that interface — `novi-agentd` takes the same
+      verbs on a unix socket, so the big untrusted program runs as
+      nobody in particular while a small reviewed one holds root.
+      Membership of the `agent` group is the grant; the audit records
+      the caller's uid, not the daemon's (RFC 0032)
 - [x] The design language, implemented — Inter for language and JetBrains
       Mono for machine values, one shared token header, a real desktop
       background instead of a flat fill
