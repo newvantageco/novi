@@ -148,7 +148,8 @@ fi
 # passphrase into a 0600 log permanently, by the very refusal meant to
 # protect it.
 for t in packages/tests/test-lib-json.sh packages/tests/test-agent-verbs.sh \
-         packages/tests/test-agent-secrets.sh packages/tests/test-agent-rate.sh; do
+         packages/tests/test-agent-secrets.sh packages/tests/test-agent-rate.sh \
+         packages/tests/test-agent-socket.sh; do
     echo ">>> ${t##*/}"
     if ! bash "$t"; then
         echo ">>> ${t} failed" >&2

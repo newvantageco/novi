@@ -46,8 +46,15 @@ mkdir -p "${ROOTFS}/var/lib/novi-state/generations"
 install -D -m 644 "${REPO_ROOT}/packages/lib-json.sh" \
     "${ROOTFS}/usr/lib/novi/json.sh"
 install -D -m 755 "${REPO_ROOT}/packages/novi-agent" "${ROOTFS}/usr/bin/novi-agent"
+# novi-agentd's per-connection handler (RFC 0032). Base image like
+# the rest of this: the service definition is inert until
+# `services.novi-agentd` is declared on, and a non-root path to the
+# machine is not a thing to make somebody install a package for.
+install -D -m 755 "${REPO_ROOT}/packages/novi-agent-serve" \
+    "${ROOTFS}/usr/bin/novi-agent-serve"
 
 echo ""
 echo "novi-state installed:"
 ls -la "${ROOTFS}/usr/bin/novi-state" "${ROOTFS}/usr/bin/novi-agent" \
+    "${ROOTFS}/usr/bin/novi-agent-serve" \
     "${ROOTFS}/usr/lib/novi/json.sh" "${ROOTFS}/etc/novi/system.conf"

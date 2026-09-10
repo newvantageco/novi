@@ -17,6 +17,8 @@
 #   input(101) /dev/input/* -- keyboards and pointers
 #   render(102) /dev/dri/renderD* -- GPU compute without KMS
 #   seat(103) seatd's own group (RFC 0001)
+#   agent(104) may reach novi-agentd's socket (RFC 0032) -- membership
+#              IS the grant, so this group is a privileged one
 root:x:0:
 bin:x:1:
 daemon:x:2:
@@ -37,4 +39,5 @@ users:x:100:
 input:x:101:
 render:x:102:
 seat:x:103:
+agent:x:104:
 nogroup:x:65534:

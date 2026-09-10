@@ -180,11 +180,36 @@ rate_exceeded() {
 # nothing runs. A log that grows forever on a machine with a small
 # writable layer is a way to fill a disk.
 
+# WHOSE uid, when the call arrived over novi-agentd's socket?
+#
+# `id -u` is the process running this script, which through the daemon
+# is root -- so a log written that way would record root as the actor
+# for every request, whoever actually made it, and the one question an
+# audit log exists to answer would have a single wrong answer.
+#
+# NOVI_AGENT_PEER_UID carries the value s6-ipcserver took from
+# SO_PEERCRED (RFC 0032). It is trusted because of where it comes
+# from: novi-agent-serve is the only thing that sets it, it runs as
+# root as the daemon's per-connection handler, and the kernel filled
+# the number. Anyone who could forge the variable could run the tool
+# directly anyway, so this widens nothing.
+#
+# `via` distinguishes the two, because "root, at a shell" and "root,
+# through the socket" are different events that a uid alone cannot
+# tell apart.
+peer_uid() {
+    case "${NOVI_AGENT_PEER_UID:-}" in
+        ''|*[!0-9]*) id -u ;;
+        *) printf '%s' "$NOVI_AGENT_PEER_UID" ;;
+    esac
+}
+
 audit() {
     local verb="$1" args="$2" decision="$3" reason="$4" status="$5" line tmp
-    line="$(printf '{"time": %s, "uid": %s, "verb": %s, "args": %s, "decision": %s, "reason": %s, "status": %s}' \
+    line="$(printf '{"time": %s, "uid": %s, "via": %s, "verb": %s, "args": %s, "decision": %s, "reason": %s, "status": %s}' \
         "$(json_str "$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || printf unknown)")" \
-        "$(json_num "$(id -u)")" \
+        "$(json_num "$(peer_uid)")" \
+        "$(json_str "${NOVI_AGENT_VIA:-cli}")" \
         "$(json_str "$verb")" \
         "$(json_str "$args")" \
         "$(json_str "$decision")" \
