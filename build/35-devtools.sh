@@ -644,25 +644,36 @@ if [ "$ONLY" = "all" ] || [ "$ONLY" = "netsurf" ]; then
     # against it -- so these are plain filenames, and the directories
     # are where the fonts-* packages put them.
     #
-    # WHAT THIS IMAGE DOES NOT HAVE, stated rather than left to be
-    # discovered against a real page:
-    #   * NO SERIF FACE AT ALL. `font-family: serif` and the default
-    #     serif of an unstyled page both land on Inter. That is wrong
-    #     typographically and it is what shipping one sans and one
-    #     mono costs; adding a serif is a design decision and a new
-    #     package, not a flag.
-    #   * NO CURSIVE OR FANTASY. Those map to Inter too.
-    # SemiBold rather than Bold for the bold face because SemiBold is
-    # what NOVI_FONT_TITLE uses -- matching the desktop beats matching
-    # the CSS keyword.
+    # THE SERIF IS REAL NOW. It used to be Inter, so `font-family:
+    # serif` and the default serif of an unstyled page both got a
+    # sans and nothing said so -- every other face NetSurf wants
+    # falls back to the one below it, and this one had nothing below
+    # it to fall back to. Source Serif 4 (OFL-1.1, 09-foot.sh) is a
+    # screen serif with the four faces a browser uses.
+    #
+    # WHAT THIS IMAGE STILL DOES NOT HAVE, stated rather than left to
+    # be discovered against a real page:
+    #   * NO CURSIVE OR FANTASY. Both map to Inter, so a page asking
+    #     for either gets the UI sans. They are rare enough that a
+    #     fourth family would be weight for nothing; a page asking for
+    #     a serif is not.
+    #   * NO SERIF ITALIC. This frontend has no option for one --
+    #     SERIF and SERIF_BOLD are the whole set (checked in
+    #     frontends/framebuffer/Makefile), so <em> inside a serif
+    #     paragraph renders upright. That is NetSurf's limit, not a
+    #     missing font, and it is why only two faces are installed.
+    # SemiBold rather than Bold for the sans bold face because
+    # SemiBold is what NOVI_FONT_TITLE uses -- matching the desktop
+    # beats matching the CSS keyword. The SERIF's bold is Bold: it is
+    # not this desktop's typography, it is a document's.
     NS_FONTS="NETSURF_FB_FONTLIB=freetype
-        NETSURF_FB_FONTPATH=/usr/share/fonts/inter:/usr/share/fonts/jetbrains-mono
+        NETSURF_FB_FONTPATH=/usr/share/fonts/inter:/usr/share/fonts/jetbrains-mono:/usr/share/fonts/source-serif
         NETSURF_FB_FONT_SANS_SERIF=Inter-Regular.ttf
         NETSURF_FB_FONT_SANS_SERIF_BOLD=Inter-SemiBold.ttf
         NETSURF_FB_FONT_SANS_SERIF_ITALIC=Inter-Italic.ttf
         NETSURF_FB_FONT_SANS_SERIF_ITALIC_BOLD=Inter-SemiBoldItalic.ttf
-        NETSURF_FB_FONT_SERIF=Inter-Regular.ttf
-        NETSURF_FB_FONT_SERIF_BOLD=Inter-SemiBold.ttf
+        NETSURF_FB_FONT_SERIF=SourceSerif4-Regular.ttf
+        NETSURF_FB_FONT_SERIF_BOLD=SourceSerif4-Bold.ttf
         NETSURF_FB_FONT_MONOSPACE=JetBrainsMono-Regular.ttf
         NETSURF_FB_FONT_MONOSPACE_BOLD=JetBrainsMono-Bold.ttf
         NETSURF_FB_FONT_CURSIVE=Inter-Regular.ttf
@@ -683,7 +694,7 @@ if [ "$ONLY" = "all" ] || [ "$ONLY" = "netsurf" ]; then
     # fails to find its default font and exits: font_freetype.c treats
     # a missing sans-serif as fatal, correctly.
     files="$(stage_pkg netsurf "${NETSURF_VERSION}" \
-        "curl,openssl,libpng,zlib,expat,wayland,freetype,fonts-inter,fonts-jetbrains-mono" \
+        "curl,openssl,libpng,zlib,expat,wayland,freetype,fonts-inter,fonts-jetbrains-mono,fonts-source-serif" \
         "NetSurf ${NETSURF_VERSION} -- a small web browser. Renders HTML and CSS; NO JavaScript in this build")"
     # shellcheck disable=SC2086
     ( cd "${NS_TREE}" && make -C netsurf ${NS_OPTS} Q=@ \

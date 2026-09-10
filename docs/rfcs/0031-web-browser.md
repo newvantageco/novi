@@ -170,19 +170,46 @@ and `Inter-SemiBoldItalic.ttf` were already inside the zip
 `09-foot.sh` downloads, so it cost ~840 KB and two lines. SemiBoldItalic
 to match the upright bold, for the same reason.
 
-**What this image still cannot draw: a serif.** `font-family: serif`
-lands on Inter. That is typographically wrong and it is exactly what
-shipping one sans and one mono costs — and unlike the italics it is not
-sitting in a zip we already have. Choosing a serif is a design decision
-and a new pinned source, not a flag, so it stays on the roadmap.
+**There is a real serif now: Source Serif 4** (OFL-1.1, pinned at
+4.004, its own `fonts-source-serif` package). `font-family: serif` and
+the default serif of an unstyled page used to land on Inter — a sans,
+silently, with nothing to say so, because every other face falls back
+to the one below it and this one had nothing below it.
 
-Cursive and fantasy map to Inter too. Only the sans-serif face is
+It is **not** a member of `novi-desktop`. Only NetSurf renders a serif,
+so it rides on `netsurf`'s `depends=`: a desktop that never draws a web
+page has no use for one, and shipping it anyway is the dead weight RFC
+0007 says is not inert.
+
+**Two faces, not four, and NetSurf decides that.** Its framebuffer
+frontend has `NETSURF_FB_FONT_SERIF` and `NETSURF_FB_FONT_SERIF_BOLD`
+and no italic option at all — checked in
+`frontends/framebuffer/Makefile`, not assumed. So `<em>` inside a serif
+paragraph renders upright, which is the frontend's limit rather than a
+missing font, and installing an italic nothing can select would be
+weight for nothing.
+
+Cursive and fantasy still map to Inter. Only the sans-serif face is
 fatal if missing (`font_freetype.c` returns false and the browser
 exits); every other face falls back to the one below it, which is why
 these gaps degrade rather than crash.
 
-**`fonts-inter` and `fonts-jetbrains-mono` are named in `depends=` by
-hand, because nothing can derive them.** pkgsplit reads `DT_NEEDED`,
+**Verified on a booted desktop**, on a page with one line each of
+`font-family: serif`, serif bold, `sans-serif` and `monospace`: three
+visibly different families, the serif with real bracket serifs and a
+real bold rather than a synthesised one. `fonts-source-serif` arrived
+as a dependency of `netsurf` without being asked for, which is the
+derived `depends=` doing its job.
+
+**All three families now ship their licence.** OFL-1.1 requires the
+licence to travel with the font, and it was not travelling: Inter's
+`LICENSE.txt` and JetBrains Mono's `OFL.txt` were sitting unread in
+their zips. Source Serif forced the question, because its release asset
+contains font files and nothing else — the text is fetched separately
+and installed beside the faces, and the other two are fixed with it.
+
+**`fonts-inter`, `fonts-jetbrains-mono` and `fonts-source-serif` are
+named in `depends=` by hand, because nothing can derive them.** pkgsplit reads `DT_NEEDED`,
 and a `.ttf` opened by path at runtime appears in no ELF header — the
 same blind spot that hides libdrm's `dlopen`'d drivers (RFC 0007),
 wearing a different costume. Without them the package installs, the
@@ -286,9 +313,9 @@ written for this test. Nothing here has run on physical hardware.
 
 1. ~~fcft in libnsfb~~ — **done**, and by a shorter route than this
    RFC first assumed: freetype rather than fcft, which upstream
-   already supports. See decision 8. Italic followed immediately;
-   what remains is **a serif face**, which unlike the italics is a
-   new pinned source and a design decision rather than a flag.
+   already supports. See decision 8. Italic followed immediately, and
+   **the serif is in too** — Source Serif 4, a new pinned source and a
+   design decision, which is why it took longer than the italics.
 2. **JavaScript, or a decision not to.** Duktape is one flag and a real
    question: it is an interpreter with no JIT, so it is slow, and slow
    scripting on pages written for fast scripting may be worse than

@@ -73,6 +73,21 @@ JETBRAINS_MONO_VERSION="2.304"
 # and explicitly deferred adding it; this is that follow-up. OFL-1.1,
 # the same licence family as JetBrains Mono, so no new review.
 INTER_VERSION="4.1"
+# Source Serif 4, the browser's serif (RFC 0031's roadmap item). OFL-1.1,
+# like the other two, so no new licence review -- but unlike the other
+# two its release asset carries NO licence file, so 01-fetch.sh pulls
+# the OFL text separately and 09-foot.sh installs it beside the faces.
+#
+# 4.004 rather than something newer because that is the newest tag with
+# a release ASSET: this environment can download a release asset and
+# cannot download a source archive, which is the same constraint that
+# decided how Inter and JetBrains Mono are fetched.
+#
+# Chosen over Noto Serif and the Google Fonts families because it is a
+# screen serif designed alongside a sans of the same metrics tradition,
+# it ships static TTFs (this build deliberately avoids variable fonts --
+# see 09-foot.sh), and it has the four faces a browser actually needs.
+SOURCE_SERIF_VERSION="4.004"
 
 # e2fsprogs: real mke2fs and e2fsck. BusyBox's mke2fs writes ext2 with
 # no journal, which on real hardware turns an unclean shutdown into a

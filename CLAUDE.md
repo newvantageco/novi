@@ -658,13 +658,28 @@ NetSurf 3.11, HTML and CSS over real HTTP, **no JavaScript**.
   already in the zip that stage downloads. When a decision's stated
   reason is about one consumer, re-read it when a second consumer
   arrives.
-- **There is still NO SERIF FACE**, so `font-family: serif` lands on
-  Inter — worth saying wherever the browser is described. Unlike the
-  italics it is not sitting in a zip we already have: choosing a serif
-  is a new pinned source and a design decision. Only the sans-serif
-  face is fatal when missing; every other face falls back to the one
-  below it, which is why the gap degrades instead of crashing. Both
-  gaps were confirmed on a screendump rather than predicted.
+- **There IS a serif now — Source Serif 4** (OFL-1.1, pinned 4.004,
+  its own `fonts-source-serif` package). Before it, `font-family:
+  serif` landed on Inter: a sans, silently, because every other face
+  falls back to the one below it and this one had nothing below it.
+  Only the sans-serif face is fatal when missing, which is why the
+  gap degraded instead of crashing — and why it survived so long.
+- **TWO faces, not four, and NetSurf decides that.** Its framebuffer
+  frontend has `NETSURF_FB_FONT_SERIF` and `_SERIF_BOLD` and NO italic
+  option — checked in `frontends/framebuffer/Makefile`, not assumed.
+  So `<em>` in a serif paragraph renders upright (the frontend's
+  limit, not a missing font), and an italic nothing can select would
+  be the dead weight RFC 0007 says is not inert.
+- **The serif is NOT a `novi-desktop` member.** Only the browser
+  renders one, so it rides on `netsurf`'s `depends=` — a desktop that
+  never draws a web page has no use for a serif.
+- **All three font families ship their licence now.** OFL-1.1
+  requires it to travel with the font and it was not travelling:
+  Inter's `LICENSE.txt` and JetBrains Mono's `OFL.txt` sat unread in
+  their zips for the life of both packages. Source Serif forced the
+  question because its release asset contains font files and NOTHING
+  ELSE — so the text is fetched separately, and the other two were
+  fixed alongside it.
 - **`fonts-inter` and `fonts-jetbrains-mono` are in `depends=` by
   hand, because NOTHING CAN DERIVE THEM.** pkgsplit reads
   `DT_NEEDED`, and a `.ttf` opened by path at runtime is in no ELF
@@ -2105,8 +2120,12 @@ check asks "is every OS package named by some meta-package", which is
 the opposite question. `pkg install novi-desktop` would have reported
 success and produced a desktop with no wallpaper and no notifications.
 Count the packages (`ls /build/repo/*.pkg.tar.gz | wc -l`) after any
-hand-run recovery, and **when a stage number is written into a
-document, the document is now something that can rot** — this line
+hand-run recovery — **55 as of `fonts-source-serif`; the 54 above is
+what that incident's repository should have held, not a number to
+check against today.** A count written down is a number that rots the
+moment somebody adds a package, so treat it as "the same as last
+time", never as a constant. And **when a stage number is written into
+a document, the document is now something that can rot** — this line
 did, and so did the identical line inside `40-repo.sh`'s own
 already-split guard, which is the copy someone actually follows
 because they are already in trouble when they read it. Both say 39

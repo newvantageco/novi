@@ -235,6 +235,12 @@ DATA_FILES = [
     # which is the right amount of friction for adding a font.
     ("fonts-jetbrains-mono", "usr/share/fonts/jetbrains-mono"),
     ("fonts-inter", "usr/share/fonts/inter"),
+    # The third family, and the friction that comment predicted. It is
+    # deliberately NOT in novi-desktop's member list below: only
+    # NetSurf renders a serif, so it rides on `netsurf`'s depends=
+    # instead of being installed on every desktop that will never draw
+    # one.
+    ("fonts-source-serif", "usr/share/fonts/source-serif"),
     ("foot", "usr/share/terminfo"),
     # NAMED SUBDIRECTORIES, not "usr/share/novi". DATA_FILES is walked
     # in full for every entry rather than first-match, so a parent and
@@ -317,6 +323,7 @@ def check_meta_members_built(name, deps, available):
 EXTRA_PACKAGE_DESCRIPTIONS = {
     "fonts-jetbrains-mono": ("JETBRAINS_MONO", "JetBrains Mono, the default terminal font"),
     "fonts-inter": ("INTER", "Inter, the UI sans every Novi client labels itself with"),
+    "fonts-source-serif": ("SOURCE_SERIF", "Source Serif 4, the serif NetSurf renders font-family: serif with"),
     "novi-headers": ("OS", "Headers and pkg-config files for the libraries Novi ships"),
 }
 
