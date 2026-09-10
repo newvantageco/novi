@@ -271,6 +271,20 @@ Confirmed by reintroducing the leak (`refuse … "$args"`) and watching
 it fail with *"THE PASSPHRASE REACHED THE AUDIT LOG on the refusal
 path"*.
 
+And confirmed again on a booted machine, which is a different question
+— the host test proves the logic, a live run proves `novi-agent`,
+`novi-state` and `novi-wifi` are the versions actually on the image and
+find each other:
+
+| | result |
+|---|---|
+| `novi-agent capabilities` | offers `wifi.join` |
+| `agent.allow = pkg.sync, wifi.join` | **0 drift lines** — `novi-state`'s `AGENT_VERBS` accepts the new verb |
+| `do wifi.join <ssid> <passphrase>` | refused; the log line reads `withheld`, not the passphrase |
+| `printf '…' \| do wifi.join MyNet` | log line reads `"args": "MyNet"` — the SSID, and only the SSID |
+| `grep -c <passphrase> /var/log/novi-agent.jsonl` | **0** |
+| the log itself | `-rw-------` |
+
 The escaper additionally has a host test
 (`packages/tests/test-lib-json.sh`) that runs it **under the shipped
 BusyBox ash, not the host's bash**, and validates the result with
