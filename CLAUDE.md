@@ -904,6 +904,66 @@ is one JSON document saying what this machine is; `novi-agent do
   as converged would hide `pkg.instal` from exactly the diff a person
   would look at.
 
+## Architecture: the non-root path, and two correct halves
+
+RFC 0032 (`docs/rfcs/0032-non-root-agent.md`). `services.novi-agentd =
+on` puts an `s6-ipcserver` on `/run/novi/agent/sock` so a process that
+is NOT root can drive RFC 0029's verb list. The privilege moves: the
+big untrusted program runs as nobody in particular, a small reviewed
+one holds root. What may be done is unchanged — `agent.allow` still
+decides that.
+
+- **The gate is `2750 root:agent`, and the setgid bit is the whole
+  feature.** `s6-ipcserver` binds as root, so the socket is created
+  `root:root`, and `-a 0660` on a `root:root` socket gives the `agent`
+  group nothing. The first version had a correct `0750 root:agent`
+  directory AND a correct `0660` socket mode and denied every member
+  of the group it exists for — service up, service ready, `Permission
+  denied`. A setgid directory hands its group to everything created
+  inside it, sockets included (`bind()` goes through `vfs_mknod`), so
+  the socket comes out `root:agent`. **Two correct halves that are
+  wrong together is not something a diff shows**, and no host test
+  could reach it: the test covers the handler's parser and this is the
+  daemon's `chmod`. It took a boot.
+- **BusyBox `setuidgid` DROPS supplementary groups; `s6-setuidgid`
+  keeps them.** `setuidgid ai …` reports `groups=1000(ai)` and is
+  denied by the socket; `s6-setuidgid ai …` reports
+  `groups=104(agent),1000(ai)` and connects. The first reading of that
+  denial was "the fix did not work" — it was the test tool, for the
+  second time in this feature. A grant that IS group membership only
+  reaches a process that actually carries the group, which constrains
+  whatever launches an agent here and not just how it was tested.
+- **The handler holds NO policy, and `wifi.join` is why.** Its socket
+  refusal was written in `novi-agent-serve`, where it worked and left
+  no trace: the handler exits before `novi-agent` runs, and
+  `novi-agent` is the only thing that writes the audit log — so the
+  attempt most worth recording was the one that vanished. RFC 0016's
+  rule from an unwatched direction. It lives in `cmd_do` now, keyed on
+  `NOVI_AGENT_VIA`, withholding the arguments like every other
+  `wifi.join` exit. `novi-agent-serve` rejects only a request that is
+  not a request (no credentials, no line, over 512 bytes, control
+  characters).
+- **`set -f` BEFORE `set -- $line`.** Unquoted expansion in a shell
+  splits words *and* expands globs, so `state.set hostname *` would
+  arrive as the contents of the handler's cwd. Verified on the booted
+  machine, not only in the host test: the audit line reads `"args":
+  "hostname *"`.
+- **Identity comes from `SO_PEERCRED`** (`s6-ipcserver -p` →
+  `IPCREMOTEEUID`), never from the request, and reaches the audit as
+  `NOVI_AGENT_PEER_UID`. `id -u` would have recorded root for every
+  request whoever made it — the one question an audit log exists to
+  answer, with a single wrong answer. A `via` field separates "root at
+  a shell" from "root through the socket", which a uid cannot.
+- **`notification-fd` is 1, not the 3 every other service here
+  declares**, because `s6-ipcserver -1` names the descriptor. Watching
+  fd 3 would leave the service never ready and `s6-rc -u change`
+  waiting out `timeout-up` on every start — RFC 0004's `s6-log -d3`
+  bug with the mismatch on the other side. Caught by reading the flag.
+- **`services.novi-agentd` is separate from `agent.enabled`**, off by
+  default. Running the interface and exposing it to non-root callers
+  are two decisions — RFC 0022's argument about
+  `network.firewall.allow` for the third time.
+
 ## Architecture: themes, and the light one that finds bugs
 
 RFC 0030 (`docs/rfcs/0030-themes.md`). `display.theme = <name>`; the
@@ -1102,6 +1162,13 @@ and cost more time than any real bug in the same session.
   could not have shown the difference either way.
 - The screenshot key writes `/root/screenshot-*.bmp`, not `.png` --
   a test that globbed `*.png` reported a working binding as broken.
+- **A fifo driving `-serial mon:stdio` needs a PERMANENT writer.**
+  `printf … > fifo` closes the write end when it finishes, the fifo
+  hits EOF, and qemu's stdio monitor **quits** -- which from the log
+  looks exactly like a boot that hung at `Loading initramfs...`, and
+  was debugged as one for twenty minutes. Hold it open
+  (`sleep 100000 > fifo &`) for the life of the VM. And check the
+  qemu process is still alive before believing a frozen log.
 
 ## Architecture: a launcher has to answer "what is installed"
 

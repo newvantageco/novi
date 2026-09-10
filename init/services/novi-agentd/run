@@ -39,7 +39,21 @@ chown root:agent "$SOCKDIR" 2>/dev/null || {
     echo "novi-agentd: could not chown ${SOCKDIR} to root:agent" >&2
     exit 1
 }
-chmod 0750 "$SOCKDIR"
+# 2750, NOT 0750, AND THE SETGID BIT IS THE WHOLE FEATURE.
+#
+# s6-ipcserver binds the socket as root, so it is created root:root --
+# and `-a 0660` on a root:root socket gives the `agent` group NOTHING.
+# The directory was 0750 root:agent and correct, the socket mode was
+# 0660 and correct, and the two together denied every member of the
+# group the socket exists for. Verified the wrong way round first:
+# `Permission denied` from s6-ipcclient as a user in `agent`, on a
+# service reporting up and ready.
+#
+# A setgid directory hands its own group to everything created inside
+# it, sockets included (bind() goes through vfs_mknod like any other
+# node), so the socket comes out root:agent and the 0660 means what it
+# says.
+chmod 2750 "$SOCKDIR"
 
 # A socket left behind by a previous run makes bind() fail with
 # EADDRINUSE, which reads as "something else is listening" when
@@ -67,6 +81,8 @@ rm -f "$SOCK"
 #     and never speaks would otherwise hold slots indefinitely; this
 #     is the server's problem to bound and it does, rather than every
 #     handler racing its own timeout.
-# -a  the socket's own mode, belt as well as braces with the 0750
-#     directory above.
+# -a  the socket's own mode. This is the second gate rather than a
+#     decoration, and it only works because of the setgid bit above:
+#     0660 on a root:root socket would exclude the very group the
+#     directory admits.
 exec s6-ipcserver -1 -p -c 8 -a 0660 "$SOCK" novi-agent-serve

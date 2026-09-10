@@ -376,11 +376,13 @@ checks, including a deliberate `", "evil": "yes` injection attempt.
 
 ## Roadmap
 
-1. **A non-root path.** Everything here runs as whatever invoked it;
-   `describe` works fine unprivileged, and every `do` verb needs root
-   because the tools underneath do. A setuid helper or an s6 service
-   taking requests on a socket is the obvious next question, and it is
-   a bigger one than it looks — that socket becomes the boundary.
+1. ~~**A non-root path.**~~ Done — **RFC 0032**. `novi-agentd` is the
+   s6 service taking requests on a socket, and the socket did become
+   the boundary: the gate is membership of the `agent` group, the
+   caller's uid comes from `SO_PEERCRED` and lands in this log's
+   `uid` field, and a new `via` field says which way the request
+   arrived. The policy stays here — `novi-agent` remains the only
+   reader of `agent.enabled`, `agent.allow` and `agent.rate`.
 2. ~~More verbs, one at a time, each with an argument to make~~ —
    `wifi.join` is in (decision 9) and `firewall.allow` is
    **deliberately out** (decision 10): it would be a second writer for

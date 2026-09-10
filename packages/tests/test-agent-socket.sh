@@ -89,11 +89,20 @@ out="$(printf 'pkg.sync\n' | PROTO=IPC IPCREMOTEEUID=notanumber \
        NOVI_AGENT="${TMP}/agent" "${SH[@]}" "${SERVE}" 2>/dev/null)"
 did; case "${out}" in *"no peer credentials"*) ;; *) note "a non-numeric uid must be refused" ;; esac
 
-# ── 5. wifi.join is not reachable here, and says why ─────────────────
-out="$(request 1000 "wifi.join MyNet")"
-did; case "${out}" in *"not available over the socket"*) ;; *) note "wifi.join must be refused over the socket" ;; esac
-did; [ ! -f "${TMP}/argv.log" ] || [ ! -s "${TMP}/argv.log" ] ||
-    note "a refused wifi.join must not reach novi-agent at all"
+# ── 5. THE HANDLER HOLDS NO POLICY, wifi.join included ───────────────
+#
+# wifi.join is unreachable over the socket, and the refusal lives in
+# novi-agent (see test-agent-secrets.sh) rather than here. It was here
+# first, and the log never saw it: a boundary that records only what it
+# let through says nothing about what was tried (RFC 0016). So what
+# this file asserts is the opposite of what it used to -- the verb goes
+# THROUGH, carrying the marker that lets the one policy reader refuse
+# it and write that down.
+request 1000 "wifi.join MyNet" >/dev/null
+did; [ "$(sed -n 1p "${TMP}/argv.log" 2>/dev/null)" = "wifi.join" ] ||
+    note "the handler must pass wifi.join on; refusing it here loses the audit line"
+did; grep -q "VIA=socket" "${TMP}/argv.log" ||
+    note "novi-agent cannot refuse a socket-only verb without knowing it came from the socket"
 
 # ── 6. bounds on a stranger's text ───────────────────────────────────
 long="$(head -c 600 < /dev/zero | tr '\0' 'a')"

@@ -132,6 +132,33 @@ grep -q "invalid ssid" "${AUDIT}" ||
     note "an SSID starting with - should be refused"
 checks=$((checks + 1))
 
+# ── 4. over the socket, wifi.join is refused AND WRITTEN DOWN ────────
+#
+# RFC 0032's transport refusal. It lived in novi-agent-serve first,
+# where it worked and left no trace: the handler exits before novi-agent
+# runs, so the one thing that writes the audit log never saw the
+# attempt. RFC 0016's rule -- a boundary that records only what it let
+# through tells you nothing about what was tried.
+#
+# The withheld-arguments promise has to survive the move, because this
+# is exactly the caller who put a passphrase in argv.
+: > "${AUDIT}"
+printf '' | NOVI_AGENT_VIA=socket run_agent do wifi.join "MyNet" "${SECRET}" >/dev/null 2>&1
+grep -q "not available over the socket" "${AUDIT}" ||
+    note "wifi.join over the socket should be refused, and the refusal audited"
+checks=$((checks + 1))
+grep -q -- "${SECRET}" "${AUDIT}" &&
+    note "THE PASSPHRASE REACHED THE AUDIT LOG on the socket refusal path"
+checks=$((checks + 1))
+
+# ...and the same call from a shell still works, or the refusal is not
+# about the transport at all.
+: > "${AUDIT}"
+printf '%s\n' "${SECRET}" | run_agent do wifi.join "MyNet" >/dev/null 2>&1
+grep -q "not available over the socket" "${AUDIT}" &&
+    note "a CLI wifi.join must not be refused as if it came from the socket"
+checks=$((checks + 1))
+
 if [ "${fail}" -ne 0 ]; then
     echo "agent secrets: ${fail} check(s) FAILED of ${checks}" >&2
     exit 1

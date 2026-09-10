@@ -36,9 +36,11 @@ AGENT="${NOVI_AGENT:-novi-agent}"
 
 # Refuse and say so in the same shape novi-agent's own refusals take,
 # so a caller parses one format whichever side produced the answer.
+# Every refusal from here is a malformed REQUEST rather than a
+# rejected verb, so there is no verb to name: the reason is always one
+# of this file's own literals, which is why it needs no escaping.
 deny() {
-    printf '{"ok": false, "verb": %s, "reason": %s, "status": 1}\n' \
-        "\"${2:-unknown}\"" "\"$1\""
+    printf '{"ok": false, "verb": "unknown", "reason": %s, "status": 1}\n' "\"$1\""
     exit 1
 }
 
@@ -84,19 +86,15 @@ set -- $line
 set +f
 
 [ "$#" -ge 1 ] || deny "empty request"
-verb="$1"
 
-# wifi.join IS DELIBERATELY NOT REACHABLE HERE, and the reason is the
-# protocol rather than the policy. Its passphrase arrives on stdin
-# precisely so it is never an argument; a one-line request has nowhere
-# to put a secret that is not the argument line, and inventing a
-# second frame for one verb would make every other request pay for it.
-# An agent that must join a network can call novi-agent directly as
-# root. Revisit when there is a second verb that needs a secret --
-# then it is a protocol decision and not a special case.
-case "$verb" in
-    wifi.join) deny "wifi.join is not available over the socket (RFC 0032)" "$verb" ;;
-esac
+# THERE IS NO POLICY HERE, and that is deliberate. Everything above
+# this line rejects a request that is not a request -- no credentials,
+# no line, too long, control characters. Which verbs exist, which are
+# permitted, how fast they may come, and which are unreachable over
+# this transport are all novi-agent's to decide, so that every refusal
+# lands in the one audit log. wifi.join is refused for the socket in
+# `cmd_do` for exactly that reason: it was refused here first, and a
+# refusal the log never sees is the boundary RFC 0016 warns about.
 
 # The peer's uid reaches the audit through the environment, so the log
 # names the process that ASKED rather than the root daemon that acted.

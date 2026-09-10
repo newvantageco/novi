@@ -1,6 +1,6 @@
 # RFC 0032 — a non-root path, and the socket that becomes the boundary
 
-**Status:** Implemented — not yet exercised on a booted machine
+**Status:** Implemented and verified on a booted machine
 **Depends on:** RFC 0029 (the agent interface), RFC 0022 (a service that opens a way in), RFC 0004 (readiness)
 
 > **Summary.** `novi-agentd` is an s6-rc longrun running `s6-ipcserver`
@@ -62,6 +62,21 @@ always discovered by someone who thought they were denied.
 The directory rather than the socket's own mode because it is one
 thing to read instead of two that must agree, and because a socket
 recreated on restart takes its mode from whatever created it.
+
+**And the directory is `2750`, not `0750`, which is the whole feature
+rather than a detail.** `s6-ipcserver` binds as root, so the socket is
+created `root:root`; `-a 0660` on a `root:root` socket gives the
+`agent` group *nothing*. The first version had a correct `0750
+root:agent` directory and a correct `0660` socket mode and denied
+every member of the group the socket exists for — service up, service
+ready, `Permission denied` from `s6-ipcclient`. A **setgid directory**
+hands its own group to everything created inside it, sockets included
+(`bind()` goes through `vfs_mknod` like any other node), so the socket
+comes out `root:agent` and the mode means what it says.
+
+Two correct halves that are wrong together is not a thing a diff
+shows, and the host test could not have caught it: it tests the
+handler's parser, and this is the daemon's `chmod`. It took a boot.
 
 `agent` is GID **104**, fixed, in `rootfs/etc/group` — a squashed
 image's file modes depend on the number being the same everywhere,
@@ -125,6 +140,23 @@ An agent that must join a network calls `novi-agent` directly as root.
 Revisit when a *second* verb needs a secret — then it is a protocol
 decision rather than a special case.
 
+**The refusal lives in `novi-agent`, not in the handler**, and it was
+written in the handler first. There it worked perfectly and left no
+trace: `novi-agent-serve` exits before `novi-agent` runs, and
+`novi-agent` is the only thing that writes the audit log — so the one
+attempt most worth recording was the one attempt that vanished. That
+is RFC 0016's rule, that a boundary recording only what it let through
+says nothing about what was tried, arriving from a direction nobody
+was watching.
+
+Moving it also keeps decision 4's promise: the arguments are withheld
+from the log, because the caller who reaches for `wifi.join` over the
+socket is precisely the caller who may have put a passphrase in argv.
+The handler ended up with *no policy at all*, which is the right
+shape — it rejects a request that is not a request (no credentials, no
+line, too long, control characters) and hands everything else to the
+one reader.
+
 ### 7. Off by default, and separate from `agent.enabled`.
 
 `services.novi-agentd = off`. Running the agent interface and exposing
@@ -155,9 +187,37 @@ readiness and never signals hangs `s6-rc` forever (RFC 0022).
 
 ## What was verified
 
-*Nothing yet. The host test covers the request parser; the socket path
-itself has not been run on a booted machine, and this section stays
-empty until it has.*
+On a booted Novi (QEMU, TCG — this container has no `/dev/kvm`), from
+an ISO built after the fixes above, with `users.ai.groups = agent`,
+`agent.enabled = on`, `agent.allow = state.set pkg.sync wifi.join` and
+`services.novi-agentd = on`:
+
+| | |
+|---|---|
+| the service | `s6-svstat` → `up true ready true` — readiness on **fd 1** works |
+| the socket | `srw-rw---- root agent` inside `drwxr-s--- root agent` |
+| a member | `state.set hostname probe-b` → `{"ok": true}`, and the value reached `system.conf` |
+| the audit | `{"uid": 1000, "via": "socket", …}` — the **caller's** uid, not the daemon's root |
+| a non-member | `s6-ipcclient: unable to connect: Permission denied` |
+| root at a shell | same log, `"uid": 0, "via": "cli"` — the two are distinguishable |
+| `agent.enabled = off` | `{"ok": false, "reason": "agent.enabled is not on"}` — the policy still bites over the socket |
+| a verb not in `agent.allow` | `{"ok": false, "reason": "not in agent.allow"}` |
+| an unknown verb | `{"ok": false, "reason": "no such verb"}` |
+| `wifi.join MyNet <passphrase>` | refused, **audited**, `"args": "<arguments withheld…>"`, `grep -c <passphrase> /var/log/novi-agent.jsonl` → `0` |
+| the glob | `state.set hostname *` audited as `"args": "hostname *"` — `set -f` holds on the real path, not only in the host test |
+
+Two things the run cost, both worth writing down:
+
+- **The socket was unreachable by the group it was for** (the setgid
+  finding in decision 2). Everything reported healthy.
+- **BusyBox `setuidgid` drops supplementary groups; `s6-setuidgid`
+  keeps them.** `setuidgid ai …` gives `groups=1000(ai)` and
+  `Permission denied`; `s6-setuidgid ai …` gives
+  `groups=104(agent),1000(ai)` and connects. The first reading of that
+  denial was "the fix did not work" — it was the test tool. **A grant
+  that is group membership only reaches a process that actually
+  carries the group**, which is a real constraint on whatever launches
+  an agent here, not just on how it was tested.
 
 ## Consequences
 

@@ -503,6 +503,27 @@ cmd_do() {
         *) refuse "$verb" "no such verb" "$args" ;;
     esac
 
+    # A VERB CAN BE UNREACHABLE BY TRANSPORT RATHER THAN BY POLICY, and
+    # wifi.join is the one: its passphrase arrives on stdin precisely so
+    # it is never an argument, and novi-agentd's protocol is one line
+    # with nowhere to put a secret that is not the argument line
+    # (RFC 0032). An agent that must join a network calls this tool
+    # directly as root.
+    #
+    # It is refused HERE rather than in novi-agent-serve, where it was
+    # first written, because a refusal the audit log never sees is the
+    # thing RFC 0016 warns about -- a boundary that records only what it
+    # let through says nothing about what was tried. The handler is not
+    # a second policy reader; this is the only one.
+    #
+    # Arguments withheld for the same reason every other wifi.join exit
+    # withholds them: the caller may have made the argv mistake, and a
+    # refusal must not be the thing that writes a passphrase to disk.
+    if [ "$verb" = "wifi.join" ] && [ "${NOVI_AGENT_VIA:-cli}" = "socket" ]; then
+        refuse "$verb" "wifi.join is not available over the socket" \
+            "<arguments withheld: may contain a passphrase>"
+    fi
+
     # Order matters for the message a caller gets: "the interface is
     # off" and "this verb is not permitted" are different problems with
     # different fixes, and collapsing them into one refusal sends
