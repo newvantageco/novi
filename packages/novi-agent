@@ -114,6 +114,55 @@ policy_allows() {
     return 1
 }
 
+# A ceiling on how many `do` verbs may SUCCEED in a rolling minute.
+#
+# WHAT THIS IS NOT: a security control. Anything that can run
+# `novi-agent do` can run `pkg` or `novi-state` directly -- this tool
+# has never claimed otherwise, and a limit here does not stand between
+# a hostile caller and the machine. Presenting it as though it did
+# would be worse than not having it.
+#
+# What it bounds is an ACCIDENT. The failure this interface actually
+# invites is a buggy actor looping -- reinstalling the same package a
+# thousand times, applying the same document until the disk fills --
+# and the point is not that the loop is stopped so much as that it
+# becomes VISIBLE: a run of `rate limit` refusals in the audit log
+# says what happened, where a thousand successful installs say nothing
+# at all. That is the same argument RFC 0016 makes about silent
+# refusals, from the other end.
+#
+# Only ALLOWED calls count. Counting refusals too would make the limit
+# self-sustaining -- each refusal is itself a log line, so once
+# tripped it would stay tripped for a minute even if the caller
+# stopped -- and refusals are cheap anyway. The log's own truncation
+# bounds the disk.
+#
+# Off by default: a limit that fires on somebody's first legitimate
+# batch is a limit they will turn off and never reconsider.
+rate_limit() {
+    printf '%s' "$("$STATE" get agent.rate 2>/dev/null || printf 0)"
+}
+
+# ISO-8601 UTC sorts LEXICALLY, which is the whole reason the audit
+# format is worth what it costs: "is this line within the last minute"
+# is a string comparison, with no date parsing in a shell script.
+rate_exceeded() {
+    local limit="$1" since n
+    case "$limit" in ''|0|off|none) return 1 ;; esac
+    case "$limit" in *[!0-9]*) return 1 ;; esac   # unusable: observer reports it
+    [ -r "$AUDIT" ] || return 1
+    since="$(date -u -d "@$(( $(date -u +%s) - 60 ))" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null)" ||
+        return 1
+    [ -n "$since" ] || return 1
+    # Read a bounded tail: only `limit` allowed calls can matter, and a
+    # refusal-heavy log should not make this walk the whole file.
+    n="$(tail -n $(( limit * 4 + 40 )) "$AUDIT" 2>/dev/null |
+         grep '"decision": "allowed"' |
+         sed -n 's/^{"time": "\([^"]*\)".*/\1/p' |
+         awk -v s="$since" '$0 >= s' | wc -l)"
+    [ "${n:-0}" -ge "$limit" ]
+}
+
 # ---------------------------------------------------------------------------
 # The audit log
 # ---------------------------------------------------------------------------
@@ -435,6 +484,21 @@ cmd_do() {
     # people to the wrong line of the document.
     policy_enabled || refuse "$verb" "agent.enabled is not on" "$args"
     policy_allows "$verb" || refuse "$verb" "not in agent.allow" "$args"
+
+    # After the policy checks and before any work: a caller who is not
+    # permitted should be told that, not told to slow down.
+    #
+    # wifi.join's arguments may hold a passphrase if the caller made
+    # the argv mistake, so this refusal withholds them too -- every
+    # exit from this function has to keep that promise, not just the
+    # ones inside the verb's own branch.
+    if rate_exceeded "$(rate_limit)"; then
+        case "$verb" in
+            wifi.join) refuse "$verb" "rate limit: agent.rate per minute reached" \
+                "<arguments withheld: may contain a passphrase>" ;;
+            *) refuse "$verb" "rate limit: agent.rate per minute reached" "$args" ;;
+        esac
+    fi
 
     case "$verb" in
         state.set)

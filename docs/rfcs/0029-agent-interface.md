@@ -238,6 +238,43 @@ If appending without a read-modify-write race is the real need, that
 belongs in `novi-state` as a general facility for list-valued keys,
 where the System panel and a person at a shell would get it too — not
 in the agent as a special case.
+### 11. `agent.rate` bounds an accident, and is not a security control.
+
+The roadmap asked for "rate limiting, or a reason not to", and the
+reason not to is real enough to state before the feature: **anything
+that can run `novi-agent do` can run `pkg` or `novi-state` directly.**
+A limit here does not stand between a hostile caller and the machine,
+and presenting it as though it did would be worse than not having it —
+a boundary people believe in is more dangerous than one they don't.
+
+What it does bound is the failure this interface actually invites: a
+**buggy** actor looping. Reinstalling one package a thousand times,
+applying the same document until the disk fills. And the value is less
+that the loop stops than that it becomes **visible** — a run of `rate
+limit` refusals in the audit log says what happened, where a thousand
+successful installs say nothing at all. That is RFC 0016's argument
+about silent refusals, from the other end.
+
+**Only allowed calls count**, and that is the one subtle decision.
+Counting refusals too would make the limit self-sustaining: each
+refusal is itself a log line, so once tripped it would stay tripped
+for a full minute even if the caller stopped entirely. That is a
+lockout wearing a rate limit's clothes, and it reads fine in a diff.
+
+Two smaller things:
+
+- **ISO-8601 UTC sorts lexically**, so "is this line inside the last
+  minute" is a string comparison and there is no date parsing in a
+  shell script. That property is most of what the audit format is
+  worth.
+- **Off by default.** A limit that fires on somebody's first
+  legitimate batch is a limit they turn off and never reconsider.
+
+`agent.rate` is read at use time like `agent.enabled` and
+`agent.allow`, so nothing holds it, it cannot drift, and
+`converge_key` never runs to reject a typo — the observer is the only
+place `agent.rate = twenty` can surface, and it surfaces as drift.
+
 ## What was verified
 
 On a booted machine, in order:
@@ -284,6 +321,23 @@ find each other:
 | `printf '…' \| do wifi.join MyNet` | log line reads `"args": "MyNet"` — the SSID, and only the SSID |
 | `grep -c <passphrase> /var/log/novi-agent.jsonl` | **0** |
 | the log itself | `-rw-------` |
+
+**The rate limit has a host test too**
+(`packages/tests/test-agent-rate.sh`, 12 checks). The check that
+matters is the self-sustaining one, and **its first version could not
+fail** — it raised the limit and expected one more call through, which
+passes whether or not refusals count. Introducing the bug on purpose
+left the suite green, which is the only reason it was caught. The
+check now builds a window where *allowed* is under the limit while
+allowed-plus-refused is over it (three successes, four non-rate
+refusals, limit five), so the two behaviours give different answers;
+with refusals counting it fails on *"that is a lockout, not a rate
+limit"*.
+
+A smaller trap the same file hit twice: **`grep -c` prints the count
+AND exits 1 when the count is zero**, so `grep -c … || echo 0` emits
+`0\n0` and every arithmetic test on it dies with "integer expression
+expected". `|| true`.
 
 The escaper additionally has a host test
 (`packages/tests/test-lib-json.sh`) that runs it **under the shipped
@@ -335,5 +389,8 @@ checks, including a deliberate `", "evil": "yes` injection attempt.
    second path to one that exists?
 3. **A `describe --text` for humans.** JSON is the default here on
    purpose, and a person reading it in a terminal deserves better.
-4. **Rate limiting, or a reason not to.** Nothing stops an automated
-   actor calling `pkg.install` in a loop.
+4. ~~Rate limiting, or a reason not to~~ — **done, and the framing
+   was the important half.** `agent.rate` caps how many verbs may
+   **succeed** in a rolling minute; unset, `0`, `off` and `none` all
+   mean no limit, which is the default. See decision 11 — including
+   why it is not a security control.

@@ -665,6 +665,23 @@ observe_key() {
         agent.allow)
             observe_agent_allow
             ;;
+        # agent.rate is read at use time by novi-agent, so nothing
+        # holds it, it cannot drift, and converge_key never runs to
+        # reject a typo -- the power.lid / storage.automount pattern.
+        # The observer is therefore the only place `agent.rate = twenty`
+        # can surface, and it surfaces as drift, which is where a
+        # person finds out.
+        #
+        # 0, off and none all mean no limit and are echoed back
+        # verbatim, because the document's own wording is not this
+        # tool's to correct.
+        agent.rate)
+            case "$(state_get "$key")" in
+                ''|0|off|none) state_get "$key" ;;
+                *[!0-9]*) printf 'unsupported' ;;
+                *) state_get "$key" ;;
+            esac
+            ;;
         display.renderer)
             case "$(state_get "$key")" in
                 pixman|gles2|auto) state_get "$key" ;;

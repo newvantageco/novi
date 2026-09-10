@@ -874,8 +874,32 @@ is one JSON document saying what this machine is; `novi-agent do
   lines so `audit` is a `tail` and not a formatter. A boundary that
   records only what it let through tells you nothing about what was
   tried — RFC 0016's rule about silent refusals.
-- **`agent.enabled`/`agent.allow` are read-at-use-time keys**, so the
-  observer is the only place a typo surfaces. ONE unknown verb makes
+- **`agent.rate` bounds an ACCIDENT and is not a security control.**
+  Anything that can run `novi-agent do` can run `pkg` directly, so a
+  limit here stands between nobody and nothing — say that wherever it
+  is described, because a boundary people believe in is more dangerous
+  than one they do not. What it buys is legibility: a buggy actor
+  looping on one install becomes a run of `rate limit` refusals in the
+  audit log, where a thousand successes say nothing (RFC 0016's silent
+  refusal argument, from the other end).
+- **ONLY ALLOWED CALLS COUNT toward the rate limit.** Counting
+  refusals makes it self-sustaining — each refusal is a log line, so
+  once tripped it stays tripped for a minute even if the caller
+  stopped. A lockout wearing a rate limit's clothes, and it reads fine
+  in a diff. **The test for it could not fail at first**: raising the
+  limit and expecting one more call through passes either way. It
+  needs a window where *allowed* is under the limit while
+  allowed-plus-refused is over it. Introducing the bug on purpose is
+  the only reason that was caught.
+- **ISO-8601 UTC sorts LEXICALLY**, so "is this line inside the last
+  minute" is a string comparison with no date parsing in a shell
+  script. That property is most of what the audit format is worth.
+- **`grep -c` prints the count AND exits 1 when the count is zero.**
+  `grep -c … || echo 0` therefore emits `0\n0`, and every arithmetic
+  test on it dies with "integer expression expected". `|| true`. Hit
+  twice in one afternoon.
+- **`agent.enabled`/`agent.allow`/`agent.rate` are read-at-use-time
+  keys**, so the observer is the only place a typo surfaces. ONE unknown verb makes
   the whole `agent.allow` line report `unsupported`: reporting the rest
   as converged would hide `pkg.instal` from exactly the diff a person
   would look at.
