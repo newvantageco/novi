@@ -638,11 +638,29 @@ NetSurf 3.11, HTML and CSS over real HTTP, **no JavaScript**.
   rule is the BASE IMAGE and RFC 0006's is the TRUST PATH, and neither
   is touched — but worth stating: only curl's half has ever been put
   through this project's HTTPS verification triple.
-- **The browser does not use this desktop's typography.**
-  `NETSURF_FB_FONTLIB=internal` is a built-in bitmap font, so the one
-  window that renders the most text is the one not drawing it in Inter.
-  Wiring fcft into libnsfb is roadmap item 1, and it is the gap a
-  person notices first.
+- **The browser draws in Inter and JetBrains Mono**, via
+  `NETSURF_FB_FONTLIB=freetype` — not the compiled-in bitmap face it
+  shipped with first. The RFC called this "a bigger change than this
+  RFC" and was wrong: freetype is a fontlib upstream already supports
+  and has been in this build since stage 06 for fcft, so it is a new
+  LINK and not a new dependency. `NETSURF_FB_FONTPATH` feeds
+  `respaths`, and `fb_new_face()` resolves each name through
+  `filepath_sfind()` against it, so the ten `NETSURF_FB_FONT_*` values
+  are plain filenames.
+- **This image can draw no italic sans and no serif at all**, and that
+  is worth saying wherever the browser is described. Inter ships
+  Regular/Medium/SemiBold only, so `<i>` renders UPRIGHT; there is no
+  serif face, so `font-family: serif` lands on Inter. Italic mono is
+  fine — JetBrains Mono has all four. Only the sans-serif face is
+  fatal when missing; every other face falls back to the one below it,
+  which is why these gaps degrade instead of crashing. Both were
+  confirmed on a screendump rather than predicted.
+- **`fonts-inter` and `fonts-jetbrains-mono` are in `depends=` by
+  hand, because NOTHING CAN DERIVE THEM.** pkgsplit reads
+  `DT_NEEDED`, and a `.ttf` opened by path at runtime is in no ELF
+  header — the libdrm `dlopen` blind spot (RFC 0007) in a different
+  costume. Without them the package installs, the browser starts,
+  cannot find its default font and exits.
 
 ## Architecture: Python, and the module it does not have
 

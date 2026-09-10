@@ -67,12 +67,10 @@ happening here. The framebuffer frontend draws its own widgets into a
 buffer that libnsfb puts on a surface, and libnsfb has a Wayland
 backend (`NETSURF_FB_FRONTEND=wld`).
 
-The cost is real and worth naming: **the browser does not use this
-desktop's typography.** `NETSURF_FB_FONTLIB=internal` is a built-in
-bitmap font, not Inter through fcft, so the one window on this desktop
-that renders the most text is the one window not drawing it with the
-design language's fonts. Wiring fcft into libnsfb is a bigger change
-than this RFC and is on the roadmap.
+It shipped first with `NETSURF_FB_FONTLIB=internal`, a compiled-in
+bitmap face, which made the one window on this desktop that renders the
+most text the one window not drawing it in Inter. That is fixed — see
+decision 8.
 
 ### 4. The patch, and why the build fails without it.
 
@@ -142,6 +140,50 @@ Whoever adds the next content stage has to do the renumber (40..43 →
 is written into the stage's own comment, where the next person will be
 standing.
 
+### 8. The browser draws in this desktop's own faces.
+
+`NETSURF_FB_FONTLIB=freetype`, `NETSURF_FB_FONTPATH` pointed at the
+`fonts-inter` and `fonts-jetbrains-mono` directories, and each of the
+ten `NETSURF_FB_FONT_*` faces named.
+
+The first version of this RFC called wiring real type in "a bigger
+change than this RFC". It is not: freetype is a fontlib upstream
+already supports (`frontends/framebuffer/font_freetype.c`), and
+freetype has been in this build since stage 06 for fcft — so this is a
+new **link**, not a new dependency. `NETSURF_FB_FONTPATH` feeds
+`respaths` in `gui.c` and `fb_new_face()` resolves each name through
+`filepath_sfind()` against it, so the faces are plain filenames.
+
+**Sans-serif bold is Inter SemiBold, not Bold.** SemiBold is what
+`NOVI_FONT_TITLE` uses; matching the desktop beats matching the CSS
+keyword.
+
+**Two things this image cannot draw, stated here rather than left to
+be found against somebody's page — and both confirmed on screen, not
+predicted:**
+
+- **No italic Inter.** The static weights were chosen over the
+  variable font deliberately (CLAUDE.md records why), and the three
+  installed are Regular, Medium and SemiBold. `<i>` in sans renders
+  **upright**. Italic *mono* is fine — JetBrains Mono ships all four
+  faces.
+- **No serif face at all.** `font-family: serif` lands on Inter.
+  That is typographically wrong and it is exactly what shipping one
+  sans and one mono costs. Adding a serif is a design decision and a
+  new package, not a flag.
+
+Cursive and fantasy map to Inter too. Only the sans-serif face is
+fatal if missing (`font_freetype.c` returns false and the browser
+exits); every other face falls back to the one below it, which is why
+these gaps degrade rather than crash.
+
+**`fonts-inter` and `fonts-jetbrains-mono` are named in `depends=` by
+hand, because nothing can derive them.** pkgsplit reads `DT_NEEDED`,
+and a `.ttf` opened by path at runtime appears in no ELF header — the
+same blind spot that hides libdrm's `dlopen`'d drivers (RFC 0007),
+wearing a different costume. Without them the package installs, the
+browser starts, fails to find its default font, and exits.
+
 ## What was verified
 
 The stage was run from a **wiped** `/build/netsurf-build`, so what
@@ -181,6 +223,16 @@ So the whole path is exercised end to end: libcurl fetched it, NetSurf's
 own engine parsed and laid it out, libnsfb painted it into a
 `wl_shm` buffer, and the patched xdg-shell surface put it on the
 screen under the compositor's decoration.
+
+**Typography, on the same booted machine** (`NETSURF_FB_FONTLIB=freetype`):
+the heading, body, table and status line render in **Inter**, and
+`<code>`/`<pre>` in **JetBrains Mono**, anti-aliased. `<b>` genuinely
+selects Inter SemiBold. Both documented gaps were confirmed **on
+screen** rather than reasoned about: a paragraph marked `<i>` renders
+upright, and a `font-family: serif` line renders in Inter.
+`netsurf-fb`'s `DT_NEEDED` gained `libfreetype.so.6`, and the package
+index carries
+`curl,openssl,libpng,zlib,expat,wayland,freetype,fonts-inter,fonts-jetbrains-mono`.
 
 **What was not tested.** HTTPS from this browser (the VM has no route
 to the public internet in this harness — curl's TLS path has RFC 0020's
@@ -224,9 +276,11 @@ written for this test. Nothing here has run on physical hardware.
 
 ## Roadmap
 
-1. **fcft in libnsfb**, so the browser draws text in Inter like every
-   other window. This is the largest visible gap and the one a person
-   notices first.
+1. ~~fcft in libnsfb~~ — **done**, and by a shorter route than this
+   RFC first assumed: freetype rather than fcft, which upstream
+   already supports. See decision 8. What remains is the two missing
+   faces: an italic sans and a serif are both new font packages and a
+   design decision, not a build flag.
 2. **JavaScript, or a decision not to.** Duktape is one flag and a real
    question: it is an interpreter with no JIT, so it is slow, and slow
    scripting on pages written for fast scripting may be worse than

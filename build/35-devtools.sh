@@ -628,15 +628,67 @@ if [ "$ONLY" = "all" ] || [ "$ONLY" = "netsurf" ]; then
     # which is true of musl. NO makes it link -liconv, a library that
     # does not exist here and never will.
     echo "  -> netsurf (framebuffer frontend, Wayland surface)"
+    # FONTS: freetype against THIS DESKTOP'S OWN FACES, not the
+    # built-in bitmap font.
+    #
+    # NETSURF_FB_FONTLIB=internal is a compiled-in bitmap face, and it
+    # made the one window on this desktop that renders the most text
+    # the one window not drawing it in Inter -- the most visible
+    # violation of the design language in the image. freetype is a
+    # supported fontlib upstream (frontends/framebuffer/font_freetype.c)
+    # and freetype itself has been in this build since stage 06, for
+    # fcft. So this is a new LINK, not a new dependency.
+    #
+    # NETSURF_FB_FONTPATH feeds respaths (frontends/framebuffer/gui.c),
+    # and fb_new_face() resolves each name through filepath_sfind()
+    # against it -- so these are plain filenames, and the directories
+    # are where the fonts-* packages put them.
+    #
+    # WHAT THIS IMAGE DOES NOT HAVE, stated rather than left to be
+    # discovered against a real page:
+    #   * NO ITALIC INTER. CLAUDE.md records that the static weights
+    #     were chosen over the variable font deliberately, and the
+    #     three installed are Regular/Medium/SemiBold. A page asking
+    #     for italic sans gets upright Inter. Italic MONO is fine --
+    #     JetBrains Mono ships all four.
+    #   * NO SERIF FACE AT ALL. `font-family: serif` and the default
+    #     serif of an unstyled page both land on Inter. That is wrong
+    #     typographically and it is what shipping one sans and one
+    #     mono costs; adding a serif is a design decision and a new
+    #     package, not a flag.
+    #   * NO CURSIVE OR FANTASY. Those map to Inter too.
+    # SemiBold rather than Bold for the bold face because SemiBold is
+    # what NOVI_FONT_TITLE uses -- matching the desktop beats matching
+    # the CSS keyword.
+    NS_FONTS="NETSURF_FB_FONTLIB=freetype
+        NETSURF_FB_FONTPATH=/usr/share/fonts/inter:/usr/share/fonts/jetbrains-mono
+        NETSURF_FB_FONT_SANS_SERIF=Inter-Regular.ttf
+        NETSURF_FB_FONT_SANS_SERIF_BOLD=Inter-SemiBold.ttf
+        NETSURF_FB_FONT_SANS_SERIF_ITALIC=Inter-Regular.ttf
+        NETSURF_FB_FONT_SANS_SERIF_ITALIC_BOLD=Inter-SemiBold.ttf
+        NETSURF_FB_FONT_SERIF=Inter-Regular.ttf
+        NETSURF_FB_FONT_SERIF_BOLD=Inter-SemiBold.ttf
+        NETSURF_FB_FONT_MONOSPACE=JetBrainsMono-Regular.ttf
+        NETSURF_FB_FONT_MONOSPACE_BOLD=JetBrainsMono-Bold.ttf
+        NETSURF_FB_FONT_CURSIVE=Inter-Regular.ttf
+        NETSURF_FB_FONT_FANTASY=Inter-Regular.ttf"
+
     NS_OPTS="HOST=${TARGET_TRIPLE} TARGET=framebuffer PREFIX=/usr
         CC=${TARGET_TRIPLE}-gcc AR=${TARGET_TRIPLE}-ar
-        NETSURF_FB_FRONTEND=wld NETSURF_FB_FONTLIB=internal
+        NETSURF_FB_FRONTEND=wld ${NS_FONTS}
         NETSURF_USE_DUKTAPE=NO NETSURF_USE_HARU_PDF=NO
         NETSURF_USE_LIBICONV_PLUG=YES NETSURF_USE_JPEG=NO
         NETSURF_USE_WEBP=NO NETSURF_USE_VIDEO=NO"
 
+    # fonts-inter and fonts-jetbrains-mono are named by hand because
+    # NOTHING CAN DERIVE THEM. pkgsplit reads DT_NEEDED, and a .ttf
+    # opened by path at runtime appears in no ELF header -- the same
+    # blind spot that hides libdrm's dlopen'd drivers, wearing a
+    # different costume. Without them the browser installs, starts,
+    # fails to find its default font and exits: font_freetype.c treats
+    # a missing sans-serif as fatal, correctly.
     files="$(stage_pkg netsurf "${NETSURF_VERSION}" \
-        "curl,openssl,libpng,zlib,expat,wayland" \
+        "curl,openssl,libpng,zlib,expat,wayland,freetype,fonts-inter,fonts-jetbrains-mono" \
         "NetSurf ${NETSURF_VERSION} -- a small web browser. Renders HTML and CSS; NO JavaScript in this build")"
     # shellcheck disable=SC2086
     ( cd "${NS_TREE}" && make -C netsurf ${NS_OPTS} Q=@ \
