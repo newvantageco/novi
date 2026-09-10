@@ -95,9 +95,15 @@ if [ ! -x "${ROOTFS}/usr/bin/novi-shell" ]; then
     echo "  empty manifest, and produce an ISO with no desktop at all." >&2
     echo "" >&2
     echo "  Put the desktop back first:" >&2
-    echo "      bash build.sh --from 06 --to 29" >&2
-    echo "  then re-run this stage, 41-desktop-split.sh and" >&2
-    echo "  42-toolchain-repo.sh in that order." >&2
+    echo "      bash build.sh --from 06 --to 39" >&2
+    echo "  then:" >&2
+    echo "      bash build.sh --from 40" >&2
+    echo "" >&2
+    echo "  --to 39, NOT --to 29: content stages run to 39 now" >&2
+    echo "  (novi-notifyd and novi-bg are 36, novi-glinfo is 37)." >&2
+    echo "  This message said 29 and shipped a repository of 51" >&2
+    echo "  packages instead of 54, with those three missing from" >&2
+    echo "  novi-desktop and no error anywhere." >&2
     exit 1
 fi
 

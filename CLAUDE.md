@@ -1710,7 +1710,20 @@ success and produced a desktop with no wallpaper and no notifications.
 Count the packages (`ls /build/repo/*.pkg.tar.gz | wc -l`) after any
 hand-run recovery, and **when a stage number is written into a
 document, the document is now something that can rot** — this line
-did.
+did, and so did the identical line inside `40-repo.sh`'s own
+already-split guard, which is the copy someone actually follows
+because they are already in trouble when they read it. Both say 39
+now.
+
+pkgsplit refuses an absent member instead of dropping it, and that
+check has a **host test** (`tools/pkgsplit/test_pkgsplit.py`, run by
+`scripts/lint.sh`) rather than only an error message nobody has seen.
+That split exists for a specific reason: provoking it for real costs
+a full content rebuild, because 40 wipes the repository before
+pkgsplit runs *and* refuses outright on an already-split rootfs — so
+"break it and watch" is a ninety-minute experiment. The test was
+confirmed by reverting the function to the old silent filter and
+watching it fail.
 
 **`restore-build-inputs.sh` launders stale files forward.** It restores
 headers and `.pc` files *from the packages*, so anything that was in a

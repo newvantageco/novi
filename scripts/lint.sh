@@ -104,6 +104,22 @@ else
     echo ">>> no host python3 -- skipping novi-recon checks" >&2
 fi
 
+# pkgsplit's meta-package checks. These are here because provoking
+# them for real is disproportionately expensive: 40-repo.sh wipes
+# /build/repo before pkgsplit runs and refuses outright on a rootfs
+# 41 has already split, so watching the check fire costs a full
+# content rebuild. A meta-package that silently drops a member is
+# exactly the failure that shipped once already -- a repository of 51
+# packages instead of 54, novi-desktop naming three fewer clients, and
+# `pkg install novi-desktop` reporting success.
+if command -v python3 >/dev/null 2>&1; then
+    echo ">>> pkgsplit"
+    if ! python3 tools/pkgsplit/test_pkgsplit.py; then
+        echo ">>> pkgsplit checks failed -- run: python3 tools/pkgsplit/test_pkgsplit.py" >&2
+        exit 1
+    fi
+fi
+
 # The shell JSON escaper (RFC 0029) is checked under the SHIPPED
 # busybox ash, not the host's bash, and against a real JSON parser
 # rather than a string comparison. Every JSON document this system

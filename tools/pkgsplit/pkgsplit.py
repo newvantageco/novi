@@ -291,6 +291,29 @@ def _check_meta_covers_first_party():
 
 _check_meta_covers_first_party()
 
+
+def check_meta_members_built(name, deps, available):
+    """Every member a meta-package names must have been packaged.
+
+    Returns the deps unchanged, or raises SystemExit naming what is
+    absent. A separate function purely so it can be tested: proving
+    it fires otherwise costs a full content rebuild, because 40 wipes
+    the repository before pkgsplit runs and refuses outright on an
+    already-split rootfs. See tools/pkgsplit/test_pkgsplit.py.
+    """
+    absent = [d for d in deps if d not in available]
+    if absent:
+        raise SystemExit(
+            "ERROR: %s names package(s) that this build did not produce:\n" % name
+            + "".join("         %s\n" % d for d in absent)
+            + "       A meta-package cannot name what the index does not\n"
+            + "       have, and dropping them silently ships a desktop\n"
+            + "       missing those programs. Some stage did not run --\n"
+            + "       rebuild the content stages (bash build.sh --from 06\n"
+            + "       --to 39) rather than removing them from\n"
+            + "       META_PACKAGES.")
+    return list(deps)
+
 EXTRA_PACKAGE_DESCRIPTIONS = {
     "fonts-jetbrains-mono": ("JETBRAINS_MONO", "JetBrains Mono, the default terminal font"),
     "fonts-inter": ("INTER", "Inter, the UI sans every Novi client labels itself with"),
@@ -590,41 +613,7 @@ def main():
 
     # Meta packages: no files, just dependencies.
     for name, vkey, desc, deps in META_PACKAGES:
-        # A member that was not packaged is a BUILD ERROR, never a
-        # dependency to quietly drop.
-        #
-        # This line used to be `deps = [d for d in deps if d in
-        # contents]`, whose intent was right -- a meta-package must
-        # never name something the index does not have, or `pkg
-        # install` fails on a dependency nobody can resolve. But it
-        # turned "a client is missing from this build" into "a desktop
-        # that installs cleanly and is missing a client", which is
-        # strictly worse: the first is loud, the second ships.
-        #
-        # It happened. `bash build.sh --from 06 --to 29` (the recovery
-        # CLAUDE.md documented, written when content stages stopped at
-        # 29) skipped stages 36 and 37, so novi-notifyd, novi-bg and
-        # novi-glinfo were never rebuilt and 41 had already deleted
-        # them. The repository came out with 51 packages instead of 54
-        # and novi-desktop's depends= simply had three fewer names.
-        # No error anywhere. `pkg install novi-desktop` would have
-        # reported success and produced a desktop with no wallpaper
-        # and no notifications.
-        #
-        # The META_PACKAGES check above cannot catch this: it asks "is
-        # every OS package named by a meta-package", which is the
-        # opposite question. This is the other direction.
-        absent = [d for d in deps if d not in contents]
-        if absent:
-            raise SystemExit(
-                "ERROR: %s names package(s) that this build did not produce:\n" % name
-                + "".join("         %s\n" % d for d in absent)
-                + "       A meta-package cannot name what the index does not\n"
-                + "       have, and dropping them silently ships a desktop\n"
-                + "       missing those programs. Some stage did not run --\n"
-                + "       rebuild the content stages (bash build.sh --from 06\n"
-                + "       --to 39) rather than removing them from\n"
-                + "       META_PACKAGES.")
+        deps = check_meta_members_built(name, deps, contents)
         stage = os.path.join(args.stage, name)
         shutil.rmtree(stage, ignore_errors=True)
         os.makedirs(os.path.join(stage, "files"))
