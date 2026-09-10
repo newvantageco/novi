@@ -6,19 +6,23 @@
 #
 # theme-test links the REAL loader (theme.c) rather than
 # reimplementing the parser, so what it asserts about the shipped
-# palettes is what a client will actually load. It needs pixman's
-# headers because theme.h's NOVI_PIX() produces a pixman_color_t --
-# headers only, nothing is linked from it.
+# palettes is what a client will actually load.
+#
+# NO EXTERNAL DEPENDENCIES, deliberately: it defines
+# NOVI_THEME_NO_PIXMAN so theme.h skips the pixman include it only
+# needs for NOVI_PIX(). The first version linked pixman's headers and
+# broke CI, on a runner that has no graphics libraries and no reason
+# to -- a test that checks a list of hex values should not need a
+# rasteriser.
 
 CC ?= cc
 CFLAGS ?= -O1 -Wall -Wextra
-PIXMAN_CFLAGS := $(shell pkg-config --cflags pixman-1 2>/dev/null)
 
 check: theme-test
 	@cd .. && common/theme-test
 
 theme-test: theme-test.c theme.c theme.h
-	$(CC) $(CFLAGS) $(PIXMAN_CFLAGS) -I. -o $@ theme-test.c theme.c -lm
+	$(CC) $(CFLAGS) -DNOVI_THEME_NO_PIXMAN -I. -o $@ theme-test.c theme.c -lm
 
 clean:
 	rm -f theme-test

@@ -22,6 +22,12 @@
  * different bug classes with different tools; this one is for the
  * theme files.
  */
+/* Built with -DNOVI_THEME_NO_PIXMAN (see common/Makefile): the loader
+ * is plain C, and pixman is only needed for NOVI_PIX(), which nothing
+ * here uses. The define lives on the compile line rather than here
+ * because theme.c is a SEPARATE translation unit and would not see it.
+ * Without it this cannot build on a machine with no graphics
+ * libraries -- which is exactly what a CI runner is. */
 #include "theme.h"
 
 #include <dirent.h>

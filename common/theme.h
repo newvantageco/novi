@@ -48,7 +48,6 @@
 #ifndef NOVI_THEME_H
 #define NOVI_THEME_H
 
-#include <pixman.h>
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -57,12 +56,30 @@
 #define NOVI_B(c) ((c) & 0xff)
 #define NOVI_EXPAND(v) ((uint16_t)((v) * 0x101))
 
+/* PIXMAN IS ONLY NEEDED FOR NOVI_PIX(), and NOVI_PIX() is only needed
+ * by clients that draw text.
+ *
+ * The palette struct and the loader in theme.c are plain uint32_t and
+ * stdio -- theme.c does not name pixman once. The unconditional
+ * include here nonetheless forced the dependency on every consumer,
+ * which went unnoticed for as long as every consumer was a Wayland
+ * client that had pixman anyway. It surfaced when common/theme-test.c
+ * became the first one that was not: `pixman.h: No such file or
+ * directory` on a CI runner with no graphics libraries, from a test
+ * that checks a list of hex values.
+ *
+ * Define NOVI_THEME_NO_PIXMAN to get the palette and the loader
+ * without it. Do not define it in a client -- you want the macro. */
+#ifndef NOVI_THEME_NO_PIXMAN
+#include <pixman.h>
+
 /* A pixman_color_t for any 0xAARRGGBB token, opaque. */
 #define NOVI_PIX(c) ((pixman_color_t){ \
 	.red   = NOVI_EXPAND(NOVI_R(c)), \
 	.green = NOVI_EXPAND(NOVI_G(c)), \
 	.blue  = NOVI_EXPAND(NOVI_B(c)), \
 	.alpha = 0xffff })
+#endif
 
 /* ── §1 Colour ─────────────────────────────────────────────────── */
 
