@@ -83,8 +83,22 @@ if command -v cc >/dev/null 2>&1; then
         exit 1
     fi
     echo ">>> clean"
+    # The shipped palettes, parsed by the REAL loader (common/theme.c)
+    # and checked against §1's invariants. RFC 0030 found its two bugs
+    # by shipping a light theme, screendumping it and looking; that
+    # worked and does not scale, because the next palette mistake needs
+    # somebody to boot an image and notice. This is the part that can
+    # be checked without a VM: elevation ordering, text contrast on
+    # every ground it is drawn on, and a pressed control that sinks
+    # rather than pops.
+    echo ">>> theme palettes"
+    if ! make -s -C common check; then
+        echo ">>> theme checks failed -- run: make -C common check" >&2
+        exit 1
+    fi
 else
     echo ">>> no host cc -- skipping novi-panel icon geometry checks" >&2
+    echo ">>> no host cc -- skipping theme palette checks" >&2
 fi
 
 # novi-recon is pure Python and most of what can be wrong in it cannot

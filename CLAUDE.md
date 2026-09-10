@@ -915,6 +915,38 @@ palette is a runtime table loaded from a plain-text file.
   unread inotify fd stays readable and the loop spins at 100% CPU —
   the same shape as the POLLPRI trap on `/proc/mounts`. Everything
   else picks the palette up at its next start.
+- **The palettes have a HOST TEST now** (`common/theme-test.c`, run by
+  `scripts/lint.sh` via `make -C common check`). It links the real
+  loader rather than reimplementing the parser, and asserts §1's
+  claims: the elevation ladder is monotonic, body text reaches WCAG AA
+  on every ground it is drawn on, `accent.active` is darker than
+  `accent` so a pressed control sinks, and each status colour is
+  readable where it appears. Verified by breaking each invariant on
+  purpose and watching it fire.
+- **Writing that test corrected three dark-palette assumptions before
+  it found a single bug**, which is the same lesson `paper` teaches
+  about code:
+  - **base → panel → card is the ladder; `bg.card-raised` is NOT its
+    fourth rung.** theme.h says it is "a card on a card; hovered row"
+    — a variant of card. On a light palette card is often pure white,
+    so the hovered row can only go darker. Asserting one direction
+    across all four fails a correct palette.
+  - **"accent.hover is lighter" is dark-palette thinking.** On a light
+    ground the more prominent colour is the darker one. Only
+    `accent.active` has a fixed direction, and both kinds of palette
+    agree on it.
+  - **Contrast ratio is the wrong instrument for "are success and
+    error distinguishable".** They are told apart by HUE and a correct
+    pair sits at almost identical brightness (paper 1.29, axiom 1.65).
+    Assert each is READABLE where drawn instead. Distinguishing them
+    for a colour-blind reader is a real problem a ratio cannot speak
+    to — which is why the panel pairs its health colour with a glyph.
+- **A token with no consumer can still be wrong, and that is the best
+  time to fix it.** White on paper's accent measured 3.74:1, under AA;
+  white is already the lightest `text.on-accent` can be, so the accent
+  moved (`#0d9488` → `#0c8578`). Nothing draws `NOVI_TEXT_ON_ACCENT`
+  yet — so the bug was latent, and would have shipped an unreadable
+  badge on one theme the day something used it.
 - **A theme swatch is two rects, not an icon.** `draw_icon()` blends a
   monochrome glyph in one colour and cannot express a ground plus an
   accent, which is the whole information a swatch carries.

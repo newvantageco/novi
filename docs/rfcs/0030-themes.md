@@ -278,10 +278,57 @@ argument for shipping `paper`, made concrete on the first run.
    would work in each. They were left out because a re-render there is
    not one function call, and the panel plus the background is what a
    person watches while switching.
-2. **Light-mode auditing that is not a screenshot.** Both bugs here
-   were found by looking. A host test that renders each theme through
-   the same geometry the icon test uses would find the next one
-   without booting anything.
+2. ~~Light-mode auditing that is not a screenshot~~ — **done**:
+   `common/theme-test.c`, run by `scripts/lint.sh`. 64 checks across
+   the four palettes, using the **real** loader rather than a second
+   parser. It asserts what §1 actually claims: the elevation ladder is
+   monotonic, body text reaches WCAG AA on every ground it is drawn
+   on, a pressed control sinks rather than pops, and the status
+   colours are readable where they appear.
+
+   **Writing it corrected three of my own assumptions before it found
+   anything**, and every one of them was dark-palette thinking of
+   exactly the kind this RFC says a light theme exposes:
+
+   - *"The four background layers are monotonic."* They are not, and
+     should not be. `theme.h` says what the tokens are: base, panel and
+     card are three grounds each further forward, but `bg.card-raised`
+     is "a card on a card; hovered row" — a **variant** of card, not a
+     storey above it. On a light palette card is often pure white, so a
+     hovered row can only go darker. `paper` runs 0.854 → 0.930 → 1.000
+     up the ladder and then 0.821 for the hovered row, and is right to.
+   - *"accent.hover is lighter than accent."* On a light ground the
+     more prominent colour is the **darker** one. `paper` goes accent →
+     hover → active all downwards. Only `accent.active` has a fixed
+     direction — darker, so a pressed control sinks — and both a dark
+     and a light palette agree on that.
+   - *"success and error must be distinguishable by contrast ratio."*
+     Wrong instrument. They are told apart by **hue**, and a correct
+     pair sits at almost identical brightness: paper's are 1.29 apart,
+     axiom's 1.65. A threshold passing one would have failed the other
+     for no reason. What matters is that each is readable where it is
+     drawn. (Telling them apart for a colour-blind reader is a real
+     problem and not one a contrast ratio can speak to — it is why the
+     panel pairs its health colour with a glyph.)
+
+   **The one real finding was latent.** White on `paper`'s accent
+   measured 3.74:1, below AA's 4.5 — and white is already the lightest
+   `text.on-accent` can be, so the accent was the only end that could
+   move (`#0d9488` → `#0c8578`, 4.52:1). **Nothing in the codebase
+   draws `NOVI_TEXT_ON_ACCENT` yet**, which is precisely why it was
+   worth fixing: the day a client uses that token it would have shipped
+   an unreadable badge, on this theme only.
+
+   Verified the way this project requires — a check nobody has seen
+   fail is a check nobody knows works: the ladder, the sinking control
+   and the text contrast were each broken on purpose in `axiom.theme`
+   and each fired.
+
+   What it deliberately cannot catch: a client that ignores the
+   palette and draws its own hex (that is CLAUDE.md's three greps),
+   and arithmetic that mangles a token on the way to a pixel (that was
+   novi-shell's unsigned wrap). Different bug classes, different
+   tools.
 4. **A theme in `/etc`**, so somebody can write their own without
    putting it in `/usr/share`. The loader would take the first hit of
    `/etc/novi/themes` then `/usr/share/novi/themes`.

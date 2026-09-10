@@ -236,7 +236,8 @@ static const struct novi_palette BUILTIN = {
 	.status_error   = 0xffef4444u,
 };
 
-bool novi_theme_read(const char *name, struct novi_palette *out)
+bool novi_theme_read_from(const char *dir, const char *name,
+			  struct novi_palette *out)
 {
 	char path[256];
 
@@ -244,14 +245,19 @@ bool novi_theme_read(const char *name, struct novi_palette *out)
 	 * theme X must give the same answer whichever theme happens to be
 	 * running, or a picker's swatches would shift as you switched. */
 	*out = BUILTIN;
-	if (!name_ok(name)) {
+	if (dir == NULL || !name_ok(name)) {
 		return false;
 	}
 	if ((size_t)snprintf(path, sizeof path, "%s/%s.theme",
-			     NOVI_THEME_DIR, name) >= sizeof path) {
+			     dir, name) >= sizeof path) {
 		return false;
 	}
 	return load_file(path, out) != 0;
+}
+
+bool novi_theme_read(const char *name, struct novi_palette *out)
+{
+	return novi_theme_read_from(NOVI_THEME_DIR, name, out);
 }
 
 const char *novi_theme_load(void)

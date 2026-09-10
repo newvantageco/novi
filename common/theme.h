@@ -142,6 +142,17 @@ bool novi_theme_reload(void);
  * one you are not running is to read it. */
 bool novi_theme_read(const char *name, struct novi_palette *out);
 
+/* The same read, from a directory the caller names.
+ *
+ * novi_theme_read() is this with NOVI_THEME_DIR, which is an absolute
+ * path on the TARGET -- so a host-side tool that wants to inspect the
+ * palettes as they sit in the repository has no way in otherwise.
+ * common/theme-test.c is that tool. The directory is a parameter
+ * rather than a test-only entry point because a test that reaches into
+ * a private function is testing something the product does not do. */
+bool novi_theme_read_from(const char *dir, const char *name,
+			  struct novi_palette *out);
+
 /* Where the active theme's name is published, by novi-state's
  * converger for display.theme. A file rather than an environment
  * variable, for the same reason the network interface and the health
