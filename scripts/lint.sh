@@ -141,7 +141,14 @@ fi
 # not choose. The verb-list check catches the other thing two files
 # can do to each other: novi-agent dispatches on a list novi-state
 # also carries, because that is where a typo in agent.allow is caught.
-for t in packages/tests/test-lib-json.sh packages/tests/test-agent-verbs.sh; do
+# The secrets check is the third: wifi.join is the first agent verb
+# that handles one, and its refusal path is the part that is easy to
+# get wrong -- cmd_do captures args="$*" before dispatch, so refusing
+# `wifi.join <ssid> <passphrase>` with "$args" would write that
+# passphrase into a 0600 log permanently, by the very refusal meant to
+# protect it.
+for t in packages/tests/test-lib-json.sh packages/tests/test-agent-verbs.sh \
+         packages/tests/test-agent-secrets.sh; do
     echo ">>> ${t##*/}"
     if ! bash "$t"; then
         echo ">>> ${t} failed" >&2

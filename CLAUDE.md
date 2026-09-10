@@ -845,6 +845,31 @@ is one JSON document saying what this machine is; `novi-agent do
   returns 1 for "this machine has no wifi" — an assignment from a
   failing command substitution ends the script. One `case`, and an
   explicit `return 0`.
+- **`wifi.join` is the first verb that handles a SECRET, and THE
+  REFUSAL PATH is the half that is easy to get wrong.** `cmd_do`
+  captures `args="$*"` before it dispatches, so refusing the obvious
+  mistake — `wifi.join <ssid> <passphrase>`, the secret in argv where
+  every other verb puts its arguments — with `"$args"` would write
+  that passphrase into a 0600 log **permanently, by the refusal meant
+  to protect it**. A boundary that leaks what it guards while
+  reporting a refusal is worse than no boundary. Every refusal in that
+  branch audits a fixed string; the SSID is audited because an SSID is
+  configuration. `packages/tests/test-agent-secrets.sh` asserts all of
+  it and was confirmed by reintroducing the leak and watching it fail.
+- **An SSID is rejected by CLASS, not by allowlist.** Every other
+  argument is checked against an `[A-Za-z0-9._-]`-ish set; real SSIDs
+  contain spaces and apostrophes, so that rule would refuse a large
+  share of actual networks. No leading `-`, nothing empty, no control
+  characters, 32 bytes (what 802.11 allows). And a **terminal on stdin
+  is refused** — `novi-wifi` would prompt, so an agent reaching the
+  verb by accident would hang rather than fail.
+- **A verb that only adds a second path to an existing key should not
+  exist.** `firewall.allow` was on the roadmap and was rejected:
+  `network.firewall.allow` is a novi-state key, so `state.set` already
+  reaches it, and a second writer with its own semantics is how RFC
+  0022's "one list a person chose" stops being one list. Hold the next
+  candidate to the same test — does it add a capability, or a second
+  path to one that exists?
 - **Refusals are audited**, at `/var/log/novi-agent.jsonl`, 0600, JSON
   lines so `audit` is a `tail` and not a formatter. A boundary that
   records only what it let through tells you nothing about what was

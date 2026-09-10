@@ -68,6 +68,7 @@ set -eu
 
 STATE="${NOVI_STATE:-novi-state}"
 PKG="${NOVI_PKG:-pkg}"
+WIFI="${NOVI_WIFI:-novi-wifi}"
 AUDIT="${NOVI_AGENT_AUDIT:-/var/log/novi-agent.jsonl}"
 AUDIT_MAX="${NOVI_AGENT_AUDIT_MAX:-2000}"
 
@@ -93,7 +94,7 @@ die() { printf 'novi-agent: %s\n' "$*" >&2; exit 1; }
 # checks the two against each other, which is the answer to "then they
 # will drift" -- the same answer as `common/keybindings.h` being one
 # table that both novi-shell and novi-launcher read.
-VERBS="state.set state.apply state.rollback pkg.sync pkg.install"
+VERBS="state.set state.apply state.rollback pkg.sync pkg.install wifi.join"
 
 # ---------------------------------------------------------------------------
 # Reading the policy
@@ -187,6 +188,28 @@ valid_pkg_name() {
     case "$1" in
         -*|''|*[!A-Za-z0-9._+-]*) return 1 ;;
     esac
+    return 0
+}
+
+# An SSID is not like the other arguments and cannot use their rule.
+#
+# It is arbitrary text chosen by a stranger and broadcast over the air
+# (RFC 0009), and legitimate ones contain spaces, apostrophes and
+# emoji. Restricting it to [A-Za-z0-9._-] the way a package name is
+# restricted would refuse a large fraction of real networks -- so this
+# one rejects by CLASS rather than by allowlist: no leading dash (the
+# oldest injection there is), nothing empty, no control characters
+# (which is novi-wifi's own rule for the same input), and a length cap.
+#
+# 32 bytes because that is what IEEE 802.11 allows an SSID to be. A
+# longer one is not a network anybody can join, so refusing it costs
+# nothing and keeps a runaway argument out of the log.
+valid_ssid() {
+    case "$1" in
+        -*|'') return 1 ;;
+        *[![:print:]]*) return 1 ;;
+    esac
+    [ "${#1}" -le 32 ] || return 1
     return 0
 }
 
@@ -443,6 +466,48 @@ cmd_do() {
                 valid_pkg_name "$a" || refuse "$verb" "invalid package name" "$args"
             done
             "$PKG" install "$@" >&2 || status=$?
+            ;;
+        wifi.join)
+            # THE PASSPHRASE IS NEVER AN ARGUMENT, and that constraint
+            # shapes every line of this branch.
+            #
+            # /proc/<pid>/cmdline is world-readable for as long as the
+            # process lives, which is why RFC 0017 gave novi-wifi
+            # `add <ssid> --stdin` for the GUI. The same reasoning
+            # applies harder here: an automated actor is exactly the
+            # caller most likely to put a secret somewhere it will be
+            # read back later. So the passphrase arrives on stdin, is
+            # piped straight through, and is never held in a shell
+            # variable this script could accidentally print.
+            #
+            # AND IT IS NEVER AUDITED -- including on the refusal path,
+            # which is the part that is easy to get wrong. cmd_do
+            # captures `args="$*"` before dispatch, so if somebody
+            # calls `wifi.join <ssid> <passphrase>` -- the obvious
+            # mistake -- then refusing with "$args" would write that
+            # passphrase into /var/log/novi-agent.jsonl, permanently,
+            # while reporting that it had protected them. Every refusal
+            # here therefore audits a FIXED string, never "$args".
+            #
+            # This is RFC 0005's rule ("configuration is declared;
+            # secrets are not") reaching the agent interface: the SSID
+            # is configuration and is logged, the passphrase is a
+            # secret and exists nowhere but the pipe.
+            [ "$#" -eq 1 ] || refuse "$verb" \
+                "usage: wifi.join <ssid>, passphrase on stdin" \
+                "<arguments withheld: may contain a passphrase>"
+            valid_ssid "$1" || refuse "$verb" "invalid ssid" \
+                "<arguments withheld: may contain a passphrase>"
+            command -v "$WIFI" >/dev/null 2>&1 || \
+                refuse "$verb" "novi-wifi is not installed" "$1"
+            # A tty means there is a person here, and novi-wifi would
+            # PROMPT -- so an agent that reached this by accident would
+            # hang forever rather than fail. Refuse instead: this verb
+            # exists to be driven by a pipe.
+            [ ! -t 0 ] || refuse "$verb" \
+                "passphrase must arrive on stdin, not a terminal" "$1"
+            "$WIFI" add "$1" --stdin >&2 || status=$?
+            args="$1"
             ;;
     esac
 

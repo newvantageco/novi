@@ -79,10 +79,11 @@ and an agent that produces drift on purpose defeats the engine it is
 talking to. Services are reached the way everything else is:
 `state.set services.X on` then `state.apply`.
 
-So the verb list is five: `state.set`, `state.apply`, `state.rollback`,
-`pkg.sync`, `pkg.install`. Each maps to exactly one existing tool. The
-interface adds no capability the machine did not have — it adds a
-boundary and a record around capabilities it already had.
+So the verb list is six: `state.set`, `state.apply`, `state.rollback`,
+`pkg.sync`, `pkg.install`, `wifi.join`. Each maps to exactly one
+existing tool. The interface adds no capability the machine did not
+have — it adds a boundary and a record around capabilities it already
+had.
 
 ### 4. `describe` composes; it computes nothing of its own.
 
@@ -180,6 +181,63 @@ away from the typo. **One** unknown verb makes the whole line report as
 `unsupported`: reporting the other four as converged would hide the
 problem from precisely the diff a person would look at.
 
+### 9. `wifi.join`, and where a secret is allowed to exist.
+
+The first verb that handles one, and the reason it was worth adding
+ahead of easier candidates: **an automated actor is exactly the caller
+most likely to put a secret somewhere it will be read back later.**
+
+`novi-wifi add <ssid> --stdin` already existed — RFC 0017 built it so
+`novi-settings` could join a network without the passphrase appearing
+in `/proc/<pid>/cmdline`, which is world-readable for the life of the
+process. The agent verb uses the same door. The passphrase arrives on
+stdin, goes straight down the pipe, and is never held in a shell
+variable this script could print.
+
+**And it is never audited — including on the refusal path, which is
+the half that is easy to get wrong.** `cmd_do` captures `args="$*"`
+before it dispatches, so a caller making the obvious mistake —
+`wifi.join <ssid> <passphrase>`, putting the secret in argv where
+every other verb puts its arguments — would have it written into
+`/var/log/novi-agent.jsonl` permanently, **by the refusal that was
+supposed to protect them**. A boundary that leaks the thing it guards
+while reporting that it refused is worse than no boundary. Every
+refusal in this branch therefore audits a fixed string.
+
+The SSID *is* audited, because the SSID is configuration. That split
+is RFC 0005's rule reaching the agent interface intact.
+
+Two smaller decisions:
+
+- **The SSID is rejected by class, not by allowlist.** Every other
+  argument here is checked against `[A-Za-z0-9._-]`-ish sets. An SSID
+  is arbitrary text a stranger chose and broadcast over the air, and
+  real ones contain spaces and apostrophes — so that rule would refuse
+  a large share of actual networks. Instead: no leading `-`, nothing
+  empty, no control characters, and 32 bytes, which is what 802.11
+  allows. A longer one is not a network anybody can join.
+- **A terminal on stdin is refused.** `novi-wifi` would *prompt*, so an
+  agent that reached this verb by accident would hang forever rather
+  than fail. This verb exists to be driven by a pipe and says so.
+
+### 10. `firewall.allow` was considered and deliberately not added.
+
+It is the other verb this RFC's roadmap named, and on inspection it
+should not exist.
+
+`network.firewall.allow` is a `novi-state` key, so an agent permitted
+`state.set` can already set it. A dedicated verb would add no
+capability — it would add a **second path to one key**, and the two
+could disagree about what the document says. RFC 0022's whole argument
+is that the set of things reachable from the network has to be one
+list a person chose; giving it a second writer with its own semantics
+(append, presumably, since that is the only thing a verb would add
+over `state.set`) is how that list stops being one list.
+
+If appending without a read-modify-write race is the real need, that
+belongs in `novi-state` as a general facility for list-valued keys,
+where the System panel and a person at a shell would get it too — not
+in the agent as a special case.
 ## What was verified
 
 On a booted machine, in order:
@@ -201,6 +259,17 @@ refusals**, each with its reason, at mode `0600` — and every line
 parsed as JSON, including the one whose `args` field is
 `"foo;rm -rf /"`, which is the escaper doing its job on real hostile
 input rather than a contrived test string.
+
+**`wifi.join`'s secret handling has its own host test**
+(`packages/tests/test-agent-secrets.sh`, 9 checks, run by
+`scripts/lint.sh` under the shipped BusyBox ash). It drives the real
+script with every path redirected — audit log, state file, JSON
+escaper, and a `novi-wifi` stand-in that records what it was handed —
+and asserts that the passphrase reaches the pipe and **not** argv, not
+the audit log on success, and not the audit log on the refusal path.
+Confirmed by reintroducing the leak (`refuse … "$args"`) and watching
+it fail with *"THE PASSPHRASE REACHED THE AUDIT LOG on the refusal
+path"*.
 
 The escaper additionally has a host test
 (`packages/tests/test-lib-json.sh`) that runs it **under the shipped
@@ -244,8 +313,12 @@ checks, including a deliberate `", "evil": "yes` injection attempt.
    because the tools underneath do. A setuid helper or an s6 service
    taking requests on a socket is the obvious next question, and it is
    a bigger one than it looks — that socket becomes the boundary.
-2. **More verbs, one at a time, each with an argument to make.**
-   `wifi.join` and `firewall.allow` are the obvious candidates.
+2. ~~More verbs, one at a time, each with an argument to make~~ —
+   `wifi.join` is in (decision 9) and `firewall.allow` is
+   **deliberately out** (decision 10): it would be a second writer for
+   a key `state.set` already reaches. The next candidates should be
+   held to the same test — does this verb add a capability, or only a
+   second path to one that exists?
 3. **A `describe --text` for humans.** JSON is the default here on
    purpose, and a person reading it in a terminal deserves better.
 4. **Rate limiting, or a reason not to.** Nothing stops an automated

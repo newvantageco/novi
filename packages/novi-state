@@ -564,7 +564,7 @@ converge_governor() {
 # thing that validates the document. The two are checked against each
 # other by packages/tests/test-agent-verbs.sh, which is the answer to
 # "then they will drift".
-AGENT_VERBS="state.set state.apply state.rollback pkg.sync pkg.install"
+AGENT_VERBS="state.set state.apply state.rollback pkg.sync pkg.install wifi.join"
 
 observe_agent_allow() {
     local want v
