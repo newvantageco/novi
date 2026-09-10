@@ -646,11 +646,6 @@ if [ "$ONLY" = "all" ] || [ "$ONLY" = "netsurf" ]; then
     #
     # WHAT THIS IMAGE DOES NOT HAVE, stated rather than left to be
     # discovered against a real page:
-    #   * NO ITALIC INTER. CLAUDE.md records that the static weights
-    #     were chosen over the variable font deliberately, and the
-    #     three installed are Regular/Medium/SemiBold. A page asking
-    #     for italic sans gets upright Inter. Italic MONO is fine --
-    #     JetBrains Mono ships all four.
     #   * NO SERIF FACE AT ALL. `font-family: serif` and the default
     #     serif of an unstyled page both land on Inter. That is wrong
     #     typographically and it is what shipping one sans and one
@@ -664,8 +659,8 @@ if [ "$ONLY" = "all" ] || [ "$ONLY" = "netsurf" ]; then
         NETSURF_FB_FONTPATH=/usr/share/fonts/inter:/usr/share/fonts/jetbrains-mono
         NETSURF_FB_FONT_SANS_SERIF=Inter-Regular.ttf
         NETSURF_FB_FONT_SANS_SERIF_BOLD=Inter-SemiBold.ttf
-        NETSURF_FB_FONT_SANS_SERIF_ITALIC=Inter-Regular.ttf
-        NETSURF_FB_FONT_SANS_SERIF_ITALIC_BOLD=Inter-SemiBold.ttf
+        NETSURF_FB_FONT_SANS_SERIF_ITALIC=Inter-Italic.ttf
+        NETSURF_FB_FONT_SANS_SERIF_ITALIC_BOLD=Inter-SemiBoldItalic.ttf
         NETSURF_FB_FONT_SERIF=Inter-Regular.ttf
         NETSURF_FB_FONT_SERIF_BOLD=Inter-SemiBold.ttf
         NETSURF_FB_FONT_MONOSPACE=JetBrainsMono-Regular.ttf

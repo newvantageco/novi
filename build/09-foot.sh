@@ -78,9 +78,21 @@ echo "   done: JetBrains Mono ($(ls "${FONT_DIR}" | wc -l) files)"
 # JetBrains Mono's four already do, through a code path this image has
 # been exercising since it had a terminal.
 #
-# Regular/Medium/SemiBold only: those are the three the type scale in
-# §2 actually names (body/caption at 400, display at 500, title at
-# 600). No italics -- nothing in this UI is italic.
+# Regular/Medium/SemiBold are the three the type scale in §2 names
+# (body/caption at 400, display at 500, title at 600). Nothing in this
+# UI is italic, and for the desktop's own clients that is still true.
+#
+# THE ITALICS ARE HERE FOR THE BROWSER (RFC 0031). A web page is not
+# this UI: `<em>`, citations and titles are italic constantly, and
+# with no italic face NetSurf rendered every one of them identically
+# to body text -- so emphasis, which is the whole point of the markup,
+# was INVISIBLE. That is a correctness problem in a browser rather
+# than a matter of taste, which is why two more faces are worth
+# ~840 KB.
+#
+# SemiBoldItalic rather than BoldItalic, to match the upright bold:
+# 35-devtools.sh maps NETSURF_FB_FONT_SANS_SERIF_BOLD to
+# Inter-SemiBold because SemiBold is what NOVI_FONT_TITLE uses.
 echo "==> Installing Inter ${INTER_VERSION} (UI sans)"
 INTER_DIR="${ROOTFS}/usr/share/fonts/inter"
 mkdir -p "${INTER_DIR}"
@@ -91,6 +103,8 @@ unzip -q -o "inter-${INTER_VERSION}.zip" \
     "extras/ttf/Inter-Regular.ttf" \
     "extras/ttf/Inter-Medium.ttf" \
     "extras/ttf/Inter-SemiBold.ttf" \
+    "extras/ttf/Inter-Italic.ttf" \
+    "extras/ttf/Inter-SemiBoldItalic.ttf" \
     -d inter-extract
 cp inter-extract/extras/ttf/*.ttf "${INTER_DIR}/"
 echo "   done: Inter ($(ls "${INTER_DIR}" | wc -l) files)"

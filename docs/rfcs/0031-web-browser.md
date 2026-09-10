@@ -158,19 +158,23 @@ new **link**, not a new dependency. `NETSURF_FB_FONTPATH` feeds
 `NOVI_FONT_TITLE` uses; matching the desktop beats matching the CSS
 keyword.
 
-**Two things this image cannot draw, stated here rather than left to
-be found against somebody's page — and both confirmed on screen, not
-predicted:**
+**Italic came next, and it was not a nicety.** The first pass shipped
+Regular/Medium/SemiBold — the three faces §2's type scale names,
+because *nothing in this desktop's own UI is italic* — and a screendump
+confirmed `<i>` rendering upright. But **a web page is not this UI.**
+`<em>`, citations and titles are italic constantly, and with no italic
+face every one of them rendered identically to body text: emphasis, the
+entire point of the markup, was **invisible**. That is a correctness
+problem in a browser rather than a matter of taste. `Inter-Italic.ttf`
+and `Inter-SemiBoldItalic.ttf` were already inside the zip
+`09-foot.sh` downloads, so it cost ~840 KB and two lines. SemiBoldItalic
+to match the upright bold, for the same reason.
 
-- **No italic Inter.** The static weights were chosen over the
-  variable font deliberately (CLAUDE.md records why), and the three
-  installed are Regular, Medium and SemiBold. `<i>` in sans renders
-  **upright**. Italic *mono* is fine — JetBrains Mono ships all four
-  faces.
-- **No serif face at all.** `font-family: serif` lands on Inter.
-  That is typographically wrong and it is exactly what shipping one
-  sans and one mono costs. Adding a serif is a design decision and a
-  new package, not a flag.
+**What this image still cannot draw: a serif.** `font-family: serif`
+lands on Inter. That is typographically wrong and it is exactly what
+shipping one sans and one mono costs — and unlike the italics it is not
+sitting in a zip we already have. Choosing a serif is a design decision
+and a new pinned source, not a flag, so it stays on the roadmap.
 
 Cursive and fantasy map to Inter too. Only the sans-serif face is
 fatal if missing (`font_freetype.c` returns false and the browser
@@ -228,8 +232,11 @@ screen under the compositor's decoration.
 the heading, body, table and status line render in **Inter**, and
 `<code>`/`<pre>` in **JetBrains Mono**, anti-aliased. `<b>` genuinely
 selects Inter SemiBold. Both documented gaps were confirmed **on
-screen** rather than reasoned about: a paragraph marked `<i>` renders
-upright, and a `font-family: serif` line renders in Inter.
+screen** rather than reasoned about: on the first pass a paragraph
+marked `<i>` rendered upright and a `font-family: serif` line rendered
+in Inter. Shipping the two italic faces fixed the first — the same page
+re-rendered with genuinely slanted emphasis — and the serif fallback
+remains, as designed.
 `netsurf-fb`'s `DT_NEEDED` gained `libfreetype.so.6`, and the package
 index carries
 `curl,openssl,libpng,zlib,expat,wayland,freetype,fonts-inter,fonts-jetbrains-mono`.
@@ -278,9 +285,9 @@ written for this test. Nothing here has run on physical hardware.
 
 1. ~~fcft in libnsfb~~ — **done**, and by a shorter route than this
    RFC first assumed: freetype rather than fcft, which upstream
-   already supports. See decision 8. What remains is the two missing
-   faces: an italic sans and a serif are both new font packages and a
-   design decision, not a build flag.
+   already supports. See decision 8. Italic followed immediately;
+   what remains is **a serif face**, which unlike the italics is a
+   new pinned source and a design decision rather than a flag.
 2. **JavaScript, or a decision not to.** Duktape is one flag and a real
    question: it is an interpreter with no JIT, so it is slow, and slow
    scripting on pages written for fast scripting may be worse than

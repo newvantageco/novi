@@ -647,14 +647,24 @@ NetSurf 3.11, HTML and CSS over real HTTP, **no JavaScript**.
   `respaths`, and `fb_new_face()` resolves each name through
   `filepath_sfind()` against it, so the ten `NETSURF_FB_FONT_*` values
   are plain filenames.
-- **This image can draw no italic sans and no serif at all**, and that
-  is worth saying wherever the browser is described. Inter ships
-  Regular/Medium/SemiBold only, so `<i>` renders UPRIGHT; there is no
-  serif face, so `font-family: serif` lands on Inter. Italic mono is
-  fine — JetBrains Mono has all four. Only the sans-serif face is
-  fatal when missing; every other face falls back to the one below it,
-  which is why these gaps degrade instead of crashing. Both were
-  confirmed on a screendump rather than predicted.
+- **A WEB PAGE IS NOT THIS UI, and that is why Inter now ships
+  italics.** 09-foot.sh installed Regular/Medium/SemiBold only, with a
+  comment saying "nothing in this UI is italic" — true of the
+  desktop's own clients and irrelevant to a browser. `<em>`, citations
+  and titles are italic constantly, so with no italic face NetSurf
+  rendered every one of them identically to body text: **emphasis was
+  invisible**, which is a correctness problem rather than a matter of
+  taste. `Inter-Italic.ttf` and `Inter-SemiBoldItalic.ttf` were
+  already in the zip that stage downloads. When a decision's stated
+  reason is about one consumer, re-read it when a second consumer
+  arrives.
+- **There is still NO SERIF FACE**, so `font-family: serif` lands on
+  Inter — worth saying wherever the browser is described. Unlike the
+  italics it is not sitting in a zip we already have: choosing a serif
+  is a new pinned source and a design decision. Only the sans-serif
+  face is fatal when missing; every other face falls back to the one
+  below it, which is why the gap degrades instead of crashing. Both
+  gaps were confirmed on a screendump rather than predicted.
 - **`fonts-inter` and `fonts-jetbrains-mono` are in `depends=` by
   hand, because NOTHING CAN DERIVE THEM.** pkgsplit reads
   `DT_NEEDED`, and a `.ttf` opened by path at runtime is in no ELF
@@ -1742,6 +1752,18 @@ pkgsplit runs *and* refuses outright on an already-split rootfs — so
 "break it and watch" is a ninety-minute experiment. The test was
 confirmed by reverting the function to the old silent filter and
 watching it fail.
+
+**`restore-build-inputs.sh` does not give you a tree every stage can
+run in.** It restores headers and `.pc` files, not target *binaries*
+that live in packages — so `09-foot.sh` aborts at
+`chroot ${ROOTFS} /usr/bin/fc-cache` with "No such file or directory",
+because fontconfig's tools went out with the split. `set -e` catches
+it correctly and the stage exits 127; the fix is a real
+`bash build.sh --from 06 --to 39`, not a hand-copied binary. (That
+127 was briefly misread as "the stage swallowed a failure" because
+the command had been piped to `tail`, which is the pipeline's exit
+status. **Check a stage's real status before accusing it of hiding
+one.**)
 
 **`restore-build-inputs.sh` launders stale files forward.** It restores
 headers and `.pc` files *from the packages*, so anything that was in a
