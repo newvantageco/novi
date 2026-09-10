@@ -47,6 +47,15 @@ echo "    all present"
 install -D -m 755 "${REPO_ROOT}/rootfs/usr/share/udhcpc/default.script" \
     "${ROOTFS}/usr/share/udhcpc/default.script"
 
+# The one writer of /run/novi/resolv.conf (RFC 0033), sourced by the
+# lease script above AND by the network service's static path. It lives
+# beside /usr/lib/novi/json.sh for the same reason that file does: a
+# rule implemented twice is a rule that disagrees with itself, and the
+# rule here is which servers win when a lease and a declared
+# `network.dns` both have an opinion.
+install -D -m 644 "${REPO_ROOT}/packages/lib-resolv.sh" \
+    "${ROOTFS}/usr/lib/novi/resolv.sh"
+
 # /etc/resolv.conf -> /run/novi/resolv.conf
 mkdir -p "${ROOTFS}/run/novi"
 ln -sfn /run/novi/resolv.conf "${ROOTFS}/etc/resolv.conf"
@@ -67,5 +76,6 @@ HOSTS
 
 echo ""
 echo "networking installed:"
-ls -la "${ROOTFS}/usr/share/udhcpc/default.script" "${ROOTFS}/etc/resolv.conf" \
+ls -la "${ROOTFS}/usr/lib/novi/resolv.sh" \
+    "${ROOTFS}/usr/share/udhcpc/default.script" "${ROOTFS}/etc/resolv.conf" \
        "${ROOTFS}/etc/hosts"

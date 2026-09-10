@@ -678,6 +678,10 @@ BUG_REPORT_URL="https://github.com/newvantageco/novi/issues"
 - [x] An interface for automated actors — `novi-agent describe` is one
       JSON document; `novi-agent do` changes the machine only within a
       list you declared, and every attempt is audited (RFC 0029)
+- [x] A static address — `network.address = 192.168.1.50/24` and
+      `network.gateway`, converged like everything else. Before this a
+      machine on a segment with no DHCP server could not be addressed
+      by the document at all (RFC 0033)
 - [x] A non-root path for that interface — `novi-agentd` takes the same
       verbs on a unix socket, so the big untrusted program runs as
       nobody in particular while a small reviewed one holds root.
@@ -691,7 +695,7 @@ BUG_REPORT_URL="https://github.com/newvantageco/novi/issues"
 - [ ] A Microsoft-signed shim (real Secure Boot); OWE and SAE-PK
       (compiled in, untested)
 - [ ] Idle-suspend and low-battery; Mesa; notification history
-- [ ] More state domains: keybindings, static IP
+- [ ] More state domains: keybindings
 - [ ] Boot splash
 
 See [`docs/PLATFORM-ROADMAP.md`](docs/PLATFORM-ROADMAP.md) for the full

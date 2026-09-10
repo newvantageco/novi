@@ -379,7 +379,7 @@ describe_hardware() {
 }
 
 describe_network() {
-    local iface wifi carrier
+    local iface wifi carrier addr
     # The interface the SERVICE published, never our own walk of
     # /sys/class/net. RFC 0009's pick_interface() has real rules (wired
     # first; a radio is a phy80211 link, not a name) and a second
@@ -394,8 +394,16 @@ describe_network() {
     if [ -n "$iface" ]; then
         carrier="$(cat "/sys/class/net/$iface/carrier" 2>/dev/null || printf '')"
     fi
-    printf '{"interface": %s, "wifi_interface": %s, "carrier": %s, "resolvers": [' \
-        "$(json_str "$iface")" "$(json_str "$wifi")" "$(json_bool "$carrier")"
+    # The address actually HELD, published by whichever half of the
+    # network service configured it -- the lease script on `bound`, or
+    # the static path at start (RFC 0033). Not read out of the document
+    # and not a second `ip addr` parse: "what did you declare" and
+    # "what is on the wire" are different questions and an agent asking
+    # this one wants the second.
+    addr="$(first_of /run/novi/network.ip)"
+    printf '{"interface": %s, "address": %s, "wifi_interface": %s, "carrier": %s, "resolvers": [' \
+        "$(json_str "$iface")" "$(json_str "$addr")" \
+        "$(json_str "$wifi")" "$(json_bool "$carrier")"
     local first=1 ns
     for ns in $(sed -n 's/^nameserver[ \t]*//p' /etc/resolv.conf 2>/dev/null); do
         [ "$first" -eq 1 ] || printf ','

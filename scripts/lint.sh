@@ -147,9 +147,15 @@ fi
 # `wifi.join <ssid> <passphrase>` with "$args" would write that
 # passphrase into a 0600 log permanently, by the very refusal meant to
 # protect it.
+# test-network-static.sh is the fourth of this shape: `network.address`
+# is the first value in system.conf that becomes an argument to `ip
+# addr add`, and every interesting way to get it wrong is textual --
+# an octet of 256, a leading zero, a leading dot whose empty field
+# field-splitting silently drops. None of those need a machine, and
+# none of them would ever be produced by one.
 for t in packages/tests/test-lib-json.sh packages/tests/test-agent-verbs.sh \
          packages/tests/test-agent-secrets.sh packages/tests/test-agent-rate.sh \
-         packages/tests/test-agent-socket.sh; do
+         packages/tests/test-agent-socket.sh packages/tests/test-network-static.sh; do
     echo ">>> ${t##*/}"
     if ! bash "$t"; then
         echo ">>> ${t} failed" >&2

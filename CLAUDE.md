@@ -1799,6 +1799,72 @@ The installer sets the target's hostname with `novi-state set` (via
 `NOVI_STATE_FILE`), not `sed` — same reason as everything else: `state_set`
 is the one edit that preserves the document's comments and ordering.
 
+## Architecture: a static address, and a resolver with two writers
+
+RFC 0033 (`docs/rfcs/0033-static-addressing.md`). `network.address =
+192.168.1.50/24` and `network.gateway`. Before this the network
+service ran `udhcpc` unconditionally, so a machine on a segment with
+no DHCP server could not be given an address by the document at all.
+
+- **It is a MODE of the existing service, not a second service.**
+  `network.address = dhcp` (the default, and what an absent key means)
+  execs udhcpc; a CIDR configures the interface here. One service,
+  because RFC 0009's `pick_interface()` already answers "which
+  interface" and a second implementation of those rules would drift —
+  the panel-indicator mistake again.
+- **`network.dhcp` now names the SERVICE, not the protocol.** A
+  machine can have `network.dhcp = on` and run no DHCP client. The key
+  predates static addressing; renaming it would silently ignore the
+  key in every `system.conf` already committed to a repository, which
+  is worse than a name that needs one sentence of explanation. Both
+  `system.conf` and novi-state's key list carry that sentence.
+- **A bare address is REFUSED, never assumed to be /24.** The prefix
+  decides which hosts this machine believes are local, and the failure
+  from guessing is not an error — it is a machine that reaches some
+  destinations and not others.
+- **The validator is pedantic because the value becomes an argument to
+  `ip addr add`.** Four octets exactly; a leading zero rejected (`010`
+  is eight to an octal reader and ten to a decimal one); and **a
+  leading dot rejected explicitly, because field splitting DROPS the
+  empty field it produces** and a naive four-octet count passes
+  `.1.2.3`. All textual, none of it needs a machine — so it is a host
+  test (`packages/tests/test-network-static.sh`, 40 checks).
+- **`/run/novi/resolv.conf` has ONE writer now**
+  (`/usr/lib/novi/resolv.sh`), shared by the lease script and the
+  static path. The rule — a declared `network.dns` beats the lease,
+  `auto` asks for the lease's answer — is a policy, and the static
+  path's first draft had its own copy that had already lost the
+  `search` line. Same argument as `json.sh` being the one escaper, and
+  the same `[ -f ... ]` guard, because `.` is a special builtin.
+- **It returns non-zero when nothing supplied a server, AND writes the
+  file anyway.** With a static address there is no lease, so
+  `network.dns = auto` — the shipped default — means no resolver at
+  all; the service says so on startup. Writing nothing instead would
+  leave a stale resolver from the previous configuration looking
+  current.
+- **`exec sleep infinity`, not `tail -f /dev/null`.** A static address
+  is held by the kernel: there is nothing to supervise, but a longrun
+  whose run script returns is one s6 restarts forever. `sleep
+  infinity` is one nanosleep and zero wakeups; busybox `tail -f` polls
+  once a second forever for a file that will never change.
+- **`init/services/network/finish` is not optional.** udhcpc's `-R`
+  cleans up after itself; a static address is held by the kernel and
+  nothing removes it — so `network.dhcp = off` left the machine still
+  answering on its address, and switching back to `dhcp` left the old
+  address beside the new lease with `diff` reporting converged. It
+  reads the spec the service PUBLISHED, not the declared value: by the
+  time a stop happens the document may say something else, and what
+  must come off is what actually went on.
+- **`/run/novi/network.ip` finally has a reader.** The lease script had
+  always written the held address and NOTHING had ever read it. It is
+  `novi-agent describe`'s `address` field now — "what did you declare"
+  and "what is on the wire" are different questions, and an agent
+  asking a machine what it is wants the second.
+- **`novi-state apply | tail -5` reports `tail`'s status.** A refusal
+  test read `exit=0` from that pipeline and nearly concluded `apply`
+  swallowed the failure; it exits 1. This file already records the
+  same trap from a build stage — that is twice.
+
 ## Architecture: services, readiness, and the log
 
 RFC 0004 (`docs/rfcs/0004-networking-and-system-logging.md`). Three traps

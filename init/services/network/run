@@ -33,6 +33,24 @@ DNSSPEC="$(novi-state get network.dns 2>/dev/null || printf 'auto')"
 [ -n "$DNSSPEC" ] || DNSSPEC=auto
 printf '%s\n' "$DNSSPEC" > "$RUN_DIR/network.dns"
 
+# How this interface gets its address (RFC 0033). `dhcp` -- the default,
+# and what an absent key means -- is a lease; anything else is a CIDR
+# this service configures itself.
+#
+# The switch is a MODE rather than a second service, because "which
+# interface" and "bring the network up" are already answered here and a
+# static machine needs both answers to be the same ones. What it costs
+# is that `network.dhcp` now names the service rather than the
+# protocol: it is the switch that turns this on, and `network.address`
+# is what decides whether a DHCP client is any part of it.
+ADDRSPEC="$(novi-state get network.address 2>/dev/null || printf 'dhcp')"
+[ -n "$ADDRSPEC" ] || ADDRSPEC=dhcp
+printf '%s\n' "$ADDRSPEC" > "$RUN_DIR/network.address"
+
+GWSPEC="$(novi-state get network.gateway 2>/dev/null || printf 'auto')"
+[ -n "$GWSPEC" ] || GWSPEC=auto
+printf '%s\n' "$GWSPEC" > "$RUN_DIR/network.gateway"
+
 # Readiness, declared to s6 via ./notification-fd. Everything s6-rc
 # needs to consider this service usable -- the recorded spec that
 # `novi-state diff` reads -- exists as of this line, and everything
@@ -140,11 +158,85 @@ while [ -z "$IFACE" ]; do
     sleep 2
 done
 
-echo "network: using ${IFACE} (declared: ${IFSPEC}, dns: ${DNSSPEC})" >&2
+echo "network: using ${IFACE} (declared: ${IFSPEC}, addr: ${ADDRSPEC}, dns: ${DNSSPEC})" >&2
 printf '%s\n' "$IFACE" > "$RUN_DIR/network.device"
 ip link set "$IFACE" up 2>/dev/null || true
 
-# -f: foreground, so s6 supervises udhcpc itself.
-# -b would background on lease failure -- exactly wrong under a
-# supervisor. -R releases the lease when the service is brought down.
-exec udhcpc -f -R -i "$IFACE" -s /usr/share/udhcpc/default.script
+if [ "$ADDRSPEC" = "dhcp" ]; then
+    # -f: foreground, so s6 supervises udhcpc itself.
+    # -b would background on lease failure -- exactly wrong under a
+    # supervisor. -R releases the lease when the service is brought down.
+    exec udhcpc -f -R -i "$IFACE" -s /usr/share/udhcpc/default.script
+fi
+
+# ── Static addressing (RFC 0033) ────────────────────────────────────
+#
+# The value is validated by `novi-state apply` before it can ever get
+# here, but this service is also started at boot from a file somebody
+# may have hand-edited, so it is checked again. Refusing loudly beats
+# handing `ip` a malformed argument and leaving a machine with no
+# address and an error two layers down.
+case "$ADDRSPEC" in
+    */*) : ;;
+    *)   echo "network: network.address = '${ADDRSPEC}' is not 'dhcp' and not a CIDR (a.b.c.d/len)" >&2
+         exit 1 ;;
+esac
+
+# Flush first. Restarting this service after an address change would
+# otherwise LEAVE THE OLD ADDRESS on the interface beside the new one
+# -- the machine answers on both, `ip addr` disagrees with the
+# document, and the drift the change was meant to fix is still there
+# under a second address. Same reason the lease script flushes.
+ip -4 addr flush dev "$IFACE" 2>/dev/null || true
+ip -4 route flush dev "$IFACE" 2>/dev/null || true
+
+ip -4 addr add "$ADDRSPEC" dev "$IFACE" || {
+    echo "network: could not set ${ADDRSPEC} on ${IFACE}" >&2
+    exit 1
+}
+
+case "$GWSPEC" in
+    auto|none|'')
+        # No default route, which is a legitimate configuration -- a
+        # machine on an isolated segment has nowhere for one to point.
+        # Said out loud because "the address is up and nothing routes"
+        # is otherwise diagnosed from the outside in.
+        echo "network: no default route (network.gateway = ${GWSPEC:-auto})" >&2
+        ;;
+    *)
+        ip -4 route add default via "$GWSPEC" dev "$IFACE" || {
+            echo "network: could not route via ${GWSPEC} on ${IFACE}" >&2
+            exit 1
+        }
+        ;;
+esac
+
+# The resolver, through the one writer both paths share. There is no
+# lease here, so `network.dns = auto` resolves to no servers at all --
+# a real and easily-made mistake (auto is the shipped default), so it
+# is reported rather than left as a machine that has an address and
+# cannot look anything up.
+if [ -f /usr/lib/novi/resolv.sh ]; then
+    # shellcheck source=/dev/null
+    . /usr/lib/novi/resolv.sh
+    novi_write_resolv "the network service for ${IFACE}" "" "" ||
+        echo "network: network.dns is '${DNSSPEC}' and there is no lease to learn from -- no resolver configured" >&2
+else
+    echo "network: /usr/lib/novi/resolv.sh is missing; no resolver written" >&2
+fi
+
+printf '%s\n' "${ADDRSPEC%%/*}" > "$RUN_DIR/network.ip"
+echo "network: ${IFACE} = ${ADDRSPEC} static (gw ${GWSPEC})" >&2
+
+# NOTHING TO SUPERVISE, AND THAT IS THE POINT. A static address is held
+# by the kernel, not by a daemon; there is no client to keep alive and
+# no lease to renew. But s6 supervises a PROCESS, so a longrun whose
+# run script returns is a longrun s6 restarts forever.
+#
+# `sleep infinity` is one nanosleep and zero wakeups -- deliberately
+# not `tail -f /dev/null`, which busybox implements by polling every
+# second, forever, for a file that will never change. The process
+# existing is what keeps `services` and `ip addr` agreeing about
+# whether this configuration is live, and stopping the service is what
+# runs ./finish to take the address back off.
+exec sleep infinity
