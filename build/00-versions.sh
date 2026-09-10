@@ -111,6 +111,14 @@ CACERT_SHA256="ab3ee3651977a4178a702b0b828a4ee7b2bbb9127235b0ab740e2e15974bf5db"
 OPENSSH_VERSION="9.9p2"
 GIT_VERSION="2.47.1"
 
+# NetSurf (RFC 0032). A web browser, and until it there was no way to
+# view a web page on this system at all. `netsurf-all` bundles its
+# thirteen own libraries; everything it needs from outside -- libcurl,
+# OpenSSL, libpng, zlib, expat, libwayland -- this project already
+# ships as packages, two of them only because RFC 0020 and RFC 0027
+# put them there.
+NETSURF_VERSION="3.11"
+
 # OpenSSL (RFC 0027). A PACKAGE, never the base image, and never on
 # the package-verification path -- novi-verify stays static, ~10 KB and
 # OpenSSL-free, which is what RFC 0006's rule actually protects. 3.5 is

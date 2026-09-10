@@ -1774,6 +1774,17 @@ audience needs a compiler by definition, the pentest toolkit is mostly
 Python/Ruby/Go/Perl that has to be built, and a browser needs Rust and
 a large native dependency tree.
 
+> **Correction (RFC 0031).** The last clause was wrong, and wrong in
+> the expensive direction: it made "a browser" sound like it had to
+> wait on a Rust toolchain, so it was never costed. **NetSurf is C,
+> builds with make, and needed no new dependency at all** — every
+> library it links was already in this image, two of them (curl,
+> OpenSSL) only because RFC 0020 and RFC 0027 had already put them
+> there. It ships as `pkg install netsurf`. What it does not have is
+> JavaScript, which is a different limitation and a real one. A
+> *Chromium-class* engine still needs Rust and a large native tree;
+> "a browser" did not.
+
 `pkg install novi-devel` now installs gcc 14.2, binutils 2.43, GNU make
 4.4.1 and the musl headers (~270 MB installed, 98 MB compressed) from
 the signed repository on the machine's own installation medium, with no

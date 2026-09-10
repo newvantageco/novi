@@ -66,7 +66,7 @@ mkdir -p "${APPS_DIR}"
 cat > "${APPS_DIR}/novi-view.app" <<'EOF'
 name=Image Viewer
 exec=/usr/bin/novi-view
-icon=globe
+icon=image
 description=View a PNG, BMP or PPM image
 EOF
 echo "   done: ${APPS_DIR}/novi-view.app"

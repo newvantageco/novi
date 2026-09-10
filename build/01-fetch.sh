@@ -288,6 +288,11 @@ fetch_pinned "https://curl.se/ca/cacert-${CACERT_DATE}.pem" "${CACERT_SHA256}"
 fetch "https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-${OPENSSH_VERSION}.tar.gz"
 fetch "https://cdn.kernel.org/pub/software/scm/git/git-${GIT_VERSION}.tar.xz"
 
+# NetSurf (RFC 0032), the "all" tarball: the browser plus the thirteen
+# libraries it is built from, which are separate git repositories
+# upstream and are not separately released.
+fetch "https://download.netsurf-browser.org/netsurf/releases/source-full/netsurf-all-${NETSURF_VERSION}.tar.gz"
+
 # OpenSSL (RFC 0027). A package: it is what CPython's ssl module is
 # written against, and there is no other implementation it accepts.
 fetch "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz"

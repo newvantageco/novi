@@ -256,6 +256,7 @@ pkg install novi-desktop          # the Wayland desktop, offline from the ISO
 pkg install novi-devel            # gcc, make, pkg-config, headers
 pkg install python                # CPython 3.11, with ssl (RFC 0026, 0027)
 pkg install novi-recon            # DNS, WHOIS, TLS, headers, ports (RFC 0028)
+pkg install netsurf               # a web browser: HTML + CSS, no JS (RFC 0031)
 novi-install install --disk /dev/vda   # install to the qcow2 (with --disk)
 ```
 
@@ -597,6 +598,7 @@ small static GPT writer) and e2fsprogs' `mke2fs`. See
 | TLS | mbedTLS 3.6.2 + curl 8.11.1 | Packages, not base; CA bundle hash-pinned |
 | WiFi | wpa_supplicant 2.11 + wolfSSL 5.7.6 | WPA2 and WPA3-SAE; no OpenSSL |
 | Remote access | sshd 9.9p2 | A package; host key made on first start; root refused |
+| Web browser | NetSurf 3.11 | A package; own layout engine, **no JavaScript**; one patch for xdg-shell |
 
 ## OS Identity
 

@@ -22,7 +22,11 @@ all of them in numeric order, so a new stage is part of the build the moment
 the file exists. **01–39 build content into the rootfs; 40+ package it.**
 That gap is deliberate: everything that puts a file in the image has to
 run before `40-repo.sh` computes the base/desktop split from what is
-there. The packaging stages used to be 30/31/32 with content filling
+there. **The content range 01–39 is FULL** — RFC 0031's browser had to
+become a phase of `35-devtools.sh` for want of a number. The next
+person who needs a content stage does the renumber (40..43 → 50..53)
+first; do not squeeze another unrelated phase into an existing stage
+to avoid it. The packaging stages used to be 30/31/32 with content filling
 20–29, and twice a new stage had nowhere legal to go — a base binary
 built after the split would ship, but pkgsplit would have computed the
 split without it, which is a trap rather than a rule. Two stages may not share a number and `build.sh` refuses
@@ -86,12 +90,15 @@ below for why `/build` is hardcoded and unrelated to the repo checkout path.
   `/build/tls-deps` for linking and into the `mbedtls` package for the
   target. Never `${ROOTFS}`: a TLS stack in the base image is the
   thing that RFC is careful to avoid
-- `bash build/35-devtools.sh [openssh|ca|curl|git|repo|all]` — the ssh
-  client, the CA bundle, curl and git (RFC 0019, RFC 0020), staged
-  into `/build/stage-devtools` and published by
-  `43-devtools-repo.sh`. Packages, never base. Also builds `sshd`
-  into `/build/ssh-test/` as the test peer, deliberately not into the
-  image
+- `bash build/35-devtools.sh [openssh|ca|curl|git|netsurf|repo|all]` —
+  the ssh client, the CA bundle, curl, git and **NetSurf** (RFC 0019,
+  RFC 0020, RFC 0031), staged into `/build/stage-devtools` and
+  published by `43-devtools-repo.sh`. Packages, never base. Also
+  builds `sshd` into `/build/ssh-test/` as the test peer, deliberately
+  not into the image. The `netsurf` phase is a phase of 35 rather than
+  a stage of its own because it must run BEFORE `41-desktop-split.sh`
+  (it reads `${ROOTFS}` headers) and publish AFTER `40-repo.sh` (which
+  wipes the repo) — and **every number from 01 to 39 is now taken**
 - `bash build/32-openssl.sh` — OpenSSL 3.5 LTS (RFC 0027), into
   `/build/openssl-target` for linking and into the `openssl` package
   for the target. Never `${ROOTFS}`: the base image still ships no TLS
@@ -570,6 +577,72 @@ novi-shell will ever take.
   exports none of them. The error names the wrong thing entirely.
   `lib-meson-cross.sh` sets this globally for meson builds; the client
   Makefiles link with `$(CC)` directly and so each one rediscovers it.
+
+## Architecture: a browser, and the claim that went unchecked
+
+RFC 0031 (`docs/rfcs/0031-web-browser.md`). `pkg install netsurf` —
+NetSurf 3.11, HTML and CSS over real HTTP, **no JavaScript**.
+
+- **`docs/PLATFORM-ROADMAP.md` said a browser "needs Rust and a large
+  native dependency tree", and that was never checked.** NetSurf is C,
+  builds with make, and needed **no new dependency at all**: curl,
+  OpenSSL, libpng, zlib, expat and libwayland were already here, two of
+  them only because RFC 0020 and RFC 0027 had put them there. The claim
+  was true of a Chromium-class engine and got applied to the whole
+  category, so the cheapest large feature this project has shipped sat
+  unscheduled behind it. **A blocking claim in a roadmap deserves the
+  same scepticism as a comment asserting a bug away.**
+- **No JavaScript, and say so every time.** `NETSURF_USE_DUKTAPE=NO`.
+  "Novi has a web browser" and "Novi can open most of the modern web"
+  are different claims and only the first is true — a site that renders
+  from script shows an empty page. Do not let the word "browser" imply
+  the second, the same way RFC 0025 says not to let "Mesa" imply a
+  gaming stack.
+- **libnsfb binds `wl_shell`, which wlroots has never implemented.**
+  Deprecated in 2016. Unpatched, the browser starts, binds a global
+  that is not advertised, gets NULL and carries on: a running process
+  that can never show a window and says nothing about why.
+  `patches/netsurf-libnsfb-xdg-shell.patch` ports it, and the stage
+  **fails the build** if the patch stops applying — the rule
+  `23-e2fsprogs.sh` already applies to its musl patch.
+- **The generated half of that patch is generated, not committed.**
+  `wayland-scanner` produces ~88 KB of `xdg-shell-protocol.{c,h}` from
+  the rootfs's own `xdg-shell.xml` at build time. A diff of machine
+  output is not something anyone can review, and a derived answer
+  cannot rot.
+- **`CFLAGS=` on NetSurf's make command line DELETES NetSurf's own
+  include paths.** Its buildsystem does `CFLAGS += …`, and a variable
+  set on the command line overrides every assignment in the makefile,
+  `+=` included; the build then dies on its own headers. They go in the
+  **environment**. That is RFC 0021's wolfSSL `.config` trap one level
+  out, and it caught this build too — including `nsgenbind`, the
+  build-host tool, which needs `env -u CFLAGS -u LDFLAGS`.
+- **The build directory is named after HOST and TARGET but NOT after
+  the compiler.** The buildsystem derives `CC` from `HOST` only when
+  its origin is `default`, and the browser's own makefile does not take
+  that path — so the first attempt compiled everything with the build
+  host's gcc. Naming `CC=`/`AR=` explicitly fixed the compiler and left
+  glibc objects behind, and the musl link failed on `__snprintf_chk`
+  and `__memset_chk`: **the error names the libc you are linking, not
+  the one that built the object.** Extract the tree fresh.
+- **`-Wl,-rpath-link` for the FIFTH time** (nftables, git/curl, the
+  meson cross file, novi-glinfo, now here). `libcurl.so`'s `DT_NEEDED`
+  names `libmbedtls.so.21` and `-L` does not resolve a shared library's
+  own dependencies.
+- **`NETSURF_USE_LIBICONV_PLUG=YES`** means "iconv is part of libc",
+  which is true of musl; `NO` links `-liconv`, which does not exist
+  here.
+- **One process, two TLS stacks.** `netsurf-fb` NEEDs `libcurl.so.4`
+  (built against mbedTLS, RFC 0020) *and* `libssl`/`libcrypto` (RFC
+  0027, for certificate inspection). Not a rule broken — RFC 0020's
+  rule is the BASE IMAGE and RFC 0006's is the TRUST PATH, and neither
+  is touched — but worth stating: only curl's half has ever been put
+  through this project's HTTPS verification triple.
+- **The browser does not use this desktop's typography.**
+  `NETSURF_FB_FONTLIB=internal` is a built-in bitmap font, so the one
+  window that renders the most text is the one not drawing it in Inter.
+  Wiring fcft into libnsfb is roadmap item 1, and it is the gap a
+  person notices first.
 
 ## Architecture: Python, and the module it does not have
 
