@@ -678,6 +678,12 @@ BUG_REPORT_URL="https://github.com/newvantageco/novi/issues"
 - [x] An interface for automated actors — `novi-agent describe` is one
       JSON document; `novi-agent do` changes the machine only within a
       list you declared, and every attempt is audited (RFC 0029)
+- [x] Asking a machine not to sleep — **Super + A** for a person, and
+      `zwp_idle_inhibit_manager_v1` for a program. Honoured only while
+      the asking client's window is on screen, and never while the
+      session is locked; the keypress survives a lock, because a person
+      asked. `novi-power idle` says which. Nothing in this image speaks
+      the protocol yet (RFC 0036)
 - [x] Idle-suspend — `power.suspend = <seconds>`, off by default. The
       trigger is verified; the resume is not, because S3 does not come
       back under TCG and this container has no KVM. It locks the screen

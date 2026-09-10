@@ -1006,6 +1006,85 @@ decides that.
   dispatched, permitted, and unmentioned by `novi-agent` with no
   arguments. `test-agent-verbs.sh` checks all three now.
 
+## Architecture: two ways to say "not now"
+
+RFC 0036 (`docs/rfcs/0036-idle-inhibitors.md`).
+`zwp_idle_inhibit_manager_v1` for programs, **Super+A** for people,
+both feeding one decision in novi-shell's idle tick.
+
+- **Shipping only the protocol would have changed nothing for
+  anybody.** Nothing in this image speaks idle-inhibit — not foot, not
+  NetSurf, not novi-view — so the compositor would have gained a
+  global with no caller, which is the "speculative wiring for a
+  hypothetical future client" novi-shell's own comments make a point
+  of avoiding. The case people actually have is *"do not sleep, I am
+  building"*, said at a terminal by somebody whose workload is a shell
+  script with no window. **A protocol is not a feature until
+  something calls it**, and RFC 0035's roadmap item got this wrong by
+  framing the whole thing as a video player.
+- **VISIBLE IS NOT MAPPED on a compositor with workspaces.** The
+  protocol's own words are "only while this surface is visible"; a
+  player left running on workspace 3 is mapped, is not on screen, and
+  has no business keeping the panel lit. The test is
+  `workspace == active_workspace && !minimized` — the same expression
+  `switch_workspace()` drives the scene graph from, so the answer
+  agrees with the screen instead of being a second opinion about it —
+  asked of the **root** surface, because the protocol takes any
+  `wl_surface` and a client may name a subsurface of its toplevel.
+  A layer surface is asked whether it is mapped instead: it joins its
+  list at CREATION rather than at map, so membership is not the mapped
+  test there.
+- **The count is recomputed every tick, on purpose.** A workspace
+  switch or a minimize changes the answer with the inhibitor's client
+  sending nothing at all, so a cached flag would need updating from
+  `switch_workspace()`, `move_focused_to_workspace()`, minimize,
+  unminimize, map and unmap — six places, one of which would
+  eventually be missed, and the symptom is a machine that never
+  sleeps. Twenty pointer comparisons every five seconds is cheaper
+  than that risk.
+- **A locked session honours no client inhibitor; Super+A survives
+  it.** The visibility test answers "no" behind the lock surface
+  anyway, but it is its own branch because the consequence is a
+  security property rather than an accident of the arithmetic —
+  otherwise any client still running holds a locked machine awake with
+  nobody there. The person's toggle deliberately does not follow that
+  rule: they pressed a key on this keyboard on purpose, and locking
+  the screen to get coffee is the same person's other decision.
+  Suspending mid-build because they stepped away is exactly what they
+  pressed the key to avoid.
+- **The clock is held at ZERO, not stepped over.** Letting `idle_ms`
+  climb past a threshold that is being ignored means the screen goes
+  dark the instant a player releases its inhibitor — at the moment
+  somebody is looking at it, from a machine that spent two hours being
+  told nobody was idle. An already-blanked screen is deliberately NOT
+  woken by an inhibitor arriving: turning a display on is something a
+  person does.
+- **`/run/novi/idle` is key-value lines now**, not three positional
+  numbers — a name per inhibitor is variable-length and positional
+  fields cannot carry it. One writer, one reader, both in this
+  repository: that is the moment to change a published format, and it
+  will never be cheaper.
+- **`awake` and `inhibit` are published as SEPARATE claims.** "A
+  person pressed a key" and "a program asked" have different remedies,
+  and a machine that will not sleep is a complaint whose only
+  interesting part is which of them is happening. One combined count
+  would hide it.
+- **There is no key to switch inhibitors off, and `novi-power idle`
+  is why.** The failure worth guarding against is a client that
+  inhibits and should not; the remedy is knowing *which* client, not a
+  flag nobody would find. An `app_id` is a stranger's string going
+  into a file a shell reads, so it is capped and filtered — and
+  offending characters become underscores rather than being dropped,
+  because a name that silently loses characters stops matching the
+  window it came from.
+- **The shortcut sheet was one row from outgrowing a 1366×768 panel.**
+  `CARD_MAX_HEIGHT` is derived from the binding table, so adding a row
+  grows the card, and `--keys` has no scroll by design (a reference
+  list that hides rows is the defect that file was fixed for once
+  already). Nothing enforced the height; a `_Static_assert` on
+  `BUFFER_HEIGHT` does now, and was confirmed by putting `ROW_H_KEYS`
+  back to 40 and watching the build stop.
+
 ## Architecture: themes, and the light one that finds bugs
 
 RFC 0030 (`docs/rfcs/0030-themes.md`). `display.theme = <name>`; the

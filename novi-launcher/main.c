@@ -175,6 +175,24 @@
 #define SHADOW_MARGIN (SHADOW_FEATHER + SHADOW_OFFSET_Y)
 #define BUFFER_WIDTH (CARD_WIDTH + 2 * SHADOW_MARGIN)
 #define BUFFER_HEIGHT (CARD_MAX_HEIGHT + 2 * SHADOW_MARGIN)
+/* The sheet's height is DERIVED from the binding table, which means
+ * adding a binding grows the card -- and there is a height past which
+ * it no longer fits the panel this file already worried about. The
+ * comment on ROW_H_KEYS records the arithmetic (16 rows at 40px did
+ * not fit 1366x768); nothing enforced it, so the row that stopped
+ * fitting would have shipped as a card taller than the screen with a
+ * header and a first row off the top edge.
+ *
+ * 768 is the shortest panel worth designing for, and the buffer -- not
+ * the card -- is what has to fit, because the shadow margin is part of
+ * the surface. There is no scroll in this mode by design (a reference
+ * list that hides rows is the defect this file was fixed for once
+ * already), so the honest response to outgrowing the screen is to
+ * stop the build and make somebody choose: drop a row, shrink
+ * ROW_H_KEYS, or add scrolling on purpose. */
+_Static_assert(BUFFER_HEIGHT <= 768,
+	"the shortcut sheet no longer fits a 1366x768 panel -- see the "
+	"comment above: shrink ROW_H_KEYS, or give --keys a scroll window");
 
 #define INPUT_MAX 127
 

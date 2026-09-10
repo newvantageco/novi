@@ -200,7 +200,10 @@ the mechanism, and it wants a KVM-capable host to become a fact.
    project avoids, so it wants a design rather than a flag.
 2. **Low battery.** The other half of RFC 0013's power story: QEMU
    emulates no battery, so it could be written and not verified.
-3. **Inhibitors.** A video player or a long build should be able to say
-   "not now", which needs a protocol (`zwp_idle_inhibit_manager_v1`)
-   the compositor does not implement yet — and which is the reason
-   every desktop that suspends on idle also has one.
+3. ~~**Inhibitors.**~~ Done — **RFC 0036**. The compositor implements
+   `zwp_idle_inhibit_manager_v1`, and Super+A is the same thing for a
+   person with no window to ask from. Worth recording what the item
+   above got wrong: it framed this as "a video player should be able
+   to say not now", and the case people actually have is a long build
+   at a terminal — which no Wayland protocol can express, because the
+   thing that wants to stay awake is a shell script.

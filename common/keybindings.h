@@ -58,6 +58,7 @@ enum novi_action {
 	NOVI_ACT_SHORTCUTS,
 	NOVI_ACT_THEMES,
 	NOVI_ACT_NOTIFICATIONS,
+	NOVI_ACT_STAY_AWAKE,
 	NOVI_ACT_SCREENSHOT,
 	NOVI_ACT_VOLUME_UP,
 	NOVI_ACT_VOLUME_DOWN,
@@ -165,6 +166,14 @@ static const struct novi_binding NOVI_BINDINGS[] = {
 
 	{ NOVI_MOD_LOGO, XKB_KEY_l, 0, NOVI_ACT_LOCK,
 	  "Session", "Super + L", "Lock the screen" },
+	/* The person's own idle inhibitor (RFC 0035). A client can ask to
+	 * stay awake through zwp_idle_inhibit_manager_v1, and nothing in
+	 * this image does yet -- but the thing somebody actually wants
+	 * ("do not sleep, I am building") has no window to ask from, so
+	 * they need a key. Toggle, not hold: an hour-long build is not a
+	 * thing to keep a finger on. */
+	{ NOVI_MOD_LOGO, XKB_KEY_a, 0, NOVI_ACT_STAY_AWAKE,
+	  "Session", "Super + A", "Keep this machine awake (on/off)" },
 	{ NOVI_MOD_LOGO, XKB_KEY_Escape, 0, NOVI_ACT_POWER_MENU,
 	  "Session", "Super + Escape", "Lock, suspend, restart or shut down" },
 	/* Listed even though it is a development convenience rather than
