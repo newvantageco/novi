@@ -678,6 +678,8 @@ BUG_REPORT_URL="https://github.com/newvantageco/novi/issues"
 - [x] An interface for automated actors — `novi-agent describe` is one
       JSON document; `novi-agent do` changes the machine only within a
       list you declared, and every attempt is audited (RFC 0029)
+- [x] Notification history — Super + N, or the Apps grid. A toast is up
+      for five seconds; before this, so was the fact of it (RFC 0034)
 - [x] A static address — `network.address = 192.168.1.50/24` and
       `network.gateway`, converged like everything else. Before this a
       machine on a segment with no DHCP server could not be addressed
@@ -694,7 +696,7 @@ BUG_REPORT_URL="https://github.com/newvantageco/novi/issues"
 - [ ] A published repository + offline release key
 - [ ] A Microsoft-signed shim (real Secure Boot); OWE and SAE-PK
       (compiled in, untested)
-- [ ] Idle-suspend and low-battery; Mesa; notification history
+- [ ] Idle-suspend and low-battery
 - [ ] More state domains: keybindings
 - [ ] Boot splash
 

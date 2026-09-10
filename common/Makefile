@@ -18,13 +18,21 @@
 CC ?= cc
 CFLAGS ?= -O1 -Wall -Wextra
 
-check: theme-test
+# notifications-test links the REAL record writer and parser, for the
+# same reason: the format's safety rests on the sanitiser dropping
+# tabs, and a test with its own copy of that would prove nothing about
+# the file two clients actually exchange.
+check: theme-test notifications-test
 	@cd .. && common/theme-test
+	@cd .. && common/notifications-test
 
 theme-test: theme-test.c theme.c theme.h
 	$(CC) $(CFLAGS) -DNOVI_THEME_NO_PIXMAN -I. -o $@ theme-test.c theme.c -lm
 
+notifications-test: notifications-test.c notifications.c notifications.h
+	$(CC) $(CFLAGS) -Werror -I. -o $@ notifications-test.c notifications.c
+
 clean:
-	rm -f theme-test
+	rm -f theme-test notifications-test
 
 .PHONY: check clean

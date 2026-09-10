@@ -151,6 +151,10 @@
 #define NOVI_IDLE_FILE "/run/novi/idle"
 #define NOVI_DEFAULT_POWER_MENU "novi-launcher --power"
 #define NOVI_DEFAULT_THEMES "novi-launcher --themes"
+/* RFC 0034. The history lives in a file novi-notifyd publishes, so
+ * the compositor's part is one more spawn -- it never reads or holds
+ * a notification, exactly as it never holds a theme. */
+#define NOVI_DEFAULT_NOTIFICATIONS "novi-launcher --notifications"
 #define NOVI_DEFAULT_LOCK "novi-lockscreen"
 /* The zwlr_layer_surface_v1 namespace novi-lockscreen identifies itself
  * with (its get_layer_surface() call's namespace argument) -- how
@@ -958,6 +962,8 @@ static void run_action(struct novi_server *server, enum novi_action action,
 		run_spawn("NOVI_POWER_MENU", NOVI_DEFAULT_POWER_MENU); break;
 	case NOVI_ACT_THEMES:
 		run_spawn("NOVI_THEMES", NOVI_DEFAULT_THEMES); break;
+	case NOVI_ACT_NOTIFICATIONS:
+		run_spawn("NOVI_NOTIFICATIONS", NOVI_DEFAULT_NOTIFICATIONS); break;
 	case NOVI_ACT_QUIT:
 		/* Not part of RFC 0001's spec -- a development convenience for
 		 * exiting cleanly under QEMU. Listed in the sheet anyway: a key

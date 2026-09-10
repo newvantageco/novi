@@ -1332,6 +1332,69 @@ base image, `novi-notifyd` drawing toasts on the desktop.
   on fourteen unrelated libraries: a correct error pointing nowhere
   near the cause.
 
+## Architecture: a toast that is gone is not a thing that happened
+
+RFC 0034 (`docs/rfcs/0034-notification-history.md`). `novi-notifyd`
+keeps the last fifty and republishes them to
+`/run/novi/notifications`; `novi-launcher --notifications` (Super+N,
+and an Apps-grid entry) shows them. RFC 0024 built the toast and
+stopped, which made the whole mechanism unreliable for the one thing
+it is for: telling you something while you are busy with something
+else.
+
+- **A published FILE, not a second socket.** novi-launcher is started
+  fresh by the keypress, so a socket it would have had to be listening
+  on before the notification arrived is no use to it. Same argument as
+  `/run/novi/health`, `/run/novi/theme` and `/run/novi/network.device`.
+  Rewritten entire (temp-and-rename) rather than appended: the bound
+  and the atomicity in one move, where an appender needs a separate
+  trimmer that can disagree with it.
+- **Tab separated with NO escaping, and that is safe by
+  construction.** Every field from outside has been through the
+  sanitiser, which DROPS control characters rather than escaping them
+  — so a tab cannot reach the file. RFC 0024 made that call for the
+  toast; this is a second reason it was right. The sanitiser is now
+  ONE function in `common/notifications.c`: two copies would be one
+  edit away from a format where a summary somebody chose shifts every
+  field after it.
+- **The urgency is a word and the icon is a name**, never enum values.
+  A file in `/run` is read by a different program, possibly a
+  different build, and a number meaning "critical" only because both
+  sides agree on an enum's order breaks silently the day someone
+  inserts a value. An icon name this build does not know is NO ICON —
+  RFC 0024's existing rule.
+- **Summary and body are separate fields on the row**, bold then
+  muted. Packing them into `primary` (64 bytes, against a 160-byte
+  body) drew `-Wformat-truncation`, and it was right: most of the body
+  was thrown away before layout saw it. That warning has caught a real
+  loss in this repo three times now. The row splits its width —
+  summary up to HALF, body the rest — so a long summary cannot push
+  the body off the row, which is the case where the list stops
+  answering its own question.
+- **Twelve rows, and it says what it is not showing.** Fifty at 32px
+  is a 1600px card. The launcher's existing "N more" strip reports the
+  remainder, so this is a bounded card rather than the silent-elision
+  bug class.
+- **An empty list says WHY**, and `card_h` gets a row's height so the
+  sentence is inside the card instead of below its bottom edge. Two
+  different answers — nothing has happened, or the daemon was never
+  told anything — and a bare cursor distinguishes neither.
+- **Enter does nothing, deliberately.** The sender told us a summary
+  and a body, not an action; inventing one means guessing intent from
+  text, which is wrong about a tenth of the time and unexplainable
+  every time.
+- **It does not survive a restart**, and that is honest: `/run` is a
+  tmpfs and the history is what this daemon has seen.
+- **The screendump found what reading the code did not.** Two rows out
+  of three had an empty icon column, because novi-launcher's
+  `resolve_icon_name()` is the table for `.app` descriptors and knew
+  `package` but not `drive` or `eject`. That is NOT the "unknown icon
+  name is no icon" rule working — that rule is about names nobody
+  defined, not names this table never learned — and a column empty
+  twice and full once reads as a rendering bug. **When a GUI change
+  looks right in the code, screenshot it**, for the fourth time in
+  this file.
+
 ## Architecture: the keys above the number row
 
 `novi-volume` (base image) over `amixer`, bound to the XF86Audio*

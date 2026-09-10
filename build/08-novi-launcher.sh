@@ -75,6 +75,20 @@ description=Every keyboard shortcut this desktop has
 EOF
 echo "   done: ${APPS_DIR}/shortcuts.app"
 
+# The notification history (RFC 0034), on the Apps grid for the same
+# reason the shortcut sheet is: Super+N is discoverable only to
+# somebody who already knows it, and the person most likely to want
+# "what did that toast say?" is the person who did not catch it and
+# has no idea a key exists. Never hide a feature behind only the
+# thing that documents it.
+cat > "${APPS_DIR}/notifications.app" <<'EOF'
+name=Notifications
+exec=/usr/bin/novi-launcher --notifications
+icon=shield
+description=What this desktop has told you recently
+EOF
+echo "   done: ${APPS_DIR}/notifications.app"
+
 # Reachable with a mouse and no prior knowledge, like the shortcut
 # sheet. Same argument, recorded in CLAUDE.md as the KDE lesson: never
 # hide a feature behind only the thing that documents it. Super+T is

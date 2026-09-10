@@ -57,6 +57,7 @@ enum novi_action {
 	NOVI_ACT_SYMBOLS,
 	NOVI_ACT_SHORTCUTS,
 	NOVI_ACT_THEMES,
+	NOVI_ACT_NOTIFICATIONS,
 	NOVI_ACT_SCREENSHOT,
 	NOVI_ACT_VOLUME_UP,
 	NOVI_ACT_VOLUME_DOWN,
@@ -150,6 +151,8 @@ static const struct novi_binding NOVI_BINDINGS[] = {
 	  "Finding things", "Super + /", "Show this list" },
 	{ NOVI_MOD_LOGO, XKB_KEY_t, 0, NOVI_ACT_THEMES,
 	  "Finding things", "Super + T", "Change the colour theme" },
+	{ NOVI_MOD_LOGO, XKB_KEY_n, 0, NOVI_ACT_NOTIFICATIONS,
+	  "Finding things", "Super + N", "Show recent notifications" },
 	{ NOVI_MOD_NONE, XKB_KEY_Print, 0, NOVI_ACT_SCREENSHOT,
 	  "Finding things", "Print Screen", "Save a screenshot" },
 

@@ -67,12 +67,12 @@ xdg-shell-protocol.c: $(XDG_SHELL_XML)
 
 # shared/icons/: ICON-PIPELINE.md's Stage 2 draw_icon() primitive plus
 # the Stage 1-generated bitmap data (icons_generated.c) -- source-level
-# inclusion, same as ../common/text.c ../common/theme.c, not a shared library, consistent
+# inclusion, same as ../common/text.c and ../common/theme.c, not a shared library, consistent
 # with this repo's all-static-linking posture. Zero new pkg-config deps.
 ICONS_SRC = ../shared/icons/icon_blit.c ../shared/icons/icons_generated.c
 
-novi-launcher: main.c ../common/text.c ../common/theme.c ../common/clipboard.c $(ICONS_SRC) wlr-layer-shell-unstable-v1-protocol.c wlr-layer-shell-unstable-v1-protocol.h xdg-shell-protocol.c
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ main.c ../common/text.c ../common/theme.c ../common/clipboard.c $(ICONS_SRC) wlr-layer-shell-unstable-v1-protocol.c xdg-shell-protocol.c $(LDLIBS)
+novi-launcher: main.c ../common/notifications.c ../common/text.c ../common/theme.c ../common/clipboard.c $(ICONS_SRC) wlr-layer-shell-unstable-v1-protocol.c wlr-layer-shell-unstable-v1-protocol.h xdg-shell-protocol.c
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ main.c ../common/notifications.c ../common/text.c ../common/theme.c ../common/clipboard.c $(ICONS_SRC) wlr-layer-shell-unstable-v1-protocol.c xdg-shell-protocol.c $(LDLIBS)
 
 install: novi-launcher
 	install -D -m 755 novi-launcher "$(DESTDIR)$(PREFIX)/bin/novi-launcher"

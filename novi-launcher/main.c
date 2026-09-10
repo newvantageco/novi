@@ -64,6 +64,7 @@
  * dispatches from it. A sheet kept separately from the bindings it
  * documents drifts, and a drifted sheet is worse than none. */
 #include "../common/keybindings.h"
+#include "../common/notifications.h"
 #include "../common/clipboard.h"
 #include "../common/text.h"
 #include "../common/theme.h"
@@ -113,6 +114,13 @@
  * Derived from the table's own length rather than written down, so
  * adding a binding cannot silently push one off the bottom. */
 #define MAX_ROWS_KEYS ((int)NOVI_BINDINGS_COUNT)
+/* Notifications are capped well below NOVI_HIST_MAX on purpose. The
+ * card would be 1600px tall at fifty rows, which fits no laptop panel
+ * -- and the list already reports what it is not showing ("N more --
+ * keep typing to narrow"), so a cap here is a bounded card rather
+ * than a silent elision. The shortcut sheet is still the taller mode,
+ * so CARD_MAX_HEIGHT is unaffected. */
+#define MAX_ROWS_NOTIF 12
 #define MAX_ROWS_ANY (MAX_ROWS_KEYS > MAX_ROWS ? MAX_ROWS_KEYS : MAX_ROWS)
 #define LIST_PAD NOVI_SP_SM
 /* A strip under the list, present only when there are matches the list
@@ -207,6 +215,19 @@ static int resolve_icon_name(const char *name) {
 		{"shield", ICON_SHIELD},
 		{"keyboard", ICON_KEYBOARD},
 		{"image", ICON_IMAGE},
+		/* The rest of the names novi-notifyd accepts (RFC 0024's own
+		 * table), so a notification history row draws the icon its
+		 * sender asked for. Without these the column was empty for
+		 * two rows out of three and full for the third, which reads
+		 * as a rendering bug rather than as the deliberate "an
+		 * unknown icon name is no icon" rule -- that rule is about
+		 * names nobody defined, not about ones this table simply
+		 * never learned. Found by screendumping the list. */
+		{"drive", ICON_HARD_DRIVE},
+		{"eject", ICON_EJECT},
+		{"wifi", ICON_WIFI},
+		{"power", ICON_POWER},
+		{"file", ICON_FILE},
 	};
 	for (size_t i = 0; i < sizeof(NAMES) / sizeof(NAMES[0]); i++) {
 		if (strcmp(NAMES[i].name, name) == 0) {
@@ -228,6 +249,7 @@ enum result_kind {
 	RESULT_POWER,
 	RESULT_KEY,
 	RESULT_THEME,
+	RESULT_NOTIFICATION,
 };
 
 struct result {
@@ -243,6 +265,17 @@ struct result {
 	 * surfaced in this repo, one of which had been silently cutting a
 	 * .app descriptor's exec= line. */
 	char copy[32];
+	/* Notification rows only: the body, drawn muted after the summary
+	 * on the same line. It is a SEPARATE field rather than
+	 * "summary — body" packed into `primary`, for two reasons. The
+	 * mechanical one is that `primary` is 64 bytes and a body is up to
+	 * 160, so packing silently threw most of it away before layout
+	 * ever saw it -- -Wformat-truncation said so, which is the third
+	 * time that warning has caught a real loss in this repo. The
+	 * readable one is that a summary and its body are not equals:
+	 * bold-then-muted is how every desktop that has this list draws
+	 * it, and one run-on string cannot express that. */
+	char detail[NOVI_HIST_BODY + 1];
 	int icon_id;                    /* enum novi_icon_id, or -1 */
 	/* Theme rows draw a swatch in the icon column instead of a glyph:
 	 * this theme's own ground with its own accent inside it. A list of
@@ -301,6 +334,11 @@ struct novi_launcher {
 	 * separately from the bindings was not acceptable. */
 	bool keys_mode;
 	bool themes_mode;
+	/* --notifications: what this desktop said while you were looking
+	 * somewhere else (RFC 0034). Rows come from the file novi-notifyd
+	 * publishes, never from a second socket -- a reader that starts
+	 * later has to be able to find out, which is what a file is. */
+	bool notif_mode;
 	struct novi_clipboard *clipboard;
 	uint32_t last_key_serial;
 
@@ -975,6 +1013,69 @@ static void rebuild_results(struct novi_launcher *state) {
 				THEME_NAME_MAX, themes[i].name);
 			push_result(state, &r);
 		}
+	} else if (state->notif_mode) {
+		/* Read on every keystroke rather than once at start, and that
+		 * is deliberate: this window is open while the machine is
+		 * still running, and a notification arriving while you are
+		 * reading the list should be in the list. It is one small
+		 * file and the alternative is a stale view that looks live.
+		 *
+		 * A file that is missing is not an error -- novi-notifyd may
+		 * simply not have been told anything yet, or may not be
+		 * installed. The empty state below says which. */
+		FILE *f = fopen(NOVI_HIST_PATH, "r");
+		if (f != NULL) {
+			char line[NOVI_HIST_SUMMARY + NOVI_HIST_BODY + 96];
+			int64_t now = (int64_t)time(NULL);
+			while (fgets(line, sizeof(line), f) != NULL) {
+				struct novi_hist_entry h;
+				/* A line this build cannot parse is SKIPPED, not
+				 * fatal and not drawn as a broken row: the file is
+				 * written by another program, possibly another
+				 * version of it, and refusing to show the twenty
+				 * records that are fine because one is not would be
+				 * the wrong trade every time. */
+				if (!novi_hist_parse(line, &h)) {
+					continue;
+				}
+				if (state->input_len > 0 &&
+						!app_name_matches(h.summary, state->input) &&
+						!app_name_matches(h.body, state->input)) {
+					continue;
+				}
+				struct result r = { .kind = RESULT_NOTIFICATION,
+					.icon_id = resolve_icon_name(h.icon) };
+				/* Summary and body on one line, because a notification's
+				 * body is usually the substance ("MYSTICK at
+				 * /run/media/MYSTICK") and a history showing only
+				 * summaries would answer "something about a volume".
+				 * One row per notification is the collapsed list every
+				 * desktop that has this shows. */
+				/* An explicit precision, not a bare %s: a summary can
+				 * be 96 bytes and `primary` is 64, so the compiler is
+				 * right that this truncates. Saying so here makes the
+				 * cut deliberate rather than something
+				 * -Wformat-truncation reports about every build --
+				 * and the operative limit is the row's WIDTH anyway,
+				 * which bites long before 63 characters. The history
+				 * file keeps the whole summary either way. */
+				snprintf(r.primary, sizeof(r.primary), "%.*s",
+					(int)sizeof(r.primary) - 1, h.summary);
+				snprintf(r.detail, sizeof(r.detail), "%s", h.body);
+				char age[16];
+				novi_hist_age(age, sizeof(age), h.when, now);
+				/* Critical says so, because "when" is not the
+				 * interesting thing about the one notification that
+				 * was never allowed to expire (RFC 0024). */
+				if (h.urgency == 2) {
+					snprintf(r.meta, sizeof(r.meta), "critical  %s", age);
+				} else {
+					snprintf(r.meta, sizeof(r.meta), "%s", age);
+				}
+				push_result(state, &r);
+			}
+			fclose(f);
+		}
 	} else if (state->keys_mode) {
 		/* Straight off the shared table, in its own order -- the sheet
 		 * reads by group (Windows, then Workspaces, and so on) and the
@@ -1054,6 +1155,12 @@ static void rebuild_results(struct novi_launcher *state) {
 	if (state->result_count > 0) {
 		state->card_h += 1 + 2 * LIST_PAD +
 			(int)state->result_count * state->row_h;
+	} else if (state->notif_mode) {
+		/* Room for the one line that says why the list is empty.
+		 * Without this the card is header-height, the explanation is
+		 * drawn below its bottom edge, and the mode looks exactly as
+		 * broken as the silence it was written to replace. */
+		state->card_h += 1 + 2 * LIST_PAD + state->row_h;
 	}
 	if (state->match_total > state->result_count) {
 		state->card_h += MORE_H;
@@ -1089,6 +1196,15 @@ static bool activate_selected(struct novi_launcher *state) {
 		 * has just read the key they wanted wants next. Deliberately
 		 * not "perform this shortcut" -- half of them act on the
 		 * focused window, and the overlay is the focused window. */
+		return false;
+	case RESULT_NOTIFICATION:
+		/* Same: the row is the answer. There is deliberately nothing
+		 * to click through to -- a notification here has already
+		 * happened, and the sender told us a summary and a body, not
+		 * an action. Inventing one (open the volume, rerun the
+		 * install) would mean guessing at intent from text, which is
+		 * the kind of cleverness that is wrong about ten percent of
+		 * the time and unexplainable every time. */
 		return false;
 	}
 	return false;
@@ -1368,12 +1484,17 @@ static void render(struct novi_launcher *state, uint32_t *px,
 			20, NOVI_ACCENT);
 		novi_text_draw(card, state->font, TEXT_X + NOVI_SP_SM,
 			input_baseline,
+			/* One test per mode. This chain used to name themes_mode
+			 * twice, so its second branch ("Pick a theme") could
+			 * never run -- harmless, and exactly the shape of thing
+			 * that stops being harmless when somebody adds a mode
+			 * after it. */
 			state->themes_mode ? "Applies at each window's next start" :
 			state->power_mode ? "End this session" :
-				state->symbol_mode ? "Search symbols" :
-					state->themes_mode ? "Pick a theme" :
+			state->symbol_mode ? "Search symbols" :
 			state->keys_mode ? "Search shortcuts" :
-						"Search apps, or type a sum",
+			state->notif_mode ? "Search notifications" :
+			"Search apps, or type a sum",
 			NOVI_PIX(NOVI_TEXT_MUTED));
 	} else {
 		int end_x = novi_text_draw(card, state->font, TEXT_X, input_baseline,
@@ -1383,6 +1504,23 @@ static void render(struct novi_launcher *state, uint32_t *px,
 	}
 
 	/* ── The rows ───────────────────────────────────────────────── */
+	/* AN EMPTY LIST HAS TO SAY WHY. A card with a cursor and nothing
+	 * under it is a puzzle, and for notifications it is a puzzle with
+	 * two very different answers -- nothing has happened, or the
+	 * daemon that would have told you is not running. Only the
+	 * notification mode needs this: every other mode's empty state is
+	 * "your query matched nothing", which the query itself explains. */
+	if (state->result_count == 0 && state->notif_mode) {
+		const char *why = state->input_len > 0
+			? "No notification matches that"
+			: (access(NOVI_HIST_PATH, R_OK) == 0
+				? "Nothing has been notified yet"
+				: "No history yet -- novi-notifyd has not been told anything");
+		novi_text_draw(card, state->font_row, TEXT_X,
+			list_top + (state->row_h - state->font_row->height) / 2 +
+				state->font_row->ascent,
+			why, NOVI_PIX(NOVI_TEXT_MUTED));
+	}
 	for (size_t i = 0; i < state->result_count; i++) {
 		const struct result *r = &state->results[i];
 		int y = list_top + (int)i * state->row_h;
@@ -1406,10 +1544,34 @@ static void render(struct novi_launcher *state, uint32_t *px,
 		int meta_w = r->meta[0] != '\0'
 			? novi_text_width(state->font_meta, r->meta) : 0;
 		int label_room = (int)cw - TEXT_X - NOVI_SP_LG - meta_w - NOVI_SP_LG;
-		novi_text_truncate(state->font_row, r->primary, label_room,
+		/* A row with a detail splits the room: the summary keeps what
+		 * it needs up to half, and the body gets the rest. Half rather
+		 * than "whatever the summary wants" so that a long summary
+		 * cannot push the body off the row entirely -- which is the
+		 * case where this list stops answering the question it exists
+		 * for. */
+		int primary_room = label_room;
+		if (r->detail[0] != '\0') {
+			int want = novi_text_width(state->font_row, r->primary);
+			int half = label_room / 2;
+			primary_room = want < half ? want : half;
+		}
+		novi_text_truncate(state->font_row, r->primary, primary_room,
 			shown, sizeof(shown));
-		novi_text_draw(card, state->font_row, TEXT_X, baseline, shown,
-			NOVI_PIX(NOVI_TEXT_PRIMARY));
+		int label_end = novi_text_draw(card, state->font_row, TEXT_X,
+			baseline, shown, NOVI_PIX(NOVI_TEXT_PRIMARY));
+
+		if (r->detail[0] != '\0') {
+			char det[NOVI_HIST_BODY + 8];
+			int gap = NOVI_SP_SM;
+			int det_room = TEXT_X + label_room - label_end - gap;
+			if (det_room > 0) {
+				novi_text_truncate(state->font_row, r->detail, det_room,
+					det, sizeof(det));
+				novi_text_draw(card, state->font_row, label_end + gap,
+					baseline, det, NOVI_PIX(NOVI_TEXT_MUTED));
+			}
+		}
 
 		if (meta_w > 0) {
 			/* Right-aligned, muted, mono: a command name and a
@@ -1779,11 +1941,17 @@ int main(int argc, char *argv[]) {
 	 * which is exactly who it is for. */
 	state.keys_mode = argc > 1 && strcmp(argv[1], "--keys") == 0;
 	state.themes_mode = argc > 1 && strcmp(argv[1], "--themes") == 0;
-	state.row_cap = state.keys_mode ? MAX_ROWS_KEYS : MAX_ROWS;
-	state.row_h   = state.keys_mode ? ROW_H_KEYS : ROW_H;
+	state.notif_mode = argc > 1 && strcmp(argv[1], "--notifications") == 0;
+	/* Notifications use the sheet's shorter row: these are lines of
+	 * text rather than launchable things with icons and breathing
+	 * room, and twelve 40px rows would be a card taller than the
+	 * shortcut sheet for less information. */
+	state.row_cap = state.keys_mode ? MAX_ROWS_KEYS :
+		state.notif_mode ? MAX_ROWS_NOTIF : MAX_ROWS;
+	state.row_h   = (state.keys_mode || state.notif_mode) ? ROW_H_KEYS : ROW_H;
 
 	if (!state.symbol_mode && !state.power_mode && !state.keys_mode &&
-			!state.themes_mode) {
+			!state.themes_mode && !state.notif_mode) {
 		load_apps(&state);
 	}
 
