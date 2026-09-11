@@ -2203,7 +2203,8 @@ then `bash build.sh --from 50`.**
 **That range used to say `--to 29`, and it silently shipped a broken
 desktop.** Content stages grew past 29 — novi-notifyd and novi-bg are
 36, novi-glinfo is 37 — so `--to 29` rebuilt most of the desktop and
-none of those, and 41 had already deleted them from the rootfs. The
+none of those, and the split stage had already deleted them from the
+rootfs. The
 repository came out with 51 packages instead of 54, and **the
 `novi-desktop` meta-package's derived `depends=` simply omitted the
 three that were missing**: no error, because pkgsplit's META_PACKAGES
@@ -2219,8 +2220,10 @@ time", never as a constant. And **when a stage number is written into
 a document, the document is now something that can rot** — this line
 did, and so did the identical line inside `50-repo.sh`'s own
 already-split guard, which is the copy someone actually follows
-because they are already in trouble when they read it. Both say 39
-now.
+because they are already in trouble when they read it. Both name the
+whole content range now (`--to 49`) rather than the highest stage that
+happens to exist, which is what stops this particular line needing an
+edit every time a stage is added.
 
 pkgsplit refuses an absent member instead of dropping it, and that
 check has a **host test** (`tools/pkgsplit/test_pkgsplit.py`, run by
@@ -2272,8 +2275,12 @@ again after it.** `build.sh` gets this right because it runs the stages
 in order; running 50 and 51 by hand and stopping does not. The only
 symptom is an ISO that is 95 MB smaller and has no `novi-devel` in its
 repository — no error, and nothing says which packages a repository
-was *supposed* to contain. Check the size, or check
-`ls /build/repo/*.pkg.tar.gz | wc -l` (37, not 31).
+was *supposed* to contain. Check the size, or count
+`ls /build/repo/*.pkg.tar.gz | wc -l` — **against what the last full
+run produced, never against a number written here.** This sentence
+said "(37, not 31)" for long enough that both numbers were wrong; the
+count is 55 today and will be wrong again the next time somebody adds
+a package.
 
 **And do not repair a broken `/build` by hand.** Extracting packages back
 over the rootfs to recover build inputs, then deleting what does not
