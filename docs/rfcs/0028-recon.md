@@ -159,7 +159,7 @@ So DNS messages are **built here and parsed back**, and every verdict is
 tested as a table. No network, no downloaded fixtures, nothing that can
 go red because a third party changed. `scripts/lint.sh` runs it, and so
 does `39-novi-recon.sh` immediately before packaging — the same reason
-`40-repo.sh` runs `check-hardening.sh` there rather than trusting that
+`50-repo.sh` runs `check-hardening.sh` there rather than trusting that
 lint was run on the tree that produced the artifact.
 
 The WHOIS referral chase is a separate function from the socket

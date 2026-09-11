@@ -184,7 +184,7 @@ makes the thirty-second measurement mean anything.
 naming.** `novi-power idle` printed the command's *usage* on the first
 booted image: `packages/novi-power` is base content installed by
 `03-base.sh`, and the documented desktop recovery range is
-`--from 06 --to 39`, which does not reach it. The compositor half of
+`--from 06 --to 49`, which does not reach it. The compositor half of
 this same change was live in that image, so one half of the feature
 had updated and the other silently had not. CLAUDE.md records it.
 

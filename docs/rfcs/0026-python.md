@@ -61,14 +61,14 @@ minutes in as an autoconf line nobody can interpret.
 ~32 MB installed, 11 MB compressed. RFC 0007 keeps the base image
 console-only and small, and a language runtime is exactly what
 `pkg install` is for. It stages into `${BUILD_DIR}/stage-devtools`
-beside git and the ssh client, so `43-devtools-repo.sh` publishes it
+beside git and the ssh client, so `53-devtools-repo.sh` publishes it
 with **no change to that stage at all** — its repo phase already globs
 every directory there that carries a `MANIFEST`.
 
-The stage number is 38 because 40+ is packaging and `40-repo.sh` must
+The stage number is 38 because 50+ is packaging and `50-repo.sh` must
 see a finished tree. This stage puts nothing in `${ROOTFS}`, but it
 *reads* from it — zlib, libffi and expat — so it has to run while those
-are still there, i.e. before `41-desktop-split.sh` moves them out.
+are still there, i.e. before `51-desktop-split.sh` moves them out.
 
 ### 3. There is no `ssl` module, and that is a consequence, not an oversight.
 

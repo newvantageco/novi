@@ -26,9 +26,9 @@
 # novi-recon uses the standard library and nothing else, so this stage
 # has one dependency: `python`.
 #
-# Staged into ${BUILD_DIR}/stage-devtools, so 43-devtools-repo.sh
+# Staged into ${BUILD_DIR}/stage-devtools, so 53-devtools-repo.sh
 # publishes it with no change to that stage. The number is 39 because
-# 40+ is packaging; it reads nothing out of ${ROOTFS} and installs
+# 50+ is packaging; it reads nothing out of ${ROOTFS} and installs
 # nothing into it.
 # ============================================================
 set -euo pipefail
@@ -44,7 +44,7 @@ VERSION="$(sed -n 's/^VERSION = "\(.*\)"$/\1/p' "${SRC}" | head -1)"
 # Run the host test suite before packaging.
 #
 # scripts/lint.sh runs it too, and that is not a reason to skip it
-# here: 40-repo.sh runs check-hardening.sh for the same reason, because
+# here: 50-repo.sh runs check-hardening.sh for the same reason, because
 # the last moment before a thing is signed and published is the right
 # place to check it, and nobody remembers whether lint was run on the
 # tree that produced this artifact. It costs 200 ms.
@@ -85,4 +85,4 @@ echo ""
 echo ">>> Staged under ${D}  ($(du -sh "${D}/files" | cut -f1))"
 head -1 "${D}/files/usr/bin/novi-recon"
 echo ""
-echo "Publish it with:  bash build/43-devtools-repo.sh"
+echo "Publish it with:  bash build/53-devtools-repo.sh"

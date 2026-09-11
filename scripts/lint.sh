@@ -119,7 +119,7 @@ else
 fi
 
 # pkgsplit's meta-package checks. These are here because provoking
-# them for real is disproportionately expensive: 40-repo.sh wipes
+# them for real is disproportionately expensive: 50-repo.sh wipes
 # /build/repo before pkgsplit runs and refuses outright on a rootfs
 # 41 has already split, so watching the check fire costs a full
 # content rebuild. A meta-package that silently drops a member is

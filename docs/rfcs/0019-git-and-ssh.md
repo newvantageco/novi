@@ -31,7 +31,7 @@ pkg install openssh     # the client on its own
 Neither goes in the base image. The base is console-only and stays
 that way (RFC 0007); these follow the same rule the toolchain does
 (RFC 0015) — built once by a cross stage, staged, and published into
-the signed repository by a 40+ stage, because `40-repo.sh` wipes and
+the signed repository by a 50+ stage, because `50-repo.sh` wipes and
 recreates the repository and anything adding to it has to run after.
 
 `git` depends on `openssh` and `zlib`. That dependency is real rather

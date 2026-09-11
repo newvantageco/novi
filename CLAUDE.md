@@ -19,17 +19,27 @@ this file.
 
 Full pipeline: `bash build.sh` — it **discovers** `build/NN-*.sh` and runs
 all of them in numeric order, so a new stage is part of the build the moment
-the file exists. **01–39 build content into the rootfs; 40+ package it.**
-That gap is deliberate: everything that puts a file in the image has to
-run before `40-repo.sh` computes the base/desktop split from what is
-there. **The content range 01–39 is FULL** — RFC 0031's browser had to
-become a phase of `35-devtools.sh` for want of a number. The next
-person who needs a content stage does the renumber (40..43 → 50..53)
-first; do not squeeze another unrelated phase into an existing stage
-to avoid it. The packaging stages used to be 30/31/32 with content filling
-20–29, and twice a new stage had nowhere legal to go — a base binary
-built after the split would ship, but pkgsplit would have computed the
-split without it, which is a trap rather than a rule. Two stages may not share a number and `build.sh` refuses
+the file exists. **01–49 build content into the rootfs; 50+ package
+it.** That gap is deliberate: everything that puts a file in the image
+has to run before `50-repo.sh` computes the base/desktop split from
+what is there. A base binary built *after* the split would ship, but
+pkgsplit would have computed the split without it — which is a trap
+rather than a rule, and the reason the gap is enforced by numbering
+instead of by care.
+
+**The packaging stages have moved twice, and the second time is why
+40–49 is empty today.** They were 30/31/32 with content filling 20–29;
+they became 40..43; they are 50..53 now. Each move happened because
+content had filled the range and a new stage had nowhere legal to go —
+the third time, RFC 0031's browser had to become a *phase* of
+`35-devtools.sh` for want of a number, which is exactly the squeeze
+this numbering exists to prevent. **So: put a new content stage in a
+free number in 40–49, and do not squeeze an unrelated phase into an
+existing stage.** When 40–49 fills, the next person moves the
+packaging stages again (50..53 → 60..63) before adding anything, and
+updates this paragraph — `NN` appears in prose all over this
+repository, so a renumber is about thirty files, most of them
+documentation. Two stages may not share a number and `build.sh` refuses
 if they do: `NN` is what `--from`/`--to` name and what a failed stage tells
 you to resume from, so a duplicate turns the identity into a guess. `--base-only` stops after the kernel (01–05: bootable
 console, no desktop/pkg/state/installer), `--from NN` resumes. Each stage can
@@ -53,7 +63,7 @@ below for why `/build` is hardcoded and unrelated to the repo checkout path.
 - `bash scripts/mkvm.sh [--disk]` — boot the ISO in QEMU/KVM
 - `novi-install install --disk DEV` (on the booted live system) — install to
   disk (RFC 0003)
-- `bash build/40-repo.sh` — build and sign the first-party package
+- `bash build/50-repo.sh` — build and sign the first-party package
   repository into `/build/repo` (RFC 0006); serve that directory over HTTP
   and point a machine at it with `mirror =` in `/etc/novi/pkg.conf`
 - `bash build/25-wifi.sh` — libnl, wpa_supplicant, `iw`, `novi-wifi`
@@ -64,9 +74,10 @@ below for why `/build` is hardcoded and unrelated to the repo checkout path.
   could only ever write) and the viewer that uses them
 - `bash build/23-e2fsprogs.sh`, `bash build/24-novi-gpt.sh` — real `mke2fs`
   (journalled ext4) and the GPT writer UEFI installs need (RFC 0008)
-- `bash build/41-desktop-split.sh` — **destructive**: removes the packaged
+- `bash build/51-desktop-split.sh` — **destructive**: removes the packaged
   desktop from `/build/rootfs`, leaving a console-only base (RFC 0007).
-  Must run after 20; re-running 06..14 puts the files back
+  Must run after 50; re-running the content stages (`--from 06 --to
+  49`) puts the files back
 - `bash build/26-firmware.sh` — curated linux-firmware + `wireless-regdb`
   + Intel SOF into `${ROOTFS}/lib/firmware` (~699 MB)
 - `bash build/27-audio.sh` — alsa-lib + alsa-utils (`amixer`, `alsactl`,
@@ -93,22 +104,23 @@ below for why `/build` is hardcoded and unrelated to the repo checkout path.
 - `bash build/35-devtools.sh [openssh|ca|curl|git|netsurf|repo|all]` —
   the ssh client, the CA bundle, curl, git and **NetSurf** (RFC 0019,
   RFC 0020, RFC 0031), staged into `/build/stage-devtools` and
-  published by `43-devtools-repo.sh`. Packages, never base. Also
+  published by `53-devtools-repo.sh`. Packages, never base. Also
   builds `sshd` into `/build/ssh-test/` as the test peer, deliberately
   not into the image. The `netsurf` phase is a phase of 35 rather than
-  a stage of its own because it must run BEFORE `41-desktop-split.sh`
-  (it reads `${ROOTFS}` headers) and publish AFTER `40-repo.sh` (which
-  wipes the repo) — and **every number from 01 to 39 is now taken**
+  a stage of its own because it must run BEFORE `51-desktop-split.sh`
+  (it reads `${ROOTFS}` headers) and publish AFTER `50-repo.sh` (which
+  wipes the repo). It was also written when every number from 01 to
+  39 was taken; 40–49 is free now, but moving it would be churn
 - `bash build/32-openssl.sh` — OpenSSL 3.5 LTS (RFC 0027), into
   `/build/openssl-target` for linking and into the `openssl` package
   for the target. Never `${ROOTFS}`: the base image still ships no TLS
   library, and `novi-verify` is still static TweetNaCl. It exists
   because CPython's `ssl` accepts no other implementation
 - `bash build/38-python.sh` — CPython, cross-compiled against musl and
-  staged into `/build/stage-devtools` for `43-devtools-repo.sh` to
+  staged into `/build/stage-devtools` for `53-devtools-repo.sh` to
   publish (RFC 0026). A package, never base. It reads zlib, libffi and
   expat out of `${ROOTFS}`, so it must run before
-  `41-desktop-split.sh` takes them out, and it needs a **`python3.11`
+  `51-desktop-split.sh` takes them out, and it needs a **`python3.11`
   on the build host** — cross-compiling CPython runs an interpreter of
   the same major.minor during `make`
 - `bash build/15-novi-state.sh` also installs `/usr/lib/novi/json.sh`
@@ -2167,26 +2179,26 @@ and does it depend on anything a later stage produces? The second is
 invisible in every tree except a clean one.
 
 **A stage that cross-compiles a client calls `require_desktop_headers`
-first** (`build/00-versions.sh`). 41-desktop-split.sh removes the
+first** (`build/00-versions.sh`). 51-desktop-split.sh removes the
 headers, so in any tree where a full build has run, rebuilding one
 client stops with four "No such file or directory" lines and no clue.
 The line it prints instead names `scripts/restore-build-inputs.sh`.
-That guard exists because chaining a rebuild into `40-repo.sh` without
+That guard exists because chaining a rebuild into `50-repo.sh` without
 checking it succeeded packaged a rootfs with no desktop in it, and
-41-desktop-split.sh then deleted from the base exactly what that empty
+51-desktop-split.sh then deleted from the base exactly what that empty
 manifest described — no desktop in the image AND none in the
-repository. **Never chain `40-repo.sh` after an unchecked build.**
+repository. **Never chain `50-repo.sh` after an unchecked build.**
 
-**`40-repo.sh` now REFUSES to run on an already-split rootfs**, and that
+**`50-repo.sh` now REFUSES to run on an already-split rootfs**, and that
 guard exists because the comment above did not stop it happening.
 pkgsplit computes the desktop from what is *in* the rootfs, so running
-40 after 41 has taken the desktop out asks a question whose honest
+50 after 51 has taken the desktop out asks a question whose honest
 answer is "nothing leaves the base": an empty manifest, a repository
 holding one meta-package, and a 95 MB-smaller ISO with no desktop
 anywhere — no error, because an empty answer is a valid answer.
 `bash build.sh` never trips it; re-running stages by hand does. The
-recovery is the stages, in order: **`bash build.sh --from 06 --to 39`,
-then `bash build.sh --from 40`.**
+recovery is the stages, in order: **`bash build.sh --from 06 --to 49`,
+then `bash build.sh --from 50`.**
 
 **That range used to say `--to 29`, and it silently shipped a broken
 desktop.** Content stages grew past 29 — novi-notifyd and novi-bg are
@@ -2205,7 +2217,7 @@ check against today.** A count written down is a number that rots the
 moment somebody adds a package, so treat it as "the same as last
 time", never as a constant. And **when a stage number is written into
 a document, the document is now something that can rot** — this line
-did, and so did the identical line inside `40-repo.sh`'s own
+did, and so did the identical line inside `50-repo.sh`'s own
 already-split guard, which is the copy someone actually follows
 because they are already in trouble when they read it. Both say 39
 now.
@@ -2214,13 +2226,13 @@ pkgsplit refuses an absent member instead of dropping it, and that
 check has a **host test** (`tools/pkgsplit/test_pkgsplit.py`, run by
 `scripts/lint.sh`) rather than only an error message nobody has seen.
 That split exists for a specific reason: provoking it for real costs
-a full content rebuild, because 40 wipes the repository before
+a full content rebuild, because 50 wipes the repository before
 pkgsplit runs *and* refuses outright on an already-split rootfs — so
 "break it and watch" is a ninety-minute experiment. The test was
 confirmed by reverting the function to the old silent filter and
 watching it fail.
 
-**`--from 06 --to 39` DOES NOT REBUILD A BASE SCRIPT.** The recovery
+**`--from 06 --to 49` DOES NOT REBUILD A BASE SCRIPT.** The recovery
 range above is about the desktop, and `packages/novi-power`,
 `novi-state`, `novi-wifi`, `novi-mount`, `pkg` and the rest of the
 base userland are installed by stages BELOW it — `novi-power` by
@@ -2241,7 +2253,7 @@ that live in packages — so `09-foot.sh` aborts at
 `chroot ${ROOTFS} /usr/bin/fc-cache` with "No such file or directory",
 because fontconfig's tools went out with the split. `set -e` catches
 it correctly and the stage exits 127; the fix is a real
-`bash build.sh --from 06 --to 39`, not a hand-copied binary. (That
+`bash build.sh --from 06 --to 49`, not a hand-copied binary. (That
 127 was briefly misread as "the stage swallowed a failure" because
 the command had been piped to `tail`, which is the pipeline's exit
 status. **Check a stage's real status before accusing it of hiding
@@ -2255,9 +2267,9 @@ even after the stage that produced it stopped producing it. A clean
 543. The clean number is the right one — treat a manifest that shrinks
 after a real rebuild as a correction, not a regression.
 
-**`40-repo.sh` WIPES `/build/repo`, so `42-toolchain-repo.sh` has to run
+**`50-repo.sh` WIPES `/build/repo`, so `52-toolchain-repo.sh` has to run
 again after it.** `build.sh` gets this right because it runs the stages
-in order; running 40 and 41 by hand and stopping does not. The only
+in order; running 50 and 51 by hand and stopping does not. The only
 symptom is an ISO that is 95 MB smaller and has no `novi-devel` in its
 repository — no error, and nothing says which packages a repository
 was *supposed* to contain. Check the size, or check
@@ -2343,10 +2355,10 @@ ssh and locally, never https.
   not "every package except a blocklist".** The blocklist was correct
   until the repository gained a package that was neither desktop nor
   toolchain: `git` and `openssh` were cheerfully installed into the
-  console base image, and the next `40-repo.sh` failed with pkgsplit's
+  console base image, and the next `50-repo.sh` failed with pkgsplit's
   straddle check — `usr/lib/libz.so.1 stays, usr/lib/libz.so moves` —
   because a base binary suddenly linked zlib. The error was correct
-  and pointed nowhere near the cause. `40-repo.sh` already writes
+  and pointed nowhere near the cause. `50-repo.sh` already writes
   `repo-desktop-files.list`; restoring exactly those paths is a
   derived answer that cannot rot, and a blocklist is one that has to
   be updated by whoever adds the next package, with nothing to tell
@@ -2668,7 +2680,7 @@ Three things this turned up that generalise:
   `-fstack-protector-strong` went through. The binaries looked hardened
   if you checked only for a stack canary. **Check the artifact, not the
   flags you think you passed** — `scripts/check-hardening.sh` does, and
-  `40-repo.sh` runs it before packaging, which is the last moment every
+  `50-repo.sh` runs it before packaging, which is the last moment every
   first-party binary is still in the rootfs.
 - **`readelf … | grep -q` under `set -o pipefail` reports a false
   failure.** grep exits on the first match, readelf takes SIGPIPE, and
@@ -2824,10 +2836,14 @@ Three things it is important not to break:
   the graph finds what is *reachable*, `PACKAGE_TABLE` claims what is
   *ours*, and anything claimed that the base does not need moves too. A
   file matching no pattern is a hard error, never a guess.
-- **`build/41-desktop-split.sh` deletes exactly what `40-repo.sh`
+- **`build/51-desktop-split.sh` deletes exactly what `50-repo.sh`
   packaged**, from the manifest 20 wrote. One source of truth, or the two
-  drift and the image ends up broken or still fat. Re-running stages
-  06..14 puts the files back; that ordering is what `build.sh` does.
+  drift and the image ends up broken or still fat. Re-running the
+  content stages (`--from 06 --to 49`) puts the files back; that
+  ordering is what `build.sh` does. **The whole range, not `06..14`** —
+  this line said that until the renumber, and desktop clients reach 37,
+  so following it would have restored part of the desktop and quietly
+  left the rest out, which is how the 51-package repository shipped.
 - **The s6 service definitions for `seatd`/`novi-shell`/`graphical` stay
   in the base** even though their binaries do not. s6-rc does not check
   that a run script's binary exists, so a declared-off service pointing at

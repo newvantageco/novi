@@ -127,18 +127,21 @@ The build phase lives in `35-devtools.sh`, not `build/44-netsurf.sh`,
 and the reason is a constraint with no remaining slack.
 
 It **reads** `${ROOTFS}` — wayland, libpng, zlib and expat headers —
-which `41-desktop-split.sh` removes, so it must run before 41. It
-**publishes** into a repository `40-repo.sh` wipes, so its package must
-be written after 40. That is the "build early, publish late" split that
+which `51-desktop-split.sh` removes, so it must run before 51. It
+**publishes** into a repository `50-repo.sh` wipes, so its package must
+be written after 50. That is the "build early, publish late" split that
 35, 38 and 39 already use.
 
 CLAUDE.md records this trap biting twice, and both times the resolution
-was to move the packaging stages up to make room. **This is the third
-time and the room is gone: every number from 01 to 39 is taken.**
-Whoever adds the next content stage has to do the renumber (40..43 →
-50..53) rather than squeeze another phase into an existing stage. That
-is written into the stage's own comment, where the next person will be
-standing.
+was to move the packaging stages up to make room. **This was the third
+time and the room was gone: every number from 01 to 39 was taken**, so
+the browser became a phase here rather than a stage of its own.
+
+That renumber has since been done — the packaging stages are 50..53 and
+**40–49 is free for content**. The browser stayed a phase of 35 because
+moving it now would be churn for its own sake: its build-early /
+publish-late constraint is real either way, and 35 is where it works.
+A *new* content stage takes a number in 40–49.
 
 ### 8. The browser draws in this desktop's own faces.
 
@@ -227,7 +230,8 @@ libexpat.so.1  libz.so.1  libcurl.so.4  libssl.so.3
 libcrypto.so.3  libpng16.so.16  libwayland-client.so.0  libc.so
 ```
 
-`40..43` then produced a repository of **54 packages** (139 MB on the
+The packaging stages (then `40..43`, now `50..53`) then produced a
+repository of **54 packages** (139 MB on the
 ISO), `netsurf-3.11-x86_64.pkg.tar.gz` at 1,026,298 bytes among them.
 
 On a booted live image, driven over QMP:

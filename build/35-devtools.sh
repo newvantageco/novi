@@ -10,7 +10,7 @@
 #
 # NEITHER GOES IN THE BASE IMAGE. Same rule as the toolchain: built
 # once here, staged, and published into the signed repository by
-# 43-devtools-repo.sh -- because 40-repo.sh wipes and recreates the
+# 53-devtools-repo.sh -- because 50-repo.sh wipes and recreates the
 # repository, so anything that adds to it has to run after, and this
 # build has to run long before.
 #
@@ -67,7 +67,7 @@ ONLY="${1:-all}"
 mkdir -p "${WORK}" "${STAGE_DIR}"
 
 # Both of these link zlib, which lives in the rootfs and which
-# 41-desktop-split.sh moves out of it. Same guard as
+# 51-desktop-split.sh moves out of it. Same guard as
 # require_desktop_headers(), and for the same reason: in any tree where
 # a full build has already run, this stage otherwise stops with
 # "zlib.h: No such file or directory" and no clue what to do about it.
@@ -77,13 +77,13 @@ require_zlib() {
     fi
     echo "ERROR: zlib is not in ${ROOTFS} (headers or library missing)." >&2
     echo "" >&2
-    echo "  41-desktop-split.sh has moved it out -- zlib is a package." >&2
+    echo "  51-desktop-split.sh has moved it out -- zlib is a package." >&2
     echo "  Put it back before building against it:" >&2
     echo "" >&2
     echo "      bash scripts/restore-build-inputs.sh" >&2
     echo "" >&2
-    echo "  Then re-run this stage, and re-run 40-repo.sh," >&2
-    echo "  41-desktop-split.sh and the 42/43 publish stages." >&2
+    echo "  Then re-run this stage, and re-run 50-repo.sh," >&2
+    echo "  51-desktop-split.sh and the 42/43 publish stages." >&2
     exit 1
 }
 
@@ -509,17 +509,18 @@ if [ "$ONLY" = "all" ] || [ "$ONLY" = "netsurf" ]; then
     # It wants to be `build/44-netsurf.sh` and it cannot be. The
     # ordering constraint is real in both directions: it READS
     # ${ROOTFS} (wayland, libpng, zlib and expat headers), which
-    # 41-desktop-split.sh removes, so it must run before 41; and it
-    # PUBLISHES into a repository 40-repo.sh wipes, so its package must
+    # 51-desktop-split.sh removes, so it must run before 41; and it
+    # PUBLISHES into a repository 50-repo.sh wipes, so its package must
     # be written after 40. That is exactly the "build early, publish
-    # late" split 35, 38 and 39 already use -- and every number from 01
-    # to 39 is taken.
+    # late" split 35, 38 and 39 already use -- and when this was
+    # written every number from 01 to 39 was taken, so there was
+    # nowhere for a stage of its own to go.
     #
-    # CLAUDE.md records this trap biting twice before, and the
-    # resolution both times was to move the PACKAGING stages up to make
-    # room. This is the third time, and the room is now gone entirely:
-    # whoever adds the next content stage has to do that renumber
-    # (40..43 -> 50..53) rather than squeeze another phase in here.
+    # That renumber has since happened: the packaging stages are
+    # 50..53 and 40-49 is free. This stays a phase of 35 because
+    # moving it now would be churn -- the build-early/publish-late
+    # constraint is the same either way. A NEW content stage takes a
+    # number in 40-49; do not squeeze another phase in here.
     NS_SRC="${SOURCES}/netsurf-all-${NETSURF_VERSION}.tar.gz"
     [ -f "${NS_SRC}" ] || { echo "ERROR: ${NS_SRC} not found -- run build/01-fetch.sh." >&2; exit 1; }
 
@@ -721,11 +722,11 @@ APP
     "${CROSS}-readelf" -d "${files}/usr/bin/netsurf-fb" | grep NEEDED || true
 fi
 
-# ── Publish (called by 43-devtools-repo.sh, never by `all`) ───────────
+# ── Publish (called by 53-devtools-repo.sh, never by `all`) ───────────
 if [ "$ONLY" = "repo" ]; then
     REPO_OUT="${BUILD_DIR}/repo"
     KEY_FILE="${BUILD_DIR}/keys/novi-repo.key"
-    [ -d "${REPO_OUT}" ] || { echo "ERROR: ${REPO_OUT} not found -- run build/40-repo.sh first." >&2; exit 1; }
+    [ -d "${REPO_OUT}" ] || { echo "ERROR: ${REPO_OUT} not found -- run build/50-repo.sh first." >&2; exit 1; }
     [ -f "${KEY_FILE}" ] || { echo "ERROR: signing key ${KEY_FILE} not found." >&2; exit 1; }
 
     echo ">>> Packaging the developer tools into ${REPO_OUT} ..."

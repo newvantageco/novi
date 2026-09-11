@@ -2,7 +2,7 @@
 """Host tests for pkgsplit's meta-package checks.
 
 These exist because the thing they check is otherwise almost
-impossible to watch fail. `40-repo.sh` wipes /build/repo before
+impossible to watch fail. `50-repo.sh` wipes /build/repo before
 running pkgsplit and refuses outright on an already-split rootfs, so
 provoking the error for real costs a full content rebuild -- and
 CLAUDE.md's rule is that a check nobody has seen fail is a check
@@ -48,7 +48,7 @@ except SystemExit as e:
     msg = str(e)
     ok("novi-bg" in msg and "novi-notifyd" in msg, "the error names every absent member")
     ok("novi-shell" not in msg.split("A meta-package")[0], "it does not name members that ARE present")
-    ok("--to 39" in msg, "it points at the correct rebuild range")
+    ok("--to 49" in msg, "it points at the correct rebuild range")
 
 # The empty case is not an error: a meta-package with no members is
 # odd but it is not this check's business to have an opinion.

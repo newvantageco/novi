@@ -303,7 +303,7 @@ def check_meta_members_built(name, deps, available):
 
     Returns the deps unchanged, or raises SystemExit naming what is
     absent. A separate function purely so it can be tested: proving
-    it fires otherwise costs a full content rebuild, because 40 wipes
+    it fires otherwise costs a full content rebuild, because 50 wipes
     the repository before pkgsplit runs and refuses outright on an
     already-split rootfs. See tools/pkgsplit/test_pkgsplit.py.
     """
@@ -316,7 +316,7 @@ def check_meta_members_built(name, deps, available):
             + "       have, and dropping them silently ships a desktop\n"
             + "       missing those programs. Some stage did not run --\n"
             + "       rebuild the content stages (bash build.sh --from 06\n"
-            + "       --to 39) rather than removing them from\n"
+            + "       --to 49) rather than removing them from\n"
             + "       META_PACKAGES.")
     return list(deps)
 

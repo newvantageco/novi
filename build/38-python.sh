@@ -19,13 +19,13 @@
 # the base console-only and small; a language runtime is exactly the
 # kind of thing that belongs behind `pkg install`. It stages into
 # ${BUILD_DIR}/stage-devtools alongside git and the ssh client, so
-# 43-devtools-repo.sh publishes it with no change to that stage --
+# 53-devtools-repo.sh publishes it with no change to that stage --
 # its repo phase globs every directory there that has a MANIFEST.
 #
-# WHY THE STAGE NUMBER IS 38: 40+ is packaging, and 40-repo.sh must
+# WHY THE STAGE NUMBER IS 38: 50+ is packaging, and 50-repo.sh must
 # see a finished tree. This builds nothing into ${ROOTFS} at all, but
 # it does READ from it (zlib, libffi, expat), so it has to run while
-# those are still there -- i.e. before 41-desktop-split.sh takes them
+# those are still there -- i.e. before 51-desktop-split.sh takes them
 # out.
 #
 # ── ssl comes from OpenSSL, which is a package of its own ─────────────
@@ -95,7 +95,7 @@ fi
 
 # ── zlib, libffi and expat come out of ${ROOTFS} ──────────────────────
 #
-# All three are packages, so 41-desktop-split.sh moves them out and in
+# All three are packages, so 51-desktop-split.sh moves them out and in
 # any tree where a full build has run this stage would otherwise stop
 # on "zlib.h: No such file or directory" with no clue what to do.
 # Same guard, same wording, as 35-devtools.sh's require_zlib().
@@ -106,13 +106,13 @@ require_lib() {
     fi
     echo "ERROR: ${what} is not in ${ROOTFS} (header or library missing)." >&2
     echo "" >&2
-    echo "  41-desktop-split.sh has moved it out -- it is a package." >&2
+    echo "  51-desktop-split.sh has moved it out -- it is a package." >&2
     echo "  Put it back before building against it:" >&2
     echo "" >&2
     echo "      bash scripts/restore-build-inputs.sh" >&2
     echo "" >&2
-    echo "  Then re-run this stage, and re-run 40-repo.sh," >&2
-    echo "  41-desktop-split.sh and the 42/43 publish stages." >&2
+    echo "  Then re-run this stage, and re-run 50-repo.sh," >&2
+    echo "  51-desktop-split.sh and the 42/43 publish stages." >&2
     exit 1
 }
 require_lib zlib.h   libz.so     "zlib"
@@ -348,4 +348,4 @@ if [ -n "${MISSING}" ]; then
     echo "    not built   : $(printf '%s' "${MISSING}" | tr '\n' ' ')"
 fi
 echo ""
-echo "Publish it with:  bash build/43-devtools-repo.sh"
+echo "Publish it with:  bash build/53-devtools-repo.sh"
