@@ -35,7 +35,7 @@
 #   ${BUILD_DIR}/openssl-target   headers + libraries, for LINKING
 #                                 (38-python.sh points at this)
 #   ${BUILD_DIR}/stage-devtools/openssl   the package, published by
-#                                 43-devtools-repo.sh
+#                                 53-devtools-repo.sh
 #
 # Never ${ROOTFS}. A TLS stack in the base image is the thing RFC 0020
 # is careful to avoid, and nothing about needing one in Python changes
@@ -161,4 +161,4 @@ echo ">>> Linking prefix : ${PREFIX}/usr"
 echo ">>> Staged under   : ${D}  ($(du -sh "${D}/files" | cut -f1))"
 "${CROSS}-readelf" -d "${D}/files/usr/bin/openssl" | grep NEEDED || true
 echo ""
-echo "Publish it with:  bash build/43-devtools-repo.sh"
+echo "Publish it with:  bash build/53-devtools-repo.sh"

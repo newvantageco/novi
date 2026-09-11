@@ -1,0 +1,27 @@
+# nocturne — near-black with an indigo accent.
+#
+# The darkest of the set: bg.base is #06060a, which is where an OLED
+# panel actually saves power. Kept deliberately close to axiom in
+# structure so the difference reads as a mood rather than a redesign.
+
+bg.base        = #06060a
+bg.panel       = #0f1018
+bg.card        = #15161f
+bg.card-raised = #1d1f2b
+
+accent         = #818cf8
+accent.hover   = #a5b4fc
+accent.active  = #6366f1
+accent.subtle  = #1e2140
+text.on-accent = #0a0b16
+
+text.primary   = #eceef6
+text.secondary = #9ba1b8
+text.muted     = #656b82
+
+border.subtle  = #232636
+border.strong  = #343850
+
+status.success = #34d399
+status.warning = #fbbf24
+status.error   = #fb7185

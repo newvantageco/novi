@@ -100,12 +100,12 @@
  * here mean the same thing it means in novi-files and the launcher --
  * it used to be a blue of its own. */
 #define SEL_COLOR      NOVI_ACCENT_SUBTLE
-static const pixman_color_t TEXT_PIX      = NOVI_PIX(NOVI_TEXT_PRIMARY);
-static const pixman_color_t GUTTER_PIX    = NOVI_PIX(NOVI_TEXT_MUTED);
-static const pixman_color_t GUTTER_CUR_PIX= NOVI_PIX(NOVI_TEXT_SECONDARY);
-static const pixman_color_t STATUS_PIX    = NOVI_PIX(NOVI_TEXT_SECONDARY);
-static const pixman_color_t MODIFIED_PIX  = NOVI_PIX(NOVI_STATUS_WARNING);
-static const pixman_color_t ERROR_PIX     = NOVI_PIX(NOVI_STATUS_ERROR);
+#define TEXT_PIX NOVI_PIX(NOVI_TEXT_PRIMARY)
+#define GUTTER_PIX NOVI_PIX(NOVI_TEXT_MUTED)
+#define GUTTER_CUR_PIX NOVI_PIX(NOVI_TEXT_SECONDARY)
+#define STATUS_PIX NOVI_PIX(NOVI_TEXT_SECONDARY)
+#define MODIFIED_PIX NOVI_PIX(NOVI_STATUS_WARNING)
+#define ERROR_PIX NOVI_PIX(NOVI_STATUS_ERROR)
 
 /* One whole-document state, held so undo can put it back. */
 struct snapshot {
@@ -1636,6 +1636,11 @@ static const struct wl_registry_listener registry_listener = {
 };
 
 int main(int argc, char **argv) {
+	/* Colours are a runtime table now (RFC 0030). Load the active
+	 * theme BEFORE anything computes a colour; on failure the
+	 * compiled-in defaults stay in force, so this cannot leave the
+	 * client worse off than it was. */
+	novi_theme_load();
 	struct novi_edit e = {0};
 	e.running = true;
 	e.width = WINDOW_WIDTH;

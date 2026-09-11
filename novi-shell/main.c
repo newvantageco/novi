@@ -42,6 +42,7 @@
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_data_device.h>
 #include <wlr/types/wlr_foreign_toplevel_management_v1.h>
+#include <wlr/types/wlr_idle_inhibit_v1.h>
 #include <wlr/types/wlr_input_device.h>
 #include <wlr/types/wlr_keyboard.h>
 #include <wlr/types/wlr_layer_shell_v1.h>
@@ -130,6 +131,123 @@
  * keystroke would not be. The screen is about to go dark anyway. */
 #define NOVI_BLANK_DEFAULT_SECONDS 600
 #define NOVI_BLANK_KEY "power.blank"
+/* Idle SUSPEND (RFC 0035), the other half of what an idle machine
+ * should do. Blanking saves the panel; suspending saves the battery,
+ * and it is what every laptop operating system does when nobody has
+ * touched it for a while.
+ *
+ * OFF BY DEFAULT, unlike blanking. Turning a display off is
+ * recoverable by moving the mouse; suspending a machine is not
+ * recoverable by anything the machine can do itself -- it needs a
+ * person, a working wake path, and a resume that this project has
+ * only ever seen on QEMU. RFC 0013 already records the power button
+ * not being delivered after an S3 resume there, which is exactly the
+ * kind of thing that makes an unattended suspend a trap rather than a
+ * saving. A person who wants it says so.
+ *
+ * Same read-at-use-time shape as power.blank, on the same tick. */
+#define NOVI_SUSPEND_KEY "power.suspend"
+#define NOVI_SUSPEND_DEFAULT_SECONDS 0
+/* Spawned, never reimplemented: novi-power already picks the sleep
+ * state the kernel offers, saves the mixer (the one piece of state
+ * that does not come back on its own) and syncs. The compositor's
+ * part is the same as it is for a theme -- notice, and spawn. */
+#define NOVI_DEFAULT_SUSPEND "novi-power suspend"
+/* Lock the screen before an idle suspend (RFC 0035 roadmap 1).
+ *
+ * ON by default, which is the opposite call from `power.suspend`
+ * itself and for the same reason: an idle suspend is BY DEFINITION
+ * the case where nobody is standing over the machine, so coming back
+ * to an unlocked session is the wrong default for the one path that
+ * fires with no person involved. `power.lid = suspend` still does not
+ * lock -- somebody closing a lid is present, and that path belongs to
+ * novi-power, which runs on machines with no compositor to ask.
+ *
+ * Turning `power.suspend` off (the shipped default) makes this key
+ * inert, so defaulting it on costs nobody anything. */
+#define NOVI_SUSPEND_LOCK_KEY "power.suspend.lock"
+/* How many idle ticks to wait for the lock surface to actually MAP
+ * before giving up. Spawning novi-lockscreen and suspending in the
+ * same breath would race: the machine can freeze before the surface
+ * exists, and the resume then shows the desktop for as long as the
+ * client takes to come up. Three ticks is fifteen seconds, which is
+ * a very long time for a layer-shell client to map. */
+#define NOVI_SUSPEND_LOCK_MAX_TICKS 3
+/* Idle INHIBITORS (`zwp_idle_inhibit_manager_v1`, RFC 0035 roadmap 3).
+ * A client asks for one on a surface and the machine stops counting
+ * towards blank and suspend while that surface is visible -- the
+ * reason every desktop that blanks or suspends on idle also has this.
+ * Without it the only way to watch a film to the end is to declare
+ * `power.blank = off` beforehand and remember to put it back.
+ *
+ * The protocol's own words are "inhibitors should only be in effect
+ * while this surface is visible", and VISIBLE IS NOT MAPPED on a
+ * compositor with workspaces. A player left running on workspace 3
+ * while you read on workspace 1 is mapped, is not on screen, and has
+ * no business keeping the panel lit -- so the test is the same
+ * `workspace == active_workspace && !minimized` the scene graph is
+ * driven from (novi_toplevel.workspace's comment), asked of the
+ * inhibited surface's ROOT surface, because a client may name a
+ * subsurface.
+ *
+ * A LOCKED SESSION HONOURS NOTHING, and that is the half worth
+ * stating out loud: while novi-lockscreen's surface is up no client
+ * surface is on screen, so nothing satisfies the visibility test
+ * anyway -- but the consequence is a security property rather than an
+ * accident of the arithmetic, since otherwise any client left running
+ * could hold a locked machine awake indefinitely with nobody there to
+ * see it.
+ *
+ * There is no key to switch this off, deliberately: the failure it
+ * would guard against is a client that inhibits and should not, and
+ * the answer to that is knowing WHICH client -- so the inhibitors and
+ * their app_ids are published (NOVI_IDLE_FILE, `novi-power idle`)
+ * rather than made overridable by a flag nobody would find. A machine
+ * that will not sleep and cannot say why is the actual complaint
+ * people have about this protocol elsewhere.
+ *
+ * The manager is a wlroots global; there is no new protocol code here
+ * and no wayland-scanner step -- libwlroots already carries the
+ * marshalling, as it does for layer-shell. */
+/* An app_id is a string a stranger's client chose, and it is about to
+ * be written into a file a shell script reads. Capped and filtered on
+ * the way out, like every other piece of client text this project
+ * publishes (novi-notifyd on a summary, novi-mount on a filesystem
+ * label). */
+#define NOVI_INHIBITOR_NAME_MAX 63
+/* Super+A: the PERSON's idle inhibitor, beside the protocol's one for
+ * programs. Two sources, one rule -- the same shape as coldplug and
+ * hotplug both feeding one modalias-to-modprobe decision.
+ *
+ * It exists because the case people actually have is not a video
+ * player: it is "do not sleep, I am building", said by somebody at a
+ * terminal that has no idea what it is running and no business
+ * speaking a Wayland protocol. Nothing in this image speaks
+ * zwp_idle_inhibit_manager_v1 today, so without this key the whole
+ * feature would be wiring for clients that do not exist here yet.
+ *
+ * A toggle rather than a held key: an hour-long build is not a thing
+ * to keep a finger on.
+ *
+ * IT SURVIVES A LOCK, and a client's inhibitor does not. The
+ * difference is who is claiming: a person pressed a key on this
+ * keyboard, deliberately, and then locking the screen to go and get
+ * coffee is the SAME person's other decision -- suspending mid-build
+ * because they stepped away is precisely the wrongness they pressed
+ * the key to avoid. A client's claim is a program's assertion about
+ * its own window, which is worth nothing once no window is on
+ * screen. */
+#define NOVI_STAY_AWAKE_KEY_NAME "Super+A"
+/* Feedback, because a toggle nobody can see the state of is a toggle
+ * nobody will trust. Low urgency: this is an acknowledgement, not
+ * news. Spawned through /bin/sh -c like every other run_spawn, so the
+ * quoted arguments arrive as arguments. */
+#define NOVI_DEFAULT_AWAKE_ON \
+	"novi-notify -u low -i power 'Staying awake' " \
+	"'Nothing will blank or suspend until you press Super+A again'"
+#define NOVI_DEFAULT_AWAKE_OFF \
+	"novi-notify -u low -i power 'Idle timers back on' " \
+	"'The screen may blank, and the machine may suspend'"
 #define NOVI_STATE_FILE "/etc/novi/system.conf"
 /* How often the idle clock advances and the declared timeout is
  * re-read. Five seconds is the granularity of blanking and the worst
@@ -150,6 +268,11 @@
  * feature is broken when it is fine are worse than none. */
 #define NOVI_IDLE_FILE "/run/novi/idle"
 #define NOVI_DEFAULT_POWER_MENU "novi-launcher --power"
+#define NOVI_DEFAULT_THEMES "novi-launcher --themes"
+/* RFC 0034. The history lives in a file novi-notifyd publishes, so
+ * the compositor's part is one more spawn -- it never reads or holds
+ * a notification, exactly as it never holds a theme. */
+#define NOVI_DEFAULT_NOTIFICATIONS "novi-launcher --notifications"
 #define NOVI_DEFAULT_LOCK "novi-lockscreen"
 /* The zwlr_layer_surface_v1 namespace novi-lockscreen identifies itself
  * with (its get_layer_surface() call's namespace argument) -- how
@@ -301,8 +424,35 @@ struct novi_server {
 	 * session restarted. */
 	struct wl_event_source *idle_timer;
 	int blank_after;
+	/* RFC 0035. Seconds of idleness before the machine suspends, 0
+	 * meaning never -- read from the same document on the same tick as
+	 * blank_after. There is deliberately no "already suspended" latch:
+	 * the trigger resets idle_ms, so the timeout has to elapse again
+	 * before it can fire, which is both the debounce and the reason a
+	 * machine that resumes with no input eventually suspends again. */
+	int suspend_after;
+	/* Ticks spent waiting for the lock surface to map before an idle
+	 * suspend, or -1 when not waiting. The wait is a STATE rather than
+	 * a sleep because the compositor's event loop must keep running --
+	 * it is the thing that will notice the lock surface mapping. */
+	int suspend_lock_wait;
 	int idle_ms;
 	bool blanked;
+	/* zwp_idle_inhibit_manager_v1. `inhibitors` holds every live
+	 * inhibitor object, mapped or not, visible or not -- whether one
+	 * COUNTS is decided per tick by idle_inhibit_active(), because a
+	 * window's workspace and minimized state change under it without
+	 * the client doing anything. `inhibited` is only the last answer,
+	 * kept so the log says something when it changes rather than once
+	 * every five seconds. */
+	struct wlr_idle_inhibit_manager_v1 *idle_inhibit_manager;
+	struct wl_listener new_idle_inhibitor;
+	struct wl_list inhibitors;
+	bool inhibited;
+	/* Super+A. The person's own inhibit, held here rather than in the
+	 * inhibitors list because it belongs to no surface and therefore
+	 * has no visibility to test. */
+	bool stay_awake;
 
 	/* Layer-shell (RFC 0001 decision 5: the panel/launcher UI layer is
 	 * built as a client of this protocol, not baked into the
@@ -384,6 +534,17 @@ struct novi_layer_surface {
 	struct wl_listener unmap;
 	struct wl_listener destroy;
 	struct wl_listener commit;
+};
+
+/* One live zwp_idle_inhibitor_v1. Nothing here caches whether it is in
+ * effect: that depends on where its surface currently is, which
+ * changes with a workspace switch or a minimize that the inhibitor's
+ * client never hears about. */
+struct novi_inhibitor {
+	struct wl_list link; /* novi_server.inhibitors */
+	struct novi_server *server;
+	struct wlr_idle_inhibitor_v1 *wlr_inhibitor;
+	struct wl_listener destroy;
 };
 
 struct novi_toplevel {
@@ -484,6 +645,11 @@ static void unminimize_toplevel(struct novi_toplevel *toplevel);
 static void switch_workspace(struct novi_server *server, int workspace);
 static void move_focused_to_workspace(struct novi_server *server, int workspace);
 
+/* Defined with the other spawn helpers further down; the idle tick
+ * needs it, and moving the whole spawn section above the idle section
+ * would put it before the server struct it does not use. */
+static void run_spawn(const char *env, const char *def);
+
 /* ── Idle blanking ─────────────────────────────────────────────────
  *
  * The screen never turned itself off. On a laptop that is the panel
@@ -532,13 +698,17 @@ static void idle_set_outputs(struct novi_server *server, bool on) {
  * re-read when the period elapsed, so changing 600 to 10 took ten
  * minutes to take effect. That is not "read at use time", it is read
  * at the least useful time available. */
-static int idle_read_timeout(void) {
+/* The raw declared value for one key, or false if it is not in the
+ * document. Split out of idle_read_seconds() because this tick reads a
+ * duration AND a flag now, and two copies of the parser would be two
+ * places to get `key = value  # comment` wrong. */
+static bool idle_read_value(const char *want_key, char *out, size_t cap) {
 	FILE *f = fopen(NOVI_STATE_FILE, "r");
 	if (f == NULL) {
-		return NOVI_BLANK_DEFAULT_SECONDS;
+		return false;
 	}
 	char line[512];
-	int result = NOVI_BLANK_DEFAULT_SECONDS;
+	bool found = false;
 	while (fgets(line, sizeof(line), f) != NULL) {
 		char *hash = strchr(line, '#');
 		if (hash != NULL) {
@@ -557,7 +727,7 @@ static int idle_read_timeout(void) {
 		while (kend > key && (kend[-1] == ' ' || kend[-1] == '\t')) {
 			*--kend = '\0';
 		}
-		if (strcmp(key, NOVI_BLANK_KEY) != 0) {
+		if (strcmp(key, want_key) != 0) {
 			continue;
 		}
 		char *val = eq + 1;
@@ -569,41 +739,211 @@ static int idle_read_timeout(void) {
 				vend[-1] == '\n' || vend[-1] == '\r')) {
 			*--vend = '\0';
 		}
-		if (strcmp(val, "off") == 0) {
-			result = 0;
-		} else {
-			char *num_end = NULL;
-			long v = strtol(val, &num_end, 10);
-			/* An unusable value falls back to the default rather than
-			 * to "never": a typo in this key should not silently
-			 * disable the thing it configures. novi-state's observer
-			 * reports it as drift, which is where a person finds out. */
-			if (num_end != val && *num_end == '\0' && v >= 0 && v <= 86400) {
-				result = (int)v;
-			}
-		}
+		snprintf(out, cap, "%s", val);
+		found = true;
 		break;
 	}
 	fclose(f);
-	return result;
+	return found;
+}
+
+static int idle_read_seconds(const char *want_key, int fallback) {
+	char val[64];
+	if (!idle_read_value(want_key, val, sizeof(val))) {
+		return fallback;
+	}
+	if (strcmp(val, "off") == 0) {
+		return 0;
+	}
+	char *num_end = NULL;
+	long v = strtol(val, &num_end, 10);
+	/* An unusable value falls back to the default rather than to
+	 * "never": a typo in this key should not silently disable the
+	 * thing it configures. novi-state's observer reports it as drift,
+	 * which is where a person finds out. */
+	if (num_end != val && *num_end == '\0' && v >= 0 && v <= 86400) {
+		return (int)v;
+	}
+	return fallback;
+}
+
+/* Same rule for a flag: anything that is not exactly `on` or `off`
+ * falls back to the default rather than being guessed at. */
+static bool idle_read_bool(const char *want_key, bool fallback) {
+	char val[64];
+	if (!idle_read_value(want_key, val, sizeof(val))) {
+		return fallback;
+	}
+	if (strcmp(val, "on") == 0) {
+		return true;
+	}
+	if (strcmp(val, "off") == 0) {
+		return false;
+	}
+	return fallback;
 }
 
 /* The timer is a plain TICK, not "fire once after the timeout". That
  * is what lets the declared value be re-read on a schedule of its own
  * -- a change takes effect within one tick instead of at the end of
  * however long the OLD timeout was. */
-/* `<blanked> <idle seconds> <timeout seconds>` on one line, rewritten
- * each tick. Written to a temp name and renamed so a reader on its own
- * schedule never sees half of it, the same rule the health service
- * follows. */
-static void idle_publish(const struct novi_server *server) {
+/* A client's app_id (or a layer surface's namespace), made safe to put
+ * on a line of a file a shell script reads. Anything that would end
+ * the line or split the field becomes an underscore rather than being
+ * dropped: a name that silently loses characters is a name that stops
+ * matching the window it came from, which is the one job it has. */
+static void inhibitor_name(char *out, size_t cap, const char *raw) {
+	size_t n = 0;
+	if (raw != NULL) {
+		for (const unsigned char *p = (const unsigned char *)raw;
+				*p != '\0' && n + 1 < cap; p++) {
+			out[n++] = (*p < 0x20 || *p == 0x7f || *p == ' ') ? '_' : (char)*p;
+		}
+	}
+	if (n == 0) {
+		snprintf(out, cap, "unnamed");
+		return;
+	}
+	out[n] = '\0';
+}
+
+/* Is this inhibitor's surface actually ON SCREEN, and what is it
+ * called? One walk answers both, because a name is only meaningful for
+ * a surface we found.
+ *
+ * The ROOT surface is what gets matched: zwp_idle_inhibit_manager_v1
+ * takes any wl_surface, and a client that composes its video out of
+ * subsurfaces may well name one of those rather than its toplevel. */
+static bool inhibitor_visible(struct novi_server *server,
+		struct wlr_idle_inhibitor_v1 *wlr_inhibitor, char *name, size_t cap) {
+	if (wlr_inhibitor->surface == NULL) {
+		return false;
+	}
+	struct wlr_surface *root =
+		wlr_surface_get_root_surface(wlr_inhibitor->surface);
+	if (root == NULL) {
+		return false;
+	}
+	struct novi_toplevel *toplevel;
+	wl_list_for_each(toplevel, &server->toplevels, link) {
+		if (toplevel->xdg_toplevel->base->surface != root) {
+			continue;
+		}
+		if (name != NULL) {
+			inhibitor_name(name, cap, toplevel->xdg_toplevel->app_id);
+		}
+		/* server->toplevels holds only MAPPED toplevels
+		 * (xdg_toplevel_map inserts, xdg_toplevel_unmap removes), so
+		 * being in this list is the mapped half and these two flags
+		 * are the whole of the rest -- the same expression
+		 * switch_workspace() drives the scene graph from, which is
+		 * what makes this answer agree with what is on the screen
+		 * rather than being a second opinion about it. */
+		return toplevel->workspace == server->active_workspace &&
+			!toplevel->minimized;
+	}
+	struct novi_output *output;
+	wl_list_for_each(output, &server->outputs, link) {
+		struct novi_layer_surface *layer;
+		wl_list_for_each(layer, &output->layer_surfaces, link) {
+			if (layer->layer_surface->surface != root) {
+				continue;
+			}
+			if (name != NULL) {
+				inhibitor_name(name, cap, layer->layer_surface->namespace);
+			}
+			/* Unlike a toplevel, a layer surface joins this list at
+			 * CREATION -- server_new_layer_surface() inserts it before
+			 * the client's required initial commit -- so membership is
+			 * not the mapped test and it has to be asked. Layer
+			 * surfaces are not workspace-scoped (the panel is on every
+			 * workspace), so mapped is the whole answer. */
+			return layer->layer_surface->surface->mapped;
+		}
+	}
+	/* An inhibitor on a surface this compositor is not drawing: a
+	 * client that took one before mapping anything, or on a surface
+	 * that has since gone. Not visible, so not honoured. */
+	return false;
+}
+
+/* How many inhibitors are in effect right now, with the name of the
+ * first through `name` for the log line.
+ *
+ * Counted from scratch every tick rather than tracked incrementally,
+ * because a workspace switch or a minimize changes the answer with the
+ * inhibitor's client sending nothing at all. An incrementally
+ * maintained flag would have to be updated from switch_workspace(),
+ * move_focused_to_workspace(), minimize/unminimize, map and unmap --
+ * six places, of which one would eventually be missed, and the symptom
+ * would be a machine that never sleeps. Twenty pointer comparisons
+ * once every five seconds is not worth that risk. */
+static int idle_inhibit_active(struct novi_server *server,
+		char *name, size_t cap) {
+	if (server->locked) {
+		/* Nothing a client owns is on screen behind the lock surface,
+		 * so the walk below would return 0 anyway. It is its own
+		 * branch because the consequence is a security property and
+		 * not an accident of the arithmetic: without it, any client
+		 * still running could hold a locked machine awake
+		 * indefinitely, with nobody there to notice. */
+		return 0;
+	}
+	int n = 0;
+	struct novi_inhibitor *inhibitor;
+	wl_list_for_each(inhibitor, &server->inhibitors, link) {
+		char one[NOVI_INHIBITOR_NAME_MAX + 1];
+		if (!inhibitor_visible(server, inhibitor->wlr_inhibitor,
+				one, sizeof(one))) {
+			continue;
+		}
+		if (name != NULL && n == 0) {
+			snprintf(name, cap, "%s", one);
+		}
+		n++;
+	}
+	return n;
+}
+
+/* One `key value` line per fact, rewritten each tick, to a temp name
+ * and renamed so a reader on its own schedule never sees half of it --
+ * the same rule the health service follows.
+ *
+ * It was three positional numbers on one line until inhibitors gave it
+ * a VARIABLE-LENGTH part: a name per inhibitor, of which there may be
+ * none or several. Positional fields cannot carry that. Changing the
+ * shape of a published file is a thing to do while it still has one
+ * writer and one reader, both in this repository, rather than later. */
+static void idle_publish(struct novi_server *server) {
 	char tmp[] = NOVI_IDLE_FILE ".tmp";
 	FILE *f = fopen(tmp, "w");
 	if (f == NULL) {
 		return;
 	}
-	fprintf(f, "%d %d %d\n", server->blanked ? 1 : 0,
-		server->idle_ms / 1000, server->blank_after);
+	fprintf(f, "blanked %d\n", server->blanked ? 1 : 0);
+	fprintf(f, "locked %d\n", server->locked ? 1 : 0);
+	fprintf(f, "idle %d\n", server->idle_ms / 1000);
+	fprintf(f, "blank %d\n", server->blank_after);
+	fprintf(f, "suspend %d\n", server->suspend_after);
+	/* Two separate lines because they are two separate claims: `awake`
+	 * is the person's Super+A, `inhibit` is how many client surfaces
+	 * asked. Folding them into one count would tell a reader that
+	 * something is holding the machine awake and hide which kind of
+	 * thing it was, which is the only interesting part. */
+	fprintf(f, "awake %d\n", server->stay_awake ? 1 : 0);
+	/* The same function the tick acts on, so what is published and
+	 * what is done can never be two different answers. */
+	fprintf(f, "inhibit %d\n", idle_inhibit_active(server, NULL, 0));
+	if (!server->locked) {
+		struct novi_inhibitor *inhibitor;
+		wl_list_for_each(inhibitor, &server->inhibitors, link) {
+			char name[NOVI_INHIBITOR_NAME_MAX + 1];
+			if (inhibitor_visible(server, inhibitor->wlr_inhibitor,
+					name, sizeof(name))) {
+				fprintf(f, "inhibitor %s\n", name);
+			}
+		}
+	}
 	fclose(f);
 	if (rename(tmp, NOVI_IDLE_FILE) != 0) {
 		unlink(tmp);
@@ -623,6 +963,10 @@ static void idle_arm(struct novi_server *server) {
  * a second answer to a question with one. */
 static void idle_notify_activity(struct novi_server *server) {
 	server->idle_ms = 0;
+	/* Somebody is here, so whatever the suspend path was waiting for
+	 * no longer matters. Left set, a half-finished wait would make the
+	 * NEXT idle period skip straight to the give-up branch. */
+	server->suspend_lock_wait = -1;
 	if (server->blanked) {
 		server->blanked = false;
 		idle_set_outputs(server, true);
@@ -633,15 +977,183 @@ static void idle_notify_activity(struct novi_server *server) {
 static int idle_timer_fire(void *data) {
 	struct novi_server *server = data;
 	server->idle_ms += NOVI_IDLE_TICK_MS;
-	server->blank_after = idle_read_timeout();
+	server->blank_after = idle_read_seconds(NOVI_BLANK_KEY,
+		NOVI_BLANK_DEFAULT_SECONDS);
+	server->suspend_after = idle_read_seconds(NOVI_SUSPEND_KEY,
+		NOVI_SUSPEND_DEFAULT_SECONDS);
+	/* An inhibitor holds the CLOCK AT ZERO rather than merely skipping
+	 * the two branches below, and the difference shows up at the end
+	 * of a film. Letting idle_ms keep climbing while inhibited means
+	 * the screen goes dark the instant the player releases its
+	 * inhibitor -- at exactly the moment somebody is looking at it,
+	 * from a machine that had been told for two hours that nobody was
+	 * idle. Zeroing it means the timeout starts again from the release,
+	 * which is what "not idle" was claiming all along.
+	 *
+	 * Note that an already-blanked screen is deliberately NOT woken by
+	 * an inhibitor arriving: turning a display on is something a person
+	 * does, and a background client that could do it would be a worse
+	 * problem than the one this solves. */
+	char inhibit_name[NOVI_INHIBITOR_NAME_MAX + 1] = "";
+	int inhibiting = idle_inhibit_active(server, inhibit_name,
+		sizeof(inhibit_name));
+	if (server->stay_awake && inhibiting == 0) {
+		snprintf(inhibit_name, sizeof(inhibit_name), "%s",
+			NOVI_STAY_AWAKE_KEY_NAME);
+	}
+	if (server->stay_awake || inhibiting > 0) {
+		server->idle_ms = 0;
+		/* Whatever the suspend path was waiting for no longer applies,
+		 * exactly as when a person touches the machine -- left set, a
+		 * half-finished lock wait would make the next idle period skip
+		 * straight to the give-up branch. */
+		server->suspend_lock_wait = -1;
+		/* On the TRANSITION only. This tick runs every five seconds
+		 * for as long as the film lasts, and a line each time is how a
+		 * log stops being read -- /init's twenty-two meaningless
+		 * module warnings, in a new place. */
+		if (!server->inhibited) {
+			server->inhibited = true;
+			wlr_log(WLR_INFO,
+				"idle: inhibited (%s%d client surface(s)), first is \"%s\"",
+				server->stay_awake ? "Super+A and " : "",
+				inhibiting, inhibit_name);
+		}
+		idle_publish(server);
+		idle_arm(server);
+		return 0;
+	}
+	if (server->inhibited) {
+		server->inhibited = false;
+		wlr_log(WLR_INFO, "idle: no longer inhibited -- the clock restarts");
+	}
 	if (!server->blanked && server->blank_after > 0 &&
 			server->idle_ms >= server->blank_after * 1000) {
 		server->blanked = true;
 		idle_set_outputs(server, false);
 	}
+	/* Suspend AFTER blanking is considered on the same tick, so a
+	 * machine whose two timeouts are equal blanks and then suspends
+	 * rather than suspending with the panel lit. Nothing enforces an
+	 * ordering between the two values, though: `power.suspend` shorter
+	 * than `power.blank` is a legitimate thing to declare (suspend
+	 * quickly, and never mind the panel) and refusing it would be this
+	 * program having an opinion about somebody's machine. */
+	if (server->suspend_after > 0 &&
+			server->idle_ms >= server->suspend_after * 1000) {
+		/* Lock FIRST, and wait for the surface to actually map.
+		 * Spawning novi-lockscreen and suspending in the same breath
+		 * is a race the machine loses: it can freeze before the
+		 * surface exists, and the resume then shows the desktop for
+		 * however long the client takes to come up -- which is the
+		 * whole thing the lock was for. server->locked flips when the
+		 * surface maps, so this loop has a real answer to wait on. */
+		if (idle_read_bool(NOVI_SUSPEND_LOCK_KEY, true) && !server->locked) {
+			if (server->suspend_lock_wait < 0) {
+				wlr_log(WLR_INFO,
+					"idle: locking before suspend (power.suspend.lock)");
+				run_spawn("NOVI_LOCK", NOVI_DEFAULT_LOCK);
+				server->suspend_lock_wait = 0;
+			} else if (++server->suspend_lock_wait >
+					NOVI_SUSPEND_LOCK_MAX_TICKS) {
+				/* NOT suspending, deliberately. The declaration was
+				 * "lock, then suspend"; doing the second half without
+				 * the first is not a degraded version of that, it is
+				 * the one outcome the key exists to prevent. A machine
+				 * that stays awake is recoverable by anyone who walks
+				 * up to it; a machine that suspended unlocked is not.
+				 *
+				 * idle_ms is reset so the retry is one full timeout
+				 * away rather than once every tick -- a lock screen
+				 * that cannot start should not produce a line every
+				 * five seconds forever. */
+				wlr_log(WLR_ERROR,
+					"idle: the lock screen did not appear within %d ticks -- "
+					"NOT suspending (set power.suspend.lock = off to suspend anyway)",
+					NOVI_SUSPEND_LOCK_MAX_TICKS);
+				server->suspend_lock_wait = -1;
+				server->idle_ms = 0;
+			}
+			idle_publish(server);
+			idle_arm(server);
+			return 0;
+		}
+		server->suspend_lock_wait = -1;
+		wlr_log(WLR_INFO, "idle: %d second(s) idle, suspending",
+			server->idle_ms / 1000);
+		/* Reset BEFORE the spawn, not after the machine comes back.
+		 * The compositor's clock does not advance while the kernel is
+		 * frozen, so on resume idle_ms would still be over the
+		 * threshold and the very next tick would suspend again --
+		 * a machine that cannot be woken up, from code that looks
+		 * correct. Resetting here means the timeout has to elapse
+		 * again, which is also what makes an untouched machine
+		 * re-suspend rather than staying awake forever. */
+		server->idle_ms = 0;
+		idle_publish(server);
+		run_spawn("NOVI_SUSPEND", NOVI_DEFAULT_SUSPEND);
+		idle_arm(server);
+		return 0;
+	}
 	idle_publish(server);
 	idle_arm(server);
 	return 0;
+}
+
+/* Super+A. Toggling it ON does not need to reset the idle clock --
+ * pressing a key already did, on the way in: every keypress runs
+ * idle_notify_activity() before handle_keybinding() sees it. What this
+ * does is stop the clock advancing from here. */
+static void stay_awake_toggle(struct novi_server *server) {
+	server->stay_awake = !server->stay_awake;
+	wlr_log(WLR_INFO, "idle: stay-awake %s (%s)",
+		server->stay_awake ? "ON" : "off", NOVI_STAY_AWAKE_KEY_NAME);
+	run_spawn(server->stay_awake ? "NOVI_AWAKE_ON" : "NOVI_AWAKE_OFF",
+		server->stay_awake ? NOVI_DEFAULT_AWAKE_ON : NOVI_DEFAULT_AWAKE_OFF);
+	/* Published here rather than left to the next tick: `novi-power
+	 * idle` run straight after the keypress must not still say `no`,
+	 * or the one tool that can report this state looks broken for up
+	 * to five seconds after the key that set it. */
+	idle_publish(server);
+}
+
+/* The client let go of its inhibitor, or the client went away. wlroots
+ * destroys the object either way, so this is the only unhook needed --
+ * an inhibitor cannot outlive the connection that asked for it, which
+ * is the property that makes the whole thing safe to honour at all. */
+static void idle_inhibitor_destroy(struct wl_listener *listener, void *data) {
+	struct novi_inhibitor *inhibitor =
+		wl_container_of(listener, inhibitor, destroy);
+	wl_list_remove(&inhibitor->destroy.link);
+	wl_list_remove(&inhibitor->link);
+	free(inhibitor);
+	/* Deliberately no idle_publish() here. The tick republishes within
+	 * five seconds anyway, and a client that takes and drops
+	 * inhibitors quickly would otherwise have the compositor writing
+	 * and renaming a file on ITS schedule instead of ours. */
+}
+
+static void server_new_idle_inhibitor(struct wl_listener *listener, void *data) {
+	struct novi_server *server =
+		wl_container_of(listener, server, new_idle_inhibitor);
+	struct wlr_idle_inhibitor_v1 *wlr_inhibitor = data;
+	struct novi_inhibitor *inhibitor = calloc(1, sizeof(*inhibitor));
+	if (inhibitor == NULL) {
+		/* Ignoring one inhibitor costs somebody a blanked screen
+		 * mid-film. Aborting the compositor costs them the session. */
+		wlr_log(WLR_ERROR,
+			"out of memory for an idle inhibitor -- ignoring it");
+		return;
+	}
+	inhibitor->server = server;
+	inhibitor->wlr_inhibitor = wlr_inhibitor;
+	inhibitor->destroy.notify = idle_inhibitor_destroy;
+	wl_signal_add(&wlr_inhibitor->events.destroy, &inhibitor->destroy);
+	wl_list_insert(&server->inhibitors, &inhibitor->link);
+	/* Logged on arrival, but NOT counted here: whether it is in effect
+	 * is a question about where its surface is, and at this moment the
+	 * client may not have mapped anything at all. */
+	wlr_log(WLR_INFO, "idle: a client took an idle inhibitor");
 }
 
 static void focus_toplevel(struct novi_toplevel *toplevel, struct wlr_surface *surface) {
@@ -955,6 +1467,11 @@ static void run_action(struct novi_server *server, enum novi_action action,
 		run_spawn("NOVI_LOCK", NOVI_DEFAULT_LOCK); break;
 	case NOVI_ACT_POWER_MENU:
 		run_spawn("NOVI_POWER_MENU", NOVI_DEFAULT_POWER_MENU); break;
+	case NOVI_ACT_THEMES:
+		run_spawn("NOVI_THEMES", NOVI_DEFAULT_THEMES); break;
+	case NOVI_ACT_NOTIFICATIONS:
+		run_spawn("NOVI_NOTIFICATIONS", NOVI_DEFAULT_NOTIFICATIONS); break;
+	case NOVI_ACT_STAY_AWAKE:     stay_awake_toggle(server); break;
 	case NOVI_ACT_QUIT:
 		/* Not part of RFC 0001's spec -- a development convenience for
 		 * exiting cleanly under QEMU. Listed in the sheet anyway: a key
@@ -3178,6 +3695,11 @@ static void server_new_xdg_popup(struct wl_listener *listener, void *data) {
 }
 
 int main(int argc, char *argv[]) {
+	/* Colours are a runtime table now (RFC 0030). Load the active
+	 * theme BEFORE anything computes a colour; on failure the
+	 * compiled-in defaults stay in force, so this cannot leave the
+	 * client worse off than it was. */
+	novi_theme_load();
 	/* Before anything can be spawned. See reap_children() for why this
 	 * exists and what it cost to not have it. */
 	struct sigaction sa_chld = {0};
@@ -3436,7 +3958,24 @@ int main(int argc, char *argv[]) {
 	 * period is measured from a session that actually exists, and read
 	 * once here so a machine that never sees input still blanks. */
 	mkdir("/run/novi", 0755);
-	server.blank_after = idle_read_timeout();
+	server.blank_after = idle_read_seconds(NOVI_BLANK_KEY,
+		NOVI_BLANK_DEFAULT_SECONDS);
+	server.suspend_after = idle_read_seconds(NOVI_SUSPEND_KEY,
+		NOVI_SUSPEND_DEFAULT_SECONDS);
+	server.suspend_lock_wait = -1;
+	/* zwp_idle_inhibit_manager_v1. The list is initialised whether or
+	 * not the global was created, so every walk of it below is safe on
+	 * a compositor that could not offer the protocol. */
+	wl_list_init(&server.inhibitors);
+	server.idle_inhibit_manager = wlr_idle_inhibit_v1_create(server.wl_display);
+	if (server.idle_inhibit_manager == NULL) {
+		wlr_log(WLR_ERROR, "could not create the idle-inhibit manager -- "
+			"no client will be able to ask the machine to stay awake");
+	} else {
+		server.new_idle_inhibitor.notify = server_new_idle_inhibitor;
+		wl_signal_add(&server.idle_inhibit_manager->events.new_inhibitor,
+			&server.new_idle_inhibitor);
+	}
 	idle_publish(&server);
 	server.idle_timer = wl_event_loop_add_timer(
 		wl_display_get_event_loop(server.wl_display), idle_timer_fire, &server);

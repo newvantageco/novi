@@ -73,6 +73,21 @@ JETBRAINS_MONO_VERSION="2.304"
 # and explicitly deferred adding it; this is that follow-up. OFL-1.1,
 # the same licence family as JetBrains Mono, so no new review.
 INTER_VERSION="4.1"
+# Source Serif 4, the browser's serif (RFC 0031's roadmap item). OFL-1.1,
+# like the other two, so no new licence review -- but unlike the other
+# two its release asset carries NO licence file, so 01-fetch.sh pulls
+# the OFL text separately and 09-foot.sh installs it beside the faces.
+#
+# 4.004 rather than something newer because that is the newest tag with
+# a release ASSET: this environment can download a release asset and
+# cannot download a source archive, which is the same constraint that
+# decided how Inter and JetBrains Mono are fetched.
+#
+# Chosen over Noto Serif and the Google Fonts families because it is a
+# screen serif designed alongside a sans of the same metrics tradition,
+# it ships static TTFs (this build deliberately avoids variable fonts --
+# see 09-foot.sh), and it has the four faces a browser actually needs.
+SOURCE_SERIF_VERSION="4.004"
 
 # e2fsprogs: real mke2fs and e2fsck. BusyBox's mke2fs writes ext2 with
 # no journal, which on real hardware turns an unclean shutdown into a
@@ -110,6 +125,14 @@ CACERT_SHA256="ab3ee3651977a4178a702b0b828a4ee7b2bbb9127235b0ab740e2e15974bf5db"
 # Both are packages, never base image.
 OPENSSH_VERSION="9.9p2"
 GIT_VERSION="2.47.1"
+
+# NetSurf (RFC 0032). A web browser, and until it there was no way to
+# view a web page on this system at all. `netsurf-all` bundles its
+# thirteen own libraries; everything it needs from outside -- libcurl,
+# OpenSSL, libpng, zlib, expat, libwayland -- this project already
+# ships as packages, two of them only because RFC 0020 and RFC 0027
+# put them there.
+NETSURF_VERSION="3.11"
 
 # OpenSSL (RFC 0027). A PACKAGE, never the base image, and never on
 # the package-verification path -- novi-verify stays static, ~10 KB and
@@ -241,15 +264,15 @@ harden_flags() {
 # ── require_desktop_headers ───────────────────────────────────────────
 #
 # Every stage that cross-compiles a Wayland client needs the headers and
-# .pc files that 06-wayland.sh put in the rootfs. 41-desktop-split.sh
+# .pc files that 06-wayland.sh put in the rootfs. 51-desktop-split.sh
 # takes them out again (RFC 0015 made them a package), so in a tree
 # where a full build has already run, rebuilding one client stops with
 # four "No such file or directory" lines from four different headers and
 # no indication of why or what to do.
 #
-# That is not a hypothetical. Chaining a rebuild into 40-repo.sh without
+# That is not a hypothetical. Chaining a rebuild into 50-repo.sh without
 # checking it succeeded packaged a rootfs with no desktop in it, and
-# 41-desktop-split.sh then deleted from the base exactly what that empty
+# 51-desktop-split.sh then deleted from the base exactly what that empty
 # manifest described -- leaving no desktop in the image AND none in the
 # repository. Recovering meant re-running the stages, which is the
 # documented mechanism and took fifteen minutes. One clear line at the
@@ -260,13 +283,13 @@ require_desktop_headers() {
     fi
     echo "ERROR: the desktop headers are not in ${ROOTFS}." >&2
     echo "" >&2
-    echo "  41-desktop-split.sh has removed them (they ship as the" >&2
+    echo "  51-desktop-split.sh has removed them (they ship as the" >&2
     echo "  novi-headers package). Put them back before building a" >&2
     echo "  client against them:" >&2
     echo "" >&2
     echo "      bash scripts/restore-build-inputs.sh" >&2
     echo "" >&2
-    echo "  Then re-run this stage, and re-run 40-repo.sh and" >&2
-    echo "  41-desktop-split.sh before making an image." >&2
+    echo "  Then re-run this stage, and re-run 50-repo.sh and" >&2
+    echo "  51-desktop-split.sh before making an image." >&2
     exit 1
 }

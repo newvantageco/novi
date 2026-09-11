@@ -88,7 +88,7 @@ ${BUILD_DIR}/stage-devtools/openssl   the package
 
 Never `${ROOTFS}`, per decision 1. `38-python.sh` points
 `--with-openssl` at the first, and the second is published by
-`43-devtools-repo.sh` with no change to that stage — it already globs
+`53-devtools-repo.sh` with no change to that stage — it already globs
 every staged directory carrying a `MANIFEST`.
 
 The stage number is **32**, beside `31-mbedtls.sh`: two TLS

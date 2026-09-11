@@ -20,11 +20,35 @@
  * 0xFF00, so pure white would come out 0.4% grey and full alpha would
  * be very slightly transparent. Several of the hand-written
  * pixman_color_t literals in this repo had exactly that shift in them.
+ *
+ * ── THE COLOURS ARE RUNTIME NOW; EVERYTHING ELSE IS NOT ────────────
+ *
+ * RFC 0030. Each colour token reads a field of `novi_theme`, a struct
+ * a client fills from a theme file at startup (novi_theme_load()).
+ * Type, spacing and radius stay compile-time constants, deliberately:
+ * a theme that can move a 12px gap to 11 is a theme that can break a
+ * layout, and §3 of the design language exists precisely to stop ad
+ * hoc numbers. What a theme may change is what a theme is for --
+ * colour.
+ *
+ * The struct is initialised with the palette below, so a client that
+ * never calls novi_theme_load(), or one whose theme file is missing or
+ * unreadable, draws exactly what it drew before. There is no state in
+ * which this system has no colours.
+ *
+ * The cost is that a token is no longer a constant expression, so
+ * `static const pixman_color_t X = NOVI_PIX(TOKEN);` at file scope no
+ * longer compiles. Those became `#define X NOVI_PIX(TOKEN)` -- a
+ * compound literal evaluated at each use, which is what they always
+ * morally were. Do not reintroduce a file-scope `static const`
+ * initialised from a token; the compiler will tell you, but the
+ * message ("initializer element is not constant") does not explain
+ * itself.
  */
 #ifndef NOVI_THEME_H
 #define NOVI_THEME_H
 
-#include <pixman.h>
+#include <stdbool.h>
 #include <stdint.h>
 
 #define NOVI_R(c) (((c) >> 16) & 0xff)
@@ -32,44 +56,156 @@
 #define NOVI_B(c) ((c) & 0xff)
 #define NOVI_EXPAND(v) ((uint16_t)((v) * 0x101))
 
+/* PIXMAN IS ONLY NEEDED FOR NOVI_PIX(), and NOVI_PIX() is only needed
+ * by clients that draw text.
+ *
+ * The palette struct and the loader in theme.c are plain uint32_t and
+ * stdio -- theme.c does not name pixman once. The unconditional
+ * include here nonetheless forced the dependency on every consumer,
+ * which went unnoticed for as long as every consumer was a Wayland
+ * client that had pixman anyway. It surfaced when common/theme-test.c
+ * became the first one that was not: `pixman.h: No such file or
+ * directory` on a CI runner with no graphics libraries, from a test
+ * that checks a list of hex values.
+ *
+ * Define NOVI_THEME_NO_PIXMAN to get the palette and the loader
+ * without it. Do not define it in a client -- you want the macro. */
+#ifndef NOVI_THEME_NO_PIXMAN
+#include <pixman.h>
+
 /* A pixman_color_t for any 0xAARRGGBB token, opaque. */
 #define NOVI_PIX(c) ((pixman_color_t){ \
 	.red   = NOVI_EXPAND(NOVI_R(c)), \
 	.green = NOVI_EXPAND(NOVI_G(c)), \
 	.blue  = NOVI_EXPAND(NOVI_B(c)), \
 	.alpha = 0xffff })
+#endif
 
 /* ── §1 Colour ─────────────────────────────────────────────────── */
 
-/* Background layers. Each a fixed step lighter than the one below, so
- * elevation reads from colour alone before any shadow is drawn. */
-#define NOVI_BG_BASE        0xff0a0a0fu /* desktop, behind everything */
-#define NOVI_BG_PANEL       0xff15161du /* top bar, non-floating chrome */
-#define NOVI_BG_CARD        0xff1b1c26u /* floating cards, toasts, windows */
-#define NOVI_BG_CARD_RAISED 0xff232430u /* a card on a card; hovered row */
+/* One field per token. The names match the theme-file keys exactly
+ * (bg.base <-> bg_base), so the loader is a table and not a switch
+ * with twenty branches -- see common/theme.c. */
+struct novi_palette {
+	/* Background layers. Each a fixed step lighter than the one
+	 * below, so elevation reads from colour alone before any shadow
+	 * is drawn. */
+	uint32_t bg_base;         /* desktop, behind everything */
+	uint32_t bg_panel;        /* top bar, non-floating chrome */
+	uint32_t bg_card;         /* floating cards, toasts, windows */
+	uint32_t bg_card_raised;  /* a card on a card; hovered row */
 
-/* Accent. One hue, used sparingly -- it is a signal colour, never a
- * large fill. */
-#define NOVI_ACCENT          0xff2dd4bfu
-#define NOVI_ACCENT_HOVER    0xff5eead4u
-#define NOVI_ACCENT_ACTIVE   0xff14b8a6u /* pressed: DARKER, so it sinks in */
-#define NOVI_ACCENT_SUBTLE   0xff17302cu /* wash behind a selected row */
-#define NOVI_TEXT_ON_ACCENT  0xff071310u
+	/* Accent. One hue, used sparingly -- it is a signal colour,
+	 * never a large fill. */
+	uint32_t accent;
+	uint32_t accent_hover;
+	uint32_t accent_active;   /* pressed: DARKER, so it sinks in */
+	uint32_t accent_subtle;   /* wash behind a selected row */
+	uint32_t text_on_accent;
 
-/* Text. */
-#define NOVI_TEXT_PRIMARY   0xfff2f3f7u
-#define NOVI_TEXT_SECONDARY 0xffa3a7b7u
-#define NOVI_TEXT_MUTED     0xff6b6f80u
+	/* Text. */
+	uint32_t text_primary;
+	uint32_t text_secondary;
+	uint32_t text_muted;
 
-/* Borders and dividers. */
-#define NOVI_BORDER_SUBTLE  0xff292b35u
-#define NOVI_BORDER_STRONG  0xff3a3d4au
+	/* Borders and dividers. */
+	uint32_t border_subtle;
+	uint32_t border_strong;
 
-/* Status. Deliberately no "info": accent already means notable, and a
- * second blue-ish hue beside teal would only compete with it. */
-#define NOVI_STATUS_SUCCESS 0xff22c55eu
-#define NOVI_STATUS_WARNING 0xfff59e0bu
-#define NOVI_STATUS_ERROR   0xffef4444u
+	/* Status. Deliberately no "info": accent already means notable,
+	 * and a second blue-ish hue beside teal would only compete. */
+	uint32_t status_success;
+	uint32_t status_warning;
+	uint32_t status_error;
+};
+
+/* The live palette. Defined in common/theme.c, pre-filled with the
+ * design language's own values, overwritten in place by
+ * novi_theme_load(). */
+extern struct novi_palette novi_theme;
+
+/* Read the active theme and overwrite `novi_theme`.
+ *
+ * Never fails and never partially applies a broken file: it parses
+ * into a copy and commits only if the file was readable. Call it once,
+ * early in main(), BEFORE anything computes a colour. Returns the name
+ * of the theme that was applied, or NULL if the built-in defaults are
+ * still in force -- clients need not check, and the return exists so a
+ * tool can report which theme is live. */
+const char *novi_theme_load(void);
+
+/* Reload only if the published theme has CHANGED since the last call.
+ *
+ * Returns true if the palette was replaced, so a caller that repaints
+ * on a timer can do `if (novi_theme_reload()) redraw();` without
+ * re-parsing a file every tick. The check is one stat(2); the parse
+ * happens only on a real change.
+ *
+ * This is what makes a theme switch visible on a long-lived surface
+ * (the panel, the background) without restarting it. Everything else
+ * still picks the palette up when it next starts -- a window that
+ * repaints only on input has nowhere to hang this. */
+bool novi_theme_reload(void);
+
+/* Load a NAMED theme into `out` without touching the live palette.
+ *
+ * `out` starts from the BUILT-IN palette, so a theme file naming only
+ * three colours still yields a complete one, and reading theme X gives
+ * the same answer whichever theme happens to be running. Returns true
+ * if the file was readable.
+ *
+ * This exists for a picker. Showing a list of theme NAMES is not
+ * showing a person their themes, and the only way to draw a swatch of
+ * one you are not running is to read it. */
+bool novi_theme_read(const char *name, struct novi_palette *out);
+
+/* The same read, from a directory the caller names.
+ *
+ * novi_theme_read() is this with NOVI_THEME_DIR, which is an absolute
+ * path on the TARGET -- so a host-side tool that wants to inspect the
+ * palettes as they sit in the repository has no way in otherwise.
+ * common/theme-test.c is that tool. The directory is a parameter
+ * rather than a test-only entry point because a test that reaches into
+ * a private function is testing something the product does not do. */
+bool novi_theme_read_from(const char *dir, const char *name,
+			  struct novi_palette *out);
+
+/* Where the active theme's name is published, by novi-state's
+ * converger for display.theme. A file rather than an environment
+ * variable, for the same reason the network interface and the health
+ * verdict are files (RFC 0009, RFC 0014): a client that starts later
+ * has to be able to find out. */
+#define NOVI_THEME_ACTIVE "/run/novi/theme"
+/* The palette compiled into common/theme.c, by name. It is here so
+ * that the ONE place that knows "the built-in colours are axiom's" is
+ * this header: a picker showing which theme is live has to be able to
+ * say so on a machine where display.theme was never declared and
+ * nothing was ever published, and the alternative is that name
+ * appearing a second time inside the picker. */
+#define NOVI_THEME_DEFAULT "axiom"
+#define NOVI_THEME_DIR    "/usr/share/novi/themes"
+
+#define NOVI_BG_BASE        (novi_theme.bg_base)
+#define NOVI_BG_PANEL       (novi_theme.bg_panel)
+#define NOVI_BG_CARD        (novi_theme.bg_card)
+#define NOVI_BG_CARD_RAISED (novi_theme.bg_card_raised)
+
+#define NOVI_ACCENT          (novi_theme.accent)
+#define NOVI_ACCENT_HOVER    (novi_theme.accent_hover)
+#define NOVI_ACCENT_ACTIVE   (novi_theme.accent_active)
+#define NOVI_ACCENT_SUBTLE   (novi_theme.accent_subtle)
+#define NOVI_TEXT_ON_ACCENT  (novi_theme.text_on_accent)
+
+#define NOVI_TEXT_PRIMARY   (novi_theme.text_primary)
+#define NOVI_TEXT_SECONDARY (novi_theme.text_secondary)
+#define NOVI_TEXT_MUTED     (novi_theme.text_muted)
+
+#define NOVI_BORDER_SUBTLE  (novi_theme.border_subtle)
+#define NOVI_BORDER_STRONG  (novi_theme.border_strong)
+
+#define NOVI_STATUS_SUCCESS (novi_theme.status_success)
+#define NOVI_STATUS_WARNING (novi_theme.status_warning)
+#define NOVI_STATUS_ERROR   (novi_theme.status_error)
 
 /* ── §2 Type ───────────────────────────────────────────────────────
  *

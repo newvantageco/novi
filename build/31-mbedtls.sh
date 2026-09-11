@@ -88,7 +88,7 @@ fi
 
 # ── Stage the runtime half as a package ───────────────────────────────
 # stage_pkg's twin lives in 28-native-toolchain.sh and 35-devtools.sh;
-# this shares STAGE_DIR with the latter so 43-devtools-repo.sh
+# this shares STAGE_DIR with the latter so 53-devtools-repo.sh
 # publishes all of it in one pass.
 d="${STAGE_DIR}/mbedtls"
 rm -rf "$d"; mkdir -p "$d/files/usr/lib"

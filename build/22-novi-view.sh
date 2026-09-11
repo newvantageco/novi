@@ -7,9 +7,9 @@
 # build/14-novi-settings.sh -- see that script's comments.
 #
 # Numbered 22 so it runs after 21-imagelibs.sh, which builds the
-# libpng it links, and before 40-repo.sh packages it and
-# 41-desktop-split.sh removes the headers. Same constraint as every
-# other GUI client -- see 40-repo.sh's header for why those two stages
+# libpng it links, and before 50-repo.sh packages it and
+# 51-desktop-split.sh removes the headers. Same constraint as every
+# other GUI client -- see 50-repo.sh's header for why those two stages
 # live at the end.
 # ============================================================
 set -euo pipefail
@@ -66,7 +66,7 @@ mkdir -p "${APPS_DIR}"
 cat > "${APPS_DIR}/novi-view.app" <<'EOF'
 name=Image Viewer
 exec=/usr/bin/novi-view
-icon=globe
+icon=image
 description=View a PNG, BMP or PPM image
 EOF
 echo "   done: ${APPS_DIR}/novi-view.app"

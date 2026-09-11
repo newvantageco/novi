@@ -64,6 +64,7 @@
  * dispatches from it. A sheet kept separately from the bindings it
  * documents drifts, and a drifted sheet is worse than none. */
 #include "../common/keybindings.h"
+#include "../common/notifications.h"
 #include "../common/clipboard.h"
 #include "../common/text.h"
 #include "../common/theme.h"
@@ -113,6 +114,13 @@
  * Derived from the table's own length rather than written down, so
  * adding a binding cannot silently push one off the bottom. */
 #define MAX_ROWS_KEYS ((int)NOVI_BINDINGS_COUNT)
+/* Notifications are capped well below NOVI_HIST_MAX on purpose. The
+ * card would be 1600px tall at fifty rows, which fits no laptop panel
+ * -- and the list already reports what it is not showing ("N more --
+ * keep typing to narrow"), so a cap here is a bounded card rather
+ * than a silent elision. The shortcut sheet is still the taller mode,
+ * so CARD_MAX_HEIGHT is unaffected. */
+#define MAX_ROWS_NOTIF 12
 #define MAX_ROWS_ANY (MAX_ROWS_KEYS > MAX_ROWS ? MAX_ROWS_KEYS : MAX_ROWS)
 #define LIST_PAD NOVI_SP_SM
 /* A strip under the list, present only when there are matches the list
@@ -167,6 +175,24 @@
 #define SHADOW_MARGIN (SHADOW_FEATHER + SHADOW_OFFSET_Y)
 #define BUFFER_WIDTH (CARD_WIDTH + 2 * SHADOW_MARGIN)
 #define BUFFER_HEIGHT (CARD_MAX_HEIGHT + 2 * SHADOW_MARGIN)
+/* The sheet's height is DERIVED from the binding table, which means
+ * adding a binding grows the card -- and there is a height past which
+ * it no longer fits the panel this file already worried about. The
+ * comment on ROW_H_KEYS records the arithmetic (16 rows at 40px did
+ * not fit 1366x768); nothing enforced it, so the row that stopped
+ * fitting would have shipped as a card taller than the screen with a
+ * header and a first row off the top edge.
+ *
+ * 768 is the shortest panel worth designing for, and the buffer -- not
+ * the card -- is what has to fit, because the shadow margin is part of
+ * the surface. There is no scroll in this mode by design (a reference
+ * list that hides rows is the defect this file was fixed for once
+ * already), so the honest response to outgrowing the screen is to
+ * stop the build and make somebody choose: drop a row, shrink
+ * ROW_H_KEYS, or add scrolling on purpose. */
+_Static_assert(BUFFER_HEIGHT <= 768,
+	"the shortcut sheet no longer fits a 1366x768 panel -- see the "
+	"comment above: shrink ROW_H_KEYS, or give --keys a scroll window");
 
 #define INPUT_MAX 127
 
@@ -206,6 +232,20 @@ static int resolve_icon_name(const char *name) {
 		{"settings", ICON_SETTINGS},
 		{"shield", ICON_SHIELD},
 		{"keyboard", ICON_KEYBOARD},
+		{"image", ICON_IMAGE},
+		/* The rest of the names novi-notifyd accepts (RFC 0024's own
+		 * table), so a notification history row draws the icon its
+		 * sender asked for. Without these the column was empty for
+		 * two rows out of three and full for the third, which reads
+		 * as a rendering bug rather than as the deliberate "an
+		 * unknown icon name is no icon" rule -- that rule is about
+		 * names nobody defined, not about ones this table simply
+		 * never learned. Found by screendumping the list. */
+		{"drive", ICON_HARD_DRIVE},
+		{"eject", ICON_EJECT},
+		{"wifi", ICON_WIFI},
+		{"power", ICON_POWER},
+		{"file", ICON_FILE},
 	};
 	for (size_t i = 0; i < sizeof(NAMES) / sizeof(NAMES[0]); i++) {
 		if (strcmp(NAMES[i].name, name) == 0) {
@@ -226,6 +266,8 @@ enum result_kind {
 	RESULT_SYMBOL,
 	RESULT_POWER,
 	RESULT_KEY,
+	RESULT_THEME,
+	RESULT_NOTIFICATION,
 };
 
 struct result {
@@ -241,7 +283,26 @@ struct result {
 	 * surfaced in this repo, one of which had been silently cutting a
 	 * .app descriptor's exec= line. */
 	char copy[32];
+	/* Notification rows only: the body, drawn muted after the summary
+	 * on the same line. It is a SEPARATE field rather than
+	 * "summary — body" packed into `primary`, for two reasons. The
+	 * mechanical one is that `primary` is 64 bytes and a body is up to
+	 * 160, so packing silently threw most of it away before layout
+	 * ever saw it -- -Wformat-truncation said so, which is the third
+	 * time that warning has caught a real loss in this repo. The
+	 * readable one is that a summary and its body are not equals:
+	 * bold-then-muted is how every desktop that has this list draws
+	 * it, and one run-on string cannot express that. */
+	char detail[NOVI_HIST_BODY + 1];
 	int icon_id;                    /* enum novi_icon_id, or -1 */
+	/* Theme rows draw a swatch in the icon column instead of a glyph:
+	 * this theme's own ground with its own accent inside it. A list of
+	 * names is not a person seeing their themes, which is the half of
+	 * RFC 0030's picker that names alone could not do. `has_swatch`
+	 * rather than a sentinel colour, because 0 is a legal colour. */
+	bool has_swatch;
+	uint32_t swatch_bg;
+	uint32_t swatch_accent;
 	uint32_t codepoint;             /* symbol rows: drawn in the icon column */
 	const struct app_entry *app;    /* app rows: what Enter launches */
 	/* Power rows: the command Enter runs. A pointer to a string
@@ -290,6 +351,12 @@ struct novi_launcher {
 	 * dispatches from -- see that header for why a sheet maintained
 	 * separately from the bindings was not acceptable. */
 	bool keys_mode;
+	bool themes_mode;
+	/* --notifications: what this desktop said while you were looking
+	 * somewhere else (RFC 0034). Rows come from the file novi-notifyd
+	 * publishes, never from a second socket -- a reader that starts
+	 * later has to be able to find out, which is what a file is. */
+	bool notif_mode;
 	struct novi_clipboard *clipboard;
 	uint32_t last_key_serial;
 
@@ -753,6 +820,141 @@ static const struct {
 	{ "Shut down", "poweroff",        "/sbin/poweroff" },
 };
 
+/* ── Themes ────────────────────────────────────────────────────────
+ *
+ * RFC 0030 made the palette a runtime table and left choosing one to
+ * `novi-state set display.theme <name>` typed at a shell -- which is
+ * the roadmap item that said choosing a palette from a list of names
+ * without seeing it is not choosing. This is half of that fixed: the
+ * list, at least, is a list of what is actually installed rather than
+ * something you have to know.
+ *
+ * SCANNED, NEVER HARDCODED. A menu naming four themes would be a menu
+ * that lies the moment somebody drops a fifth into the directory, and
+ * a hardcoded list beside a directory of files is the drift this
+ * project keeps writing tests to prevent.
+ */
+#define THEME_DIR "/usr/share/novi/themes"
+#define THEME_ACTIVE "/run/novi/theme"
+/* 31, not 32, and that is `copy`'s size minus its NUL.
+ *
+ * `copy` is what apply_theme() acts on, and it is 32 bytes for the
+ * calculator's own overflow reasoning (see struct result). A name that
+ * did not fit would be silently truncated there and would APPLY A
+ * DIFFERENT THEME than the row the person selected -- or none. GCC's
+ * -Wformat-truncation said so on the first build; CLAUDE.md already
+ * records that -O2 turning this warning on found three real bugs in
+ * this repository, one of them cutting a .app descriptor's exec= line.
+ *
+ * scan_themes() skips anything longer rather than truncating it, so a
+ * name that cannot be applied correctly is never offered. */
+#define THEME_NAME_MAX 31
+
+struct theme_entry {
+	char name[THEME_NAME_MAX + 1];
+};
+
+static int theme_cmp(const void *a, const void *b) {
+	return strcmp(((const struct theme_entry *)a)->name,
+		((const struct theme_entry *)b)->name);
+}
+
+/* Fills `out`, returns how many were found. Sorted, because readdir
+ * order is filesystem order and a menu whose rows move between
+ * openings is one you cannot build muscle memory for. */
+static size_t scan_themes(struct theme_entry *out, size_t cap) {
+	DIR *d = opendir(THEME_DIR);
+	size_t n = 0;
+	if (d == NULL) {
+		return 0;
+	}
+	struct dirent *e;
+	while ((e = readdir(d)) != NULL && n < cap) {
+		const char *dot = strrchr(e->d_name, '.');
+		if (dot == NULL || strcmp(dot, ".theme") != 0) {
+			continue;
+		}
+		size_t len = (size_t)(dot - e->d_name);
+		if (len == 0 || len > THEME_NAME_MAX) {
+			continue;
+		}
+		memcpy(out[n].name, e->d_name, len);
+		out[n].name[len] = '\0';
+		n++;
+	}
+	closedir(d);
+	qsort(out, n, sizeof(out[0]), theme_cmp);
+	return n;
+}
+
+/* The name novi-state published, or "" if none. Not the DECLARED value
+ * out of system.conf: what is on screen is what the clients read, and
+ * those are different the moment somebody sets the key without
+ * applying it. */
+static void active_theme(char *out, size_t cap) {
+	FILE *f = fopen(THEME_ACTIVE, "re");
+	out[0] = '\0';
+	if (f != NULL) {
+		if (fgets(out, (int)cap, f) != NULL) {
+			out[strcspn(out, "\r\n")] = '\0';
+		}
+		fclose(f);
+	}
+	/* Nothing published means display.theme was never declared, which
+	 * is the SHIPPED state -- and the desktop is still drawing a
+	 * palette, the one compiled into common/theme.c. Reporting no
+	 * active theme there would leave the picker showing four rows and
+	 * no answer to "which of these am I looking at", on the exact
+	 * machine most people open it on. */
+	if (out[0] == '\0') {
+		snprintf(out, cap, "%s", NOVI_THEME_DEFAULT);
+	}
+}
+
+/* Declare it, then apply it -- and it has to be one child, because two
+ * spawns race and `apply` would run against a document `set` had not
+ * finished writing.
+ *
+ * /bin/sh rather than the launcher's own spawn_command(), which splits
+ * on spaces and cannot express a two-command sequence. The name is
+ * re-validated here even though novi-state validates it too: it is
+ * about to be pasted into a shell command line, and the check is four
+ * lines. It cannot fail in practice -- scan_themes() built it from a
+ * filename -- which is exactly the kind of "cannot happen" that stops
+ * being true when somebody adds a second caller. */
+static void apply_theme(const char *name) {
+	char cmd[160];
+
+	for (const char *p = name; *p != '\0'; p++) {
+		bool ok = (*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+			(*p >= '0' && *p <= '9') || *p == '-' || *p == '_' || *p == '.';
+		if (!ok) {
+			return;
+		}
+	}
+	if (name[0] == '\0' || name[0] == '.') {
+		return;
+	}
+	if ((size_t)snprintf(cmd, sizeof(cmd),
+			"novi-state set display.theme %s && novi-state apply", name)
+			>= sizeof(cmd)) {
+		return;
+	}
+
+	pid_t pid = fork();
+	if (pid < 0) {
+		return;
+	}
+	if (pid == 0) {
+		setsid();
+		execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
+		_exit(127);
+	}
+	/* novi-shell reaps it: this process is about to exit anyway, and
+	 * waiting here would hold the overlay on screen for the length of
+	 * an `apply`. */
+}
+
 /* ── The result list ───────────────────────────────────────────────
  *
  * This used to be find_app_match(): the FIRST app whose name contained
@@ -794,6 +996,103 @@ static void rebuild_results(struct novi_launcher *state) {
 			snprintf(r.primary, sizeof(r.primary), "%s", POWER_ACTIONS[i].name);
 			snprintf(r.meta, sizeof(r.meta), "%s", POWER_ACTIONS[i].meta);
 			push_result(state, &r);
+		}
+	} else if (state->themes_mode) {
+		struct theme_entry themes[32];
+		char active[THEME_NAME_MAX + 1];
+		size_t n = scan_themes(themes, sizeof(themes) / sizeof(themes[0]));
+		active_theme(active, sizeof(active));
+		for (size_t i = 0; i < n; i++) {
+			if (state->input_len > 0 &&
+					!app_name_matches(themes[i].name, state->input)) {
+				continue;
+			}
+			struct novi_palette pal;
+			struct result r = { .kind = RESULT_THEME, .icon_id = -1 };
+			/* Read from the file, not from the live palette: the
+			 * swatch has to show what THAT theme looks like
+			 * whichever one is currently running. */
+			if (novi_theme_read(themes[i].name, &pal)) {
+				r.has_swatch = true;
+				r.swatch_bg = pal.bg_card;
+				r.swatch_accent = pal.accent;
+			}
+			/* An explicit precision, not a bare %s: the name lives in
+			 * an array element and the compiler cannot prove its NUL
+			 * is inside that element, so it assumes the string may
+			 * run to the end of the whole array. */
+			snprintf(r.primary, sizeof(r.primary), "%.*s",
+				THEME_NAME_MAX, themes[i].name);
+			/* The active one says so. A picker that cannot tell you
+			 * which one you are looking at is a list, not a picker. */
+			snprintf(r.meta, sizeof(r.meta), "%s",
+				strcmp(themes[i].name, active) == 0 ? "active" : "");
+			snprintf(r.copy, sizeof(r.copy), "%.*s",
+				THEME_NAME_MAX, themes[i].name);
+			push_result(state, &r);
+		}
+	} else if (state->notif_mode) {
+		/* Read on every keystroke rather than once at start, and that
+		 * is deliberate: this window is open while the machine is
+		 * still running, and a notification arriving while you are
+		 * reading the list should be in the list. It is one small
+		 * file and the alternative is a stale view that looks live.
+		 *
+		 * A file that is missing is not an error -- novi-notifyd may
+		 * simply not have been told anything yet, or may not be
+		 * installed. The empty state below says which. */
+		FILE *f = fopen(NOVI_HIST_PATH, "r");
+		if (f != NULL) {
+			char line[NOVI_HIST_SUMMARY + NOVI_HIST_BODY + 96];
+			int64_t now = (int64_t)time(NULL);
+			while (fgets(line, sizeof(line), f) != NULL) {
+				struct novi_hist_entry h;
+				/* A line this build cannot parse is SKIPPED, not
+				 * fatal and not drawn as a broken row: the file is
+				 * written by another program, possibly another
+				 * version of it, and refusing to show the twenty
+				 * records that are fine because one is not would be
+				 * the wrong trade every time. */
+				if (!novi_hist_parse(line, &h)) {
+					continue;
+				}
+				if (state->input_len > 0 &&
+						!app_name_matches(h.summary, state->input) &&
+						!app_name_matches(h.body, state->input)) {
+					continue;
+				}
+				struct result r = { .kind = RESULT_NOTIFICATION,
+					.icon_id = resolve_icon_name(h.icon) };
+				/* Summary and body on one line, because a notification's
+				 * body is usually the substance ("MYSTICK at
+				 * /run/media/MYSTICK") and a history showing only
+				 * summaries would answer "something about a volume".
+				 * One row per notification is the collapsed list every
+				 * desktop that has this shows. */
+				/* An explicit precision, not a bare %s: a summary can
+				 * be 96 bytes and `primary` is 64, so the compiler is
+				 * right that this truncates. Saying so here makes the
+				 * cut deliberate rather than something
+				 * -Wformat-truncation reports about every build --
+				 * and the operative limit is the row's WIDTH anyway,
+				 * which bites long before 63 characters. The history
+				 * file keeps the whole summary either way. */
+				snprintf(r.primary, sizeof(r.primary), "%.*s",
+					(int)sizeof(r.primary) - 1, h.summary);
+				snprintf(r.detail, sizeof(r.detail), "%s", h.body);
+				char age[16];
+				novi_hist_age(age, sizeof(age), h.when, now);
+				/* Critical says so, because "when" is not the
+				 * interesting thing about the one notification that
+				 * was never allowed to expire (RFC 0024). */
+				if (h.urgency == 2) {
+					snprintf(r.meta, sizeof(r.meta), "critical  %s", age);
+				} else {
+					snprintf(r.meta, sizeof(r.meta), "%s", age);
+				}
+				push_result(state, &r);
+			}
+			fclose(f);
 		}
 	} else if (state->keys_mode) {
 		/* Straight off the shared table, in its own order -- the sheet
@@ -874,6 +1173,12 @@ static void rebuild_results(struct novi_launcher *state) {
 	if (state->result_count > 0) {
 		state->card_h += 1 + 2 * LIST_PAD +
 			(int)state->result_count * state->row_h;
+	} else if (state->notif_mode) {
+		/* Room for the one line that says why the list is empty.
+		 * Without this the card is header-height, the explanation is
+		 * drawn below its bottom edge, and the mode looks exactly as
+		 * broken as the silence it was written to replace. */
+		state->card_h += 1 + 2 * LIST_PAD + state->row_h;
 	}
 	if (state->match_total > state->result_count) {
 		state->card_h += MORE_H;
@@ -896,6 +1201,9 @@ static bool activate_selected(struct novi_launcher *state) {
 	case RESULT_POWER:
 		spawn_command(r->command);
 		return false;
+	case RESULT_THEME:
+		apply_theme(r->copy);
+		return false;
 	case RESULT_CALC:
 	case RESULT_SYMBOL:
 		copy_to_clipboard(state, r->copy);
@@ -906,6 +1214,15 @@ static bool activate_selected(struct novi_launcher *state) {
 		 * has just read the key they wanted wants next. Deliberately
 		 * not "perform this shortcut" -- half of them act on the
 		 * focused window, and the overlay is the focused window. */
+		return false;
+	case RESULT_NOTIFICATION:
+		/* Same: the row is the answer. There is deliberately nothing
+		 * to click through to -- a notification here has already
+		 * happened, and the sender told us a summary and a body, not
+		 * an action. Inventing one (open the volume, rerun the
+		 * install) would mean guessing at intent from text, which is
+		 * the kind of cleverness that is wrong about ten percent of
+		 * the time and unexplainable every time. */
 		return false;
 	}
 	return false;
@@ -1138,10 +1455,30 @@ static void render(struct novi_launcher *state, uint32_t *px,
 		state->input_len > 0 ? NOVI_TEXT_SECONDARY : NOVI_TEXT_MUTED);
 	for (size_t i = 0; i < state->result_count; i++) {
 		const struct result *r = &state->results[i];
+		int y = list_top + (int)i * state->row_h;
+		if (r->has_swatch) {
+			/* A paint chip: the theme's card colour with its accent
+			 * inside, and a border so a light theme's near-white
+			 * ground does not vanish into a light row. Squares
+			 * rather than icons because draw_icon() blends a
+			 * monochrome glyph in ONE colour -- it has no way to
+			 * express two, which is the whole information here. */
+			int sx = ICON_CENTER_X - RESULT_ICON_SIZE / 2;
+			int sy = y + (state->row_h - RESULT_ICON_SIZE) / 2;
+			int sz = RESULT_ICON_SIZE;
+			int in = sz / 2;
+			draw_rect(card_buf, cw, cw, card_h, sx, sy, sz, sz,
+				NOVI_BORDER_STRONG);
+			draw_rect(card_buf, cw, cw, card_h, sx + 1, sy + 1,
+				sz - 2, sz - 2, r->swatch_bg);
+			draw_rect(card_buf, cw, cw, card_h,
+				sx + (sz - in) / 2, sy + (sz - in) / 2, in, in,
+				r->swatch_accent);
+			continue;
+		}
 		if (r->icon_id < 0) {
 			continue;
 		}
-		int y = list_top + (int)i * state->row_h;
 		draw_icon(card_buf, cw, cw, (uint32_t)card_h,
 			ICON_CENTER_X - RESULT_ICON_SIZE / 2,
 			y + (state->row_h - RESULT_ICON_SIZE) / 2,
@@ -1165,10 +1502,17 @@ static void render(struct novi_launcher *state, uint32_t *px,
 			20, NOVI_ACCENT);
 		novi_text_draw(card, state->font, TEXT_X + NOVI_SP_SM,
 			input_baseline,
+			/* One test per mode. This chain used to name themes_mode
+			 * twice, so its second branch ("Pick a theme") could
+			 * never run -- harmless, and exactly the shape of thing
+			 * that stops being harmless when somebody adds a mode
+			 * after it. */
+			state->themes_mode ? "Applies at each window's next start" :
 			state->power_mode ? "End this session" :
-				state->symbol_mode ? "Search symbols" :
-					state->keys_mode ? "Search shortcuts" :
-						"Search apps, or type a sum",
+			state->symbol_mode ? "Search symbols" :
+			state->keys_mode ? "Search shortcuts" :
+			state->notif_mode ? "Search notifications" :
+			"Search apps, or type a sum",
 			NOVI_PIX(NOVI_TEXT_MUTED));
 	} else {
 		int end_x = novi_text_draw(card, state->font, TEXT_X, input_baseline,
@@ -1178,6 +1522,23 @@ static void render(struct novi_launcher *state, uint32_t *px,
 	}
 
 	/* ── The rows ───────────────────────────────────────────────── */
+	/* AN EMPTY LIST HAS TO SAY WHY. A card with a cursor and nothing
+	 * under it is a puzzle, and for notifications it is a puzzle with
+	 * two very different answers -- nothing has happened, or the
+	 * daemon that would have told you is not running. Only the
+	 * notification mode needs this: every other mode's empty state is
+	 * "your query matched nothing", which the query itself explains. */
+	if (state->result_count == 0 && state->notif_mode) {
+		const char *why = state->input_len > 0
+			? "No notification matches that"
+			: (access(NOVI_HIST_PATH, R_OK) == 0
+				? "Nothing has been notified yet"
+				: "No history yet -- novi-notifyd has not been told anything");
+		novi_text_draw(card, state->font_row, TEXT_X,
+			list_top + (state->row_h - state->font_row->height) / 2 +
+				state->font_row->ascent,
+			why, NOVI_PIX(NOVI_TEXT_MUTED));
+	}
 	for (size_t i = 0; i < state->result_count; i++) {
 		const struct result *r = &state->results[i];
 		int y = list_top + (int)i * state->row_h;
@@ -1201,10 +1562,34 @@ static void render(struct novi_launcher *state, uint32_t *px,
 		int meta_w = r->meta[0] != '\0'
 			? novi_text_width(state->font_meta, r->meta) : 0;
 		int label_room = (int)cw - TEXT_X - NOVI_SP_LG - meta_w - NOVI_SP_LG;
-		novi_text_truncate(state->font_row, r->primary, label_room,
+		/* A row with a detail splits the room: the summary keeps what
+		 * it needs up to half, and the body gets the rest. Half rather
+		 * than "whatever the summary wants" so that a long summary
+		 * cannot push the body off the row entirely -- which is the
+		 * case where this list stops answering the question it exists
+		 * for. */
+		int primary_room = label_room;
+		if (r->detail[0] != '\0') {
+			int want = novi_text_width(state->font_row, r->primary);
+			int half = label_room / 2;
+			primary_room = want < half ? want : half;
+		}
+		novi_text_truncate(state->font_row, r->primary, primary_room,
 			shown, sizeof(shown));
-		novi_text_draw(card, state->font_row, TEXT_X, baseline, shown,
-			NOVI_PIX(NOVI_TEXT_PRIMARY));
+		int label_end = novi_text_draw(card, state->font_row, TEXT_X,
+			baseline, shown, NOVI_PIX(NOVI_TEXT_PRIMARY));
+
+		if (r->detail[0] != '\0') {
+			char det[NOVI_HIST_BODY + 8];
+			int gap = NOVI_SP_SM;
+			int det_room = TEXT_X + label_room - label_end - gap;
+			if (det_room > 0) {
+				novi_text_truncate(state->font_row, r->detail, det_room,
+					det, sizeof(det));
+				novi_text_draw(card, state->font_row, label_end + gap,
+					baseline, det, NOVI_PIX(NOVI_TEXT_MUTED));
+			}
+		}
 
 		if (meta_w > 0) {
 			/* Right-aligned, muted, mono: a command name and a
@@ -1547,6 +1932,11 @@ static const struct wl_registry_listener registry_listener = {
 };
 
 int main(int argc, char *argv[]) {
+	/* Colours are a runtime table now (RFC 0030). Load the active
+	 * theme BEFORE anything computes a colour; on failure the
+	 * compiled-in defaults stay in force, so this cannot leave the
+	 * client worse off than it was. */
+	novi_theme_load();
 	struct novi_launcher state = {0};
 	state.running = true;
 	/* --symbols: the symbol-picker half of RFC 0001 decision 7's
@@ -1568,10 +1958,18 @@ int main(int argc, char *argv[]) {
 	 * everyone except the person who does not yet know any of them --
 	 * which is exactly who it is for. */
 	state.keys_mode = argc > 1 && strcmp(argv[1], "--keys") == 0;
-	state.row_cap = state.keys_mode ? MAX_ROWS_KEYS : MAX_ROWS;
-	state.row_h   = state.keys_mode ? ROW_H_KEYS : ROW_H;
+	state.themes_mode = argc > 1 && strcmp(argv[1], "--themes") == 0;
+	state.notif_mode = argc > 1 && strcmp(argv[1], "--notifications") == 0;
+	/* Notifications use the sheet's shorter row: these are lines of
+	 * text rather than launchable things with icons and breathing
+	 * room, and twelve 40px rows would be a card taller than the
+	 * shortcut sheet for less information. */
+	state.row_cap = state.keys_mode ? MAX_ROWS_KEYS :
+		state.notif_mode ? MAX_ROWS_NOTIF : MAX_ROWS;
+	state.row_h   = (state.keys_mode || state.notif_mode) ? ROW_H_KEYS : ROW_H;
 
-	if (!state.symbol_mode && !state.power_mode && !state.keys_mode) {
+	if (!state.symbol_mode && !state.power_mode && !state.keys_mode &&
+			!state.themes_mode && !state.notif_mode) {
 		load_apps(&state);
 	}
 

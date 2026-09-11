@@ -1,0 +1,40 @@
+# paper — a light theme, and the one that actually tests the tokens.
+#
+# Every other palette here is dark, so every one of them can get the
+# elevation order backwards and still look plausible. This one cannot:
+# on a light ground the background layers have to get DARKER as they
+# rise, `text.on-accent` has to be light rather than dark, and anything
+# that assumed "background is nearly black" shows up immediately.
+#
+# It is shipped for that reason as much as for preference.
+
+bg.base        = #eceef2
+bg.panel       = #f6f7f9
+bg.card        = #ffffff
+bg.card-raised = #e7eaf0
+
+# The teal is a step darker than the dark palettes' because white has
+# to be readable ON it. common/theme-test.c measures that: at #0d9488
+# white reached only 3.74:1, below WCAG AA's 4.5 for normal text, and
+# white is already the lightest text.on-accent can be -- so the accent
+# is the only end that can move. #0c8578 gives 4.52:1.
+#
+# Nothing draws text.on-accent yet, which is exactly why this is worth
+# fixing now: the bug was latent, and the day a client uses the token
+# it would have shipped an unreadable badge on this theme only.
+accent         = #0c8578
+accent.hover   = #0f766e
+accent.active  = #115e59
+accent.subtle  = #d3ece8
+text.on-accent = #ffffff
+
+text.primary   = #14161c
+text.secondary = #4a4f5c
+text.muted     = #7c8291
+
+border.subtle  = #d6dae2
+border.strong  = #b3b9c6
+
+status.success = #15803d
+status.warning = #b45309
+status.error   = #b91c1c

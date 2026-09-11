@@ -231,8 +231,8 @@
  * was written and it was never true -- the panel's accent has been
  * very slightly darker than every other accent on this desktop for the
  * whole life of the file. Never write one of these by hand. */
-static const pixman_color_t TASKBAR_LABEL_COLOR = NOVI_PIX(NOVI_TEXT_SECONDARY);
-static const pixman_color_t TASKBAR_LABEL_ACTIVE_COLOR = NOVI_PIX(NOVI_ACCENT);
+#define TASKBAR_LABEL_COLOR NOVI_PIX(NOVI_TEXT_SECONDARY)
+#define TASKBAR_LABEL_ACTIVE_COLOR NOVI_PIX(NOVI_ACCENT)
 
 struct novi_panel;
 
@@ -687,8 +687,7 @@ static void render(struct novi_panel *panel, uint32_t *px, uint32_t stride_px) {
 	 * pixman to zero it again. */
 	pixman_image_t *dest = pixman_image_create_bits_no_clear(
 		PIXMAN_x8r8g8b8, (int)w, (int)h, px, (int)stride_px * 4);
-
-	static const pixman_color_t clock_color = NOVI_PIX(NOVI_TEXT_SECONDARY);
+#define clock_color NOVI_PIX(NOVI_TEXT_SECONDARY)
 	int text_x = pw_x - POWER_GAP - panel->clock_w;
 	int baseline_y = ((int)h + panel->font->ascent - panel->font->descent) / 2;
 	int clock_base = ((int)h + panel->font_clock->ascent -
@@ -698,8 +697,8 @@ static void render(struct novi_panel *panel, uint32_t *px, uint32_t stride_px) {
 
 	/* text-secondary at rest, accent on hover -- GUI-DESIGN-LANGUAGE.md
 	 * §7's stated hover treatment for the apps button. */
-	static const pixman_color_t apps_label_color = NOVI_PIX(NOVI_TEXT_SECONDARY);
-	static const pixman_color_t apps_label_hover_color = NOVI_PIX(NOVI_ACCENT);
+#define apps_label_color NOVI_PIX(NOVI_TEXT_SECONDARY)
+#define apps_label_hover_color NOVI_PIX(NOVI_ACCENT)
 	int label_x = icon_x + APPS_ICON_SIZE + APPS_ICON_TEXT_GAP;
 	novi_text_draw(dest, panel->font, label_x, baseline_y, "Apps",
 		panel->apps_button_hover ? apps_label_hover_color : apps_label_color);
@@ -1161,6 +1160,11 @@ static const struct wl_registry_listener registry_listener = {
 };
 
 int main(void) {
+	/* Colours are a runtime table now (RFC 0030). Load the active
+	 * theme BEFORE anything computes a colour; on failure the
+	 * compiled-in defaults stay in force, so this cannot leave the
+	 * client worse off than it was. */
+	novi_theme_load();
 	struct novi_panel panel = {0};
 	panel.running = true;
 	wl_list_init(&panel.taskbar_entries);
@@ -1295,6 +1299,14 @@ int main(void) {
 		if (fds[1].revents & POLLIN) {
 			uint64_t expirations;
 			if (read(timer_fd, &expirations, sizeof(expirations)) > 0) {
+				/* One stat(2) per second, and a parse only when the
+				 * published theme actually changed (RFC 0030). The
+				 * panel is the surface a person looks at while
+				 * switching themes, and it is already redrawing here,
+				 * so it is the one client that can follow a switch
+				 * live for the price of a syscall. Everything else
+				 * picks the palette up when it next starts. */
+				novi_theme_reload();
 				surface_draw_frame(&panel);
 			}
 		}

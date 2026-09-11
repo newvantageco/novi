@@ -235,8 +235,20 @@ DATA_FILES = [
     # which is the right amount of friction for adding a font.
     ("fonts-jetbrains-mono", "usr/share/fonts/jetbrains-mono"),
     ("fonts-inter", "usr/share/fonts/inter"),
+    # The third family, and the friction that comment predicted. It is
+    # deliberately NOT in novi-desktop's member list below: only
+    # NetSurf renders a serif, so it rides on `netsurf`'s depends=
+    # instead of being installed on every desktop that will never draw
+    # one.
+    ("fonts-source-serif", "usr/share/fonts/source-serif"),
     ("foot", "usr/share/terminfo"),
-    ("novi-launcher", "usr/share/novi"),
+    # NAMED SUBDIRECTORIES, not "usr/share/novi". DATA_FILES is walked
+    # in full for every entry rather than first-match, so a parent and
+    # a child both listed would put the same file in two packages --
+    # and the parent was already the wrong owner: the .app descriptors
+    # are the launcher's, the palettes are not.
+    ("novi-launcher", "usr/share/novi/apps"),
+    ("novi-themes", "usr/share/novi/themes"),
 ]
 
 # Packages that exist only to pull others in.
@@ -244,7 +256,7 @@ META_PACKAGES = [
     ("novi-desktop", "OS", "The Novi desktop: compositor, panel, launcher, terminal",
      ["novi-shell", "novi-panel", "novi-launcher", "novi-settings", "novi-edit", "novi-files", "novi-view",
       "novi-lockscreen", "novi-screenshot", "novi-notifyd", "novi-bg",
-      "novi-glinfo", "foot",
+      "novi-glinfo", "foot", "novi-themes",
       "fonts-jetbrains-mono", "fonts-inter"]),
 ]
 
@@ -285,9 +297,33 @@ def _check_meta_covers_first_party():
 
 _check_meta_covers_first_party()
 
+
+def check_meta_members_built(name, deps, available):
+    """Every member a meta-package names must have been packaged.
+
+    Returns the deps unchanged, or raises SystemExit naming what is
+    absent. A separate function purely so it can be tested: proving
+    it fires otherwise costs a full content rebuild, because 50 wipes
+    the repository before pkgsplit runs and refuses outright on an
+    already-split rootfs. See tools/pkgsplit/test_pkgsplit.py.
+    """
+    absent = [d for d in deps if d not in available]
+    if absent:
+        raise SystemExit(
+            "ERROR: %s names package(s) that this build did not produce:\n" % name
+            + "".join("         %s\n" % d for d in absent)
+            + "       A meta-package cannot name what the index does not\n"
+            + "       have, and dropping them silently ships a desktop\n"
+            + "       missing those programs. Some stage did not run --\n"
+            + "       rebuild the content stages (bash build.sh --from 06\n"
+            + "       --to 49) rather than removing them from\n"
+            + "       META_PACKAGES.")
+    return list(deps)
+
 EXTRA_PACKAGE_DESCRIPTIONS = {
     "fonts-jetbrains-mono": ("JETBRAINS_MONO", "JetBrains Mono, the default terminal font"),
     "fonts-inter": ("INTER", "Inter, the UI sans every Novi client labels itself with"),
+    "fonts-source-serif": ("SOURCE_SERIF", "Source Serif 4, the serif NetSurf renders font-family: serif with"),
     "novi-headers": ("OS", "Headers and pkg-config files for the libraries Novi ships"),
 }
 
@@ -584,7 +620,7 @@ def main():
 
     # Meta packages: no files, just dependencies.
     for name, vkey, desc, deps in META_PACKAGES:
-        deps = [d for d in deps if d in contents]
+        deps = check_meta_members_built(name, deps, contents)
         stage = os.path.join(args.stage, name)
         shutil.rmtree(stage, ignore_errors=True)
         os.makedirs(os.path.join(stage, "files"))

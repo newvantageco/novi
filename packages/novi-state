@@ -36,6 +36,22 @@ GEN_DIR="${NOVI_STATE_GENERATIONS:-/var/lib/novi-state/generations}"
 # language in system.conf: the escape hatch for anything this key
 # cannot express is editing a real file in nftables' real format.
 FIREWALL_RULES="${NOVI_FIREWALL_RULES:-/etc/novi/firewall.nft}"
+# The desktop's colour palettes (RFC 0030). display.theme names one of
+# these by basename; the converger publishes the resolved name to
+# THEME_ACTIVE, which is what every client reads at startup.
+THEME_DIR="${NOVI_THEME_DIR:-/usr/share/novi/themes}"
+THEME_ACTIVE="${NOVI_THEME_ACTIVE:-/run/novi/theme}"
+
+# The shell JSON escaper (RFC 0029), shared with novi-agent. Sourced
+# with a guard rather than bare: `.` is a SPECIAL BUILTIN, so in ash a
+# missing file ends the script immediately with no message anyone would
+# connect to a missing library -- exit status 2 and nothing on stderr.
+# Found the hard way writing this file's own test.
+NOVI_JSON_LIB="${NOVI_JSON_LIB:-/usr/lib/novi/json.sh}"
+if [ -f "$NOVI_JSON_LIB" ]; then
+    # shellcheck disable=SC1090
+    . "$NOVI_JSON_LIB"
+fi
 
 msg()  { printf '==> %s\n'    "$*" >&2; }
 info() { printf '  -> %s\n'   "$*" >&2; }
@@ -294,6 +310,71 @@ firewall_live_ports() {
     firewall_ports_canon "${raw#,}" 2>/dev/null || printf 'unparseable'
 }
 
+# An IPv4 address, checked properly rather than by looking for dots.
+#
+# This is the first value in this document that BECOMES A KERNEL
+# ARGUMENT rather than a service's business: `ip addr add` takes it,
+# and a machine that gets it wrong has no network and an error message
+# from `ip` that names neither the key nor the file. So the checks are
+# the pedantic ones:
+#
+#   * exactly four octets -- `1.2.3` and `1.2.3.4.5` both split into
+#     something `ip` will reject in its own words;
+#   * a leading or trailing dot, or `..`, rejected explicitly, because
+#     field splitting drops the empty field they produce and `.1.2.3`
+#     would otherwise pass as four octets;
+#   * no leading zero on an octet: `010` is eight to anything that
+#     reads it as octal and ten to anything that does not, and an
+#     address whose meaning depends on the reader is not an address.
+valid_ipv4() {
+    local ip="$1" o oldifs
+    case "$ip" in
+        ''|*[!0-9.]*|.*|*.|*..*) return 1 ;;
+    esac
+    oldifs="$IFS"; IFS=.
+    # shellcheck disable=SC2086
+    set -- $ip
+    IFS="$oldifs"
+    [ "$#" -eq 4 ] || return 1
+    for o in "$@"; do
+        case "$o" in
+            ''|*[!0-9]*) return 1 ;;
+            0) continue ;;
+            0*) return 1 ;;
+        esac
+        [ "${#o}" -le 3 ] || return 1
+        [ "$o" -le 255 ] || return 1
+    done
+    return 0
+}
+
+# `dhcp`, or an address with a prefix length. A bare address is
+# REFUSED rather than assumed to be /24: guessing a netmask decides
+# which hosts this machine believes are local, which is not a guess
+# anything should make on somebody's behalf.
+valid_cidr() {
+    local spec="$1" addr prefix
+    [ "$spec" = "dhcp" ] && return 0
+    case "$spec" in
+        */*) addr="${spec%/*}"; prefix="${spec##*/}" ;;
+        *)   return 1 ;;
+    esac
+    valid_ipv4 "$addr" || return 1
+    case "$prefix" in ''|*[!0-9]*) return 1 ;; esac
+    [ "${#prefix}" -le 2 ] || return 1
+    [ "$prefix" -ge 1 ] && [ "$prefix" -le 32 ]
+}
+
+# `auto` (the default, and what a lease supplies), `none` (a real
+# answer -- an isolated segment has nowhere for a default route to
+# point), or an address.
+valid_gateway() {
+    case "$1" in
+        auto|none|'') return 0 ;;
+    esac
+    valid_ipv4 "$1"
+}
+
 observe_network() {
     local sub="$1"
     case "$sub" in
@@ -368,7 +449,17 @@ observe_network() {
                 printf 'unknown'
             fi
             ;;
-        interface|dns)
+        # address and gateway (RFC 0033) join interface and dns: all
+        # four are read by the network service when it starts and
+        # recorded under /run, so a change to any of them shows up as
+        # real drift and `apply` has something to do about it, instead
+        # of silently having no effect until the next reboot.
+        #
+        # An UNDECLARED network.address is `dhcp` -- the service reads
+        # it that way, so the observation has to agree or every machine
+        # that has never heard of this key reports drift on it forever.
+        # Same for gateway and `auto`.
+        interface|dns|address|gateway)
             # With the service down there is no running configuration
             # to be out of step with, so the declared value is the
             # honest observation. Anything else would report permanent,
@@ -379,6 +470,10 @@ observe_network() {
             fi
             if [ -r "/run/novi/network.$sub" ]; then
                 cat "/run/novi/network.$sub"
+            elif [ "$sub" = "address" ]; then
+                printf 'dhcp'
+            elif [ "$sub" = "gateway" ]; then
+                printf 'auto'
             else
                 printf 'unknown'
             fi
@@ -542,6 +637,39 @@ converge_governor() {
 # forward-compatibility case (a newer novi-state, a hand-written note),
 # not corruption, and `diff` should say so plainly instead of refusing
 # to run at all.
+# The verbs novi-agent will act on. Declared here as well as in
+# novi-agent because this is where a typo is CAUGHT, and a list that
+# lives only in the tool being configured cannot be validated by the
+# thing that validates the document. The two are checked against each
+# other by packages/tests/test-agent-verbs.sh, which is the answer to
+# "then they will drift".
+AGENT_VERBS="state.set state.apply state.rollback pkg.sync pkg.install wifi.join"
+
+observe_agent_allow() {
+    local want v
+    want="$(state_get agent.allow)"
+    # `none` and an empty value are the same policy, and both are fine.
+    case "$want" in ''|none) printf 'none'; return 0 ;; esac
+    for v in $(printf '%s' "$want" | tr ',' ' '); do
+        case " $AGENT_VERBS " in
+            *" $v "*) ;;
+            # ONE unknown verb makes the whole line untrustworthy. A
+            # person who wrote `pkg.instal` believes installs are
+            # permitted; reporting the other four as converged hides
+            # that from exactly the diff they would look at.
+            *) printf 'unsupported'; return 0 ;;
+        esac
+    done
+    # Nothing holds this key, so there is no observed value to compare
+    # against and no canonical form to impose -- echoing the declared
+    # string back verbatim is what makes a valid policy converged and
+    # leaves the document's own spacing and ordering alone. Same as
+    # power.lid, and deliberately NOT the firewall's sorted comparison
+    # (RFC 0022), which exists because there the other side is the
+    # kernel.
+    printf '%s' "$want"
+}
+
 observe_key() {
     local key="$1"
     case "$key" in
@@ -591,17 +719,109 @@ observe_key() {
         # can surface. Changing it takes effect on the next start of
         # the compositor, not immediately: this is the one
         # read-at-use-time key whose "use" is a process launch.
+        # agent.enabled / agent.allow are read at use time by
+        # novi-agent, on every invocation of `novi-agent do` -- so
+        # nothing holds them, they cannot drift, and `apply` has
+        # nothing to converge. Same shape as power.lid, and the
+        # observer is again the only place a typo can surface.
+        #
+        # It matters more here than for a lid switch. `agent.allow =
+        # pkg.instal` is a policy file that looks like it permits
+        # something and permits nothing, and the failure shows up as a
+        # refusal three layers away from the typo. Reporting an
+        # unusable value as drift is where a person finds out.
+        agent.enabled)
+            case "$(state_get "$key")" in
+                on|off) state_get "$key" ;;
+                *) printf 'unsupported' ;;
+            esac
+            ;;
+        # Every named verb must be one novi-agent knows. A comma
+        # separated list, compared canonically so `state.set, pkg.sync`
+        # and `pkg.sync,state.set` are the same policy and neither
+        # reports eternal drift against the other -- the same call
+        # network.firewall.allow makes about port lists (RFC 0022).
+        agent.allow)
+            observe_agent_allow
+            ;;
+        # agent.rate is read at use time by novi-agent, so nothing
+        # holds it, it cannot drift, and converge_key never runs to
+        # reject a typo -- the power.lid / storage.automount pattern.
+        # The observer is therefore the only place `agent.rate = twenty`
+        # can surface, and it surfaces as drift, which is where a
+        # person finds out.
+        #
+        # 0, off and none all mean no limit and are echoed back
+        # verbatim, because the document's own wording is not this
+        # tool's to correct.
+        agent.rate)
+            case "$(state_get "$key")" in
+                ''|0|off|none) state_get "$key" ;;
+                *[!0-9]*) printf 'unsupported' ;;
+                *) state_get "$key" ;;
+            esac
+            ;;
         display.renderer)
             case "$(state_get "$key")" in
                 pixman|gles2|auto) state_get "$key" ;;
                 *) printf 'unsupported' ;;
             esac
             ;;
+        # display.theme IS observable, unlike every other display.* key:
+        # the converger publishes the resolved name to /run/novi/theme
+        # and that file is what the clients actually read, so "what
+        # theme is this machine running" has a real answer to compare
+        # against. Reading the declared value back would make this key
+        # permanently converged and the file permanently unchecked.
+        #
+        # A theme that is declared but not installed reports
+        # `missing`, not the name: `apply` genuinely cannot fix it (the
+        # file is not there to publish), and reporting the name would
+        # call a machine drawing the default palette converged on a
+        # theme it does not have.
+        display.theme)
+            local want_theme
+            want_theme="$(state_get "$key")"
+            if [ ! -f "${THEME_DIR}/${want_theme}.theme" ]; then
+                printf 'missing'
+            elif [ -r "$THEME_ACTIVE" ]; then
+                cat "$THEME_ACTIVE"
+            else
+                printf 'unset'
+            fi
+            ;;
         power.blank)
             case "$(state_get "$key")" in
                 off) printf 'off' ;;
                 ''|*[!0-9]*) printf 'unsupported' ;;
                 *) state_get "$key" ;;
+            esac
+            ;;
+        # power.suspend (RFC 0035) is power.blank's shape exactly:
+        # novi-shell re-reads it on the idle tick, so nothing holds it,
+        # it cannot drift, and `apply` has nothing to converge -- which
+        # again makes this the only place a typo can surface.
+        #
+        # An UNDECLARED value is `off`, not the compositor's default,
+        # because the compositor's default IS off. A machine that has
+        # never heard of this key must not report drift on it forever.
+        power.suspend)
+            case "$(state_get "$key")" in
+                ''|off) printf 'off' ;;
+                *[!0-9]*) printf 'unsupported' ;;
+                *) state_get "$key" ;;
+            esac
+            ;;
+        # Whether an idle suspend locks the screen first. ON when
+        # undeclared, which is what novi-shell falls back to -- so a
+        # machine that has never heard of this key does not report
+        # drift on it, and one that HAS declared it gets its own word
+        # back.
+        power.suspend.lock)
+            case "$(state_get "$key")" in
+                ''|on) printf 'on' ;;
+                off) printf 'off' ;;
+                *) printf 'unsupported' ;;
             esac
             ;;
         # storage.automount is the same shape as power.lid, for the
@@ -789,7 +1009,19 @@ converge_network() {
                     die "failed to restart 'wifi' after setting network.$sub"
             fi
             ;;
-        interface|dns)
+        interface|dns|address|gateway)
+            # address and gateway are checked before anything is
+            # restarted, because a malformed one costs the machine its
+            # network and the error `ip` gives for it names neither the
+            # key nor the document. `die` here means this key is
+            # skipped and every other key still converges (each runs in
+            # its own subshell), and `apply` exits non-zero.
+            case "$sub" in
+                address) valid_cidr "$want" ||
+                    die "network.address: '$want' is not 'dhcp' or an address like 192.168.1.50/24" ;;
+                gateway) valid_gateway "$want" ||
+                    die "network.gateway: '$want' is not 'auto', 'none' or an address like 192.168.1.1" ;;
+            esac
             # The service reads these once, at start, so making the
             # declaration true means restarting it. Only if it is
             # actually up: bringing a stopped network service into
@@ -941,11 +1173,45 @@ converge_key() {
                 *) die "$key: must be 'pixman', 'gles2' or 'auto', got '$want'" ;;
             esac
             ;;
-        power.blank)
+        # Publishing the name is the whole convergence. Clients read
+        # THEME_ACTIVE when they START, so a change reaches a window
+        # that is already open only when that window reopens -- stated
+        # here rather than left to be discovered, and the reason
+        # `apply` prints the note below.
+        #
+        # A theme name becomes a path in every client that reads it, so
+        # it is validated HERE, once, rather than trusted seventeen
+        # times. `..` survives a plain character filter because dots
+        # are legal in a name -- the trap RFC 0023 records from the
+        # other direction.
+        display.theme)
+            case "$want" in
+                ''|.*|*/*|*[!A-Za-z0-9._-]*)
+                    die "$key: '$want' is not a theme name" ;;
+            esac
+            [ -f "${THEME_DIR}/${want}.theme" ] || \
+                die "$key: no such theme '${want}' in ${THEME_DIR} (have: $(cd "$THEME_DIR" 2>/dev/null && printf '%s ' *.theme))"
+            mkdir -p "$(dirname "$THEME_ACTIVE")"
+            # Temp file and rename: a client reading this while it is
+            # being written must never see half a name. Same rule as
+            # the health service's /run/novi/health (RFC 0014).
+            printf '%s\n' "$want" > "${THEME_ACTIVE}.new"
+            mv "${THEME_ACTIVE}.new" "$THEME_ACTIVE"
+            info "theme '${want}' published; open windows keep the old palette until they restart"
+            ;;
+        power.blank|power.suspend)
             case "$want" in
                 off) : ;;
                 ''|*[!0-9]*) die "$key: must be a number of seconds or 'off', got '$want'" ;;
                 *) : ;;
+            esac
+            ;;
+        # Read on novi-shell's idle tick, like power.blank. Nothing to
+        # converge; `apply` is where the typo is reported.
+        power.suspend.lock)
+            case "$want" in
+                on|off) : ;;
+                *) die "$key: must be 'on' or 'off', got '$want'" ;;
             esac
             ;;
         # Read at event time by novi-mount, like power.lid -- nothing
@@ -1058,7 +1324,30 @@ snapshot_generation() {
 # Commands
 # ---------------------------------------------------------------------------
 
+# Every --json command starts here. A JSON mode that silently emits a
+# broken document because the escaper is missing is worse than one that
+# is not offered: an agent parsing the output cannot tell the
+# difference between "this machine has no services" and "this string
+# had a quote in it".
+need_json_lib() {
+    command -v json_str >/dev/null 2>&1 \
+        || die "$NOVI_JSON_LIB is missing; --json needs it"
+}
+
 cmd_show() {
+    if [ "${1:-}" = "--json" ]; then
+        need_json_lib
+        [ -f "$STATE_FILE" ] || die "no state file at $STATE_FILE"
+        local key first=1
+        printf '{"state_file": %s, "declared": {' "$(json_str "$STATE_FILE")"
+        for key in $(state_keys); do
+            [ "$first" -eq 1 ] || printf ','
+            first=0
+            printf '%s: %s' "$(json_str "$key")" "$(json_str "$(state_get "$key")")"
+        done
+        printf '}}\n'
+        return 0
+    fi
     [ -f "$STATE_FILE" ] || die "no state file at $STATE_FILE"
     cat "$STATE_FILE"
 }
@@ -1082,8 +1371,47 @@ cmd_set() {
 # Declared vs. actual. Exit status is deliberately meaningful:
 # 0 = converged (no drift), 1 = drift found. That makes it usable as a
 # check in a script or a CI job, not just something a human reads.
+# The JSON form reports the SAME comparison as the text form and adds
+# nothing of its own -- one loop over state_keys, one observe_key per
+# key. A second implementation of "what is drifting" is a second answer
+# to a question that has one, which is the whole argument novi-state
+# exists to make.
+cmd_diff_json() {
+    need_json_lib
+    local key want have first=1 drift=0
+    [ -f "$STATE_FILE" ] || die "no state file at $STATE_FILE"
+    service_cache_load
+    printf '{"drift": ['
+    for key in $(state_keys); do
+        want="$(state_get "$key")"
+        have="$(observe_key "$key")"
+        [ "$want" = "$have" ] && continue
+        drift=1
+        [ "$first" -eq 1 ] || printf ','
+        first=0
+        printf '{"key": %s, "declared": %s, "actual": %s}' \
+            "$(json_str "$key")" "$(json_str "$want")" "$(json_str "$have")"
+    done
+    printf '], "converged": %s, "unhealthy": [' \
+        "$([ "$drift" -eq 0 ] && printf true || printf false)"
+    first=1
+    health_problems | while IFS= read -r l; do
+        [ -n "$l" ] || continue
+        [ "$first" -eq 1 ] || printf ','
+        first=0
+        printf '%s' "$(json_str "$l")"
+    done
+    printf ']}\n'
+    return "$drift"
+}
+
 cmd_diff() {
     local key want have drift=0
+    # `|| return $?` rather than `; return $?`: under `set -e` a bare
+    # call that returns 1 (which is what drift means here) ends the
+    # script before the `return` runs. Same exit status by luck today,
+    # and a trap for the next branch added below it.
+    [ "${1:-}" = "--json" ] && { cmd_diff_json || return $?; return 0; }
     [ -f "$STATE_FILE" ] || die "no state file at $STATE_FILE"
     # Nothing changes during a diff, so one snapshot of the live
     # service list serves every key.
@@ -1411,6 +1739,8 @@ Keys:
   services.<name>                 on | off  (an s6-rc service)
   network.dhcp                    on | off  (the DHCP client service)
   network.interface               auto | <name>  (which NIC to use)
+  network.address                 dhcp | 192.168.1.50/24  (RFC 0033)
+  network.gateway                 auto | none | 192.168.1.1
   network.dns                     auto | 1.1.1.1,9.9.9.9
   network.wifi                    on | off  (the supplicant; see novi-wifi)
   network.wifi.interface          auto | <name>
@@ -1420,7 +1750,10 @@ Keys:
   users.<name>.groups             wheel,video,input | none
   packages.<name>                 present | absent
   display.renderer                pixman | gles2 | auto  (compositor renderer)
+  display.theme                   a file in /usr/share/novi/themes (colours)
   power.blank                     <seconds> | off  (idle screen blank)
+  power.suspend                   <seconds> | off  (idle suspend; off by default)
+  power.suspend.lock              on | off  (lock before an idle suspend)
   power.governor                  performance | powersave | schedutil | ...
   storage.automount               on | off  (removable media -> /run/media)
   state.apply_on_boot             on | off  (converge on every boot)
@@ -1542,8 +1875,34 @@ health_problems() {
 # Exit 0 when every supervised service is doing its job, 1 when one is
 # not -- so this is the command a CI job or a health check runs, and
 # `diff` keeps meaning exactly "declared vs actual".
+cmd_health_json() {
+    need_json_lib
+    local n line name verdict detail first=1 bad=0
+    command -v s6-svstat >/dev/null 2>&1 || die "s6-svstat not found; cannot inspect services"
+    printf '{"services": ['
+    for n in $(health_services); do
+        line="$(service_health "$n")"
+        # service_health prints `<name> <verdict> <detail>`, and the
+        # detail may be `-`. Split on whitespace rather than parsing,
+        # because this is our own format and there is no third field
+        # that can contain a space.
+        # shellcheck disable=SC2086
+        set -- $line
+        name="${1:-$n}"; verdict="${2:-unknown}"; detail="${3:--}"
+        case "$verdict" in DOWN|CRASHLOOP|NOTREADY) bad=1 ;; esac
+        [ "$first" -eq 1 ] || printf ','
+        first=0
+        printf '{"service": %s, "verdict": %s, "detail": %s}' \
+            "$(json_str "$name")" "$(json_str "$verdict")" "$(json_str "$detail")"
+    done
+    printf '], "healthy": %s}\n' \
+        "$([ "$bad" -eq 0 ] && printf true || printf false)"
+    return "$bad"
+}
+
 cmd_health() {
     local n bad=0 line
+    [ "${1:-}" = "--json" ] && { cmd_health_json || return $?; return 0; }
     command -v s6-svstat >/dev/null 2>&1 || die "s6-svstat not found; cannot inspect services"
     for n in $(health_services); do
         line="$(service_health "$n")"

@@ -1,0 +1,48 @@
+#!/bin/sh
+# ============================================================
+# network service — finish script
+#
+# RFC 0033. Runs after the run process dies, on every stop and every
+# restart, and takes a STATIC address back off the interface.
+#
+# WHY THIS IS NOT OPTIONAL. udhcpc's `-R` releases its lease and the
+# hook script deconfigures the interface, so the DHCP path has always
+# cleaned up after itself. A static address is held by the kernel and
+# nothing removes it -- so without this, `network.dhcp = off` left the
+# machine still answering on its declared address, and switching from
+# static back to `dhcp` left the old address sitting beside the new
+# lease. `novi-state diff` would report converged while `ip addr`
+# showed two addresses. That is the shape of bug this project keeps
+# recording: the report was right about the document and wrong about
+# the machine.
+#
+# It reads the SPEC THE SERVICE PUBLISHED, not the declared value: by
+# the time a stop happens the document may already say something else,
+# and what has to come off is what actually went on. Same reason
+# generations snapshot observed state rather than the state file.
+#
+# Only for the static path -- with a lease, `deconfig` has already run
+# and flushing again would be a second writer for no reason.
+# ============================================================
+
+RUN_DIR=/run/novi
+ADDR_FILE="${RUN_DIR}/network.address"
+DEV_FILE="${RUN_DIR}/network.device"
+
+[ -r "$ADDR_FILE" ] || exit 0
+[ -r "$DEV_FILE" ] || exit 0
+
+ADDRSPEC="$(cat "$ADDR_FILE")"
+IFACE="$(cat "$DEV_FILE")"
+
+case "$ADDRSPEC" in
+    ''|dhcp) exit 0 ;;
+esac
+[ -n "$IFACE" ] || exit 0
+[ -d "/sys/class/net/${IFACE}" ] || exit 0
+
+ip -4 route flush dev "$IFACE" 2>/dev/null || true
+ip -4 addr flush dev "$IFACE" 2>/dev/null || true
+rm -f "${RUN_DIR}/network.ip"
+echo "network: released ${ADDRSPEC} from ${IFACE}" >&2
+exit 0

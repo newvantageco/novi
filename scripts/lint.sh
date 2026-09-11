@@ -83,7 +83,84 @@ if command -v cc >/dev/null 2>&1; then
         exit 1
     fi
     echo ">>> clean"
+    # The shipped palettes, parsed by the REAL loader (common/theme.c)
+    # and checked against §1's invariants. RFC 0030 found its two bugs
+    # by shipping a light theme, screendumping it and looking; that
+    # worked and does not scale, because the next palette mistake needs
+    # somebody to boot an image and notice. This is the part that can
+    # be checked without a VM: elevation ordering, text contrast on
+    # every ground it is drawn on, and a pressed control that sinks
+    # rather than pops.
+    echo ">>> theme palettes"
+    if ! make -s -C common check; then
+        echo ">>> theme checks failed -- run: make -C common check" >&2
+        exit 1
+    fi
 else
     echo ">>> no host cc -- skipping novi-panel icon geometry checks" >&2
+    echo ">>> no host cc -- skipping theme palette checks" >&2
 fi
+
+# novi-recon is pure Python and most of what can be wrong in it cannot
+# be shown by running it: a real resolver never sends a compression
+# pointer loop, a mismatched transaction ID, or a TXT record split
+# across chunks, and a live site exercises one row of the clickjacking
+# truth table. So the wire format is tested by building messages and
+# parsing them back. No network, no downloaded fixtures -- same
+# argument as the icon geometry test above.
+if command -v python3 >/dev/null 2>&1; then
+    echo ">>> novi-recon"
+    if ! python3 novi-recon/tests/test_recon.py; then
+        echo ">>> novi-recon checks failed -- run: python3 novi-recon/tests/test_recon.py" >&2
+        exit 1
+    fi
+else
+    echo ">>> no host python3 -- skipping novi-recon checks" >&2
+fi
+
+# pkgsplit's meta-package checks. These are here because provoking
+# them for real is disproportionately expensive: 50-repo.sh wipes
+# /build/repo before pkgsplit runs and refuses outright on a rootfs
+# 41 has already split, so watching the check fire costs a full
+# content rebuild. A meta-package that silently drops a member is
+# exactly the failure that shipped once already -- a repository of 51
+# packages instead of 54, novi-desktop naming three fewer clients, and
+# `pkg install novi-desktop` reporting success.
+if command -v python3 >/dev/null 2>&1; then
+    echo ">>> pkgsplit"
+    if ! python3 tools/pkgsplit/test_pkgsplit.py; then
+        echo ">>> pkgsplit checks failed -- run: python3 tools/pkgsplit/test_pkgsplit.py" >&2
+        exit 1
+    fi
+fi
+
+# The shell JSON escaper (RFC 0029) is checked under the SHIPPED
+# busybox ash, not the host's bash, and against a real JSON parser
+# rather than a string comparison. Every JSON document this system
+# emits is assembled by a shell script out of strings the shell did
+# not choose. The verb-list check catches the other thing two files
+# can do to each other: novi-agent dispatches on a list novi-state
+# also carries, because that is where a typo in agent.allow is caught.
+# The secrets check is the third: wifi.join is the first agent verb
+# that handles one, and its refusal path is the part that is easy to
+# get wrong -- cmd_do captures args="$*" before dispatch, so refusing
+# `wifi.join <ssid> <passphrase>` with "$args" would write that
+# passphrase into a 0600 log permanently, by the very refusal meant to
+# protect it.
+# test-network-static.sh is the fourth of this shape: `network.address`
+# is the first value in system.conf that becomes an argument to `ip
+# addr add`, and every interesting way to get it wrong is textual --
+# an octet of 256, a leading zero, a leading dot whose empty field
+# field-splitting silently drops. None of those need a machine, and
+# none of them would ever be produced by one.
+for t in packages/tests/test-lib-json.sh packages/tests/test-agent-verbs.sh \
+         packages/tests/test-agent-secrets.sh packages/tests/test-agent-rate.sh \
+         packages/tests/test-agent-socket.sh packages/tests/test-network-static.sh \
+         packages/tests/test-power-idle.sh; do
+    echo ">>> ${t##*/}"
+    if ! bash "$t"; then
+        echo ">>> ${t} failed" >&2
+        exit 1
+    fi
+done
 exit 0

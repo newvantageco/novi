@@ -50,6 +50,7 @@
 #include "wlr-layer-shell-unstable-v1-protocol.h"
 #include "../common/text.h"
 #include "../common/theme.h"
+#include "notifications.h"
 #include "icons.h"
 #include "icon_blit.h"
 
@@ -81,9 +82,8 @@
 #define ACCENT_NORMAL NOVI_ACCENT
 #define ACCENT_CRIT   NOVI_STATUS_ERROR
 #define ICON_COLOR    NOVI_TEXT_SECONDARY
-
-static const pixman_color_t SUMMARY_PIX = NOVI_PIX(NOVI_TEXT_PRIMARY);
-static const pixman_color_t BODY_PIX    = NOVI_PIX(NOVI_TEXT_SECONDARY);
+#define SUMMARY_PIX NOVI_PIX(NOVI_TEXT_PRIMARY)
+#define BODY_PIX NOVI_PIX(NOVI_TEXT_SECONDARY)
 
 enum urgency { URG_LOW = 0, URG_NORMAL, URG_CRITICAL };
 
@@ -123,6 +123,11 @@ struct notifyd {
 	bool mapped; /* a surface with content committed on it */
 
 	struct toast toasts[MAX_TOASTS];
+
+	/* Everything this daemon has been told, bounded, republished to
+	 * /run/novi/notifications on every message (RFC 0034). A toast is
+	 * gone in five seconds; before this, so was the fact of it. */
+	struct novi_history history;
 	double ptr_x, ptr_y;
 	bool ptr_in;
 	int hover;
@@ -144,23 +149,18 @@ static int64_t now_ms(void) {
  * Nothing here believes any of it.
  */
 
-/* Copies at most `cap` bytes of `src` into `dst`, dropping every
- * control character on the way. Not "escapes" -- drops: there is
+/* Drops every control character rather than escaping them: there is
  * nothing a control character in a notification summary can mean
  * except that somebody is trying to draw outside their box, and the
  * same argument this project already made about tabs in an SSID
- * applies verbatim. */
-static void sanitise(char *dst, size_t cap, const char *src) {
-	size_t o = 0;
-	for (size_t i = 0; src[i] != '\0' && o < cap; i++) {
-		unsigned char c = (unsigned char)src[i];
-		if (c < 0x20 || c == 0x7f) {
-			continue;
-		}
-		dst[o++] = (char)c;
-	}
-	dst[o] = '\0';
-}
+ * applies verbatim.
+ *
+ * It lives in common/notifications.c now (RFC 0034) because the history's
+ * tab-separated record format depends on exactly this guarantee -- a
+ * tab cannot reach the file because it cannot get past here. Two
+ * copies of that rule would be one copy away from a format that
+ * shifts every field after a summary somebody chose. */
+#define sanitise novi_hist_sanitise
 
 /* Icon names are matched against a fixed list, never used to index
  * anything. An unknown name is not an error and not a fallback glyph
@@ -283,6 +283,30 @@ static void handle_message(struct notifyd *n, const char *msg) {
 
 	int ttl = TTL_MS[t.urgency];
 	t.expires_ms = ttl > 0 ? now_ms() + ttl : 0;
+
+	/* The history record carries the icon NAME, not the resolved id:
+	 * the reader is a different program with its own icon table
+	 * (novi-launcher's resolve_icon_name), and an enum's numeric value
+	 * shared between two binaries through a text file in /run is a
+	 * coupling nobody would notice breaking. An unknown name there
+	 * means no icon, which is RFC 0024's rule already.
+	 *
+	 * Wall clock rather than the monotonic now_ms() this file uses for
+	 * expiry: a reader needs to say how long ago, and a monotonic
+	 * count from an arbitrary origin cannot be compared across two
+	 * processes that started at different times. */
+	struct novi_hist_entry he;
+	memset(&he, 0, sizeof(he));
+	he.when = (int64_t)time(NULL);
+	he.urgency = (int)t.urgency;
+	novi_hist_sanitise(he.icon, NOVI_HIST_ICON, icon_name);
+	novi_hist_sanitise(he.summary, NOVI_HIST_SUMMARY, t.summary);
+	novi_hist_sanitise(he.body, NOVI_HIST_BODY, t.body);
+	novi_hist_push(&n->history, &he);
+	/* A failure here is not a reason to drop the toast: the thing the
+	 * sender asked for is the toast, and the history is a convenience
+	 * on top of it. */
+	novi_hist_publish(&n->history, NOVI_HIST_PATH);
 
 	toast_add(n, &t);
 	relayout(n);
@@ -808,6 +832,11 @@ static void expire_toasts(struct notifyd *n) {
 }
 
 int main(void) {
+	/* Colours are a runtime table now (RFC 0030). Load the active
+	 * theme BEFORE anything computes a colour; on failure the
+	 * compiled-in defaults stay in force, so this cannot leave the
+	 * client worse off than it was. */
+	novi_theme_load();
 	struct notifyd n;
 	memset(&n, 0, sizeof(n));
 	n.running = true;

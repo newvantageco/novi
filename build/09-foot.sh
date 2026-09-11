@@ -78,9 +78,21 @@ echo "   done: JetBrains Mono ($(ls "${FONT_DIR}" | wc -l) files)"
 # JetBrains Mono's four already do, through a code path this image has
 # been exercising since it had a terminal.
 #
-# Regular/Medium/SemiBold only: those are the three the type scale in
-# §2 actually names (body/caption at 400, display at 500, title at
-# 600). No italics -- nothing in this UI is italic.
+# Regular/Medium/SemiBold are the three the type scale in §2 names
+# (body/caption at 400, display at 500, title at 600). Nothing in this
+# UI is italic, and for the desktop's own clients that is still true.
+#
+# THE ITALICS ARE HERE FOR THE BROWSER (RFC 0031). A web page is not
+# this UI: `<em>`, citations and titles are italic constantly, and
+# with no italic face NetSurf rendered every one of them identically
+# to body text -- so emphasis, which is the whole point of the markup,
+# was INVISIBLE. That is a correctness problem in a browser rather
+# than a matter of taste, which is why two more faces are worth
+# ~840 KB.
+#
+# SemiBoldItalic rather than BoldItalic, to match the upright bold:
+# 35-devtools.sh maps NETSURF_FB_FONT_SANS_SERIF_BOLD to
+# Inter-SemiBold because SemiBold is what NOVI_FONT_TITLE uses.
 echo "==> Installing Inter ${INTER_VERSION} (UI sans)"
 INTER_DIR="${ROOTFS}/usr/share/fonts/inter"
 mkdir -p "${INTER_DIR}"
@@ -91,9 +103,70 @@ unzip -q -o "inter-${INTER_VERSION}.zip" \
     "extras/ttf/Inter-Regular.ttf" \
     "extras/ttf/Inter-Medium.ttf" \
     "extras/ttf/Inter-SemiBold.ttf" \
+    "extras/ttf/Inter-Italic.ttf" \
+    "extras/ttf/Inter-SemiBoldItalic.ttf" \
     -d inter-extract
 cp inter-extract/extras/ttf/*.ttf "${INTER_DIR}/"
 echo "   done: Inter ($(ls "${INTER_DIR}" | wc -l) files)"
+
+# ── 5c. Source Serif 4 (the browser's serif) ─────────────────────────
+#
+# RFC 0031 shipped a browser whose `font-family: serif` landed on
+# Inter, so a page that asked for a serif got a sans and nothing said
+# so. Every other face NetSurf needs falls back to the one below it;
+# this one had nothing below it to fall back to.
+#
+# TWO faces, not four, and the reason is NetSurf rather than taste:
+# its framebuffer frontend has NETSURF_FB_FONT_SERIF and
+# NETSURF_FB_FONT_SERIF_BOLD and no italic option at all (checked in
+# frontends/framebuffer/Makefile, not assumed). Shipping an italic
+# nothing can select is the dead weight RFC 0007 says is not inert --
+# in a split computed from what the base needs, dead weight votes.
+#
+# Static TTFs rather than the variable file in VAR/, for the reason
+# CLAUDE.md already records about Inter -- selecting a weight out of a
+# variable font depends on fontconfig's named-instance handling, and a
+# build where that quietly does not work gives Regular everywhere with
+# no error to notice.
+#
+# It is NOT part of the desktop. Only NetSurf uses it, so it is
+# `netsurf`'s dependency rather than a `novi-desktop` member: a desktop
+# that never renders a web page has no use for a serif, and shipping
+# one anyway is the dead weight RFC 0007 says is not inert.
+echo "==> Installing Source Serif ${SOURCE_SERIF_VERSION} (the browser serif)"
+SERIF_DIR="${ROOTFS}/usr/share/fonts/source-serif"
+mkdir -p "${SERIF_DIR}"
+cd "${SOURCES}"
+rm -rf source-serif-extract
+mkdir source-serif-extract
+unzip -q -o "source-serif-${SOURCE_SERIF_VERSION}.zip" \
+    "source-serif-${SOURCE_SERIF_VERSION}/TTF/SourceSerif4-Regular.ttf" \
+    "source-serif-${SOURCE_SERIF_VERSION}/TTF/SourceSerif4-Bold.ttf" \
+    -d source-serif-extract
+cp "source-serif-extract/source-serif-${SOURCE_SERIF_VERSION}/TTF/"*.ttf \
+    "${SERIF_DIR}/"
+
+# ── 5d. The licences these fonts are redistributed under ─────────────
+#
+# All three are OFL-1.1, which REQUIRES the licence to travel with the
+# font. It was not travelling: the two families already here shipped
+# their faces and left LICENSE.txt/OFL.txt sitting in the zip, so an
+# installed Novi carried three redistributed fonts and no evidence of
+# the terms. Source Serif made it obvious -- its release asset has no
+# licence file at all, which forced the question for all three.
+#
+# Named per family rather than one shared copy: they are three
+# different copyright holders under the same licence text, and a single
+# file could only carry one of the three notices.
+echo "==> Installing the font licences (OFL-1.1)"
+unzip -q -o "inter-${INTER_VERSION}.zip" "LICENSE.txt" -d inter-extract
+install -m 644 inter-extract/LICENSE.txt "${INTER_DIR}/LICENSE.txt"
+unzip -q -o "jetbrains-mono-${JETBRAINS_MONO_VERSION}.zip" "OFL.txt" \
+    -d jetbrains-mono-extract
+install -m 644 jetbrains-mono-extract/OFL.txt "${FONT_DIR}/OFL.txt"
+install -m 644 "source-serif-${SOURCE_SERIF_VERSION}-OFL.txt" \
+    "${SERIF_DIR}/LICENSE.txt"
+echo "   done: Source Serif ($(ls "${SERIF_DIR}" | wc -l) files)"
 
 # ── 6. Build the fontconfig cache, chrooted ──────────────────────────
 #

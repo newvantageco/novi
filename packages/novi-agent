@@ -1,0 +1,781 @@
+#!/bin/sh
+# ============================================================
+# novi-agent — the interface an automated actor uses to this machine
+#
+# RFC 0029. Two commands and a policy:
+#
+#   novi-agent describe        what this machine IS, as one JSON document
+#   novi-agent do <verb> ...   change it, within a list somebody declared
+#
+# WHY THIS EXISTS. Every operating system can be driven by a program --
+# by shelling out to twenty tools, parsing twenty human-shaped outputs,
+# and running as root with no boundary and no record. That works and it
+# is nobody's design. What is missing is not the ability; it is
+#
+#   * ONE call that answers "what is this machine", so an actor can
+#     orient without knowing which twenty tools to run;
+#   * a DECLARED boundary on what may be changed, in the same document
+#     as everything else this system declares;
+#   * a RECORD of what was attempted, including what was refused.
+#
+# Novi already had the ingredients. novi-state is a single declared
+# truth with real observers (RFC 0002); `--json` on its read commands
+# (RFC 0029) makes them machine-readable without a second source of
+# truth; and this file is the thing that composes them and gates the
+# writes.
+#
+# ── The boundary, stated once ────────────────────────────────────────
+#
+# READING IS FREE. `describe`, `capabilities` and `audit` change
+# nothing and are always available: they are a formatted view of files
+# any user on this machine can already read, and gating them would buy
+# no security while making the interface useless for the thing it is
+# best at.
+#
+# WRITING IS DECLARED. `do <verb>` runs only when `agent.enabled = on`
+# AND the verb appears in `agent.allow`. Both live in
+# /etc/novi/system.conf beside everything else.
+#
+# That split is the same argument RFC 0022 makes about
+# `network.firewall.allow` being a separate key from `services.sshd`.
+# Deriving the permissions from "an agent is installed" would be one
+# key instead of two and it is what people expect; it is also a machine
+# that grants powers because a program was installed. The set of things
+# an automated actor may do has to be one list a person chose.
+#
+# ── What `do` deliberately cannot do ─────────────────────────────────
+#
+# There is NO `exec` verb, and there will not be one. An interface that
+# runs an arbitrary command is not a boundary with a hole in it, it is
+# the absence of a boundary wearing a policy file. Anyone who wants
+# that has a shell; the point of this is to be the thing you can hand
+# out when you do not.
+#
+# There is also no `service.start`. Starting a service without
+# declaring it is drift by construction, and an agent that produces
+# drift on purpose defeats the engine it is talking to. Services are
+# reached the way everything else is: `state.set services.X on` then
+# `state.apply`.
+#
+# ── Busybox ──────────────────────────────────────────────────────────
+#
+# shellcheck disable=SC3043
+# `local` is outside strict POSIX sh, which is what shellcheck's `sh`
+# dialect checks -- the real target is BusyBox ash, which supports it,
+# exactly as packages/pkg and packages/novi-state already rely on.
+# ============================================================
+set -eu
+
+STATE="${NOVI_STATE:-novi-state}"
+PKG="${NOVI_PKG:-pkg}"
+WIFI="${NOVI_WIFI:-novi-wifi}"
+AUDIT="${NOVI_AGENT_AUDIT:-/var/log/novi-agent.jsonl}"
+SOCK="${NOVI_AGENT_SOCK:-/run/novi/agent/sock}"
+AUDIT_MAX="${NOVI_AGENT_AUDIT_MAX:-2000}"
+
+# `.` is a SPECIAL BUILTIN: in ash, sourcing a file that is not there
+# ends the script immediately, with status 2 and nothing on stderr that
+# anyone would connect to a missing library. Guard it.
+NOVI_JSON_LIB="${NOVI_JSON_LIB:-/usr/lib/novi/json.sh}"
+if [ -f "$NOVI_JSON_LIB" ]; then
+    # shellcheck disable=SC1090
+    . "$NOVI_JSON_LIB"
+else
+    printf 'novi-agent: %s is missing; every output of this tool is JSON\n' \
+        "$NOVI_JSON_LIB" >&2
+    exit 1
+fi
+
+die() { printf 'novi-agent: %s\n' "$*" >&2; exit 1; }
+
+# The verbs this tool knows. novi-state carries the same list, because
+# that is where a typo in `agent.allow` is caught, and a list that
+# lives only in the tool being configured cannot be validated by the
+# thing that validates the document. packages/tests/test-agent-verbs.sh
+# checks the two against each other, which is the answer to "then they
+# will drift" -- the same answer as `common/keybindings.h` being one
+# table that both novi-shell and novi-launcher read.
+VERBS="state.set state.apply state.rollback pkg.sync pkg.install wifi.join"
+
+# ---------------------------------------------------------------------------
+# Reading the policy
+# ---------------------------------------------------------------------------
+
+policy_enabled() {
+    [ "$("$STATE" get agent.enabled 2>/dev/null || printf off)" = "on" ]
+}
+
+policy_allows() {
+    local want="$1" allow v
+    allow="$("$STATE" get agent.allow 2>/dev/null || printf '')"
+    case "$allow" in ''|none) return 1 ;; esac
+    for v in $(printf '%s' "$allow" | tr ',' ' '); do
+        [ "$v" = "$want" ] && return 0
+    done
+    return 1
+}
+
+# A ceiling on how many `do` verbs may SUCCEED in a rolling minute.
+#
+# WHAT THIS IS NOT: a security control. Anything that can run
+# `novi-agent do` can run `pkg` or `novi-state` directly -- this tool
+# has never claimed otherwise, and a limit here does not stand between
+# a hostile caller and the machine. Presenting it as though it did
+# would be worse than not having it.
+#
+# What it bounds is an ACCIDENT. The failure this interface actually
+# invites is a buggy actor looping -- reinstalling the same package a
+# thousand times, applying the same document until the disk fills --
+# and the point is not that the loop is stopped so much as that it
+# becomes VISIBLE: a run of `rate limit` refusals in the audit log
+# says what happened, where a thousand successful installs say nothing
+# at all. That is the same argument RFC 0016 makes about silent
+# refusals, from the other end.
+#
+# Only ALLOWED calls count. Counting refusals too would make the limit
+# self-sustaining -- each refusal is itself a log line, so once
+# tripped it would stay tripped for a minute even if the caller
+# stopped -- and refusals are cheap anyway. The log's own truncation
+# bounds the disk.
+#
+# Off by default: a limit that fires on somebody's first legitimate
+# batch is a limit they will turn off and never reconsider.
+rate_limit() {
+    printf '%s' "$("$STATE" get agent.rate 2>/dev/null || printf 0)"
+}
+
+# ISO-8601 UTC sorts LEXICALLY, which is the whole reason the audit
+# format is worth what it costs: "is this line within the last minute"
+# is a string comparison, with no date parsing in a shell script.
+rate_exceeded() {
+    local limit="$1" since n
+    case "$limit" in ''|0|off|none) return 1 ;; esac
+    case "$limit" in *[!0-9]*) return 1 ;; esac   # unusable: observer reports it
+    [ -r "$AUDIT" ] || return 1
+    since="$(date -u -d "@$(( $(date -u +%s) - 60 ))" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null)" ||
+        return 1
+    [ -n "$since" ] || return 1
+    # Read a bounded tail: only `limit` allowed calls can matter, and a
+    # refusal-heavy log should not make this walk the whole file.
+    n="$(tail -n $(( limit * 4 + 40 )) "$AUDIT" 2>/dev/null |
+         grep '"decision": "allowed"' |
+         sed -n 's/^{"time": "\([^"]*\)".*/\1/p' |
+         awk -v s="$since" '$0 >= s' | wc -l)"
+    [ "${n:-0}" -ge "$limit" ]
+}
+
+# ---------------------------------------------------------------------------
+# The audit log
+# ---------------------------------------------------------------------------
+#
+# One JSON object per line, appended. REFUSALS ARE LOGGED TOO: a
+# boundary that records only what it let through tells you nothing
+# about what was tried, and this project already learned that lesson in
+# novi-umh, where a silent exec refusal was the same bug as the silent
+# exec failure it replaced.
+#
+# 0600, because it records what an actor asked this machine to do,
+# which is not everybody's business.
+#
+# Truncation is by line count and happens on write, not by a cron job
+# nothing runs. A log that grows forever on a machine with a small
+# writable layer is a way to fill a disk.
+
+# WHOSE uid, when the call arrived over novi-agentd's socket?
+#
+# `id -u` is the process running this script, which through the daemon
+# is root -- so a log written that way would record root as the actor
+# for every request, whoever actually made it, and the one question an
+# audit log exists to answer would have a single wrong answer.
+#
+# NOVI_AGENT_PEER_UID carries the value s6-ipcserver took from
+# SO_PEERCRED (RFC 0032). It is trusted because of where it comes
+# from: novi-agent-serve is the only thing that sets it, it runs as
+# root as the daemon's per-connection handler, and the kernel filled
+# the number. Anyone who could forge the variable could run the tool
+# directly anyway, so this widens nothing.
+#
+# `via` distinguishes the two, because "root, at a shell" and "root,
+# through the socket" are different events that a uid alone cannot
+# tell apart.
+peer_uid() {
+    case "${NOVI_AGENT_PEER_UID:-}" in
+        ''|*[!0-9]*) id -u ;;
+        *) printf '%s' "$NOVI_AGENT_PEER_UID" ;;
+    esac
+}
+
+audit() {
+    local verb="$1" args="$2" decision="$3" reason="$4" status="$5" line tmp
+    line="$(printf '{"time": %s, "uid": %s, "via": %s, "verb": %s, "args": %s, "decision": %s, "reason": %s, "status": %s}' \
+        "$(json_str "$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || printf unknown)")" \
+        "$(json_num "$(peer_uid)")" \
+        "$(json_str "${NOVI_AGENT_VIA:-cli}")" \
+        "$(json_str "$verb")" \
+        "$(json_str "$args")" \
+        "$(json_str "$decision")" \
+        "$(json_str "$reason")" \
+        "$(json_num "$status")")"
+    # A machine whose /var is read-only, or a non-root caller, must not
+    # take the whole command down over the log -- but it must not do
+    # the work silently either, so say so on stderr.
+    if ! { mkdir -p "$(dirname "$AUDIT")" 2>/dev/null &&
+           printf '%s\n' "$line" >> "$AUDIT" 2>/dev/null; }; then
+        printf 'novi-agent: could not append to %s (not recorded)\n' "$AUDIT" >&2
+        return 0
+    fi
+    chmod 600 "$AUDIT" 2>/dev/null || true
+    if [ "$(wc -l < "$AUDIT" 2>/dev/null || printf 0)" -gt "$AUDIT_MAX" ]; then
+        tmp="${AUDIT}.new"
+        if tail -n "$AUDIT_MAX" "$AUDIT" > "$tmp" 2>/dev/null; then
+            chmod 600 "$tmp" 2>/dev/null || true
+            mv "$tmp" "$AUDIT"
+        else
+            rm -f "$tmp"
+        fi
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Argument validation
+# ---------------------------------------------------------------------------
+#
+# Every argument reaching this tool came from something automated, and
+# it is about to become part of a command line. Two rules, both narrow
+# on purpose:
+#
+#   * NOTHING MAY START WITH `-`. `pkg.install --root=/` is a different
+#     program than `pkg install <name>`, and an argument that turns
+#     into an option is the oldest injection there is.
+#   * A restricted character set, per argument kind. This is
+#     novi-mount's safe_name() rule (RFC 0023) applied to a different
+#     kind of stranger's input: reject rather than sanitise, because a
+#     sanitised name that no longer refers to the thing asked for is a
+#     worse answer than a refusal.
+
+# Each is ONE `case` with no AND-list. `f() { g "$1" && return 1; ... }`
+# reads better and is a `set -e` trap: the AND-list's own failure is
+# the function's last status, and whether that ends the script depends
+# on whether the caller happened to put the call in a condition. Not
+# something to leave to the next caller to get right.
+
+valid_pkg_name() {
+    case "$1" in
+        -*|''|*[!A-Za-z0-9._+-]*) return 1 ;;
+    esac
+    return 0
+}
+
+# An SSID is not like the other arguments and cannot use their rule.
+#
+# It is arbitrary text chosen by a stranger and broadcast over the air
+# (RFC 0009), and legitimate ones contain spaces, apostrophes and
+# emoji. Restricting it to [A-Za-z0-9._-] the way a package name is
+# restricted would refuse a large fraction of real networks -- so this
+# one rejects by CLASS rather than by allowlist: no leading dash (the
+# oldest injection there is), nothing empty, no control characters
+# (which is novi-wifi's own rule for the same input), and a length cap.
+#
+# 32 bytes because that is what IEEE 802.11 allows an SSID to be. A
+# longer one is not a network anybody can join, so refusing it costs
+# nothing and keeps a runaway argument out of the log.
+valid_ssid() {
+    case "$1" in
+        -*|'') return 1 ;;
+        *[![:print:]]*) return 1 ;;
+    esac
+    [ "${#1}" -le 32 ] || return 1
+    return 0
+}
+
+valid_state_key() {
+    case "$1" in
+        -*|''|*[!A-Za-z0-9._-]*) return 1 ;;
+    esac
+    return 0
+}
+
+valid_state_value() {
+    # `#` would start a comment when the document is read back, so a
+    # value containing one turns the rest of that line into nothing --
+    # the GUI's System panel refuses it for exactly this reason
+    # (CLAUDE.md), and this is the same document. Whitespace is refused
+    # because a value is a bare word in this format; there is no
+    # quoting to get right and therefore none to get wrong.
+    case "$1" in
+        -*|''|*'#'*|*' '*) return 1 ;;
+        *[!A-Za-z0-9._,:/+-]*) return 1 ;;
+    esac
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# describe
+# ---------------------------------------------------------------------------
+#
+# One document, composed from the observers that already exist. It
+# reimplements NONE of them: the declared state and the drift come from
+# `novi-state --json`, the service verdicts from `novi-state health
+# --json`, the network interface from the file the network service
+# published (RFC 0009's /run/novi/network.device, never a second walk
+# of /sys/class/net), the package list from `pkg list`.
+#
+# That is the whole discipline of this file. An agent-facing summary
+# that computed its own answers would be a second source of truth about
+# a machine whose entire architecture is built on having one.
+
+# Returns 0 whether or not it found anything, DELIBERATELY. Callers do
+# `x="$(first_of ...)"`, and under `set -e` an assignment from a
+# failing command substitution ends the script -- so a helper that
+# returns 1 for "this machine has no wifi" would make `describe` exit
+# silently on every machine without one.
+first_of() {
+    local f
+    for f in "$@"; do
+        if [ -r "$f" ]; then
+            cat "$f" 2>/dev/null
+            return 0
+        fi
+    done
+    return 0
+}
+
+os_release_field() {
+    sed -n "s/^$1=//p" /etc/os-release 2>/dev/null | head -1 | tr -d '"'
+}
+
+describe_identity() {
+    printf '{"pretty_name": %s, "id": %s, "version_id": %s, "hostname": %s, "kernel": %s, "arch": %s, "uptime_seconds": %s, "boot": %s}' \
+        "$(json_str "$(os_release_field PRETTY_NAME)")" \
+        "$(json_str "$(os_release_field ID)")" \
+        "$(json_str "$(os_release_field VERSION_ID)")" \
+        "$(json_str "$(cat /proc/sys/kernel/hostname 2>/dev/null)")" \
+        "$(json_str "$(uname -r 2>/dev/null)")" \
+        "$(json_str "$(uname -m 2>/dev/null)")" \
+        "$(json_num "$(cut -d. -f1 /proc/uptime 2>/dev/null)")" \
+        "$(json_str "$([ -d /run/live ] && printf live || printf installed)")"
+}
+
+describe_hardware() {
+    local cpus model memtotal memavail dev first=1
+    cpus="$(grep -c '^processor' /proc/cpuinfo 2>/dev/null || printf 0)"
+    model="$(sed -n 's/^model name[ \t]*: //p' /proc/cpuinfo 2>/dev/null | head -1)"
+    memtotal="$(sed -n 's/^MemTotal:[ ]*\([0-9]*\).*/\1/p' /proc/meminfo 2>/dev/null)"
+    memavail="$(sed -n 's/^MemAvailable:[ ]*\([0-9]*\).*/\1/p' /proc/meminfo 2>/dev/null)"
+    printf '{"cpu_model": %s, "cpu_count": %s, "mem_total_kb": %s, "mem_available_kb": %s, "firmware": %s, "block_devices": [' \
+        "$(json_str "$model")" "$(json_num "$cpus")" \
+        "$(json_num "$memtotal")" "$(json_num "$memavail")" \
+        "$(json_str "$([ -d /sys/firmware/efi ] && printf uefi || printf bios)")"
+    for dev in /sys/block/*; do
+        [ -d "$dev" ] || continue
+        [ "$first" -eq 1 ] || printf ','
+        first=0
+        printf '{"name": %s, "sectors": %s, "removable": %s}' \
+            "$(json_str "${dev##*/}")" \
+            "$(json_num "$(cat "$dev/size" 2>/dev/null)")" \
+            "$([ "$(cat "$dev/removable" 2>/dev/null || printf 0)" = "1" ] && printf true || printf false)"
+    done
+    printf ']}'
+}
+
+describe_network() {
+    local iface wifi carrier addr
+    # The interface the SERVICE published, never our own walk of
+    # /sys/class/net. RFC 0009's pick_interface() has real rules (wired
+    # first; a radio is a phy80211 link, not a name) and a second
+    # implementation would drift from them -- which is the same reason
+    # novi-panel reads this file rather than looking for itself.
+    iface="$(first_of /run/novi/network.device)"
+    wifi="$(first_of /run/novi/wifi.device)"
+    carrier=""
+    # An `if`, not `[ -n "$iface" ] && carrier=...`: on a machine with
+    # no network interface the AND-list's status is 1, which under
+    # `set -e` is the end of the command.
+    if [ -n "$iface" ]; then
+        carrier="$(cat "/sys/class/net/$iface/carrier" 2>/dev/null || printf '')"
+    fi
+    # The address actually HELD, published by whichever half of the
+    # network service configured it -- the lease script on `bound`, or
+    # the static path at start (RFC 0033). Not read out of the document
+    # and not a second `ip addr` parse: "what did you declare" and
+    # "what is on the wire" are different questions and an agent asking
+    # this one wants the second.
+    addr="$(first_of /run/novi/network.ip)"
+    printf '{"interface": %s, "address": %s, "wifi_interface": %s, "carrier": %s, "resolvers": [' \
+        "$(json_str "$iface")" "$(json_str "$addr")" \
+        "$(json_str "$wifi")" "$(json_bool "$carrier")"
+    local first=1 ns
+    for ns in $(sed -n 's/^nameserver[ \t]*//p' /etc/resolv.conf 2>/dev/null); do
+        [ "$first" -eq 1 ] || printf ','
+        first=0
+        printf '%s' "$(json_str "$ns")"
+    done
+    printf ']}'
+}
+
+describe_packages() {
+    local first=1 name version
+    printf '['
+    # `pkg list` prints `%-30s %s` -- name and version, space-padded.
+    # `read` splits on whitespace, so the padding costs nothing, and
+    # neither field can contain a space: mkpkg rejects one in depends=
+    # and the index format forbids `|` for the same family of reasons
+    # (RFC 0006, RFC 0015).
+    #
+    # 2>/dev/null matters: `pkg list` prints "No packages installed."
+    # to STDERR on an empty database, which would otherwise land in the
+    # middle of a JSON document.
+    "$PKG" list 2>/dev/null | while read -r name version _rest; do
+        [ -n "$name" ] || continue
+        [ "$first" -eq 1 ] || printf ','
+        first=0
+        printf '{"name": %s, "version": %s}' \
+            "$(json_str "$name")" "$(json_str "$version")"
+    done
+    printf ']'
+    return 0
+}
+
+describe_agent() {
+    local first=1 v allow
+    allow="$("$STATE" get agent.allow 2>/dev/null || printf '')"
+    printf '{"enabled": %s, "audit_log": %s, "known_verbs": [' \
+        "$(policy_enabled && printf true || printf false)" \
+        "$(json_str "$AUDIT")"
+    for v in $VERBS; do
+        [ "$first" -eq 1 ] || printf ','
+        first=0
+        printf '%s' "$(json_str "$v")"
+    done
+    printf '], "allowed_verbs": ['
+    first=1
+    for v in $VERBS; do
+        policy_allows "$v" || continue
+        [ "$first" -eq 1 ] || printf ','
+        first=0
+        printf '%s' "$(json_str "$v")"
+    done
+    printf ']'
+    # WHETHER THE NON-ROOT PATH EXISTS IS A CAPABILITY, so it belongs
+    # in the document that answers "what may I do here". An agent that
+    # is not root has no other way to find out short of trying, and
+    # `null` distinguishes "novi-agentd is not running" from "it is,
+    # and here is where" -- which are different problems with different
+    # fixes (declare `services.novi-agentd = on`, versus join `agent`).
+    if [ -S "$SOCK" ]; then
+        printf ', "socket": %s' "$(json_str "$SOCK")"
+    else
+        printf ', "socket": null'
+    fi
+    printf '}'
+    # `allow` is read but not emitted raw on purpose: what matters to a
+    # caller is which verbs are actually permitted, and echoing the
+    # declared string as well would invite reading the string instead
+    # of the resolved list.
+    : "$allow"
+}
+
+cmd_describe() {
+    local state diff health
+    # `|| true` on each: `novi-state diff` exits 1 when there is drift,
+    # and under `set -e` an assignment from a failing command
+    # substitution ends the script. Drift is a THING TO REPORT, not an
+    # error -- this is a description, and a machine with drift is
+    # exactly the machine somebody wants described.
+    state="$("$STATE" show --json 2>/dev/null || printf '{}')"
+    diff="$("$STATE" diff --json 2>/dev/null || true)"
+    [ -n "$diff" ] || diff='{}'
+    health="$("$STATE" health --json 2>/dev/null || true)"
+    [ -n "$health" ] || health='{}'
+    printf '{"schema": 1, "identity": %s, "hardware": %s, "network": %s, "state": %s, "drift": %s, "health": %s, "packages": %s, "agent": %s}\n' \
+        "$(describe_identity)" \
+        "$(describe_hardware)" \
+        "$(describe_network)" \
+        "$state" "$diff" "$health" \
+        "$(describe_packages)" \
+        "$(describe_agent)"
+}
+
+# ---------------------------------------------------------------------------
+# do
+# ---------------------------------------------------------------------------
+
+result() {
+    local ok="$1" verb="$2" reason="$3" status="$4"
+    printf '{"verb": %s, "ok": %s, "reason": %s, "status": %s}\n' \
+        "$(json_str "$verb")" "$ok" "$(json_str "$reason")" "$(json_num "$status")"
+}
+
+refuse() {
+    local verb="$1" reason="$2" args="${3:-}"
+    audit "$verb" "$args" refused "$reason" 1
+    result false "$verb" "$reason" 1
+    exit 1
+}
+
+cmd_do() {
+    local verb="${1:-}" args status=0 reason=ok a
+    [ -n "$verb" ] || die "usage: novi-agent do <verb> [args...]"
+    shift
+    args="$*"
+
+    case " $VERBS " in
+        *" $verb "*) ;;
+        *) refuse "$verb" "no such verb" "$args" ;;
+    esac
+
+    # A VERB CAN BE UNREACHABLE BY TRANSPORT RATHER THAN BY POLICY, and
+    # wifi.join is the one: its passphrase arrives on stdin precisely so
+    # it is never an argument, and novi-agentd's protocol is one line
+    # with nowhere to put a secret that is not the argument line
+    # (RFC 0032). An agent that must join a network calls this tool
+    # directly as root.
+    #
+    # It is refused HERE rather than in novi-agent-serve, where it was
+    # first written, because a refusal the audit log never sees is the
+    # thing RFC 0016 warns about -- a boundary that records only what it
+    # let through says nothing about what was tried. The handler is not
+    # a second policy reader; this is the only one.
+    #
+    # Arguments withheld for the same reason every other wifi.join exit
+    # withholds them: the caller may have made the argv mistake, and a
+    # refusal must not be the thing that writes a passphrase to disk.
+    if [ "$verb" = "wifi.join" ] && [ "${NOVI_AGENT_VIA:-cli}" = "socket" ]; then
+        refuse "$verb" "wifi.join is not available over the socket" \
+            "<arguments withheld: may contain a passphrase>"
+    fi
+
+    # Order matters for the message a caller gets: "the interface is
+    # off" and "this verb is not permitted" are different problems with
+    # different fixes, and collapsing them into one refusal sends
+    # people to the wrong line of the document.
+    policy_enabled || refuse "$verb" "agent.enabled is not on" "$args"
+    policy_allows "$verb" || refuse "$verb" "not in agent.allow" "$args"
+
+    # After the policy checks and before any work: a caller who is not
+    # permitted should be told that, not told to slow down.
+    #
+    # wifi.join's arguments may hold a passphrase if the caller made
+    # the argv mistake, so this refusal withholds them too -- every
+    # exit from this function has to keep that promise, not just the
+    # ones inside the verb's own branch.
+    if rate_exceeded "$(rate_limit)"; then
+        case "$verb" in
+            wifi.join) refuse "$verb" "rate limit: agent.rate per minute reached" \
+                "<arguments withheld: may contain a passphrase>" ;;
+            *) refuse "$verb" "rate limit: agent.rate per minute reached" "$args" ;;
+        esac
+    fi
+
+    case "$verb" in
+        state.set)
+            [ "$#" -eq 2 ] || refuse "$verb" "usage: state.set <key> <value>" "$args"
+            valid_state_key "$1" || refuse "$verb" "invalid key" "$args"
+            valid_state_value "$2" || refuse "$verb" "invalid value" "$args"
+            "$STATE" set "$1" "$2" >&2 || status=$?
+            ;;
+        state.apply)
+            [ "$#" -eq 0 ] || refuse "$verb" "state.apply takes no arguments" "$args"
+            "$STATE" apply >&2 || status=$?
+            ;;
+        state.rollback)
+            [ "$#" -le 1 ] || refuse "$verb" "usage: state.rollback [generation]" "$args"
+            if [ "$#" -eq 1 ]; then
+                case "$1" in ''|*[!0-9]*) refuse "$verb" "generation must be a number" "$args" ;; esac
+                "$STATE" rollback "$1" >&2 || status=$?
+            else
+                "$STATE" rollback >&2 || status=$?
+            fi
+            ;;
+        pkg.sync)
+            [ "$#" -eq 0 ] || refuse "$verb" "pkg.sync takes no arguments" "$args"
+            "$PKG" sync >&2 || status=$?
+            ;;
+        pkg.install)
+            [ "$#" -ge 1 ] || refuse "$verb" "usage: pkg.install <name>..." "$args"
+            for a in "$@"; do
+                valid_pkg_name "$a" || refuse "$verb" "invalid package name" "$args"
+            done
+            "$PKG" install "$@" >&2 || status=$?
+            ;;
+        wifi.join)
+            # THE PASSPHRASE IS NEVER AN ARGUMENT, and that constraint
+            # shapes every line of this branch.
+            #
+            # /proc/<pid>/cmdline is world-readable for as long as the
+            # process lives, which is why RFC 0017 gave novi-wifi
+            # `add <ssid> --stdin` for the GUI. The same reasoning
+            # applies harder here: an automated actor is exactly the
+            # caller most likely to put a secret somewhere it will be
+            # read back later. So the passphrase arrives on stdin, is
+            # piped straight through, and is never held in a shell
+            # variable this script could accidentally print.
+            #
+            # AND IT IS NEVER AUDITED -- including on the refusal path,
+            # which is the part that is easy to get wrong. cmd_do
+            # captures `args="$*"` before dispatch, so if somebody
+            # calls `wifi.join <ssid> <passphrase>` -- the obvious
+            # mistake -- then refusing with "$args" would write that
+            # passphrase into /var/log/novi-agent.jsonl, permanently,
+            # while reporting that it had protected them. Every refusal
+            # here therefore audits a FIXED string, never "$args".
+            #
+            # This is RFC 0005's rule ("configuration is declared;
+            # secrets are not") reaching the agent interface: the SSID
+            # is configuration and is logged, the passphrase is a
+            # secret and exists nowhere but the pipe.
+            [ "$#" -eq 1 ] || refuse "$verb" \
+                "usage: wifi.join <ssid>, passphrase on stdin" \
+                "<arguments withheld: may contain a passphrase>"
+            valid_ssid "$1" || refuse "$verb" "invalid ssid" \
+                "<arguments withheld: may contain a passphrase>"
+            command -v "$WIFI" >/dev/null 2>&1 || \
+                refuse "$verb" "novi-wifi is not installed" "$1"
+            # A tty means there is a person here, and novi-wifi would
+            # PROMPT -- so an agent that reached this by accident would
+            # hang forever rather than fail. Refuse instead: this verb
+            # exists to be driven by a pipe.
+            [ ! -t 0 ] || refuse "$verb" \
+                "passphrase must arrive on stdin, not a terminal" "$1"
+            "$WIFI" add "$1" --stdin >&2 || status=$?
+            args="$1"
+            ;;
+    esac
+
+    [ "$status" -eq 0 ] || reason="the command exited $status"
+    audit "$verb" "$args" allowed "$reason" "$status"
+    result "$([ "$status" -eq 0 ] && printf true || printf false)" \
+        "$verb" "$reason" "$status"
+    return "$status"
+}
+
+# ---------------------------------------------------------------------------
+
+cmd_capabilities() {
+    printf '%s\n' "$(describe_agent)"
+}
+
+cmd_audit() {
+    local n=50
+    case "${1:-}" in
+        -n) n="${2:-50}"; case "$n" in ''|*[!0-9]*) die "-n wants a number" ;; esac ;;
+        '') ;;
+        *) die "usage: novi-agent audit [-n <lines>]" ;;
+    esac
+    # The log is already JSON, one object per line, so this is a tail
+    # and not a formatter. That is the point of storing it that way:
+    # the thing that reads the record does not need a parser this
+    # project would then have to keep in step with the writer.
+    [ -f "$AUDIT" ] || { printf '' ; return 0; }
+    tail -n "$n" "$AUDIT"
+}
+
+# ---------------------------------------------------------------------------
+# `send` — the same verbs, from a process that is not root
+# ---------------------------------------------------------------------------
+#
+# RFC 0032 put the non-root path on a socket, and driving it by hand
+# means `s6-ipcclient /run/novi/agent/sock s6-ioconnect` with the
+# request on stdin. That works and nobody would guess it. A capability
+# reachable only by an incantation is the KDE lesson this repo already
+# recorded about the shortcut sheet: the audience for the non-root path
+# is exactly the reader least likely to know skarnet's tool names.
+#
+# So: `novi-agent send <verb> [args...]` is `novi-agent do <verb>
+# [args...]` for somebody who is not root. Same tool, same verb names,
+# same JSON answer -- the difference is which side of the socket the
+# policy is read on, and that difference is not the caller's to care
+# about.
+#
+# It needs NO privilege of its own. Reaching the socket is the whole
+# permission, and that is group membership (see RFC 0032): running this
+# as somebody outside `agent` fails at connect, which is the right
+# place and the right message.
+cmd_send() {
+    local sock="$SOCK" line
+    [ -n "${1:-}" ] || die "usage: novi-agent send <verb> [args...]"
+
+    # THE PROTOCOL IS ONE LINE SPLIT ON WHITESPACE, so an argument that
+    # CONTAINS whitespace cannot survive the trip: it would arrive as
+    # two arguments and the verb would be handed something it was not
+    # given. Refuse here rather than send it -- a request that means
+    # something different at the other end is worse than one that is
+    # rejected, and the caller is the only party who still knows what
+    # was meant.
+    for line in "$@"; do
+        case "$line" in
+            *[[:space:]]*) die "an argument may not contain whitespace: novi-agentd's protocol is one line" ;;
+            *[![:print:]]*) die "an argument may not contain control characters" ;;
+        esac
+    done
+
+    # ABSENT AND UNREACHABLE ARE DIFFERENT PROBLEMS WITH DIFFERENT
+    # FIXES, and `test -S` cannot tell them apart: for somebody outside
+    # the `agent` group the socket directory is not searchable, so the
+    # test fails exactly as it would if novi-agentd were off. The first
+    # version said "declare services.novi-agentd = on" to a caller
+    # looking at a running daemon -- a confident message pointing at
+    # the wrong layer, which is worse than none.
+    #
+    # The directory itself is visible (its parent is 0755); what a
+    # non-member lacks is SEARCH permission on it.
+    if [ ! -S "$sock" ]; then
+        local dir
+        # ${sock%/*} yields the path back unchanged when there is no
+        # slash in it, which would test the socket for searchability
+        # rather than its directory.
+        case "$sock" in */*) dir="${sock%/*}" ;; *) dir="." ;; esac
+        if [ -d "$dir" ] && [ ! -x "$dir" ]; then
+            die "${dir} is not reachable by you -- membership of the 'agent' group is the grant (RFC 0032)"
+        fi
+        die "no agent socket at ${sock} -- declare 'services.novi-agentd = on' and apply"
+    fi
+
+    # s6-ipcclient hands the connection to its child on fds 6 and 7;
+    # s6-ioconnect is the skarnet tool that joins those to stdin and
+    # stdout. Without it a child like `cat` reads the TERMINAL and the
+    # request never leaves the machine it was typed on -- which looks
+    # like a server that answered with an echo of the question.
+    printf '%s\n' "$*" | s6-ipcclient -- "$sock" s6-ioconnect
+}
+
+usage() {
+    cat >&2 <<'USAGE'
+novi-agent — the interface an automated actor uses to this machine (RFC 0029)
+
+  novi-agent describe            what this machine is, as one JSON document
+  novi-agent capabilities        whether `do` is enabled, and which verbs
+  novi-agent audit [-n N]        what has been attempted, refusals included
+  novi-agent do <verb> [args]    change the machine, within the declared list
+  novi-agent send <verb> [args]  the same, over novi-agentd's socket (RFC 0032),
+                                 for a caller who is not root but is in `agent`
+
+Reading is free. Writing requires `agent.enabled = on` in
+/etc/novi/system.conf AND the verb named in `agent.allow`.
+
+Verbs:
+  state.set <key> <value>    declare a value (does not apply it)
+  state.apply                converge the machine to the document
+  state.rollback [gen]       restore a previous generation and re-apply
+  pkg.sync                   refresh the signed package index
+  pkg.install <name>...      install a package
+  wifi.join <ssid>           join a network; PASSPHRASE ON STDIN, never in
+                             argv -- and not available over `send`, because
+                             a one-line request has nowhere to put a secret
+
+There is deliberately no `exec` verb and no `service.start`: an
+interface that runs arbitrary commands is not a boundary, and starting
+a service without declaring it is drift by construction. Services are
+reached with state.set + state.apply, like everything else.
+USAGE
+    exit 1
+}
+
+case "${1:-}" in
+    describe)     shift; cmd_describe "$@" ;;
+    capabilities) shift; cmd_capabilities "$@" ;;
+    audit)        shift; cmd_audit "$@" ;;
+    do)           shift; cmd_do "$@" ;;
+    send)         shift; cmd_send "$@" ;;
+    *)            usage ;;
+esac

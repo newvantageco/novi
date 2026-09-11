@@ -219,6 +219,29 @@ else
     echo "[skip]  ${INTER_ZIP} already exists"
 fi
 
+# Source Serif 4 (RFC 0031's serif). Same release-asset reasoning as
+# the two above -- and one extra fetch, because Adobe's release asset
+# contains font files and nothing else. An OFL font redistributed
+# without its licence is a licence violation with a friendly face, so
+# the text comes down beside it.
+SOURCE_SERIF_ZIP="source-serif-${SOURCE_SERIF_VERSION}.zip"
+if [ ! -f "${SOURCE_SERIF_ZIP}" ]; then
+    echo "[fetch] ${SOURCE_SERIF_ZIP}"
+    curl -fL --retry 3 -o "${SOURCE_SERIF_ZIP}" \
+        "https://github.com/adobe-fonts/source-serif/releases/download/${SOURCE_SERIF_VERSION}R/source-serif-${SOURCE_SERIF_VERSION}.zip"
+else
+    echo "[skip]  ${SOURCE_SERIF_ZIP} already exists"
+fi
+
+SOURCE_SERIF_LICENSE="source-serif-${SOURCE_SERIF_VERSION}-OFL.txt"
+if [ ! -f "${SOURCE_SERIF_LICENSE}" ]; then
+    echo "[fetch] ${SOURCE_SERIF_LICENSE}"
+    curl -fL --retry 3 -o "${SOURCE_SERIF_LICENSE}" \
+        "https://raw.githubusercontent.com/adobe-fonts/source-serif/${SOURCE_SERIF_VERSION}R/LICENSE.md"
+else
+    echo "[skip]  ${SOURCE_SERIF_LICENSE} already exists"
+fi
+
 JBMONO_ZIP="jetbrains-mono-${JETBRAINS_MONO_VERSION}.zip"
 if [ ! -f "${JBMONO_ZIP}" ]; then
     echo "[fetch] ${JBMONO_ZIP}"
@@ -287,6 +310,11 @@ fetch_pinned "https://curl.se/ca/cacert-${CACERT_DATE}.pem" "${CACERT_SHA256}"
 # whole reason it is allowed in this image at all.
 fetch "https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-${OPENSSH_VERSION}.tar.gz"
 fetch "https://cdn.kernel.org/pub/software/scm/git/git-${GIT_VERSION}.tar.xz"
+
+# NetSurf (RFC 0032), the "all" tarball: the browser plus the thirteen
+# libraries it is built from, which are separate git repositories
+# upstream and are not separately released.
+fetch "https://download.netsurf-browser.org/netsurf/releases/source-full/netsurf-all-${NETSURF_VERSION}.tar.gz"
 
 # OpenSSL (RFC 0027). A package: it is what CPython's ssl module is
 # written against, and there is no other implementation it accepts.
