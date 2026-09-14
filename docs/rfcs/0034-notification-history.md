@@ -239,6 +239,13 @@ That is the repo's standing advice about GUI work applied again: the
 list was correct, the format was correct, the test passed, and the
 thing that was wrong was only visible in a picture.
 
+**The bell, on a booted machine.** Two `novi-notify` calls from the
+console put a bell and the numeral **2** on the panel. Super+N opened
+the list, and the next screendump has no bell at all — the marker file
+holds the newest entry's timestamp. Toggling Super+A twice afterwards
+(two more toasts) brought it back showing **1**, then **2**, which is
+the count following the machine rather than a flag that latches.
+
 ## Consequences
 
 - **A notification is no longer lost by not being seen.** That is most

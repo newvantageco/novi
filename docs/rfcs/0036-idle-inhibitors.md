@@ -262,6 +262,8 @@ the script now says so where the number is.
 | **the clock is HELD** | `power.blank = 10`, then **thirty seconds** untouched with the toggle on: `blanked 0` and `idle 0`. Three timeouts' worth of not blanking |
 | **and released** | Super+A off → `idle: no longer inhibited -- the clock restarts`, and twenty seconds later `blanked 1` with `idle: output Virtual-1 off committed`. The commit result, not the intent — RFC 0035's rule |
 | `novi-power idle` | on the target: `awake yes -- somebody pressed Super+A`, with `inhibit no` beside it, the two claims apart |
+| **the cup** | Super+A on a live desktop draws a coffee cup in the status area, and a second press takes it away — `awake 1` then `awake 0` in `/run/novi/idle`, checked against the same screendumps |
+| **the description** | with a compositor running, `novi-agent describe` reports `"idle": {"present": true, …, "blank_after": 600, "suspend_after": null, "awake": true, "inhibitors": []}`; on the console base before the desktop was started, the same command reported `{"present": false}` and nothing else |
 | the sheet | Super+/ renders all nineteen rows, "Keep this machine awake (on/off) — Super + A" among them in the Session group, with no edit to novi-launcher |
 
 The console is on ttyS0 and is not a libinput device, so typing these

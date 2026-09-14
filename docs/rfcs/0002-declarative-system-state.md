@@ -455,7 +455,11 @@ job runner the Network panel brought for WiFi scans, instead of
 forking and waiting inside the Wayland event loop.
 
 Nothing new was needed: `JOB_APPLY` already existed, because turning
-the radio on restarts the supplicant. The System panel's Enter was
+the radio on restarts the supplicant. **Not separately verified in a
+running window**: it compiles clean and it is the same runner RFC 0017
+put through a live WiFi scan, but nobody has watched this particular
+Enter key with a slow install behind it. Say that rather than implying
+otherwise. The System panel's Enter was
 simply the last path that could freeze the window, and the one that
 could freeze it longest. A side effect worth having — the job
 runner captures the child's stderr, so a failed apply now shows
