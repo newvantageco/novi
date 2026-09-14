@@ -122,6 +122,61 @@ struct net_fan {
 #define VOL_X_CX 4.2
 #define VOL_X_HALF 2.2
 
+/* ── The stay-awake glyph (Lucide "coffee") ───────────────────────── */
+/* Drawn when something is holding this machine awake: either somebody
+ * pressed Super+A or a client surface is inhibiting (RFC 0036). ONE
+ * glyph for both, deliberately -- which of the two is happening has
+ * different remedies and `novi-power idle` is where that question is
+ * answered, the same division of labour the health glyph already has
+ * with `novi-state health`. The panel's job here is "still true".
+ *
+ * A coffee cup rather than a moon-with-a-slash or an open eye: it is
+ * what every other desktop with this feature draws, so it is the one
+ * shape a person arriving from elsewhere already knows.
+ *
+ * 17 wide because the handle hangs off the cup's right side and 16
+ * would clip it; 16 tall like the power and volume glyphs beside it. */
+#define AWAKE_ICON_W 17
+#define AWAKE_ICON_H 16
+#define AWAKE_ICON_STROKE 1.7
+/* The cup, as a closed four-point polyline -- a slight taper, which is
+ * what makes it read as a cup rather than as a bucket or a battery.
+ * Same closed-polyline treatment as the speaker body, and for the same
+ * reason: a rounded box unioned with anything draws a seam where the
+ * two shapes meet. */
+#define AWAKE_CUP_POINTS 4
+/* Named here rather than left as a table in icons.c because the host
+ * test probes them -- the speaker body's literals had to be retyped
+ * into icons-test.c, and a probe at a hand-copied coordinate is a
+ * probe that goes on passing after the shape moves. */
+#define AWAKE_CUP_TOP 6.2
+#define AWAKE_CUP_BOTTOM 14.0
+#define AWAKE_CUP_TOP_LEFT 2.6
+#define AWAKE_CUP_TOP_RIGHT 12.2
+#define AWAKE_CUP_BOTTOM_LEFT 3.9
+#define AWAKE_CUP_BOTTOM_RIGHT 10.9
+/* The handle: an arc centred on the cup's right edge, opening
+ * rightward, with its ends carried back INSIDE the cup (the slope is
+ * negative) so it joins the outline instead of floating beside it. */
+#define AWAKE_HANDLE_CX 12.2
+#define AWAKE_HANDLE_CY 8.9
+#define AWAKE_HANDLE_R 2.8
+#define AWAKE_HANDLE_SLOPE (-0.30)
+/* Two ticks of steam. Without them the cup is just a cup; with them it
+ * is a hot drink, which is the half of the metaphor that means awake.
+ * They stop at 3.3 rather than running down to the cup: at 3.8 the
+ * caps and the cup's top edge landed in adjacent rows, which at this
+ * size is not a gap but a join -- the steam grew out of the rim. The
+ * host test asserts an empty row between them.
+ * Their top is 2.0 and not one pixel higher: a segment's round cap
+ * plus half a stroke plus a pixel of antialiasing reaches 1.35, so a
+ * top edge any nearer the box than 1.85 puts ink in the box's own top
+ * row -- where draw_icon() clips it. The border assertion in icons-test.c is what enforces it. */
+#define AWAKE_STEAM_TOP 2.0
+#define AWAKE_STEAM_BOTTOM 3.3
+#define AWAKE_STEAM_X1 5.6
+#define AWAKE_STEAM_X2 9.2
+
 /* Which arcs this pass draws: bit 0 is the inner, bit 1 the outer.
  * `muted` replaces them entirely. The body is always drawn -- an
  * indicator that vanishes at zero volume is one that cannot tell you
@@ -146,5 +201,6 @@ double novi_net_wired_coverage(double x, double y, const void *ctx);
 double novi_power_coverage(double x, double y, const void *ctx);
 double novi_warn_coverage(double x, double y, const void *ctx);
 double novi_volume_coverage(double x, double y, const void *ctx);
+double novi_awake_coverage(double x, double y, const void *ctx);
 
 #endif

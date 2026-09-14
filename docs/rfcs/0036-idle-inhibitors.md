@@ -153,6 +153,91 @@ publishes immediately rather than at the next tick — `novi-power idle`
 run straight after the keypress must not still say `no`, or the one
 tool that can report this state looks broken for five seconds.
 
+### 8. The panel says "still true"; `novi-power idle` says which.
+
+A coffee cup, leftmost of the status glyphs, drawn whenever `awake 1`
+or `inhibit N > 0` — **one glyph for both askers**, which looks like it
+contradicts decision 1 and does not. That decision is about the
+published file, where the two claims have different remedies and an
+agent or a person debugging a machine that will not sleep needs to know
+which is happening. The panel is not where that question is answered:
+it is where the question is *raised*. The health indicator has made
+exactly this division since RFC 0014 — the glyph says "degraded", the
+notification says which service just broke, and `novi-state health`
+says which services are broken now. A second cup, or a cup in two
+colours, would be the panel trying to carry an answer that has a
+better place to live.
+
+Display-only, like the health and volume glyphs and unlike the three
+buttons on that bar. Super+A is the toggle and it is on the shortcut
+sheet; a click here that turned it off would be a second way to say one
+thing, in the one spot on this panel where everything else opens
+something.
+
+A coffee cup rather than a crossed-out moon or an open eye, because it
+is what every other desktop that has this feature draws. The glyph is
+geometry in `novi-panel/icons.c` with six assertions in the host test,
+each confirmed by breaking it: the cup's closing segment, the handle,
+the two steam ticks, the empty row between the steam and the rim, the
+box border, and that the steam is above the cup rather than below it —
+the RJ45 jack shipped upside down once, cleanly.
+
+**It is leftmost, and that is not arbitrary.** Every glyph in that
+march shifts the ones left of it when it appears, and this is the only
+one a person toggles with a keystroke. On the outside, its coming and
+going moves nothing else on the bar. (The volume *level* changes far
+more often; the volume glyph's presence does not — it is there for the
+life of a machine with a sound card.)
+
+**Adding a third glyph found two bugs in the second.** The taskbar's
+right-hand limit was `net_x - gap`, and its own comment said "the row
+stops where the status area starts" — which had never been true: the
+volume and health glyphs are drawn after the taskbar, so a long enough
+row ran underneath them, and, as that same comment says about the
+network button, *an entry drawn under an indicator still hit-tests as
+an entry*. And the volume file was read inside `layout_taskbar()`,
+which `render()` calls after it has already drawn the status glyphs —
+so the speaker had always been showing the previous second's level.
+Harmless at 1 Hz and invisible in a screenshot, which is why it lasted;
+it stops being harmless the moment a read decides a layout, which the
+limit now does. All three reads are one function called at the top of
+`render()`, and the width the taskbar stops short of is derived from
+the same three flags the march consumes — one arithmetic, so the
+drawing and the hit-test cannot disagree about a glyph.
+
+### 9. `novi-agent describe` gains an `idle` object.
+
+RFC 0029's rule is that `describe` **composes and computes nothing**,
+and this is a clean instance: `/run/novi/idle` is already published on
+every tick, so the object is that file turned into JSON and nothing
+else. Three calls in it were not obvious.
+
+**Absent is its own answer.** With no compositor there is no idle clock
+at all, and the honest zeros are the dangerous ones: `{"seconds": 0,
+"awake": false}` tells an agent that somebody just touched this machine
+and nothing is holding it awake, which is a reading of an instrument
+that does not exist. A base install reports `{"present": false}` and
+stops.
+
+**A timeout that is off is `null`, never the `0` the file spells it
+with.** `"suspend_after": 0` reads as "suspends the moment it goes
+idle" — the one wrong answer that matters here, and the exact opposite
+of the truth. `novi-power idle` has the same problem and solves it with
+the document's own word, `off`; JSON has a spelling for "there is no
+value here" and this is it. That is a `seconds_or_null()` rather than a test
+against `0`, because `json_num()` answers **0** for anything it cannot
+parse — so the first version turned `blank later` into `"blank_after":
+0` and would have handed an agent "blanks immediately" for a typo.
+
+**The `inhibit` count is not emitted beside the names.** It is the
+length of the array, and two spellings of one number is how they end up
+disagreeing. novi-shell writes both because `novi-power idle` prints a
+count to a person before it lists the names; a parser needs one.
+
+`schema` stays at 1. A consumer written against 1 still reads every
+field it knew; renaming or removing one is what would make it 2, and
+the script now says so where the number is.
+
 ## What was verified, and what could not be
 
 **On the build host, done:**
@@ -162,6 +247,9 @@ tool that can report this state looks broken for five seconds.
 | the reader | 16 host checks on `novi-power idle` under the shipped busybox ash, each confirmed by reintroducing the bug it covers |
 | the sheet's height | a `_Static_assert` on `BUFFER_HEIGHT`, confirmed by putting `ROW_H_KEYS` back to 40 and watching the build stop |
 | both binaries | cross-compiled clean at `-O2` with this project's hardening flags, so `-Wformat-truncation` had a chance to speak |
+| the glyph | 6 host checks on the cup's geometry, every one confirmed by breaking the thing it asserts — including one that could not fail as first written: the "closed polygon" probe sat on the cup's *base*, which the loop draws either way, and passed with the closing segment deleted. It probes the left wall now |
+| the description | 23 host checks on `novi-agent describe`'s idle object under the shipped busybox ash, the document parsed by `json.loads` rather than grepped — a grep passes on output that is not JSON at all, which is the failure most worth catching |
+| the escaping | an `app_id` carrying `"` and `\\` reaches the array escaped, because the names go through `json.sh` like every other string this system emits. Confirmed by building them by hand instead and watching the document stop parsing |
 
 **On a booted machine, done:**
 
@@ -209,19 +297,33 @@ protocol are different claims.
   both updated in the same commit.
 - **A locked machine sleeps despite any client**, and does not sleep if
   the person said not to.
+- **The panel says so.** A machine being held awake is visible without
+  running anything, which is the difference between a feature and a
+  feature you have to remember you turned on.
+- **An automated actor can ask.** `novi-agent describe` carries the
+  idle clock and both askers, so "why will this machine not sleep" is
+  answerable from the same document that answers everything else about
+  it.
+- **The taskbar stops short of the status glyphs**, which it had never
+  actually done.
 - **The shortcut sheet is one row from outgrowing a 1366×768 panel**,
   and now says so at compile time rather than shipping a card taller
   than the screen.
 
 ## Roadmap
 
-1. **A panel indicator.** `/run/novi/idle` already carries everything
-   needed and novi-panel already reads `/run/novi` files once a second
-   for the network, the volume and the health verdict. Display-only,
-   like the health glyph: there is nowhere for a click to lead.
+1. ~~**A panel indicator.**~~ **Done** — see decision 8. A coffee cup,
+   leftmost of the status glyphs, display-only.
 2. **A client that actually inhibits.** NetSurf has no video and no
    JavaScript (RFC 0031), so the first honest caller here is probably
-   a media player, which this system does not have.
-3. **`novi-state` reporting it.** `novi-agent describe` composes a
-   picture of the machine out of published files; whether something is
-   holding it awake belongs in that picture.
+   a media player, which this system does not have. Until one exists,
+   the client half of this protocol remains implemented and untested —
+   the panel glyph and the `describe` object both reach the same
+   `idle_inhibit_active()` the tick does, so what is unexercised is the
+   same one path it always was, not three.
+3. ~~**`novi-state` reporting it.**~~ **Done** — see decision 9.
+   `novi-agent describe` carries an `idle` object.
+4. **Somewhere for the cup to lead.** The health glyph has the same
+   gap and the same reason: there is no session UI to open, and a panel
+   item that opens a terminal is not a thing this desktop does. When
+   `novi-settings` grows a Session panel, both should point at it.

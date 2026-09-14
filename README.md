@@ -686,6 +686,11 @@ BUG_REPORT_URL="https://github.com/newvantageco/novi/issues"
       with a ten-second blank timeout untouched for thirty seconds and
       watching it stay lit, then blank twenty seconds after the toggle
       went off. Nothing in this image speaks the protocol yet (RFC 0036)
+- [x] ...and saying so — a coffee cup on the panel while anything is
+      holding the machine awake, and an `idle` object in
+      `novi-agent describe` so an automated actor can ask why a machine
+      will not sleep. One glyph for both askers: the panel raises the
+      question, `novi-power idle` answers which (RFC 0036)
 - [x] Idle-suspend — `power.suspend = <seconds>`, off by default. The
       trigger is verified; the resume is not, because S3 does not come
       back under TCG and this container has no KVM. It locks the screen

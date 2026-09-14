@@ -1089,6 +1089,55 @@ both feeding one decision in novi-shell's idle tick.
   offending characters become underscores rather than being dropped,
   because a name that silently loses characters stops matching the
   window it came from.
+- **The panel draws ONE glyph for both askers, and that is not
+  decision 1 being contradicted.** The file separates them because
+  "somebody pressed Super+A" and "a program asked" have different
+  remedies; the panel is where the question is RAISED, not where it is
+  answered -- the health glyph has said "degraded" and left
+  `novi-state health` to say which service since RFC 0014. A coffee
+  cup, because it is what every other desktop that has this draws.
+  Display-only: Super+A is the toggle and it is on the shortcut sheet,
+  so a click that turned it off would be a second way to say one thing.
+- **A glyph a PERSON toggles belongs at the outer end of the status
+  march.** Every glyph there shifts the ones left of it when it
+  appears; this is the only one that comes and goes on a keystroke, so
+  on the outside it moves nothing else on the bar.
+- **Adding a third status glyph found two bugs in the second.** The
+  taskbar's right-hand limit was `net_x - gap` under a comment saying
+  "the row stops where the status area starts" -- never true, since the
+  volume and health glyphs are drawn AFTER the taskbar, so a long row
+  ran under them and (as the same comment says of the network button)
+  an entry drawn under an indicator still hit-tests as an entry. And
+  the volume file was read inside `layout_taskbar()`, which `render()`
+  calls after drawing those glyphs, so the speaker always showed the
+  previous second's level. Harmless at 1 Hz, invisible in a
+  screenshot -- and not harmless the moment a read decides a LAYOUT.
+  `read_published_state()` does all three reads at the top of
+  `render()` now, and `status_area_w()` derives the width from the same
+  three flags the march consumes, so the drawing and the hit-test
+  cannot disagree about a glyph.
+- **`novi-agent describe` reports ABSENT, not zeros.** A machine with
+  no compositor has no idle clock, and `{"seconds": 0, "awake":
+  false}` says somebody just touched it -- a reading of an instrument
+  that is not there. `{"present": false}` and stop.
+- **A timeout that is off is `null`, never the `0` the file spells it
+  with.** `"suspend_after": 0` reads as "suspends immediately", which
+  is the exact opposite of the truth. (`novi-power idle` prints the
+  document's own word, `off`, for the same reason.) And it is a
+  `seconds_or_null()` rather than a test against `0`: **`json_num()`
+  answers 0 for anything it cannot parse**, so `blank later` came out
+  as `"blank_after": 0` -- a typo in the file becoming the strongest
+  possible claim about the machine.
+- **The `inhibit` count is not emitted beside the names**: it is the
+  length of the array, and two spellings of one number is how they end
+  up disagreeing. novi-shell publishes both because a person reading
+  `novi-power idle` wants a count before a list.
+- **A host-test probe can sit where the code cannot fail.** The "the
+  polygon is closed" check on the cup probed its BASE -- which the loop
+  over point pairs draws either way -- and passed with the closing
+  segment deleted. The segment that closes 3 back to 0 is the LEFT
+  WALL. Provoking each assertion is what found it, on a glyph that was
+  correct: the check was the broken thing.
 - **The shortcut sheet was one row from outgrowing a 1366×768 panel.**
   `CARD_MAX_HEIGHT` is derived from the binding table, so adding a row
   grows the card, and `--keys` has no scroll by design (a reference

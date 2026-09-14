@@ -373,3 +373,70 @@ double novi_volume_coverage(double x, double y, const void *ctx) {
 	}
 	return best;
 }
+
+/* ── The stay-awake glyph ─────────────────────────────────────────────
+ *
+ * A cup with a handle and two ticks of steam. Drawn on the panel while
+ * something is keeping this machine from blanking or suspending; see
+ * AWAKE_* in icons.h for why one glyph covers both askers.
+ *
+ * The cup is a closed polyline for the same reason the speaker body is
+ * (a union of shapes draws its own seam through the join), and the
+ * handle is an arc rather than a second closed shape so that its two
+ * ends run back inside the cup's outline and disappear into it.
+ */
+static const double AWAKE_CUP[AWAKE_CUP_POINTS][2] = {
+	{ AWAKE_CUP_TOP_LEFT,     AWAKE_CUP_TOP },
+	{ AWAKE_CUP_TOP_RIGHT,    AWAKE_CUP_TOP },
+	{ AWAKE_CUP_BOTTOM_RIGHT, AWAKE_CUP_BOTTOM },
+	{ AWAKE_CUP_BOTTOM_LEFT,  AWAKE_CUP_BOTTOM },
+};
+
+double novi_awake_coverage(double x, double y, const void *ctx) {
+	(void)ctx;
+	double half_stroke = AWAKE_ICON_STROKE / 2.0;
+
+	/* The cup. The loop walks points 0->1->2->3 -- top, right side,
+	 * base -- and the segment BEFORE it closes 3 back to 0, which is
+	 * the left wall. Leave it out and the cup is a C lying on its
+	 * back, which at this size reads as a slightly thin cup rather
+	 * than as a bug. The speaker body lost its own flat end that
+	 * way. */
+	double d = seg_distance(x, y,
+		AWAKE_CUP[AWAKE_CUP_POINTS - 1][0], AWAKE_CUP[AWAKE_CUP_POINTS - 1][1],
+		AWAKE_CUP[0][0], AWAKE_CUP[0][1]);
+	for (int i = 0; i + 1 < AWAKE_CUP_POINTS; i++) {
+		double e = seg_distance(x, y, AWAKE_CUP[i][0], AWAKE_CUP[i][1],
+			AWAKE_CUP[i + 1][0], AWAKE_CUP[i + 1][1]);
+		if (e < d) {
+			d = e;
+		}
+	}
+	double best = novi_stroke_coverage(d, half_stroke);
+
+	/* The handle, kept where dx >= slope * r as the volume arcs are --
+	 * except that this slope is NEGATIVE, so the arc runs past the
+	 * vertical at both ends and closes onto the cup's own side. */
+	double hx = x - AWAKE_HANDLE_CX;
+	double hy = y - AWAKE_HANDLE_CY;
+	double hr = sqrt(hx * hx + hy * hy);
+	if (hx >= AWAKE_HANDLE_SLOPE * hr) {
+		double handle = novi_stroke_coverage(hr - AWAKE_HANDLE_R, half_stroke);
+		if (handle > best) {
+			best = handle;
+		}
+	}
+
+	/* The steam: two vertical ticks, thinner than the cup's own stroke
+	 * so they read as rising vapour rather than as two more walls. */
+	static const double steam_x[2] = { AWAKE_STEAM_X1, AWAKE_STEAM_X2 };
+	for (int i = 0; i < 2; i++) {
+		double s = seg_distance(x, y, steam_x[i], AWAKE_STEAM_TOP,
+			steam_x[i], AWAKE_STEAM_BOTTOM);
+		double cov = novi_stroke_coverage(s, half_stroke * 0.85);
+		if (cov > best) {
+			best = cov;
+		}
+	}
+	return best;
+}

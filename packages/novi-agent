@@ -413,6 +413,90 @@ describe_network() {
     printf ']}'
 }
 
+# A timeout in seconds, or JSON null when there is not one. Anything
+# that is not a positive integer becomes null, which matters more than
+# it looks: json_num() answers 0 for a value it cannot parse, and 0 is
+# the one number this field must never carry -- a reader has every
+# reason to take `"suspend_after": 0` for "suspends the moment it goes
+# idle", which is the exact opposite of what the file meant.
+seconds_or_null() {
+    case "${1:-0}" in
+        ''|0|*[!0-9]*) printf 'null' ;;
+        *)             printf '%s' "$1" ;;
+    esac
+}
+
+# What the compositor says about this session's idle clock: how long
+# since anybody touched the machine, whether it has blanked or locked
+# itself, when it would do either, and -- the part that is the reason
+# this is here at all -- whether anything is currently holding it awake
+# (RFC 0036).
+#
+# Composed, not computed: /run/novi/idle is the file novi-shell already
+# publishes on every tick, and re-deriving any of it here would be a
+# second answer to a question that has one. Same rule as the interface
+# name above.
+describe_idle() {
+    local file=/run/novi/idle
+    local key value idle='' blanked='' locked='' blank='' suspend=''
+    local awake='' names='' first=1 n
+
+    # ABSENT IS ITS OWN ANSWER, and it has to be, because the honest
+    # zeros are indistinguishable from a real reading: `{"seconds": 0,
+    # "awake": false}` on a console-only machine says "somebody just
+    # touched this and nothing is holding it awake", which is a claim
+    # about an idle clock that does not exist here. There is no
+    # compositor on a base install at all.
+    if [ ! -r "$file" ]; then
+        printf '{"present": false}'
+        return 0
+    fi
+
+    # Unknown keys skipped rather than refused: a novi-shell newer than
+    # this script must not be able to break the description by adding a
+    # line. novi-power reads the same file under the same rule.
+    while read -r key value; do
+        case "$key" in
+            idle)      idle="$value" ;;
+            blanked)   blanked="$value" ;;
+            locked)    locked="$value" ;;
+            blank)     blank="$value" ;;
+            suspend)   suspend="$value" ;;
+            awake)     awake="$value" ;;
+            inhibitor) names="${names}${names:+ }${value}" ;;
+        esac
+    done < "$file"
+
+    printf '{"present": true, "seconds": %s, "blanked": %s, "locked": %s, ' \
+        "$(json_num "$idle")" "$(json_bool "$blanked")" "$(json_bool "$locked")"
+    # NULL for a timeout that is off, never the 0 the file spells it
+    # with. An agent reading `"suspend_after": 0` has every reason to
+    # read it as "suspends the moment it goes idle" -- the one wrong
+    # answer that matters, and the opposite of the truth. JSON has a
+    # spelling for "there is no value here".
+    printf '"blank_after": %s, "suspend_after": %s, ' \
+        "$(seconds_or_null "$blank")" "$(seconds_or_null "$suspend")"
+    # Two separate claims for the reason RFC 0036 publishes them
+    # separately: "somebody pressed Super+A" and "a program asked" have
+    # different remedies, and an agent asked why a machine will not
+    # sleep needs to know which. The names are what novi-shell wrote,
+    # which it has already reduced to one whitespace-free token each --
+    # which is what makes the unquoted split below safe.
+    printf '"awake": %s, "inhibitors": [' "$(json_bool "$awake")"
+    for n in $names; do
+        [ "$first" -eq 1 ] || printf ','
+        first=0
+        printf '%s' "$(json_str "$n")"
+    done
+    printf ']}'
+    # The file's own `inhibit` count is deliberately not read: it is
+    # the length of the array above, and two spellings of one number
+    # is how they end up disagreeing. (novi-shell writes both because
+    # `novi-power idle` prints the count for a person before it lists
+    # the names.)
+    return 0
+}
+
 describe_packages() {
     local first=1 name version
     printf '['
@@ -487,10 +571,14 @@ cmd_describe() {
     [ -n "$diff" ] || diff='{}'
     health="$("$STATE" health --json 2>/dev/null || true)"
     [ -n "$health" ] || health='{}'
-    printf '{"schema": 1, "identity": %s, "hardware": %s, "network": %s, "state": %s, "drift": %s, "health": %s, "packages": %s, "agent": %s}\n' \
+    # `schema` stays 1 for an ADDED key -- a consumer written against
+    # 1 still reads every field it knew. Renaming or removing one is
+    # what would make it 2.
+    printf '{"schema": 1, "identity": %s, "hardware": %s, "network": %s, "idle": %s, "state": %s, "drift": %s, "health": %s, "packages": %s, "agent": %s}\n' \
         "$(describe_identity)" \
         "$(describe_hardware)" \
         "$(describe_network)" \
+        "$(describe_idle)" \
         "$state" "$diff" "$health" \
         "$(describe_packages)" \
         "$(describe_agent)"
