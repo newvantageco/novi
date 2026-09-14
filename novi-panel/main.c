@@ -86,6 +86,7 @@
 #include "../common/text.h"
 #include "../common/theme.h"
 #include "icons.h"
+#include "../common/notifications.h"
 #include "netstat.h"
 
 #define PANEL_HEIGHT 32
@@ -228,6 +229,27 @@
  * does not: it is there for the life of a machine with a sound card. */
 #define IDLE_FILE "/run/novi/idle"
 #define AWAKE_GAP 10
+/* The unread-notification indicator, between the health glyph and the
+ * stay-awake one. RFC 0034 gave this desktop a notification history
+ * and no way to know there was anything in it: a toast is up for five
+ * seconds, and if you were looking at something else it may as well
+ * not have happened. novi-notifyd publishes the list, novi-launcher
+ * writes a marker when it shows it, and this counts what is newer
+ * than the marker -- see common/notifications.h for why that is two
+ * files with one writer each.
+ *
+ * A bell AND a number. The number is what a bare dot cannot say: "one
+ * thing happened" and "eleven things happened" are different states
+ * of a machine, and the second is the one worth interrupting for. It
+ * is drawn in the mono face, like the clock, because it is a machine
+ * value and not language (GUI-DESIGN-LANGUAGE.md §2).
+ *
+ * DISPLAY ONLY, like the glyphs either side of it -- but unlike them
+ * it has somewhere obvious to lead, and Super+N already goes there.
+ * A click would be a second way to say one thing; the sheet
+ * (Super+/) is where a person finds the first. */
+#define BELL_GAP 10
+#define BELL_COUNT_GAP 4
 #define POWER_GAP 8
 #define NOVI_DEFAULT_POWER_MENU "novi-launcher --power"
 #define CLOCK_GAP 12 /* between the status area and the clock */
@@ -318,6 +340,12 @@ struct novi_panel {
 	 * "nothing is holding this awake" and "there is no idle clock
 	 * here" both mean there is nothing to draw. */
 	bool holding_awake;
+	/* How many notifications are newer than the marker the launcher
+	 * wrote when it last showed the list. Zero draws nothing at all:
+	 * a bell that is always there, greyed, is the thing that teaches
+	 * people to stop looking at this part of the bar. */
+	int unread;
+	char unread_label[8];
 	bool net_button_pressed;
 	bool power_button_pressed;
 	/* Same press-then-release-in-bounds convention as apps_button_
@@ -478,6 +506,30 @@ static void read_published_state(struct novi_panel *panel) {
 	 * refused -- a novi-shell newer than this panel must not be able
 	 * to blank its own indicator by adding a line, which is the same
 	 * rule `novi-power idle` follows over the same file. */
+	/* Counted by the shared reader, not by a parser written here: the
+	 * history's record format has one owner (common/notifications.c)
+	 * and three programs that read it. The file is newest-first, so
+	 * this costs the unread count rather than the whole file. */
+	panel->unread = (int)novi_hist_unread(NOVI_HIST_PATH, NOVI_HIST_SEEN_PATH);
+	/* CLAMPED to what the daemon keeps, and the clamp is what makes
+	 * the label's size provable: -Wformat-truncation is right that an
+	 * unbounded int does not fit in eight bytes, and this repository
+	 * has been caught three times by silencing that warning with a
+	 * bigger buffer instead of asking why the value was unbounded.
+	 * novi_hist_unread() counts lines in a file another program
+	 * wrote, so "more than the maximum" is a thing it can return and
+	 * a number wider than the list can hold is not a count of
+	 * anything. */
+	if (panel->unread > NOVI_HIST_MAX) {
+		panel->unread = NOVI_HIST_MAX;
+	}
+	if (panel->unread > 0) {
+		snprintf(panel->unread_label, sizeof(panel->unread_label), "%d",
+			panel->unread);
+	} else {
+		panel->unread_label[0] = '\0';
+	}
+
 	panel->holding_awake = false;
 	{
 		FILE *idf = fopen(IDLE_FILE, "r");
@@ -512,6 +564,10 @@ static int status_area_w(const struct novi_panel *panel) {
 	}
 	if (panel->holding_awake) {
 		w += AWAKE_GAP + AWAKE_ICON_W;
+	}
+	if (panel->unread > 0) {
+		w += BELL_GAP + BELL_ICON_W + BELL_COUNT_GAP +
+			novi_text_width(panel->font_clock, panel->unread_label);
 	}
 	return w;
 }
@@ -728,12 +784,31 @@ static void render(struct novi_panel *panel, uint32_t *px, uint32_t stride_px) {
 		&panel->net,
 		panel->net_button_hover ? NET_ICON_HOVER_COLOR : NET_ICON_COLOR);
 
+	/* Wraps the same buffer draw_rect() already filled above -- both
+	 * write into the identical memory in place, no double buffering.
+	 * _no_clear: the background is already painted, no need for
+	 * pixman to zero it again.
+	 *
+	 * Created BEFORE the status march below rather than after it,
+	 * because one of those glyphs comes with a number beside it and
+	 * text needs a pixman image to land in. */
+	pixman_image_t *dest = pixman_image_create_bits_no_clear(
+		PIXMAN_x8r8g8b8, (int)w, (int)h, px, (int)stride_px * 4);
+
 	/* The status glyphs march LEFTWARD from the network button, each
 	 * one placed against a running cursor rather than against a fixed
-	 * offset from net_x. Both of them are conditional, so a fixed
-	 * offset would leave a hole where the absent one would have been
+	 * offset from net_x. EVERY ONE of them is conditional, so a fixed
+	 * offset would leave a hole where an absent one would have been
 	 * -- and worse, would move the health glyph sideways depending on
-	 * whether the machine has a sound card. */
+	 * whether the machine has a sound card.
+	 *
+	 * The order out from the network button is volume, health,
+	 * stay-awake, unread -- least likely to come and go first, so
+	 * that the ones which do come and go move as little else as
+	 * possible. The unread bell is outermost because it is the only
+	 * one that appears without anybody doing anything. Whatever this
+	 * order is, status_area_w() above must consume exactly the same
+	 * widths, or the taskbar's hit-test and this drawing disagree. */
 	int status_x = net_x;
 
 	if (panel->volume_known) {
@@ -781,6 +856,28 @@ static void render(struct novi_panel *panel, uint32_t *px, uint32_t stride_px) {
 			NET_ICON_COLOR);
 	}
 
+	/* Outermost of all, because this is the one that changes without
+	 * anybody doing anything: a notification arrives on its own
+	 * schedule, and a glyph that appears in the middle of the row
+	 * shifts everything left of it while somebody is reading it.
+	 *
+	 * The count sits to the RIGHT of the bell, between the glyph and
+	 * whatever is next along, so the number is nearer the thing it
+	 * counts than the thing it is not. */
+	if (panel->unread > 0) {
+		int count_w = novi_text_width(panel->font_clock, panel->unread_label);
+		status_x -= BELL_GAP + BELL_ICON_W + BELL_COUNT_GAP + count_w;
+		draw_icon(px, stride_px, w, h,
+			status_x, (int)h / 2 - BELL_ICON_H / 2,
+			BELL_ICON_W, BELL_ICON_H, novi_bell_coverage, NULL,
+			NET_ICON_COLOR);
+		novi_text_draw(dest, panel->font_clock,
+			status_x + BELL_ICON_W + BELL_COUNT_GAP,
+			((int)h + panel->font_clock->ascent -
+				panel->font_clock->descent) / 2,
+			panel->unread_label, NOVI_PIX(NOVI_TEXT_SECONDARY));
+	}
+
 	time_t now = time(NULL);
 	struct tm tm_now;
 	localtime_r(&now, &tm_now);
@@ -788,12 +885,6 @@ static void render(struct novi_panel *panel, uint32_t *px, uint32_t stride_px) {
 	snprintf(clock_str, sizeof(clock_str), "%02d:%02d:%02d",
 		tm_now.tm_hour, tm_now.tm_min, tm_now.tm_sec);
 
-	/* Wraps the same buffer draw_rect() already filled above -- both
-	 * write into the identical memory in place, no double buffering.
-	 * _no_clear: the background is already painted, no need for
-	 * pixman to zero it again. */
-	pixman_image_t *dest = pixman_image_create_bits_no_clear(
-		PIXMAN_x8r8g8b8, (int)w, (int)h, px, (int)stride_px * 4);
 #define clock_color NOVI_PIX(NOVI_TEXT_SECONDARY)
 	int text_x = pw_x - POWER_GAP - panel->clock_w;
 	int baseline_y = ((int)h + panel->font->ascent - panel->font->descent) / 2;

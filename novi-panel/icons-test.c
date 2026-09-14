@@ -79,6 +79,8 @@ int main(void) {
 	show("health warning", novi_warn_coverage, NULL, WARN_ICON_W, WARN_ICON_H);
 	show("stay awake", novi_awake_coverage, NULL,
 		AWAKE_ICON_W, AWAKE_ICON_H);
+	show("unread notifications", novi_bell_coverage, NULL,
+		BELL_ICON_W, BELL_ICON_H);
 
 	struct net_fan fan[6];
 	for (int bars = 0; bars <= 4; bars++) {
@@ -381,6 +383,102 @@ int main(void) {
 			(AWAKE_CUP_TOP_LEFT + AWAKE_CUP_BOTTOM_LEFT) / 2.0,
 			(AWAKE_CUP_TOP + AWAKE_CUP_BOTTOM) / 2.0, NULL);
 		check("awake: the cup's left wall is closed", wall > 0.7);
+	}
+
+	/* ── The unread-notification bell ──────────────────────────────
+	 *
+	 * A dome, a rim, and a clapper hanging under it. The two things
+	 * that make it read as a bell rather than as an arch or a blob
+	 * are the rim's overhang and the AIR between the rim and the
+	 * clapper -- and both are quantities that disappear quietly when
+	 * a radius moves.
+	 */
+	{
+		double edge = 0.0;
+		for (int x = 0; x < BELL_ICON_W; x++) {
+			edge += novi_bell_coverage(x + 0.5, 0.5, NULL);
+			edge += novi_bell_coverage(x + 0.5, BELL_ICON_H - 0.5, NULL);
+		}
+		for (int y = 0; y < BELL_ICON_H; y++) {
+			edge += novi_bell_coverage(0.5, y + 0.5, NULL);
+			edge += novi_bell_coverage(BELL_ICON_W - 0.5, y + 0.5, NULL);
+		}
+		check("bell: nothing touches the icon box's border", edge < 0.05);
+
+		/* The rim overhangs the dome. Without it this is an arch.
+		 *
+		 * Measured as an EXTENT -- rightmost inked column minus
+		 * leftmost -- and not as a count of inked columns, which is
+		 * what this asked first and which cannot answer the question
+		 * on an outline glyph: at the dome's own centre row the only
+		 * ink is its two arc ends, four columns, so a rim narrower
+		 * than the dome still "counted" wider and the check passed
+		 * with the overhang taken away. Provoking it is what found
+		 * that; the glyph was right and the probe was not, for the
+		 * second time in this file. */
+		int rim_l = BELL_ICON_W, rim_r = -1, dome_l = BELL_ICON_W, dome_r = -1;
+		for (int x = 0; x < BELL_ICON_W; x++) {
+			if (novi_bell_coverage(x + 0.5, BELL_RIM_Y, NULL) > 0.05) {
+				if (x < rim_l) { rim_l = x; }
+				rim_r = x;
+			}
+			if (novi_bell_coverage(x + 0.5, BELL_DOME_CY, NULL) > 0.05) {
+				if (x < dome_l) { dome_l = x; }
+				dome_r = x;
+			}
+		}
+		check("bell: the rim is wider than the dome it sits under",
+			dome_r > dome_l && rim_r - rim_l > dome_r - dome_l);
+
+		/* AIR between the rim and the clapper. At 16 rows tall this
+		 * closed to half a pixel, the clapper welded itself to the
+		 * bell, and the glyph read as a blob with a tail -- which is
+		 * why the box is 17 rows and not 16. */
+		int gap_rows = 0;
+		for (int y = (int)BELL_RIM_Y + 1; y < (int)BELL_CLAPPER_CY; y++) {
+			double row = 0.0;
+			for (int x = 0; x < BELL_ICON_W; x++) {
+				row += novi_bell_coverage(x + 0.5, y + 0.5, NULL);
+			}
+			if (row < 0.05) {
+				gap_rows++;
+			}
+		}
+		check("bell: the clapper hangs clear of the rim", gap_rows >= 1);
+
+		/* Half-circles, not circles. The clapper's UPPER half would
+		 * close it into a bead, and a bead under a bell is a bell
+		 * with a bug rather than a bell with a clapper.
+		 *
+		 * Against 0.5, not against zero, and the difference is the
+		 * point: the rim's own antialiasing reaches this row and
+		 * leaves about 0.1 there whatever the clapper does, so a
+		 * probe demanding zero fails on a correct glyph. A closed
+		 * bead puts full ink here. The margin between 0.1 and 1.0 is
+		 * what the check is actually reading. */
+		double clapper_top = novi_bell_coverage(BELL_CX,
+			BELL_CLAPPER_CY - BELL_CLAPPER_R, NULL);
+		check("bell: the clapper is an arc, not a closed bead",
+			clapper_top < 0.5);
+		double clapper_bottom = novi_bell_coverage(BELL_CX,
+			BELL_CLAPPER_CY + BELL_CLAPPER_R, NULL);
+		check("bell: ...and the arc it is has a bottom",
+			clapper_bottom > 0.7);
+
+		/* Right way up. The dome is most of the ink and the clapper
+		 * is a few pixels, so a flip inverts a large margin -- the
+		 * RJ45 jack's lesson, in the glyph that would look most
+		 * plausible upside down. */
+		double top_ink = 0.0, bottom_ink = 0.0;
+		for (int y = 0; y < BELL_ICON_H / 3; y++) {
+			for (int x = 0; x < BELL_ICON_W; x++) {
+				top_ink += novi_bell_coverage(x + 0.5, y + 0.5, NULL);
+				bottom_ink += novi_bell_coverage(x + 0.5,
+					BELL_ICON_H - 1 - y + 0.5, NULL);
+			}
+		}
+		check("bell: the dome is above and the clapper below",
+			top_ink > bottom_ink + 4.0 && bottom_ink > 1.0);
 	}
 
 	/* The jack's tab is below its body. The upside-down version passed

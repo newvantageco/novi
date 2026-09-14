@@ -177,6 +177,35 @@ struct net_fan {
 #define AWAKE_STEAM_X1 5.6
 #define AWAKE_STEAM_X2 9.2
 
+/* ── The unread-notification glyph (Lucide "bell") ────────────────── */
+/* Drawn when novi-notifyd has recorded something the notification
+ * list has not been opened since (RFC 0034). A dome, a rim wider than
+ * the dome, and a clapper hanging below it -- the rim's overhang is
+ * most of what makes a dome read as a bell rather than as an arch.
+ *
+ * 16x17: one row taller than its neighbours, and the row is the
+ * clapper's. At 16 the gap between the rim and the clapper closed to
+ * half a pixel, which at this size is not a gap -- the clapper welded
+ * itself to the bell and the glyph read as a solid blob with a tail.
+ * The alternative was dropping the clapper, and a bell without one is
+ * an arch. */
+#define BELL_ICON_W 16
+#define BELL_ICON_H 17
+#define BELL_ICON_STROKE 1.7
+/* The dome: the upper half of a circle, plus two straight sides down
+ * to the rim. */
+#define BELL_CX 8.0
+#define BELL_DOME_CY 6.6
+#define BELL_DOME_R 4.4
+#define BELL_SIDE_BOTTOM 10.8
+/* The rim, wider than the dome on both sides. */
+#define BELL_RIM_Y 10.8
+#define BELL_RIM_HALF 5.6
+/* The clapper: the lower half of a small circle whose chord sits
+ * below the rim, with clear air between the two. */
+#define BELL_CLAPPER_CY 13.4
+#define BELL_CLAPPER_R 1.35
+
 /* Which arcs this pass draws: bit 0 is the inner, bit 1 the outer.
  * `muted` replaces them entirely. The body is always drawn -- an
  * indicator that vanishes at zero volume is one that cannot tell you
@@ -202,5 +231,6 @@ double novi_power_coverage(double x, double y, const void *ctx);
 double novi_warn_coverage(double x, double y, const void *ctx);
 double novi_volume_coverage(double x, double y, const void *ctx);
 double novi_awake_coverage(double x, double y, const void *ctx);
+double novi_bell_coverage(double x, double y, const void *ctx);
 
 #endif

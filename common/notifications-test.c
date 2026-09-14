@@ -140,6 +140,74 @@ int main(void) {
 	ok(count_tabs(line) == 4, "a capped record still has four separators");
 	ok(novi_hist_parse(line, &back), "a capped record still parses");
 
+	/* ── 8. unread: two files, one writer each ───────────────────
+	 *
+	 * The panel's bell. What makes this worth a test rather than a
+	 * look is that every wrong answer is plausible on screen: a bell
+	 * that never lights and a bell that never goes out are both just
+	 * "a bell", and neither says which of the two files is at fault.
+	 */
+	{
+		const char *hp = "/tmp/novi-hist-test.tsv";
+		const char *sp = "/tmp/novi-seen-test";
+		remove(hp);
+		remove(sp);
+
+		/* No marker at all means the list has never been opened, so
+		 * everything is unread -- not nothing, which is what a
+		 * read-error-as-zero would produce if 0 meant "now". */
+		ok(novi_hist_seen_read(sp) == 0, "a missing marker reads as 0");
+		ok(novi_hist_unread(hp, sp) == 0,
+			"no history is no unread -- a daemon that is not running has not failed to tell you anything");
+
+		struct novi_history h;
+		memset(&h, 0, sizeof(h));
+		struct novi_hist_entry a = mk("first", "b", 1, "drive", 1000);
+		struct novi_hist_entry b2 = mk("second", "b", 1, "drive", 2000);
+		struct novi_hist_entry c = mk("third", "b", 1, "drive", 3000);
+		novi_hist_push(&h, &a);
+		novi_hist_push(&h, &b2);
+		novi_hist_push(&h, &c);
+		ok(novi_hist_publish(&h, hp), "the history publishes");
+
+		ok(novi_hist_unread(hp, sp) == 3,
+			"with no marker every entry is unread");
+
+		ok(novi_hist_seen_write(sp, 2000), "the marker writes");
+		ok(novi_hist_seen_read(sp) == 2000, "and reads back");
+		ok(novi_hist_unread(hp, sp) == 1,
+			"only what is strictly newer than the marker counts");
+
+		ok(novi_hist_seen_write(sp, 3000), "the marker moves");
+		ok(novi_hist_unread(hp, sp) == 0, "and the bell goes out");
+
+		/* A line an older build cannot parse is SKIPPED, not counted
+		 * and not a stopping point: the file is newest first, but a
+		 * line this build cannot read says nothing about the ages of
+		 * the ones after it. Prepended, so a reader that stopped
+		 * there would report zero for a file with two unread
+		 * entries. */
+		FILE *f = fopen(hp, "w");
+		ok(f != NULL, "the mixed file opens for writing");
+		if (f != NULL) {
+			char rec[512];
+			fprintf(f, "this is not a record at all\n");
+			novi_hist_format(rec, sizeof(rec), &c);
+			fputs(rec, f);
+			novi_hist_format(rec, sizeof(rec), &b2);
+			fputs(rec, f);
+			novi_hist_format(rec, sizeof(rec), &a);
+			fputs(rec, f);
+			fclose(f);
+		}
+		ok(novi_hist_seen_write(sp, 1000), "the marker moves back");
+		ok(novi_hist_unread(hp, sp) == 2,
+			"a line this build cannot parse is skipped, not counted and not a full stop");
+
+		remove(hp);
+		remove(sp);
+	}
+
 	if (failures > 0) {
 		fprintf(stderr, "notifications: %d of %d checks FAILED\n", failures, checks);
 		return 1;

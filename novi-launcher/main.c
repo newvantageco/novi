@@ -357,6 +357,10 @@ struct novi_launcher {
 	 * publishes, never from a second socket -- a reader that starts
 	 * later has to be able to find out, which is what a file is. */
 	bool notif_mode;
+	/* The newest `when` this window has already marked seen, so the
+	 * marker is written once per session rather than once per
+	 * keystroke. */
+	int64_t notif_seen;
 	struct novi_clipboard *clipboard;
 	uint32_t last_key_serial;
 
@@ -1045,6 +1049,7 @@ static void rebuild_results(struct novi_launcher *state) {
 		if (f != NULL) {
 			char line[NOVI_HIST_SUMMARY + NOVI_HIST_BODY + 96];
 			int64_t now = (int64_t)time(NULL);
+			int64_t newest = 0;
 			while (fgets(line, sizeof(line), f) != NULL) {
 				struct novi_hist_entry h;
 				/* A line this build cannot parse is SKIPPED, not
@@ -1055,6 +1060,14 @@ static void rebuild_results(struct novi_launcher *state) {
 				 * the wrong trade every time. */
 				if (!novi_hist_parse(line, &h)) {
 					continue;
+				}
+				/* BEFORE the filter, deliberately. What has been seen
+				 * is what this window showed the list OF, not what
+				 * survived whatever was typed into the search box --
+				 * otherwise typing one word would leave everything
+				 * else unread forever. */
+				if (h.when > newest) {
+					newest = h.when;
 				}
 				if (state->input_len > 0 &&
 						!app_name_matches(h.summary, state->input) &&
@@ -1093,6 +1106,21 @@ static void rebuild_results(struct novi_launcher *state) {
 				push_result(state, &r);
 			}
 			fclose(f);
+			/* The panel's bell goes out here. Written only when the
+			 * newest entry has moved, because this whole function
+			 * runs on every keystroke -- and a marker rewritten per
+			 * character would be a temp file and a rename per
+			 * character, for a number that did not change.
+			 *
+			 * A failure is ignored on purpose: /run may be read-only
+			 * in some corner, and a launcher that refused to show
+			 * you your notifications because it could not record
+			 * that it had would be a worse program than one whose
+			 * bell stays lit. */
+			if (newest > state->notif_seen) {
+				state->notif_seen = newest;
+				(void)novi_hist_seen_write(NOVI_HIST_SEEN_PATH, newest);
+			}
 		}
 	} else if (state->keys_mode) {
 		/* Straight off the shared table, in its own order -- the sheet

@@ -440,3 +440,57 @@ double novi_awake_coverage(double x, double y, const void *ctx) {
 	}
 	return best;
 }
+
+/* ── The unread-notification glyph ────────────────────────────────────
+ *
+ * Four pieces: the dome (an upper half-circle), the two sides that
+ * drop from its ends to the rim, the rim itself, and the clapper (a
+ * lower half-circle) hanging below with a gap. Half-circles rather
+ * than full ones because a bell is not two rings: the dome's lower
+ * half would draw a line straight through the middle of the bell, and
+ * the clapper's upper half would close it into a bead.
+ */
+double novi_bell_coverage(double x, double y, const void *ctx) {
+	(void)ctx;
+	double half_stroke = BELL_ICON_STROKE / 2.0;
+	double best = 0.0;
+
+	/* The dome. `dy <= 0` is the upper half: everything at or above
+	 * the circle's own centre. */
+	double dx = x - BELL_CX;
+	double dy = y - BELL_DOME_CY;
+	if (dy <= 0.0) {
+		best = novi_stroke_coverage(sqrt(dx * dx + dy * dy) - BELL_DOME_R,
+			half_stroke);
+	}
+
+	/* The two sides, from where the dome ends down to the rim, and the
+	 * rim across them. */
+	double sides = seg_distance(x, y, BELL_CX - BELL_DOME_R, BELL_DOME_CY,
+		BELL_CX - BELL_DOME_R, BELL_SIDE_BOTTOM);
+	double right = seg_distance(x, y, BELL_CX + BELL_DOME_R, BELL_DOME_CY,
+		BELL_CX + BELL_DOME_R, BELL_SIDE_BOTTOM);
+	if (right < sides) {
+		sides = right;
+	}
+	double rim = seg_distance(x, y, BELL_CX - BELL_RIM_HALF, BELL_RIM_Y,
+		BELL_CX + BELL_RIM_HALF, BELL_RIM_Y);
+	if (rim < sides) {
+		sides = rim;
+	}
+	double cov = novi_stroke_coverage(sides, half_stroke);
+	if (cov > best) {
+		best = cov;
+	}
+
+	/* The clapper. */
+	double cy = y - BELL_CLAPPER_CY;
+	if (cy >= 0.0) {
+		double clap = novi_stroke_coverage(
+			sqrt(dx * dx + cy * cy) - BELL_CLAPPER_R, half_stroke);
+		if (clap > best) {
+			best = clap;
+		}
+	}
+	return best;
+}

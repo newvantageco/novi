@@ -1605,6 +1605,44 @@ else.
   looks right in the code, screenshot it**, for the fourth time in
   this file.
 
+## Architecture: the bell, and what "read" had to mean
+
+RFC 0034 shipped a notification history and no way to know there was
+anything in it. The panel draws a bell and a count when there is.
+
+- **"Read" is ONE TIMESTAMP**, the `when` of the newest entry the
+  list has shown. novi-launcher writes it; the panel counts what is
+  newer. That is the whole notion the RFC said it did not have.
+- **Two files, one writer each.** novi-notifyd owns
+  `/run/novi/notifications` and never reads the marker; novi-launcher
+  owns `/run/novi/notifications.seen` and never writes the history;
+  the panel reads both and writes neither. A "seen" column in the
+  history would put two programs on one file.
+- **The marker is taken BEFORE the search filter.** The launcher
+  re-reads the file on every keystroke, and what you have seen is the
+  list the window showed -- not what survived what you typed. Taking
+  it after would leave everything else unread forever the moment
+  somebody filtered.
+- **There is a one-second blind spot and it is written down.** A
+  notification arriving in the same second as the newest one on
+  screen counts as seen. The alternative is a marker that is a count
+  as well as a time, and two numbers about one moment can disagree.
+- **A bell AND a number, not a dot.** "One thing happened" and
+  "eleven things happened" are different states of a machine. Mono
+  face, like the clock: it is a machine value, not language.
+- **`-Wformat-truncation` was right again** (fourth time here): an
+  `int` does not fit in an eight-byte label. The fix is the CLAMP it
+  points at, not a wider buffer -- `novi_hist_unread()` counts lines
+  in a file another program wrote, so a number wider than the list can
+  hold is not a count of anything.
+- **The host test's probe was wrong twice before the glyph was.** The
+  bell's "rim is wider than the dome" check counted INKED COLUMNS,
+  which on an outline glyph at the dome's centre row is two strokes --
+  so a rim narrower than the dome still counted wider and the check
+  passed with the overhang removed. Measure an EXTENT (rightmost minus
+  leftmost). Provoking each assertion is the only thing that finds
+  this class of mistake.
+
 ## Architecture: the keys above the number row
 
 `novi-volume` (base image) over `amixer`, bound to the XF86Audio*

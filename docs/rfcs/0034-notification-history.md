@@ -139,6 +139,51 @@ Because the binding is a row in `common/keybindings.h`, it appears in
 `novi-launcher --keys` automatically. A sheet maintained separately
 from the bindings drifts; this one cannot.
 
+### 11. A bell and a count, and a marker with one writer.
+
+Roadmap item 1, and it needed the notion of "read" this RFC said it
+did not have. The cheapest honest one: **the `when` of the newest
+entry the list has shown.** novi-launcher writes it to
+`/run/novi/notifications.seen`; the panel counts the entries newer
+than it.
+
+**Two files, one writer each.** novi-notifyd owns the history and
+never reads the marker; novi-launcher owns the marker and never writes
+the history; the panel reads both and writes neither. A single file
+with a "seen" column would put the daemon and the launcher on the same
+file, which is the arrangement every published-state file in this
+system exists to avoid.
+
+**The marker is written from the unfiltered list.** The launcher
+re-reads the history on every keystroke so that a notification
+arriving while you are reading is in the list; the newest `when` is
+taken before the search filter, because what you have seen is the list
+this window showed, not what survived what you typed. Filtering on one
+word would otherwise leave everything else unread forever.
+
+**There is a one-second blind spot, and it is stated rather than
+papered over.** A notification arriving in the same second as the
+newest one on screen counts as seen. The alternative is a marker that
+is a count as well as a time — two numbers about one moment, which can
+disagree. The entry is still in the list either way.
+
+**A bell AND a number**, not a dot. "One thing happened" and "eleven
+things happened" are different states of a machine and the second is
+the one worth interrupting for. The number is in the mono face like
+the clock, because it is a machine value rather than language.
+
+It is the **outermost** glyph on the bar, for the reason the
+stay-awake cup is second-outermost: every glyph in that march shifts
+the ones to its left when it appears, and this is the only one that
+appears without anybody doing anything at all.
+
+`-Wformat-truncation` had something to say here too, for the fourth
+time in this repository: an `int` does not fit in an eight-byte label.
+The fix is the **clamp** it was pointing at rather than a wider buffer
+— `novi_hist_unread()` counts lines in a file another program wrote,
+so "more than the list can hold" is a thing it can return, and a
+number wider than that is not a count of anything.
+
 ## What is checked without a desktop
 
 `common/notifications-test.c`, 33 checks, run by `make -C common check`
@@ -209,9 +254,8 @@ thing that was wrong was only visible in a picture.
 
 ## Roadmap
 
-1. **A panel indicator** — an unread count beside the clock, which is
-   the other half of what a history is for. It needs a notion of
-   "read", which this deliberately does not have yet.
+1. ~~**A panel indicator**~~ — **done**, see decision 11. The notion of
+   "read" it needed turned out to be one timestamp.
 2. **Dismiss, and clear all.** Both mean writing to the daemon, which
    means the socket gains a direction it does not have.
 3. **Persistence across a restart**, if it turns out to be wanted. It

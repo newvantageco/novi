@@ -198,3 +198,72 @@ void novi_hist_age(char *out, size_t cap, int64_t when, int64_t now) {
 		snprintf(out, cap, "%lldd", (long long)(d / 86400));
 	}
 }
+
+int64_t novi_hist_seen_read(const char *path) {
+	FILE *f = fopen(path, "r");
+	if (f == NULL) {
+		return 0;
+	}
+	long long v = 0;
+	if (fscanf(f, "%lld", &v) != 1 || v < 0) {
+		v = 0;
+	}
+	fclose(f);
+	return (int64_t)v;
+}
+
+bool novi_hist_seen_write(const char *path, int64_t when) {
+	char tmp[256];
+	if (snprintf(tmp, sizeof(tmp), "%s.tmp", path) >= (int)sizeof(tmp)) {
+		return false;
+	}
+	FILE *f = fopen(tmp, "w");
+	if (f == NULL) {
+		return false;
+	}
+	/* Temp-and-rename for the same reason the history itself is: the
+	 * panel reads this on a schedule of its own and must never see a
+	 * half-written number, which would read as a much older marker
+	 * and light the bell for everything. */
+	if (fprintf(f, "%lld\n", (long long)when) < 0 || fclose(f) != 0) {
+		unlink(tmp);
+		return false;
+	}
+	if (rename(tmp, path) != 0) {
+		unlink(tmp);
+		return false;
+	}
+	return true;
+}
+
+size_t novi_hist_unread(const char *hist_path, const char *seen_path) {
+	FILE *f = fopen(hist_path, "r");
+	if (f == NULL) {
+		/* No history is no unread. A daemon that is not running has
+		 * not failed to tell you anything. */
+		return 0;
+	}
+	int64_t seen = novi_hist_seen_read(seen_path);
+	char line[NOVI_HIST_SUMMARY + NOVI_HIST_BODY + 96];
+	size_t n = 0;
+	while (fgets(line, sizeof(line), f) != NULL) {
+		struct novi_hist_entry e;
+		/* An unparseable line is skipped rather than counted or
+		 * fatal -- the same call the launcher makes about the same
+		 * file, and for the same reason: it was written by another
+		 * program, possibly another version of it. Skipped rather
+		 * than STOPPING, too: the file is newest first, but a line
+		 * this build cannot read says nothing about the ages of the
+		 * ones after it. */
+		if (!novi_hist_parse(line, &e)) {
+			continue;
+		}
+		if (e.when <= seen) {
+			/* Newest first, so everything below this is older. */
+			break;
+		}
+		n++;
+	}
+	fclose(f);
+	return n;
+}

@@ -88,6 +88,43 @@ bool novi_hist_parse(const char *line, struct novi_hist_entry *out);
  * Returns false if it could not. */
 bool novi_hist_publish(const struct novi_history *h, const char *path);
 
+/* ── Unread ───────────────────────────────────────────────────────
+ *
+ * A history nobody can see the SIZE of is a history nobody opens. The
+ * panel draws a bell and a count; this is where "how many have I not
+ * seen" is answered, once, for both ends of it.
+ *
+ * TWO FILES, ONE WRITER EACH. novi-notifyd owns the history and never
+ * reads the marker; novi-launcher owns the marker and never writes
+ * the history; the panel reads both and writes neither. A single file
+ * with a "seen" column would need the daemon and the launcher to
+ * write the same file, which is the arrangement every published-state
+ * file in this system exists to avoid.
+ *
+ * The marker is the `when` of the newest entry the list has shown.
+ * Unread is therefore "strictly newer than that", which has a
+ * one-second blind spot: a notification arriving in the same second
+ * as the newest one on screen is counted as seen. Stated rather than
+ * papered over -- the entry is still in the list, and the alternative
+ * (a marker that is a count as well as a time) is two numbers that can
+ * disagree about the same moment.
+ */
+#define NOVI_HIST_SEEN_PATH "/run/novi/notifications.seen"
+
+/* The marker, or 0 when there is none -- which is the right answer for
+ * a machine where the list has never been opened: everything is
+ * unread. */
+int64_t novi_hist_seen_read(const char *path);
+
+/* Writes the marker, temp-and-rename like the history itself. */
+bool novi_hist_seen_write(const char *path, int64_t when);
+
+/* How many entries in `hist_path` are newer than the marker in
+ * `seen_path`. The history is written newest first, so this stops at
+ * the first entry that is not -- it costs the unread count, not the
+ * file. */
+size_t novi_hist_unread(const char *hist_path, const char *seen_path);
+
 /* "now", "3m", "2h", "5d" -- the age of an entry in one short field,
  * which is what a list wants where a timestamp would take the width
  * of the summary. `now` is the current wall clock in seconds. */
