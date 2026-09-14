@@ -157,7 +157,8 @@ for t in packages/tests/test-lib-json.sh packages/tests/test-agent-verbs.sh \
          packages/tests/test-agent-secrets.sh packages/tests/test-agent-rate.sh \
          packages/tests/test-agent-socket.sh packages/tests/test-network-static.sh \
          packages/tests/test-power-idle.sh \
-         packages/tests/test-agent-idle.sh; do
+         packages/tests/test-agent-idle.sh \
+         packages/tests/test-state-packages.sh; do
     echo ">>> ${t##*/}"
     if ! bash "$t"; then
         echo ">>> ${t} failed" >&2

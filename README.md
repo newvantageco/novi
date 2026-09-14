@@ -55,6 +55,13 @@ $ novi-state rollback                # and stops. reversibly.
 One plain-text file. Real `diff`. Real rollback. Every setting visible,
 greppable, and committable to git.
 
+Installed software is in there too — `packages.foot = present`, and an
+`apply` fetches, verifies and installs it. The document is **additive**,
+not exhaustive: a package it never mentions is one nothing touches, so
+`pkg install` by hand is not something the next apply quietly undoes.
+A removal that would break another installed package is refused and
+named rather than done behind your back.
+
 And the Settings app is a front-end to *that same file* — it shows you
 which settings the running system doesn't currently match, writes your
 changes back into the file (comments and all), and picks up edits you

@@ -1136,6 +1136,52 @@ converge_package() {
                 die "failed to install '$name' (is the index synced? try: pkg sync)"
             ;;
         absent)
+            # REFUSED when something installed still needs it, and the
+            # refusal is the point. `pkg remove` run by a person warns
+            # about reverse dependencies and proceeds, which is right:
+            # they typed it, they are reading the warning. This path is
+            # a document being applied -- at BOOT, with nobody there --
+            # and "remove libpng" quietly taking the image viewer's
+            # only decoder with it is not a thing an unattended
+            # converger should do.
+            #
+            # The list comes from `pkg rdeps`, not from a second scan
+            # written here: one implementation of "what depends on
+            # this", in the tool that owns the database.
+            #
+            # The cost is that the document cannot express "remove it
+            # anyway", and that is deliberate. The result is permanent
+            # DRIFT, which is the honest report -- the machine does not
+            # match the document and this engine will not make it
+            # match. Declare the dependants absent too, or run
+            # `pkg remove` by hand, which still does exactly what it
+            # always did.
+            #
+            # A QUERY THAT FAILED IS NOT AN EMPTY ANSWER. `|| true` on
+            # this would turn "pkg could not tell me" into "nothing
+            # depends on it" and remove the package anyway -- a
+            # refusal degrading into permission at exactly the moment
+            # it is least justified. A pkg too old to know the
+            # subcommand exits non-zero, which is the case that makes
+            # this reachable rather than theoretical. Found by the
+            # test: the stub's shell rejected `set -o pipefail`, the
+            # query died, and the removal went through.
+            #
+            # NOT `$(pkg rdeps ... | tr ...)`: a pipeline reports the
+            # status of its LAST command, so `tr` succeeding would
+            # report the whole substitution as a success and hand back
+            # the empty answer anyway -- the fix failing in precisely
+            # the way the bug did. That is the third time this
+            # repository has been caught by a pipeline's exit status.
+            # Capture first, reshape after.
+            local rdeps=""
+            if ! rdeps="$(pkg rdeps "$name" 2>/dev/null)"; then
+                die "refusing to remove '$name': 'pkg rdeps' failed, so nothing here knows what still depends on it"
+            fi
+            rdeps="$(printf '%s' "$rdeps" | tr '\n' ' ')"
+            if [ -n "${rdeps% }" ]; then
+                die "refusing to remove '$name': ${rdeps% } still depend(s) on it (declare those absent too, or remove it by hand)"
+            fi
             pkg remove "$name" || die "failed to remove '$name'"
             ;;
         *)

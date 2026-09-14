@@ -360,6 +360,83 @@ anything whose confidentiality matters keeps its own storage with its
 own permissions. A future `users.*` domain can declare that a user
 exists without declaring their secret.
 
+### `packages.*`, and the removal it refuses
+
+`packages.<name> = present | absent`, observed from the install
+database and converged with `pkg`. This is the domain this RFC's own
+roadmap called "the one that makes *commit your machine, reproduce it
+elsewhere* literally true", and the observer and converger had in fact
+been written some time ago — **the roadmap simply never said so, and
+nothing had ever tested them.** A roadmap that is wrong about what is
+already built is the same defect as one that is wrong about what is
+possible (RFC 0031's browser, from the other direction).
+
+Testing them found the interesting half.
+
+**The document is ADDITIVE, not exhaustive.** A package nobody
+mentions is a package nothing touches. The alternative — unlisted
+means absent — is what a strict reading of "declarative" suggests, and
+it would make `pkg install` by hand an act the next `apply` silently
+undoes. `users.<name>.shell` set the precedent: declaring the anchor
+key creates the account, and nothing manages accounts that are not
+declared.
+
+**A removal that would break another package is REFUSED.** `pkg
+remove` warns about reverse dependencies and proceeds, which is right
+for a person who typed it and is reading the warning. This path is a
+document being applied, at boot, with nobody watching, and "remove
+libpng" quietly taking the image viewer's only decoder with it is not
+a decision an unattended converger gets to make. It refuses, names
+what is in the way, and leaves the key as **permanent drift** — the
+honest report: the machine does not match the document and this engine
+will not make it. Declaring the dependants absent as well is how the
+document says "yes, really"; `pkg remove` by hand still does what it
+always did.
+
+The list comes from `pkg rdeps <name>`, a new subcommand, rather than
+from a second scan written in novi-state: one implementation of "what
+depends on this", in the tool that owns the database. It is also
+useful on its own — nothing could answer that question before.
+
+**A query that failed is not an empty answer**, and getting that wrong
+is how the refusal becomes permission. A `pkg` too old to know the
+subcommand exits non-zero; reading that as "nothing depends on it"
+removes the package at exactly the moment there is least justification
+for it. The converger refuses on a failed query too. Both the bug and
+its first fix were found by the test rather than by reading: the fix
+was written as `if ! rdeps="$(pkg rdeps … | tr …)"`, and **a pipeline
+reports the status of its last command**, so `tr` succeeding reported
+the whole substitution as success and handed back the empty answer
+anyway. That is the third time this repository has been caught by a
+pipeline's exit status.
+
+**`pkg`'s fetch timeout is now bounded, and this domain is why.**
+BusyBox wget's default is 900 seconds of silence before it gives up.
+Nothing cared while every fetch was a person waiting at a prompt; a
+declared package is fetched by boot convergence, so an unreachable
+mirror — a laptop opened on a different network, a mirror that moved —
+would have stalled the boot for a quarter of an hour per package, with
+nothing on the console to say why. 30 seconds, configurable in
+`pkg.conf`, and a *read* timeout rather than a total one, so a slow but
+progressing download of a 90 MB toolchain package is unaffected.
+
+### The GUI no longer blocks on an apply
+
+Roadmap item 2 named this in the same breath as the domain above, and
+correctly: "it stops being fine the first time a domain converges
+something slow — a package install." That is now a thing an apply can
+do, so the System panel's Enter runs `novi-state apply` through the
+job runner the Network panel brought for WiFi scans, instead of
+forking and waiting inside the Wayland event loop.
+
+Nothing new was needed: `JOB_APPLY` already existed, because turning
+the radio on restarts the supplicant. The System panel's Enter was
+simply the last path that could freeze the window, and the one that
+could freeze it longest. A side effect worth having — the job
+runner captures the child's stderr, so a failed apply now shows
+novi-state's own `ERROR:` line in the status bar instead of the word
+"failed".
+
 ---
 
 ## Roadmap
@@ -372,16 +449,19 @@ hatch.
 
 **Next, in dependency order:**
 
-1. **More domains:** `packages.*` (declare installed packages, converge
-   via `pkg`), `users.*`, `network.*`, `desktop.*` (keybindings, theme
-   — RFC 0001 already calls for keybindings to move to a user-editable
-   config file; this is that file). `packages.*` is the one that makes
-   "commit your machine, reproduce it elsewhere" literally true.
-2. **Move the subprocess calls off the GUI event loop.** They block it
-   today. Fine at this scale (an `apply` is a couple of s6-rc
-   transitions) and noted in a comment where someone will hit it, but
-   it stops being fine the first time a domain converges something slow
-   — a package install.
+1. ~~**More domains.**~~ Largely **done**, and this entry was stale for
+   most of that: `packages.*` (see above), `users.*` (RFC 0005),
+   `network.*` (RFC 0009, RFC 0033), `power.*` (RFC 0013, RFC 0035),
+   `agent.*` (RFC 0029) and `display.theme` (RFC 0030) all landed
+   without it being updated. What is left of it is **`desktop.*`** —
+   keybindings as a user-editable file, which RFC 0001 asks for and
+   `common/keybindings.h` currently answers at compile time.
+2. ~~**Move the subprocess calls off the GUI event loop.**~~ **Done**
+   for the one that mattered — see above. `novi-state set` and
+   `novi-state diff` are still synchronous, deliberately: a `set` is
+   one awk pass and a `diff` is a directory walk and an `s6-rc -a
+   list`. Neither can grow slow without something else changing first,
+   and an apply is where the slow thing lives.
 3. **`novi-state diff` in CI**, and a `--json` projection for tooling.
 4. **Concurrent-edit safety.** Two writers racing on `system.conf`
    (the GUI and an editor) can currently lose one side's change; the

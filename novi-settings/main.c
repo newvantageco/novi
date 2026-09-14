@@ -631,6 +631,13 @@ static bool entry_is_toggleable(const struct state_entry *e) {
 }
 
 static void set_status(struct novi_settings *state, const char *msg, bool is_error);
+/* Declared here because apply_state() below needs it and the runner
+ * itself lives with the Network panel that brought it (see the
+ * enum job_kind comment). It is not the Network panel's runner any
+ * more -- an apply is an apply whichever panel asked for it. */
+static bool job_start(struct novi_settings *state, enum job_kind kind,
+	const char *path, char *const argv[], const char *stdin_data,
+	const char *ssid);
 
 static void toggle_selected(struct novi_settings *state) {
 	if (state->entry_count == 0) {
@@ -726,15 +733,26 @@ static void commit_edit(struct novi_settings *state) {
 	set_status(state, "Declared -- press Enter to apply", false);
 }
 
+/* AS A JOB, not a blocking fork, and that stopped being a nicety the
+ * day `packages.*` became a domain novi-state converges: an apply can
+ * now mean `pkg install`, which fetches from a mirror over a network
+ * and unpacks. The comment at the top of this section has warned since
+ * it was written that these calls block the Wayland event loop and
+ * that it would stop being acceptable "the first time a domain
+ * converges something slow (a package install)". That is this, and RFC
+ * 0002's roadmap named it in the same breath as the domain itself.
+ *
+ * The runner already existed for the WiFi scan, and JOB_APPLY already
+ * existed because turning the radio on restarts the supplicant -- so
+ * the System panel's Enter was the one remaining path that could
+ * freeze the window, and it was the one that could freeze it longest.
+ * The completion handler refreshes both panels and reports, so there
+ * is nothing panel-specific to add here. */
 static void apply_state(struct novi_settings *state) {
 	char *const argv[] = { (char *)"novi-state", (char *)"apply", NULL };
-	int rc = run_novi_state(argv);
-	refresh_system(state);
-	if (rc != 0) {
-		set_status(state, "Apply failed", true);
-		return;
+	if (job_start(state, JOB_APPLY, NOVI_STATE_BIN, argv, NULL, NULL)) {
+		set_status(state, "Applying...", false);
 	}
-	set_status(state, "Applied -- system matches the document", false);
 }
 
 /* ── The Network panel ─────────────────────────────────────────────

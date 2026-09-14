@@ -52,6 +52,20 @@ PKG_MIRROR=""
 PKG_KEY="/etc/novi/keys/novi-repo.pub"
 PKG_ALLOW_UNSIGNED="no"
 PKG_ALLOW_STALE="no"
+# Network read timeout, in seconds, for every fetch this tool makes.
+#
+# BusyBox wget's own default is 900 -- fifteen minutes of no data before
+# it gives up -- and that is not a number anybody chose for this
+# situation. `packages.<name> = present` is converged by novi-state,
+# which runs at BOOT, so an unreachable mirror (a laptop that opened its
+# lid somewhere else, a mirror that has moved) would stall the boot for
+# a quarter of an hour per declared package, silently, with the console
+# showing nothing.
+#
+# It is a READ timeout, not a total one, so a slow but progressing
+# download of a 90 MB toolchain package is unaffected: the clock only
+# runs while nothing at all is arriving.
+PKG_TIMEOUT="30"
 
 conf_value() {
     [ -r "$PKG_CONF" ] || { printf ''; return 0; }
@@ -65,6 +79,11 @@ load_conf() {
     v="$(conf_value key)";             [ -n "$v" ] && PKG_KEY="$v"
     v="$(conf_value allow_unsigned)";  [ -n "$v" ] && PKG_ALLOW_UNSIGNED="$v"
     v="$(conf_value allow_stale)";     [ -n "$v" ] && PKG_ALLOW_STALE="$v"
+    v="$(conf_value timeout)"
+    case "$v" in
+        ''|*[!0-9]*) ;;   # absent or not a number: keep the default
+        *)           PKG_TIMEOUT="$v" ;;
+    esac
     # The environment wins over the file, so a one-off
     # `PKG_MIRROR=... pkg sync` works without editing anything.
     [ -n "${PKG_MIRROR_ENV:-}" ] && PKG_MIRROR="$PKG_MIRROR_ENV"
@@ -240,7 +259,7 @@ fetch_repo_file() {
     else
         command -v wget >/dev/null 2>&1 ||
             die "wget not found; cannot fetch $rel from $PKG_MIRROR"
-        if ! wget -q -O "$dest.part" "${PKG_MIRROR%/}/$rel"; then
+        if ! wget -q -T "$PKG_TIMEOUT" -O "$dest.part" "${PKG_MIRROR%/}/$rel"; then
             rm -f "$dest.part"
             return 1
         fi
@@ -614,6 +633,46 @@ cmd_install() {
     done
 }
 
+# Which installed packages name $1 in their `depends`, space-separated
+# and empty when nothing does.
+#
+# Its own function, and a subcommand (`pkg rdeps`), because there are
+# now two callers: `pkg remove` warns with it, and novi-state's
+# packages.* converger REFUSES with it. A second copy of this matching
+# in novi-state would be a second answer to "what depends on this",
+# written in a different language, drifting the first time the depends
+# syntax gains a spelling -- which is what the version-constrained
+# patterns below already are.
+rdeps_of() {
+    local name="$1" rdeps="" other_manifest other_name other_deps
+    for other_manifest in "$PKG_DB"/*/MANIFEST; do
+        [ -f "$other_manifest" ] || continue
+        other_name="$(manifest_field "$other_manifest" "name")"
+        [ "$other_name" = "$name" ] && continue
+        other_deps="$(manifest_field "$other_manifest" "depends")"
+        case ",$other_deps," in
+            *",${name},"*|*",${name}>"*|*",${name}<"*|*",${name}="*|\
+            "${name},"*|"${name}>"*|"${name}<"*|"${name}="*|\
+            *",$name"|"$name")
+                rdeps="$rdeps $other_name";;
+        esac
+    done
+    # Leading space trimmed so a caller can test emptiness with -n and
+    # print the list without a stray gap in the middle of a sentence.
+    printf '%s' "${rdeps# }"
+}
+
+cmd_rdeps() {
+    [ $# -eq 1 ] || die "Usage: pkg rdeps <package>"
+    local list
+    list="$(rdeps_of "$1")"
+    [ -n "$list" ] || return 0
+    local d
+    for d in $list; do
+        printf '%s\n' "$d"
+    done
+}
+
 cmd_remove() {
     need_root
     [ $# -ge 1 ] || die "Usage: pkg remove <package> [...]"
@@ -623,22 +682,8 @@ cmd_remove() {
 
         msg "Removing $name"
 
-        # Check reverse dependencies (packages that depend on this one)
-        local rdeps=""
-        for other_manifest in "$PKG_DB"/*/MANIFEST; do
-            [ -f "$other_manifest" ] || continue
-            local other_name
-            other_name="$(manifest_field "$other_manifest" "name")"
-            [ "$other_name" = "$name" ] && continue
-            local other_deps
-            other_deps="$(manifest_field "$other_manifest" "depends")"
-            case ",$other_deps," in
-                *",${name},"*|*",${name}>"*|*",${name}<"*|*",${name}="*|\
-                "${name},"*|"${name}>"*|"${name}<"*|"${name}="*|\
-                *",$name"|"$name")
-                    rdeps="$rdeps $other_name";;
-            esac
-        done
+        local rdeps
+        rdeps="$(rdeps_of "$name")"
 
         if [ -n "$rdeps" ]; then
             warn "The following installed packages depend on '$name':$rdeps"
@@ -1011,6 +1056,7 @@ Usage:
   pkg search  <pattern>                Search for packages
   pkg list    [filter]                 List installed packages
   pkg info    <package>                Show package information
+  pkg rdeps   <package>                List installed packages that need it
 
 `sync` refreshes the index; `update` upgrades installed packages. They
 are different operations and have different names on purpose.
@@ -1020,6 +1066,7 @@ Configuration (/etc/novi/pkg.conf):
   key             = /etc/novi/keys/novi-repo.pub
   allow_unsigned  = no
   allow_stale     = no
+  timeout         = 30                                 (network read, seconds)
 
 The index is signed and `pkg sync` verifies it with novi-verify before
 believing a line of it; every package's SHA-256 comes from that index,
@@ -1044,5 +1091,6 @@ case "$cmd" in
     search)  cmd_search  "$@";;
     list)    cmd_list    "$@";;
     info)    cmd_info    "$@";;
+    rdeps)   cmd_rdeps   "$@";;
     *)       usage;;
 esac

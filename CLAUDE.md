@@ -279,6 +279,61 @@ Three smaller things worth knowing before extending this:
   two generation steps from `04-s6.sh` on their own — seconds instead
   of rebuilding the whole skarnet stack.
 
+## Architecture: declaring what is installed
+
+`packages.<name> = present | absent` (RFC 0002). The observer reads
+`/var/lib/pkg/installed/<name>/MANIFEST`; the converger runs `pkg`.
+
+- **It already existed and the roadmap said it did not.** RFC 0002
+  listed `packages.*` under "next, in dependency order" for the whole
+  life of the project while `observe_package` and `converge_package`
+  sat in `novi-state` -- untested, undocumented and live. A roadmap
+  that is wrong about what is BUILT is the same defect as one that is
+  wrong about what is possible (RFC 0031's browser, from the other
+  side). Check the code before believing either.
+- **The document is ADDITIVE.** A package nobody mentions is a package
+  nothing touches. "Unlisted means absent" is what a strict reading of
+  *declarative* suggests and it would make `pkg install` by hand
+  something the next `apply` silently undoes. Same shape as
+  `users.<name>.shell`: the anchor key is what brings a thing under
+  management.
+- **A removal that would break another package is REFUSED**, and the
+  refusal is the feature. `pkg remove` warns about reverse dependencies
+  and proceeds -- right for a person who typed it and is reading the
+  warning, wrong for a document applied at boot with nobody there. The
+  result is PERMANENT DRIFT, which is the honest report: the machine
+  does not match the document and this engine will not make it.
+- **`pkg rdeps` exists so there is ONE implementation of "what depends
+  on this".** A second scan written in novi-state would drift from
+  pkg's the first time the `depends` syntax gains a spelling -- and it
+  already has several (version constraints).
+- **A QUERY THAT FAILED IS NOT AN EMPTY ANSWER.** `pkg rdeps` from a
+  pkg too old to know the subcommand exits non-zero, and reading that
+  as "nothing depends on it" turns the refusal into permission at
+  exactly the moment it is least justified. Refuse on a failed query
+  too.
+- **And the first fix for that failed the same way the bug did.**
+  `if ! rdeps="$(pkg rdeps "$name" | tr '\n' ' ')"` tests the
+  PIPELINE's status, which is `tr`'s -- so the substitution reported
+  success and handed back the empty answer regardless. Capture first,
+  reshape after. Third time this repository has been caught by a
+  pipeline's exit status.
+- **BusyBox wget's default timeout is 900 seconds**, and nothing cared
+  while every fetch had a person waiting at a prompt. A declared
+  package is fetched by BOOT CONVERGENCE, so an unreachable mirror
+  would stall the boot for a quarter of an hour per package with
+  nothing on the console to say why. `pkg.conf`'s `timeout` is 30 now
+  -- a READ timeout, so a slow but progressing 90 MB download is
+  unaffected.
+- **The System panel's apply is a JOB now, not a blocking fork.** The
+  comment in `novi-settings/main.c` had warned since it was written
+  that these calls block the Wayland event loop and that it would stop
+  being acceptable "the first time a domain converges something slow (a
+  package install)". This is that. Nothing new was needed: `JOB_APPLY`
+  already existed for the WiFi radio. A side effect worth having --
+  the runner captures stderr, so a failed apply shows novi-state's own
+  `ERROR:` line instead of the word "failed".
+
 ## Architecture: hardware you have never seen
 
 RFC 0011 (`docs/rfcs/0011-hardware-enablement.md`). The traps here are
