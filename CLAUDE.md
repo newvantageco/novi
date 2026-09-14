@@ -325,6 +325,17 @@ Three smaller things worth knowing before extending this:
   nothing on the console to say why. `pkg.conf`'s `timeout` is 30 now
   -- a READ timeout, so a slow but progressing 90 MB download is
   unaffected.
+- **A FAILED KEY IS RETRIED in the next pass if the pass made
+  progress**, and this domain is what forced it. `cmd_apply` used to
+  strike a failed key off for the rest of the apply -- to stop one bad
+  key printing the same error three times -- and that defeats the
+  passes for exactly the case they exist for: declare
+  `packages.expat = absent` and `packages.fontconfig = absent`
+  together, expat sorts first, its removal is refused because
+  fontconfig still needs it, fontconfig is then removed, and expat
+  stays. Watched live. A key that is merely EARLY now converges; a key
+  that is simply wrong costs one extra error line, because nothing
+  else converges on the retry pass and the loop ends there.
 - **The System panel's apply is a JOB now, not a blocking fork.** The
   comment in `novi-settings/main.c` had warned since it was written
   that these calls block the Wayland event loop and that it would stop

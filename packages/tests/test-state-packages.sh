@@ -200,6 +200,26 @@ state apply >/dev/null 2>&1
 did; grep -qx "install zzz" "${TMP}/pkg.log" ||
     note "a refused key must not stop the keys sorted after it"
 
+# ── 5b. a key that was only EARLY is retried ─────────────────────────
+# Declaring a package and the package that depends on it absent in one
+# edit is the obvious way to say "take both of these off", and the
+# dependency sorts first (l < n), so its removal is refused before the
+# dependant has gone. The passes exist for exactly this; a failed key
+# struck off for the whole apply defeats them, and the symptom is a
+# document that needs applying twice with no hint that it does.
+: > "${TMP}/pkg.log"
+rm -rf "${DB:?}"/*
+installed libpng
+installed novi-view "libpng"
+printf 'packages.libpng = absent\npackages.novi-view = absent\n' > "${TMP}/system.conf"
+state apply >/dev/null 2>&1; rc=$?
+did; grep -qx "remove novi-view" "${TMP}/pkg.log" ||
+    note "the dependant must be removed"
+did; grep -qx "remove libpng" "${TMP}/pkg.log" ||
+    note "and the dependency too, in the SAME apply (log: $(tr '\n' ' ' < "${TMP}/pkg.log"))"
+did; [ "$rc" -eq 0 ] ||
+    note "an apply that converged everything in the end must exit 0"
+
 # ── 6. a value that is neither ───────────────────────────────────────
 : > "${TMP}/pkg.log"
 rm -rf "${DB:?}"/*

@@ -420,6 +420,31 @@ nothing on the console to say why. 30 seconds, configurable in
 `pkg.conf`, and a *read* timeout rather than a total one, so a slow but
 progressing download of a 90 MB toolchain package is unaffected.
 
+**A failed key is retried in the next pass now, if the pass made
+progress** — and that change came out of watching this domain on a
+booted machine. Declaring a package and the package that depends on it
+absent in one edit is the obvious way to say "take both of these off".
+The dependency sorts first, so its removal is refused; the dependant is
+then removed; and the first version left the dependency behind, because
+a key that failed was struck off for the rest of the apply. `diff`
+reported the drift and a second `apply` fixed it, which is honest and
+is still one apply too many — the passes exist for exactly this shape
+of dependency, and that rule defeated them. The skip was there to stop
+one permanently-bad key printing the same error three times; it now
+costs one extra error line in that case, because nothing else converges
+on the retry pass and the loop ends there.
+
+**Verified on a booted machine** (live image, mirror on the
+installation medium):
+
+| | |
+|---|---|
+| present | `packages.fontconfig = present` → apply installed fontconfig **and its two dependencies**; `pkg list` shows all three |
+| refused | `packages.expat = absent` with fontconfig installed → `ERROR: refusing to remove 'expat': fontconfig still depend(s) on it`, apply exits 1, expat still installed, and `diff` goes on reporting the drift |
+| both | declaring expat and fontconfig absent together → **one** apply removes both, exit 0, `diff` clean. Before the retry fix, the same edit took two |
+| additive | freetype, installed as a dependency and never declared, is still there afterwards — nothing manages what the document does not mention |
+| the timeout | `timeout = 30` is in the shipped `/etc/novi/pkg.conf` |
+
 ### The GUI no longer blocks on an apply
 
 Roadmap item 2 named this in the same breath as the domain above, and

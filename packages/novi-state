@@ -1561,8 +1561,23 @@ cmd_apply() {
     # value instead of the end of the program. `converge_key` sets no
     # globals (its effects are on the system -- files, s6-rc), so
     # nothing is lost by isolating it. A key that fails is recorded and
-    # SKIPPED in later passes, or a document with one bad key would
-    # print the same error three times over.
+    # skipped for the REST OF THAT PASS.
+    #
+    # It is retried in the next pass IF the pass made progress, and
+    # that condition is the whole of it. The first version skipped a
+    # failed key for the rest of the apply, to stop one bad key
+    # printing the same error three times -- and that defeated the
+    # passes for exactly the case they exist for. Watched live:
+    # `packages.expat = absent` and `packages.fontconfig = absent`
+    # declared in one edit, expat sorts first, expat's removal is
+    # refused because fontconfig still depends on it, fontconfig is
+    # then removed... and expat stays, because it had been struck off.
+    # `diff` reported the drift and a second `apply` fixed it, which
+    # is honest and is still one apply too many.
+    #
+    # A key that is simply wrong costs one extra error line for this:
+    # nothing else converges on the retry pass, so the loop ends
+    # there. A key that was merely EARLY costs nothing and now works.
     local pass=0 total=0 failed="" failed_n=0
     while [ "$pass" -lt 3 ]; do
         pass=$((pass + 1))
@@ -1591,6 +1606,11 @@ cmd_apply() {
         done
         total=$((total + changed))
         [ "$changed" -eq 0 ] && break
+        # Progress was made, so whatever failed may only have been
+        # waiting for it. Cleared here rather than never, per the
+        # comment above.
+        failed=""
+        failed_n=0
     done
 
     if [ "$changed" -ne 0 ]; then
