@@ -27,8 +27,17 @@ if [ -x "${BUSYBOX}" ]; then
     SH=("${BUSYBOX}" ash)
     echo ">>> packages.* domain, under the shipped busybox ash"
 else
-    SH=(sh)
-    echo ">>> packages.* domain, under host sh (no shipped busybox found)" >&2
+    # BASH, not `sh`, where there is no busybox -- and unlike the other
+    # tests in this directory that is not a weaker fallback, it is the
+    # only one that means anything. This test runs `pkg`, which is
+    # `#!/bin/sh` AND uses `set -o pipefail` on purpose: it runs under
+    # busybox ash on the target, which supports it. `/bin/sh` on Debian
+    # is dash, which does not, so pkg dies on its second line and every
+    # check that depends on it fails for a reason that has nothing to
+    # do with the code under test. Running it under a shell it could
+    # never meet is not a test.
+    SH=(bash)
+    echo ">>> packages.* domain, under host bash (no shipped busybox; pkg needs pipefail, which dash has not)" >&2
 fi
 
 SHELL_CMD="${SH[*]}"
@@ -47,7 +56,14 @@ mkdir -p "${DB}" "${TMP}/bin"
 # them and unreachable for a test. Redirected with a sed rather than by
 # adding an environment override to production code purely so a test
 # can reach it -- the call test-power-idle.sh makes over /run/novi/idle.
-sed "s|/var/lib/pkg/installed|${DB}|g" packages/novi-state > "${TMP}/novi-state"
+# need_root goes too, and that is not a cheat: `apply` requires root
+# because it changes a machine, and this copy changes a stub in /tmp.
+# Without it the whole file would be a test that only runs for whoever
+# happens to be root -- which in practice means it runs here and not in
+# CI, where it would have caught something.
+sed -e "s|/var/lib/pkg/installed|${DB}|g" \
+    -e 's|.*This operation requires root.*|    :|' \
+    packages/novi-state > "${TMP}/novi-state"
 sed "s|^PKG_DB=\"/var/lib/pkg/installed\"|PKG_DB=\"${DB}\"|" packages/pkg > "${TMP}/pkg"
 chmod +x "${TMP}/novi-state" "${TMP}/pkg"
 

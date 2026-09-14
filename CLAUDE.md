@@ -336,6 +336,22 @@ Three smaller things worth knowing before extending this:
   stays. Watched live. A key that is merely EARLY now converges; a key
   that is simply wrong costs one extra error line, because nothing
   else converges on the retry pass and the loop ends there.
+- **A test that needs root does not run in CI, and the whole of it
+  fails there rather than skipping.** `novi-state apply` calls
+  `need_root`, this container is root, and the packages test passed
+  here and failed on every apply-shaped check in CI with
+  `ERROR: This operation requires root.` The test copy is already a
+  doctored copy (the install database path is sed'd into /tmp), so
+  `need_root` is sed'd out with it: the thing under test is the
+  converger's decisions, not the privilege check.
+- **And `packages/pkg` CANNOT RUN UNDER DASH.** It is `#!/bin/sh` and
+  uses `set -o pipefail` deliberately -- busybox ash supports it and
+  that is what runs on the target. `/bin/sh` on a CI runner is dash,
+  which does not, so pkg dies on its second line and every check that
+  depends on it fails for a reason unrelated to the code. Where the
+  other tests here fall back to `sh` when there is no shipped busybox,
+  a test that runs `pkg` falls back to **bash**: running it under a
+  shell it could never meet is not a test.
 - **The System panel's apply is a JOB now, not a blocking fork.** The
   comment in `novi-settings/main.c` had warned since it was written
   that these calls block the Wayland event loop and that it would stop
