@@ -2,9 +2,13 @@
 #include "keys.h"
 
 #include <ctype.h>
+#include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include <xkbcommon/xkbcommon.h>
 
@@ -377,4 +381,188 @@ int novi_keys_load(struct novi_keys *k, const char *path) {
 		rewrite_text(k, i);
 	}
 	return k->unreadable;
+}
+
+/* ── Writing one back ─────────────────────────────────────────────────
+ *
+ * See keys.h for why this is a surgical edit rather than a rewrite,
+ * and why a commented line is not a match.
+ */
+
+/* Does `line` carry a LIVE assignment to `action`?
+ *
+ * "Live" is the whole subtlety: leading whitespace is allowed and
+ * preserved, a `#` anywhere before the name is not. The shipped file
+ * is 87 lines of commented examples, so a matcher that skipped the `#`
+ * would rewrite one of them in place and uncomment it -- turning a
+ * line of documentation into a setting, in the middle of a prose
+ * block, without being asked to.
+ */
+static bool line_assigns(const char *line, const char *action)
+{
+	const char *p = line;
+	while (*p == ' ' || *p == '\t') {
+		p++;
+	}
+	size_t n = strlen(action);
+	if (strncmp(p, action, n) != 0) {
+		return false;
+	}
+	p += n;
+	while (*p == ' ' || *p == '\t') {
+		p++;
+	}
+	return *p == '=';
+}
+
+static bool known_action(const char *action)
+{
+	for (size_t i = 0; i < NOVI_BINDINGS_COUNT; i++) {
+		if (strcmp(NOVI_BINDINGS[i].name, action) == 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
+bool novi_keys_is_set(const char *path, const char *action)
+{
+	if (path == NULL || action == NULL) {
+		return false;
+	}
+	FILE *f = fopen(path, "r");
+	if (f == NULL) {
+		return false;
+	}
+	char line[512];
+	bool found = false;
+	while (fgets(line, sizeof line, f) != NULL) {
+		if (line_assigns(line, action)) {
+			found = true;
+			break;
+		}
+	}
+	fclose(f);
+	return found;
+}
+
+int novi_keys_write(const char *path, const char *action, const char *spec)
+{
+	if (path == NULL || action == NULL || !known_action(action)) {
+		return EINVAL;
+	}
+	if (spec != NULL) {
+		unsigned mods;
+		xkb_keysym_t sym;
+		if (!novi_keys_parse(spec, &mods, &sym)) {
+			return EINVAL;
+		}
+		/* A spec with a newline in it would write two lines, the
+		 * second of which is whatever the caller put after it; one
+		 * with a `#` would write a line whose tail the loader then
+		 * ignores.
+		 *
+		 * BOTH ARE ALREADY REFUSED BY novi_keys_parse() TODAY --
+		 * checked by removing this guard and watching the tests still
+		 * pass. It stays as a FILE-FORMAT concern belonging to the
+		 * writer rather than to the parser: what may appear in a
+		 * binding and what may appear on a line of this file are
+		 * different questions, and a future parser that accepted more
+		 * must not silently gain the ability to write two lines from
+		 * one call. The tests for it pass through the parser today
+		 * and say so. */
+		if (strpbrk(spec, "\r\n") != NULL || strchr(spec, '#') != NULL) {
+			return EINVAL;
+		}
+	}
+
+	/* The file's own mode is preserved rather than assumed: it is
+	 * 0644 as shipped, and somebody who tightened it did so on
+	 * purpose. A missing file is not an error -- keys.conf is base
+	 * content and always there, but a panel that cannot write to a
+	 * machine where it is absent is a panel that fails for a reason
+	 * nobody can act on. */
+	mode_t mode = 0644;
+	struct stat st;
+	bool existed = (stat(path, &st) == 0);
+	if (existed) {
+		mode = st.st_mode & 07777;
+	}
+
+	char tmp[PATH_MAX];
+	if ((size_t)snprintf(tmp, sizeof tmp, "%s.tmp", path) >= sizeof tmp) {
+		return ENAMETOOLONG;
+	}
+	FILE *out = fopen(tmp, "w");
+	if (out == NULL) {
+		return errno;
+	}
+
+	int rc = 0;
+	bool replaced = false;
+	FILE *in = existed ? fopen(path, "r") : NULL;
+	if (in != NULL) {
+		char line[512];
+		while (fgets(line, sizeof line, in) != NULL) {
+			if (line_assigns(line, action)) {
+				if (spec == NULL) {
+					/* Removing: drop the line entirely. */
+					replaced = true;
+					continue;
+				}
+				if (!replaced) {
+					/* Leading whitespace is kept, the way state_set
+					 * keeps a key's indentation: a file somebody
+					 * formatted stays formatted. */
+					size_t indent = strspn(line, " \t");
+					if (fprintf(out, "%.*s%s = %s\n", (int)indent, line,
+							action, spec) < 0) {
+						rc = errno;
+						break;
+					}
+					replaced = true;
+					continue;
+				}
+				/* A DUPLICATE live line, which the loader resolves by
+				 * last-wins. Dropping it is what makes this function's
+				 * result match what the loader will read -- leaving it
+				 * would write the new value above a stale line that
+				 * still overrides it. */
+				continue;
+			}
+			if (fputs(line, out) == EOF) {
+				rc = errno;
+				break;
+			}
+		}
+		fclose(in);
+	}
+
+	if (rc == 0 && spec != NULL && !replaced) {
+		if (fprintf(out, "%s = %s\n", action, spec) < 0) {
+			rc = errno;
+		}
+	}
+	if (rc == 0 && fflush(out) != 0) {
+		rc = errno;
+	}
+	if (fclose(out) != 0 && rc == 0) {
+		rc = errno;
+	}
+	if (rc != 0) {
+		unlink(tmp);
+		return rc;
+	}
+	if (chmod(tmp, mode) != 0) {
+		/* Not fatal: the content is right and a mode this process
+		 * could not set is one it could not have set on the original
+		 * either. */
+		(void)0;
+	}
+	if (rename(tmp, path) != 0) {
+		rc = errno;
+		unlink(tmp);
+		return rc;
+	}
+	return 0;
 }

@@ -97,4 +97,47 @@ bool novi_keys_parse(const char *spec, unsigned *mods, xkb_keysym_t *sym);
 void novi_keys_format(unsigned mods, xkb_keysym_t sym, unsigned flags,
 	char *out, size_t cap);
 
+/* ── Writing one back ─────────────────────────────────────────────────
+ *
+ * RFC 0037 roadmap 1. The file is hand-edited prose with comments, so
+ * the model is `novi-state`'s `state_set` — a SURGICAL edit that
+ * preserves every other byte — and emphatically not a rewrite from the
+ * parsed table. A settings panel that rewrites this file turns it into
+ * a machine-owned blob the first time somebody uses the panel, and the
+ * whole claim RFC 0037 makes is that the GUI and a text editor write
+ * the same document.
+ *
+ * `spec` is a binding string (`Super+Shift+T`, `off`), or NULL to
+ * REMOVE the line and go back to the compiled default. Removing is a
+ * delete rather than a comment-out: a commented line is documentation,
+ * and inventing documentation on somebody's behalf is not this
+ * function's job.
+ *
+ * Refuses an action this build does not have and a spec
+ * novi_keys_parse() cannot read, for the reason the loader refuses an
+ * unknown modifier word rather than skipping it: writing a line that
+ * does something other than what it says is worse than writing
+ * nothing.
+ *
+ * A COMMENTED LINE IS NOT A MATCH. The shipped keys.conf is 87 lines
+ * and every one of them is a comment — it is the documentation as well
+ * as the file — so a matcher that ignored the `#` would find
+ * `# session.lock = Super+L` in the middle of a prose block and
+ * uncomment it. That is the trap CLAUDE.md records about editing
+ * `system.conf` by hand ("read a diff for what it UNCOMMENTS"), from
+ * the writing side. An action with no live line is APPENDED.
+ *
+ * Returns 0, or an errno: EINVAL for a bad action or spec, and
+ * whatever open/write/rename gave otherwise (EACCES is the ordinary
+ * one — this file is root-owned).
+ */
+int novi_keys_write(const char *path, const char *action, const char *spec);
+
+/* Is there a live (uncommented) line for this action? The panel needs
+ * it to say "default" versus "yours" without re-deriving it from a
+ * comparison against the compiled table — two rows can hold the same
+ * binding for different reasons, and "you set this to what it already
+ * was" is a true and useful thing to show. */
+bool novi_keys_is_set(const char *path, const char *action);
+
 #endif
