@@ -96,6 +96,23 @@ int main(void) {
 			"no row renders with an underscore in it");
 	}
 
+	/* NO TWO COMPILED ROWS SHARE A BINDING. The collision rule below
+	 * only runs when there is a file to read, so a pair of defaults
+	 * that landed on one key would not be caught there -- and would
+	 * ship as a shortcut that silently never fires on every machine,
+	 * with no config file involved at all. */
+	novi_keys_defaults(&k);
+	for (size_t i = 0; i < NOVI_BINDINGS_COUNT; i++) {
+		for (size_t j = i + 1; j < NOVI_BINDINGS_COUNT; j++) {
+			bool same = k.v[i].sym == k.v[j].sym && k.v[i].mods == k.v[j].mods;
+			if (same) {
+				fprintf(stderr, "       (%s and %s both want %s)\n",
+					k.v[i].name, k.v[j].name, k.text[i]);
+			}
+			ok(!same, "no two compiled bindings collide");
+		}
+	}
+
 	/* ── 2. an override moves the binding AND the text ───────────── */
 	load(&k, "window.terminal = Super+Shift+T\n");
 	ok(k.overridden == 1, "one line, one override");

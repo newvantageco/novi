@@ -158,7 +158,9 @@ somebody includes it first — which is exactly what `keys.c` did.
 ## What is checked without a desktop
 
 `common/keys-test.c`, linking the real loader, run by
-`make -C common check` from `scripts/lint.sh`. **118 checks.** The
+`make -C common check` from `scripts/lint.sh`. **289 checks** (the
+count is pair-wise in places -- every row against every other for the
+collision invariant). The
 interesting ones are all things a running desktop cannot show you: a
 well-formed file exercises one path, and the paths that matter are the
 misspelled modifier, the action that does not exist, the line that
