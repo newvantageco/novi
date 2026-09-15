@@ -320,10 +320,59 @@ written for this test. Nothing here has run on physical hardware.
    already supports. See decision 8. Italic followed immediately, and
    **the serif is in too** — Source Serif 4, a new pinned source and a
    design decision, which is why it took longer than the italics.
-2. **JavaScript, or a decision not to.** Duktape is one flag and a real
-   question: it is an interpreter with no JIT, so it is slow, and slow
-   scripting on pages written for fast scripting may be worse than
-   none. Measure before turning it on.
+2. ~~**JavaScript, or a decision not to.**~~ **Measured, and the
+   decision is not to.** `NETSURF_USE_DUKTAPE=NO` stands, now as a
+   number rather than a shrug. The instrument is kept at
+   `tests/js-probe/` so the next person can re-run this rather than
+   re-argue it.
+
+   **It builds and it works.** Duktape is vendored in the NetSurf
+   bundle, so the flag needs no new upstream and no new pin, and a
+   probe page renders `SCRIPT RAN: DOM WRITE OK` with an element its
+   script created. Two things silently do nothing first, though:
+   `enable_javascript` defaults to **false** in NetSurf's options, and
+   the framebuffer frontend reads `Choices` off its RESOURCE path —
+   **`~/.netsurf/Choices`**, not `~/.config/netsurf/Choices`, where
+   the first attempt put it and where it was ignored without comment.
+
+   **The syntax is ES5.** `let`, arrow functions, template literals,
+   `class` and `for…of` are each a SyntaxError; `const` and the ES5
+   core work. **And a syntax error is a WHOLE-SCRIPT failure** — one
+   arrow function anywhere in a bundle and nothing in it runs, which
+   is not a guess: this RFC's own first probe page was written in ES6
+   and sat on its `loading...` placeholder exactly as a 2020s site
+   would.
+
+   **The APIs that make a page dynamic are absent.**
+   `querySelector`, `addEventListener`, `innerHTML`, `setTimeout` and
+   `canvas.getContext` are all there; **`Promise`, `fetch`,
+   `XMLHttpRequest` and `localStorage` are `undefined`.** No `fetch`
+   and no XHR means a page cannot load anything after its initial
+   HTML — that rules out not just React but 2005-era AJAX.
+
+   **Speed is interpreter-class, two orders off a JIT.** On the guest:
+   fib(24) **308 ms**, a 2-million-iteration modulo loop **9153 ms**,
+   50k string appends plus a join **654 ms**, and the page's own
+   status bar reading *Done (10.2s)* because the script blocks the
+   load. That guest is TCG, so the number is corrected rather than
+   quoted: the same loop in CPython takes 4577 ms there and 151 ms on
+   the build host, a **30× emulation penalty** — so Duktape is about
+   **305 ms** of real hardware, **within 2× of CPython** and roughly
+   **60–150× slower than the JIT'd engines these pages are written
+   for**.
+
+   **So: +1.34 MB on the binary (2,557,840 → 3,901,840, +52%)**, an
+   interpreter parsing hostile script in a browser that roadmap items
+   4 and 5 just established has no sandbox and no CPU bound, and what
+   it buys is ES5 DOM manipulation with no network — menus, tabs and
+   accordions written before 2015, or jQuery's DOM half. Real, and
+   small. The RFC's original framing was right in direction and for
+   the wrong reason: the problem is not that the interpreter is slow,
+   it is that **the language it implements is not the language the web
+   is written in**.
+
+   Worth revisiting when item 6 gives the browser a CPU bound, or if
+   somebody demonstrates a class of sites that comes to life.
 3. ~~**The OpenSSL/mbedTLS split is worth removing.**~~ **Measured,
    and the answer is no — keep both.** This item asserted the
    conclusion in its own first sentence; the measurement says the

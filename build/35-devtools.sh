@@ -680,6 +680,18 @@ if [ "$ONLY" = "all" ] || [ "$ONLY" = "netsurf" ]; then
         NETSURF_FB_FONT_CURSIVE=Inter-Regular.ttf
         NETSURF_FB_FONT_FANTASY=Inter-Regular.ttf"
 
+    # NETSURF_USE_DUKTAPE=NO is a MEASURED decision, not an omission
+    # (RFC 0031 roadmap 2, instrument at tests/js-probe/). Duktape is
+    # vendored in this bundle, so turning it on costs no new upstream
+    # -- it costs +1.34 MB on the binary (+52%) for an engine whose
+    # language is ES5: `let`, arrow functions, template literals,
+    # `class` and `for..of` are each a SyntaxError, and a syntax error
+    # is a WHOLE-SCRIPT failure, so one arrow function in a bundle
+    # means nothing in it runs. There is no Promise, no fetch, no
+    # XMLHttpRequest and no localStorage either, so a page cannot load
+    # anything after its initial HTML. Speed is CPython-class once the
+    # 30x TCG penalty is taken out, which is 60-150x off a JIT.
+    # Revisit when roadmap 6 gives the browser a CPU bound.
     NS_OPTS="HOST=${TARGET_TRIPLE} TARGET=framebuffer PREFIX=/usr
         CC=${TARGET_TRIPLE}-gcc AR=${TARGET_TRIPLE}-ar
         NETSURF_FB_FRONTEND=wld ${NS_FONTS}

@@ -764,6 +764,31 @@ NetSurf 3.11, HTML and CSS over real HTTP, **no JavaScript**.
   from script shows an empty page. Do not let the word "browser" imply
   the second, the same way RFC 0025 says not to let "Mesa" imply a
   gaming stack.
+- **THAT IS A MEASURED DECISION NOW** (RFC 0031 roadmap 2, instrument
+  at `tests/js-probe/`), and the reason is not the one the roadmap
+  gave. It said an interpreter with no JIT is slow; **the problem is
+  that the language Duktape implements is not the language the web is
+  written in.** `let`, arrow functions, template literals, `class` and
+  `for..of` are each a SyntaxError — and **a syntax error is a
+  WHOLE-SCRIPT failure**, so one arrow function anywhere in a bundle
+  means nothing in it runs. `Promise`, `fetch`, `XMLHttpRequest` and
+  `localStorage` are all `undefined`, so a page cannot load anything
+  after its initial HTML. Cost: **+1.34 MB (+52%)** on the binary, and
+  an interpreter parsing hostile script in a browser with no sandbox
+  and no CPU bound.
+- **TWO THINGS SILENTLY DO NOTHING before any of that can be
+  measured.** `NETSURF_USE_DUKTAPE=YES` is not enough —
+  `enable_javascript` defaults to FALSE in NetSurf's own options — and
+  the framebuffer frontend reads `Choices` off its RESOURCE path,
+  `~/.netsurf/Choices`, **not** `~/.config/netsurf/Choices`, which is
+  where it went first and where it did nothing at all.
+- **A TCG GUEST IS 30x SLOWER THAN THIS HOST, measured rather than
+  assumed.** The same 2M-iteration loop in CPython takes 4577 ms on
+  the guest and 151 ms on the build host. Any timing taken in that VM
+  needs dividing by something, and the honest way to find the divisor
+  is to run the same workload in an interpreter that exists on both
+  sides. Duktape's 9153 ms becomes ~305 ms of real hardware — within
+  2x of CPython, and 60-150x off a JIT.
 - **libnsfb binds `wl_shell`, which wlroots has never implemented.**
   Deprecated in 2016. Unpatched, the browser starts, binds a global
   that is not advertised, gets NULL and carries on: a running process
