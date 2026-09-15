@@ -81,12 +81,21 @@ EOF
 # test copy is doctored the way test-state-packages.sh doctors
 # novi-state's database path: the thing under test is the decision, not
 # how the paths are spelled.
+#
+# need_root goes with them, and that is not a cheat -- `pkg install`
+# requires root because it writes to a machine, and this copy writes
+# into /tmp. Deleting the CALL was the first attempt and it silently
+# did nothing (the calls are bare `need_root` lines inside functions,
+# and the pattern anchored at the start of a line); the message is what
+# is replaced, exactly as test-state-packages.sh does it. A test that
+# only runs for whoever happens to be root runs HERE, in a container
+# that is root, and not in CI -- which is precisely where it failed.
 sed -e "s#^PKG_CACHE=.*#PKG_CACHE=\"$T/cache\"#" \
     -e "s#^PKG_REPO=.*#PKG_REPO=\"$T/repo2\"#" \
     -e "s#^PKG_DB=.*#PKG_DB=\"$T/db\"#" \
     -e "s#^PKG_ROOT=.*#PKG_ROOT=\"$T/root\"#" \
     -e "s#^PKG_INDEX=.*#PKG_INDEX=\"\${PKG_INDEX:-$T/index}\"#" \
-    -e '/^need_root$/d' -e 's/^need_root ".*"$//' \
+    -e 's|.*This operation requires root.*|    :|' \
     packages/pkg > "$T/pkg"
 chmod 755 "$T/pkg"
 run_pkg() { PKG_INDEX="$T/index" "${SH[@]}" "$T/pkg" "$@" 2>&1; }
