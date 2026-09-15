@@ -324,10 +324,48 @@ written for this test. Nothing here has run on physical hardware.
    question: it is an interpreter with no JIT, so it is slow, and slow
    scripting on pages written for fast scripting may be worse than
    none. Measure before turning it on.
-3. **The OpenSSL/mbedTLS split is worth removing.** Two TLS
-   implementations in one process is a maintenance surface nobody
-   chose; building curl against OpenSSL would collapse it to one, at
-   the cost of changing what RFC 0020 decided.
+3. ~~**The OpenSSL/mbedTLS split is worth removing.**~~ **Measured,
+   and the answer is no — keep both.** This item asserted the
+   conclusion in its own first sentence; the measurement says the
+   opposite, which is the whole reason to take one.
+
+   **Installed on the target: mbedTLS is 972 KB (three libraries),
+   OpenSSL is 8.0 MB** (libcrypto 6.1 MB, libssl 1.0 MB, the legacy
+   provider 142 KB). 8.2x. And the dependency graph says who would pay
+   it — `git` → `curl` → `mbedtls` and nothing else, so **a machine
+   with git and no Python goes from 972 KB of TLS to 8.0 MB, +7 MB,
+   for no capability it did not have.** What the collapse saves is
+   under 1 MB, and only on a machine already carrying OpenSSL for
+   another reason: `netsurf` (which depends on both) or `python`.
+
+   The maintenance argument is real and small: two pinned upstreams to
+   bump instead of one, and two CVE watch-lists. Set against 7 MB on
+   the commonest developer machine, it does not carry — and the second
+   half of it cuts the other way, because **the smaller stack is the
+   one on the HTTPS fetch path.** 972 KB of audited code parsing
+   certificates from the internet is a better place to be than 8 MB
+   of it, which is RFC 0020's original reasoning still standing on its
+   own terms.
+
+   The asymmetry is worth naming, because it is what makes this a
+   decision rather than a preference: **OpenSSL can never leave** —
+   CPython's `ssl` accepts no other implementation (RFC 0027) — so the
+   only question ever available was whether mbedTLS goes. It earns its
+   972 KB.
+
+   **What WOULD change the answer is a trimmed OpenSSL**, and that is
+   a better item than this one was: the build is near-stock today
+   (`no-tests`, `no-docs`, `enable-ktls` and nothing else), so the
+   legacy provider, the deprecated API surface and every algorithm
+   ship. Trimming benefits **every** machine that has OpenSSL,
+   including the Python ones this collapse would not have helped at
+   all. It is not free — CPython uses some of the deprecated surface,
+   so it needs a rebuild and RFC 0020's HTTPS triple to verify — and
+   it is unmeasured here. Filed as RFC 0027 roadmap item 4 —
+   OpenSSL's own business, not the browser's — rather than claimed.
+
+   So `netsurf` goes on linking both, and the note in this RFC's
+   decisions stands as written: not a rule broken, and worth stating.
 4. **Nothing here has been tested against a hostile page.** A layout
    engine parsing arbitrary HTML off the network is among the larger
    attack surfaces this project has ever shipped, and it ships with

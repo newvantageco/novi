@@ -882,6 +882,28 @@ package — the first scripting language this system has ever had.
   (curl, git), wolfSSL (wpa_supplicant), OpenSSL (Python) — each
   because its consumer accepts only it. All three are packages; the
   base image has none.
+- **COLLAPSING mbedTLS INTO OpenSSL WAS MEASURED AND REFUSED** (RFC
+  0031 roadmap 3, RFC 0027 roadmap 2). Both items asserted it was
+  worth doing; the numbers say the opposite, which is the whole reason
+  to measure. Installed on the target: **mbedTLS 972 KB, OpenSSL
+  8.0 MB** — 8.2x. And the dependency graph says who pays: `git` →
+  `curl` → `mbedtls` and nothing else with TLS in it, so **a machine
+  with git and no Python would go from 972 KB to 8.0 MB, +7 MB, for
+  no capability it did not have.** The saving is under 1 MB and only
+  where OpenSSL is already present anyway (`netsurf`, `python`). The
+  maintenance argument is real and small, and its second half cuts the
+  other way: **the smaller stack is the one on the HTTPS fetch path.**
+  The choice was always one-sided — OpenSSL can never leave, because
+  CPython's `ssl` accepts nothing else — so the only question was
+  whether mbedTLS goes, and at 972 KB on that path it earns its place.
+  Re-opening this needs a new NUMBER, not a new opinion.
+- **What would change that answer is a TRIMMED OpenSSL**, which is a
+  better item than the collapse was because it helps every machine
+  that has OpenSSL rather than only the ones a collapse would touch.
+  The build is near-stock (`no-tests`, `no-docs`, `enable-ktls`), so
+  the legacy provider and the whole deprecated surface ship in that
+  8.0 MB. Unmeasured — RFC 0027 roadmap 4, and do not assume a number
+  for it.
 - **The build host needs `python3.11`, not just any python.**
   Cross-compiling CPython RUNS Python during `make` (freezing
   importlib, generating C, byte-compiling the stdlib), and

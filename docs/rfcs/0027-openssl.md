@@ -202,13 +202,52 @@ repository:
    machine made, which proves the code path and not the CA set. The
    first boot on a network should fetch a real https URL and check that
    the 143-certificate store is the reason it succeeded.
-2. **Rebuild curl against OpenSSL, or not.** There is now a duplicate:
-   two TLS libraries in the package set doing the same job for
-   different consumers. mbedTLS is 10x smaller and curl works today, so
-   this is a question about the package set's size rather than a bug —
-   but it should be answered on purpose, not left as sediment.
+2. ~~**Rebuild curl against OpenSSL, or not.**~~ **Answered on
+   purpose: NOT.** The item asked for a decision rather than a build,
+   and guessed the ratio almost right — it said 10x; measured, it is
+   **8.2x**.
+
+   **Installed on the target: mbedTLS 972 KB** (libmbedcrypto 597 KB,
+   libmbedtls 295 KB, libmbedx509 85 KB) **against OpenSSL 8.0 MB**
+   (libcrypto 6.1 MB, libssl 1.0 MB, the legacy provider 142 KB).
+
+   Who pays is settled by the dependency graph, not by taste. `git`
+   depends on `curl` depends on `mbedtls`, and on nothing else that
+   carries TLS — so **a machine with git and no Python would go from
+   972 KB of TLS to 8.0 MB, +7 MB, for no capability it did not
+   already have.** The saving is under 1 MB and lands only where
+   OpenSSL is already present for another reason: `netsurf` (which
+   depends on both) and `python`.
+
+   | machine | today | curl on OpenSSL | delta |
+   |---|---|---|---|
+   | `git` | 972 KB | 8.0 MB | **+7.0 MB** |
+   | `netsurf` | 8.97 MB | 8.0 MB | −972 KB |
+   | `python` | 8.0 MB | 8.0 MB | 0 |
+
+   The maintenance argument — one upstream to bump, one CVE watch-list
+   — is real and small, and its second half cuts the other way: **the
+   smaller stack is the one on the HTTPS fetch path.** 972 KB parsing
+   certificates off the internet is a better place to be than 8 MB of
+   it, which is RFC 0020's original reasoning intact.
+
+   And the choice was always one-sided: **OpenSSL can never leave**,
+   because CPython's `ssl` accepts nothing else. The only question
+   available was whether mbedTLS goes, and at 972 KB on the path that
+   matters most it earns its place. This is sediment no longer; it is
+   a decision, and re-opening it needs a new number rather than a new
+   opinion.
 3. **`pip`.** RFC 0026 refused it because it fetches over https and
    there was none. That objection is gone; the remaining ones (no
    compiler in the `python` package, so no source wheels; the
    `x86_64-linux-gnu` SOABI mislabel, so no binary wheels) are real and
    belong in their own RFC.
+4. **Trim the OpenSSL build.** The successor to item 2, and a better
+   item than it was, because it helps **every** machine that has
+   OpenSSL rather than only the ones a collapse would have touched.
+   The build is near-stock — `no-tests`, `no-docs`, `enable-ktls` and
+   nothing else — so the legacy provider, the deprecated API surface
+   and every algorithm ship in that 8.0 MB. Not free: CPython uses
+   some of the deprecated surface, so it needs a CPython rebuild and
+   RFC 0020's HTTPS verification triple, and `no-legacy` changes what
+   `ssl` can negotiate. **Unmeasured — do not assume a number.**
