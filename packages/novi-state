@@ -2137,7 +2137,12 @@ Keys:
   power.suspend                   <seconds> | off  (idle suspend; off by default)
   power.suspend.lock              on | off  (lock before an idle suspend)
   power.governor                  performance | powersave | schedutil | ...
+  power.lid                       suspend | poweroff | ignore  (lid switch)
+  power.button                    suspend | poweroff | ignore  (power button)
   storage.automount               on | off  (removable media -> /run/media)
+  agent.enabled                   on | off  (novi-agent may CHANGE things)
+  agent.allow                     none | pkg.install,state.set,...  (verbs)
+  agent.rate                      <calls per minute> | off
   state.apply_on_boot             on | off  (converge on every boot)
 
 Recovery:

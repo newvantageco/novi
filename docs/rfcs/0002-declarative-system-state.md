@@ -502,7 +502,51 @@ hatch.
    one awk pass and a `diff` is a directory walk and an `s6-rc -a
    list`. Neither can grow slow without something else changing first,
    and an apply is where the slow thing lives.
-3. **`novi-state diff` in CI**, and a `--json` projection for tooling.
+3. ~~**`novi-state diff` in CI**, and a `--json` projection for
+   tooling.~~ **Half of this was already built when it was written,
+   and the other half cannot be what it says.**
+
+   **The `--json` projection exists.** `show --json`, `diff --json`
+   and `health --json` were added for RFC 0029's agent interface,
+   which composes its whole document out of them — so the item asked
+   for something the code had. **Fourth roadmap item in this
+   repository found to be wrong about what is already built**, after
+   this RFC's own `packages.*`, RFC 0030's "a re-render there is not
+   one function call", and RFC 0033's wired-network GUI. Check the
+   code before believing an item, including one in your own RFC.
+
+   **`diff` itself cannot run in CI**, and that is a property of what
+   it is rather than a gap: it observes a RUNNING machine — s6-rc's
+   service list, `/run/novi`, `/proc` — and a runner has none of that.
+   Making it run there would mean faking the machine, and a test
+   against a fake machine tests the fake.
+
+   What a runner *can* do is `packages/tests/test-state-document.sh`:
+   drive the observer over the **shipped** `/etc/novi/system.conf` and
+   assert that no key comes back `unmanaged`. That is worth having
+   because the failure is silent by design — an unrecognised key
+   observes as `unmanaged` on purpose, for forward compatibility — so
+   a typo in the shipped document, or a key whose domain was renamed,
+   ships as a line that reads declarative, looks converged to anyone
+   skimming, and converges nothing. Same class as the
+   `power.governor = schedutil` line that got accidentally
+   uncommented and cost five boots.
+
+   It checks **three lists** against each other, the discipline
+   `common/keybindings.h` already follows: the DOCUMENT, the
+   DISPATCHER, and the HELP TEXT — which is the only place a person
+   learns what a key is called. **Its first run found `power.lid`,
+   `power.button` and `agent.enabled` declared in the shipped document
+   and missing from that reference**, along with `agent.allow` and
+   `agent.rate`. Five live keys nobody could look up.
+
+   It also asserts the `--json` modes parse, because `novi-agent
+   describe` splices them into its own document — a `--json` mode that
+   emits something unparseable breaks the agent interface rather than
+   just the command. `health --json` needs `s6-svstat`, which a
+   runner does not have, so what is checked there is that it fails
+   **cleanly**, with nothing on stdout, and that `novi-agent` still
+   substitutes `{}` for the empty answer.
 4. ~~**Concurrent-edit safety.**~~ **Done for the writers this engine
    owns, and honestly scoped for the one it does not.**
 

@@ -305,6 +305,46 @@ Three smaller things worth knowing before extending this:
   two generation steps from `04-s6.sh` on their own — seconds instead
   of rebuilding the whole skarnet stack.
 
+## Architecture: the shipped document, and the reference nobody could read
+
+RFC 0002 roadmap 3. `packages/tests/test-state-document.sh`.
+
+- **THE `--json` PROJECTION THAT ROADMAP ITEM ASKED FOR ALREADY
+  EXISTED.** `show --json`, `diff --json` and `health --json` were
+  built for RFC 0029's agent interface, which composes its document
+  out of them. **Fourth roadmap item in this repository found to be
+  wrong about what is already built**, after RFC 0002's own
+  `packages.*`, RFC 0030's "a re-render there is not one function
+  call", and RFC 0033's wired-network GUI. Check the code before
+  believing an item — including one in your own RFC.
+- **`diff` CANNOT RUN IN CI, and that is what it is rather than a
+  gap.** It observes a RUNNING machine — s6-rc's service list,
+  `/run/novi`, `/proc` — and a runner has none of that. Making it run
+  there would mean faking the machine, and a test against a fake
+  machine tests the fake.
+- **What a runner CAN do is the shipped document.** Drive the observer
+  over `rootfs/etc/novi/system.conf` and assert no key comes back
+  `unmanaged`. The failure is silent BY DESIGN — an unrecognised key
+  observes as `unmanaged` on purpose, for forward compatibility — so a
+  typo there ships as a line that reads declarative, looks converged
+  to anyone skimming, and converges nothing. Same class as the
+  `power.governor = schedutil` line that got accidentally uncommented.
+  `unknown` is NOT the same answer and must not be asserted on:
+  services observe through `s6-rc` and `storage.automount` through
+  `novi-mount`, neither of which exists on a build host.
+- **Three lists, and the third is the one people read.** The DOCUMENT,
+  the DISPATCHER, and `novi-state --help`'s `Keys:` block — the only
+  place a person learns what a key is CALLED. Its first run found
+  `power.lid`, `power.button`, `agent.enabled`, `agent.allow` and
+  `agent.rate` live in the shipped document and absent from that
+  reference. Five keys nobody could look up.
+- **A `--json` mode that emits something unparseable breaks the AGENT
+  INTERFACE, not just the command**, because `novi-agent describe`
+  splices these into its own document. `health --json` needs
+  `s6-svstat`, so what is checked on a runner is that it fails
+  CLEANLY — nothing on stdout — and that novi-agent still substitutes
+  `{}` for the empty answer.
+
 ## Architecture: declaring what is installed
 
 `packages.<name> = present | absent` (RFC 0002). The observer reads

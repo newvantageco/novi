@@ -147,6 +147,24 @@ fi
 # `wifi.join <ssid> <passphrase>` with "$args" would write that
 # passphrase into a 0600 log permanently, by the very refusal meant to
 # protect it.
+# test-state-document.sh is the last, and it is RFC 0002 roadmap 3's
+# half that CI can actually do. That item asked for "`novi-state diff`
+# in CI, and a --json projection for tooling", and the --json half
+# ALREADY EXISTED when it was written -- built for RFC 0029's agent
+# interface, which composes its document out of exactly those modes.
+# Fourth roadmap item in this repository found to be wrong about what
+# is already built. The real `diff` observes a RUNNING machine, which a
+# runner is not; what a runner CAN do is drive the observer over the
+# SHIPPED system.conf and check no key comes back `unmanaged`, because
+# an unrecognised key is deliberately not an error -- so a typo in that
+# document ships as a line that reads declarative and converges
+# nothing, the same class as the `power.governor` line that got
+# accidentally uncommented. It checks three lists against each other:
+# the document, the dispatcher, and the help text that is the only
+# place a person learns what a key is called. Its first run found
+# `power.lid`, `power.button` and `agent.enabled` live in the shipped
+# document and absent from that reference.
+#
 # test-state-lock.sh is the seventh, and it is the only one here that
 # has to PROVE ITS OWN BUG before it can prove the fix: it runs the
 # same two-writer race against a copy with the locking removed and
@@ -180,7 +198,8 @@ for t in packages/tests/test-lib-json.sh packages/tests/test-agent-verbs.sh \
          packages/tests/test-state-packages.sh \
          packages/tests/test-services.sh \
          packages/tests/test-agent-text.sh \
-         packages/tests/test-state-lock.sh; do
+         packages/tests/test-state-lock.sh \
+         packages/tests/test-state-document.sh; do
     echo ">>> ${t##*/}"
     if ! bash "$t"; then
         echo ">>> ${t} failed" >&2
