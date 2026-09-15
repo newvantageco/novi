@@ -2235,6 +2235,8 @@ int main(void) {
 	 * events or cancel the read -- cancel on EVERY path that does not
 	 * read, including a poll error, or the next prepare_read blocks
 	 * forever. */
+	int theme_fd = novi_theme_watch();
+
 	while (state.running) {
 		while (wl_display_prepare_read(state.display) != 0) {
 			if (wl_display_dispatch_pending(state.display) < 0) {
@@ -2250,16 +2252,28 @@ int main(void) {
 			break;
 		}
 
-		struct pollfd pfds[2];
-		nfds_t n = 1;
+		/* Three slots: the display, the running job (if there is
+		 * one), and the theme watch. The job slot is conditional
+		 * because state.job_fd is reused, so a stale fd from a
+		 * finished job must not be polled; the theme slot is
+		 * unconditional because a -1 fd is ignored by poll(2) and
+		 * making it conditional would mean tracking which index it
+		 * landed on. Hence a fixed index for the theme and a moving
+		 * one for the job -- the opposite of what reads naturally,
+		 * and the reason the job slot is last. */
+		struct pollfd pfds[3];
+		nfds_t n = 2;
 		pfds[0].fd = wl_display_get_fd(state.display);
 		pfds[0].events = POLLIN;
 		pfds[0].revents = 0;
+		pfds[1].fd = theme_fd;
+		pfds[1].events = POLLIN;
+		pfds[1].revents = 0;
 		if (state.job != JOB_NONE && state.job_fd >= 0) {
-			pfds[1].fd = state.job_fd;
-			pfds[1].events = POLLIN;
-			pfds[1].revents = 0;
-			n = 2;
+			pfds[2].fd = state.job_fd;
+			pfds[2].events = POLLIN;
+			pfds[2].revents = 0;
+			n = 3;
 		}
 
 		int pr = poll(pfds, n, -1);
@@ -2286,12 +2300,21 @@ int main(void) {
 		 * and on a job that printed nothing that is the only event
 		 * there will ever be. Waiting for POLLIN alone would leave the
 		 * job hanging and the window saying "Scanning..." forever. */
-		if (n == 2 && (pfds[1].revents & (POLLIN | POLLHUP | POLLERR))) {
+		if (n == 3 && (pfds[2].revents & (POLLIN | POLLHUP | POLLERR))) {
 			if (job_pump(&state)) {
 				surface_draw_frame(&state);
 			}
 		}
+
+		/* A theme switch (RFC 0030 roadmap 1). Settings is where a
+		 * person is standing when they change one, so a Settings
+		 * window still in the old palette is the most conspicuous
+		 * place for this to be missing. */
+		if ((pfds[1].revents & POLLIN) && novi_theme_watch_drain(theme_fd)) {
+			surface_draw_frame(&state);
+		}
 	}
+	novi_theme_watch_close(theme_fd);
 
 	if (state.job_fd >= 0) {
 		close(state.job_fd);

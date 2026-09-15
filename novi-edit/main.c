@@ -42,6 +42,7 @@
 
 #define _GNU_SOURCE
 #include <errno.h>
+#include <poll.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <stdarg.h>
@@ -1704,9 +1705,65 @@ int main(int argc, char **argv) {
 
 	wl_surface_commit(e.surface);
 
-	while (e.running && wl_display_dispatch(e.display) != -1) {
-		;
+	/* A poll loop, where this was `wl_display_dispatch()` in a while
+	 * (RFC 0030 roadmap 1). The editor is the longest-lived window on
+	 * this desktop -- it is what somebody has open for an hour -- so
+	 * it is the one most likely to still be showing yesterday's
+	 * palette, and dispatch() has nowhere to put a second descriptor.
+	 *
+	 * prepare_read / read_events / cancel_read is libwayland's own
+	 * protocol and the only correct way to poll() the display fd:
+	 * dispatch() does its own internal read and racing it loses
+	 * events. cancel_read() on EVERY path that does not read, poll
+	 * errors included, or the next prepare_read() blocks forever --
+	 * the trap RFC 0017 records and three other clients here already
+	 * carry the comment for. */
+	int theme_fd = novi_theme_watch();
+
+	while (e.running) {
+		while (wl_display_prepare_read(e.display) != 0) {
+			if (wl_display_dispatch_pending(e.display) < 0) {
+				e.running = false;
+				break;
+			}
+		}
+		if (!e.running) {
+			wl_display_cancel_read(e.display);
+			break;
+		}
+		if (wl_display_flush(e.display) < 0 && errno != EAGAIN) {
+			wl_display_cancel_read(e.display);
+			break;
+		}
+
+		struct pollfd fds[2] = {
+			{.fd = wl_display_get_fd(e.display), .events = POLLIN},
+			{.fd = theme_fd, .events = POLLIN},
+		};
+		if (poll(fds, 2, -1) < 0) {
+			wl_display_cancel_read(e.display);
+			if (errno == EINTR) {
+				continue;
+			}
+			break;
+		}
+
+		if (fds[0].revents & POLLIN) {
+			if (wl_display_read_events(e.display) < 0) {
+				break;
+			}
+		} else {
+			wl_display_cancel_read(e.display);
+		}
+		if (wl_display_dispatch_pending(e.display) < 0) {
+			break;
+		}
+
+		if ((fds[1].revents & POLLIN) && novi_theme_watch_drain(theme_fd)) {
+			surface_draw_frame(&e);
+		}
 	}
+	novi_theme_watch_close(theme_fd);
 
 	novi_clipboard_destroy(e.clipboard);
 	history_free(&e);

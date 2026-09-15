@@ -160,6 +160,34 @@ bool novi_theme_reload(void);
  * one you are not running is to read it. */
 bool novi_theme_read(const char *name, struct novi_palette *out);
 
+/* Watch for a theme switch, for a client with an event loop.
+ *
+ *     int tfd = novi_theme_watch();
+ *     ... poll() it alongside the Wayland fd ...
+ *     if (tfd >= 0 && (pfd.revents & POLLIN) && novi_theme_watch_drain(tfd))
+ *             redraw();
+ *
+ * `novi_theme_watch()` returns an inotify fd to poll, or -1 if a watch
+ * could not be set up -- which is not an error and needs no handling
+ * beyond polling one fewer descriptor: the client is still correct, it
+ * just will not follow a switch until it restarts.
+ *
+ * `novi_theme_watch_drain()` MUST be called on every wake of that fd,
+ * whatever woke it. The watch is on a directory and most of what
+ * happens in /run/novi is some other file; an inotify fd that is not
+ * read stays readable, so a loop that polls again without reading
+ * spins at 100% CPU -- silent, and visible only as a hot laptop. It
+ * returns true only when the PALETTE actually changed, so a caller
+ * does not repaint on every volume update.
+ *
+ * This is a function rather than four copies of the same twenty lines
+ * because the three ways to get it wrong -- watching the file instead
+ * of the directory, not draining, treating -1 as fatal -- are each
+ * invisible in review and none of them is invisible in use. */
+int novi_theme_watch(void);
+bool novi_theme_watch_drain(int fd);
+void novi_theme_watch_close(int fd);
+
 /* The same read, from a directory the caller names.
  *
  * novi_theme_read() is this with NOVI_THEME_DIR, which is an absolute
@@ -185,6 +213,10 @@ bool novi_theme_read_first(const char *const *dirs, size_t ndirs,
  * verdict are files (RFC 0009, RFC 0014): a client that starts later
  * has to be able to find out. */
 #define NOVI_THEME_ACTIVE "/run/novi/theme"
+/* The DIRECTORY that name lives in, which is what a watch has to be
+ * set on. Spelled out rather than derived, because deriving it means
+ * a dirname() at runtime on a constant. */
+#define NOVI_THEME_ACTIVE_DIR "/run/novi"
 /* The palette compiled into common/theme.c, by name. It is here so
  * that the ONE place that knows "the built-in colours are axiom's" is
  * this header: a picker showing which theme is live has to be able to

@@ -32,7 +32,6 @@
 #include <sys/mman.h>
 #include <time.h>
 #include <poll.h>
-#include <sys/inotify.h>
 #include <unistd.h>
 
 #include <wayland-client.h>
@@ -322,17 +321,12 @@ int main(void) {
 	 * never again. IN_MOVED_TO on /run/novi is the event that rename
 	 * actually produces.
 	 */
-	int inotify_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
-	if (inotify_fd >= 0 &&
-			inotify_add_watch(inotify_fd, "/run/novi",
-				IN_MOVED_TO | IN_CLOSE_WRITE) < 0) {
-		/* /run/novi may not exist yet on a machine where nothing has
-		 * published anything. Not fatal, and not worth retrying: the
-		 * background is correct either way, it just will not follow a
-		 * switch until it restarts. */
-		close(inotify_fd);
-		inotify_fd = -1;
-	}
+	/* novi_theme_watch() is this client's own code, moved into
+	 * common/theme.c when three more clients needed it (RFC 0030
+	 * roadmap 1). The comment above is why it exists; the reasons the
+	 * three details in it are load-bearing are now beside the
+	 * function, where the other callers can read them. */
+	int inotify_fd = novi_theme_watch();
 
 	while (b.running) {
 		while (wl_display_prepare_read(b.display) != 0) {
@@ -372,27 +366,13 @@ int main(void) {
 			break;
 		}
 
-		if (nfds == 2 && (fds[1].revents & POLLIN)) {
-			/* Drain it whatever it says. The watch covers a whole
-			 * directory, so most events are about some other file in
-			 * /run/novi -- and an unread inotify fd stays readable,
-			 * which would spin this loop at 100% CPU. Silent, and
-			 * visible only as a hot laptop: the same shape as the
-			 * POLLPRI trap novi-files hit on /proc/mounts. */
-			char buf[4096]
-				__attribute__((aligned(__alignof__(struct inotify_event))));
-			while (read(inotify_fd, buf, sizeof buf) > 0) {
-				;
-			}
-			if (novi_theme_reload()) {
-				draw(&b);
-				wl_surface_commit(b.surface);
-			}
+		if (nfds == 2 && (fds[1].revents & POLLIN) &&
+				novi_theme_watch_drain(inotify_fd)) {
+			draw(&b);
+			wl_surface_commit(b.surface);
 		}
 	}
-	if (inotify_fd >= 0) {
-		close(inotify_fd);
-	}
+	novi_theme_watch_close(inotify_fd);
 	wl_display_disconnect(b.display);
 	return 0;
 }

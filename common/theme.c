@@ -26,7 +26,9 @@
 
 #include <ctype.h>
 #include <stddef.h>
+#include <sys/inotify.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <stdio.h>
 #include <stdbool.h>
 #include <string.h>
@@ -359,4 +361,74 @@ bool novi_theme_reload(void)
 	last_mtime = st.st_mtim;
 	last_size = st.st_size;
 	return novi_theme_load() != NULL;
+}
+
+/* ── Watching for a switch ────────────────────────────────────────────
+ *
+ * RFC 0030 roadmap 1. novi-bg had this inline and it was the only
+ * client with it, which left every other long-lived window on the
+ * desktop showing the old palette until it was closed and reopened --
+ * a theme switch that reaches the wallpaper and the panel and nothing
+ * in between reads as a half-applied theme, which is the one outcome
+ * the loader itself is written to avoid.
+ *
+ * It is here rather than copied into four event loops because three
+ * details of it are easy to get wrong and invisible when you do:
+ *
+ *   * THE WATCH IS ON THE DIRECTORY, not the file. novi-state
+ *     publishes by writing `theme.new` and renaming it over `theme`,
+ *     so a reader never sees half a name -- and a watch on the file
+ *     follows the old inode into oblivion. It would fire once, for
+ *     the deletion, and never again. IN_MOVED_TO is the event a
+ *     rename actually produces.
+ *   * THE FD MUST BE DRAINED ON EVERY WAKE, whatever it says. The
+ *     watch covers a whole directory and most events in /run/novi are
+ *     about some other file; an unread inotify fd stays readable, so
+ *     a loop that polls again without reading spins at 100% CPU.
+ *     Silent, and visible only as a hot laptop -- the same shape as
+ *     the POLLPRI trap novi-files hit on /proc/mounts.
+ *   * A MISSING /run/novi IS NOT AN ERROR. On a machine where nothing
+ *     has published anything yet the watch cannot be set up, and the
+ *     client is still correct: it just will not follow a switch until
+ *     it restarts. Returning -1 and letting the caller poll one fewer
+ *     descriptor is the whole of the handling.
+ */
+
+int novi_theme_watch(void)
+{
+	int fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+	if (fd < 0) {
+		return -1;
+	}
+	if (inotify_add_watch(fd, NOVI_THEME_ACTIVE_DIR,
+			      IN_MOVED_TO | IN_CLOSE_WRITE) < 0) {
+		close(fd);
+		return -1;
+	}
+	return fd;
+}
+
+bool novi_theme_watch_drain(int fd)
+{
+	char buf[4096] __attribute__((aligned(__alignof__(struct inotify_event))));
+
+	if (fd < 0) {
+		return false;
+	}
+	while (read(fd, buf, sizeof buf) > 0) {
+		;
+	}
+	/* The drain happens whatever the events were; whether the PALETTE
+	 * changed is a separate question, and novi_theme_reload() answers
+	 * it with one stat(2). Returning its answer rather than "something
+	 * happened in /run/novi" is what keeps a caller from repainting on
+	 * every volume change. */
+	return novi_theme_reload();
+}
+
+void novi_theme_watch_close(int fd)
+{
+	if (fd >= 0) {
+		close(fd);
+	}
 }

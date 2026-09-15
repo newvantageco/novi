@@ -1349,6 +1349,19 @@ palette is a runtime table loaded from a plain-text file.
   caught that a longer name would be truncated in the field
   `apply_theme()` acts on and would apply A DIFFERENT THEME than the
   row selected.
+- **EVERY LONG-LIVED WINDOW follows a switch now**, and the watch is
+  ONE function rather than five copies. `novi_theme_watch()` /
+  `_drain()` / `_close()` in `common/theme.c` is novi-bg's inline
+  inotify, moved there when novi-files, novi-edit, novi-settings and
+  novi-notifyd needed it (RFC 0030 roadmap 1) — and novi-bg calls it,
+  which is what makes it the same code rather than a fifth copy. That
+  roadmap item said "a re-render there is not one function call"; it
+  is (`surface_draw_frame`, or `relayout` in novi-notifyd), and the
+  claim went unchecked for as long as the item sat there.
+  **novi-edit had no poll loop at all** — `wl_display_dispatch()` in a
+  `while`, which has nowhere to put a second descriptor — so it got
+  the prepare_read/read_events/cancel_read loop the others carry.
+  A -1 watch fd needs no branch anywhere: `poll(2)` ignores it.
 - **The panel and the background follow a switch LIVE, by different
   mechanisms.** novi-panel already redraws at 1 Hz, so
   `novi_theme_reload()` is one `stat(2)` on a tick it had anyway; it

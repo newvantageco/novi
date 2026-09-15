@@ -273,11 +273,48 @@ argument for shipping `paper`, made concrete on the first run.
 
 ## Roadmap
 
-1. **Live reload in the clients that have an event loop.** novi-files,
-   novi-edit and novi-settings all poll already; the same inotify fd
-   would work in each. They were left out because a re-render there is
-   not one function call, and the panel plus the background is what a
-   person watches while switching.
+1. ~~**Live reload in the clients that have an event loop.**~~
+   **Done, and the reason they were left out was wrong.**
+
+   This item said "a re-render there is not one function call". It is:
+   `surface_draw_frame()` in novi-files, novi-edit and novi-settings,
+   `relayout()` in novi-notifyd. The item also said the panel and the
+   background are "what a person watches while switching", which is
+   true and is exactly the problem — a switch that reached the
+   wallpaper and the bar and **nothing in between** reads as a
+   half-applied theme, which is the one outcome the loader itself is
+   written to avoid (decision 2). A Files window in the old palette
+   beside a panel in the new one is not "not yet updated", it is a
+   desktop that looks broken.
+
+   **novi-bg's inotify moved into `common/theme.c`** as
+   `novi_theme_watch()` / `novi_theme_watch_drain()` /
+   `novi_theme_watch_close()`, and novi-bg now calls it — which is
+   what makes it the same code rather than a fifth copy. Three details
+   are easy to get wrong and invisible when you do, which is the
+   argument for one function rather than four:
+
+   - the watch is on the **directory**, because novi-state publishes
+     by rename and a watch on the file follows the old inode into
+     oblivion;
+   - the fd must be **drained on every wake**, whatever woke it, or an
+     unread inotify fd stays readable and the loop spins at 100% CPU —
+     silent, visible only as a hot laptop;
+   - **-1 is not an error**. On a machine where nothing has published
+     anything `/run/novi` may not exist, and a client that cannot
+     watch is still correct: it just will not follow a switch until it
+     restarts. `poll(2)` ignores a -1 fd, so the absent watch needs no
+     branch at all.
+
+   `novi-edit` had no poll loop — it was `wl_display_dispatch()` in a
+   `while`, which has nowhere to put a second descriptor — so it got
+   the prepare_read / read_events / cancel_read loop the other three
+   already carry. It is the longest-lived window on this desktop, so
+   it is also the one most likely to be showing yesterday's palette.
+
+   **Still picked up only at startup:** novi-launcher and
+   novi-lockscreen, both of which are spawned per keypress and live
+   for seconds, and the terminal, which is foot and not ours.
 2. ~~Light-mode auditing that is not a screenshot~~ — **done**:
    `common/theme-test.c`, run by `scripts/lint.sh`. 64 checks across
    the four palettes, using the **real** loader rather than a second

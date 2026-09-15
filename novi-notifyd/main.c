@@ -905,6 +905,14 @@ int main(void) {
 	wl_display_roundtrip(n.display);
 	relayout(&n);
 
+	/* A theme switch (RFC 0030 roadmap 1). This daemon runs for the
+	 * life of the session and its surface is on top of everything, so
+	 * a toast in the old palette after a switch is the most visible
+	 * possible stale colour -- and the least excusable, since it
+	 * appears AFTER the change rather than having been drawn before
+	 * it. */
+	int theme_fd = novi_theme_watch();
+
 	while (n.running) {
 		while (wl_display_prepare_read(n.display) != 0) {
 			if (wl_display_dispatch_pending(n.display) < 0) {
@@ -919,12 +927,15 @@ int main(void) {
 		arm_timer(&n);
 		wl_display_flush(n.display);
 
-		struct pollfd fds[3] = {
+		struct pollfd fds[4] = {
 			{.fd = wl_display_get_fd(n.display), .events = POLLIN},
 			{.fd = n.sock_fd, .events = POLLIN},
 			{.fd = n.timer_fd, .events = POLLIN},
+			/* -1 when no watch could be set up, which poll(2)
+			 * ignores -- so there is no count to keep in step. */
+			{.fd = theme_fd, .events = POLLIN},
 		};
-		if (poll(fds, 3, -1) < 0) {
+		if (poll(fds, 4, -1) < 0) {
 			/* cancel_read on EVERY path that does not read, poll
 			 * errors included, or the next prepare_read blocks
 			 * forever. RFC 0017 learned this one the hard way. */
@@ -953,7 +964,17 @@ int main(void) {
 				expire_toasts(&n);
 			}
 		}
+		if ((fds[3].revents & POLLIN) && novi_theme_watch_drain(theme_fd)) {
+			/* relayout(), not a bare redraw: the card heights come
+			 * out of the same pass that draws them, and a palette
+			 * change cannot alter them -- but going through the one
+			 * entry point the rest of this file uses means a future
+			 * token that DOES affect layout is not a bug waiting in
+			 * this branch alone. */
+			relayout(&n);
+		}
 	}
+	novi_theme_watch_close(theme_fd);
 
 	unlink(SOCK_PATH);
 	close(n.sock_fd);
