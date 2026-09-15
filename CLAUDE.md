@@ -855,14 +855,24 @@ NetSurf 3.11, HTML and CSS over real HTTP, **no JavaScript**.
   guest, twice on two fresh boots, with the serial console
   unresponsive. Not a curiosity: one page, off the network, reaches a
   state a local shell cannot recover from.
-- **THE HARNESS COULD NOT ENFORCE ITS OWN DEADLINE, and that is the
-  measurement.** The supervising script's 40-second kill never ran —
-  the shell meant to run it was starved by the thing it was meant to
-  kill. So per-page peak RSS is NOT in the README, because two
-  attempts to get it ended in that state. **A harness that shares a
-  machine with an unbounded allocator gets starved by it**, which is
-  exactly the absence a per-process memory bound would fill. An
-  honest gap beats a table nobody could measure.
+- **"THE SHELL WAS STARVED BY THE CPU LOAD" WAS AN INFERENCE AND IT
+  WAS WRONG.** The supervising script's 40-second kill never ran, and
+  the obvious reading — CPU starvation — got written down before it
+  was measured. Measured afterwards on the same 4-vCPU guest with an
+  unrelated shell probe: **three** runaway browsers cost it nothing at
+  all (17 centiseconds, the idle figure) and it took **eight** to slow
+  it to 40–43. The takedown was MEMORY: several half-gigabyte pages
+  plus one that grows without limit, on a guest with no swap, under
+  which everything stalls including the kill. The distinction decides
+  the fix — a CPU bound would not have helped. Third time in this file
+  that a mechanism was stated confidently before being measured (the
+  empty `TERM`, the resume that never completed, this).
+- **The per-page table was impossible and is not any more, and the FIX
+  is what made it possible.** Two attempts to measure peak memory one
+  page at a time ended in the state above; under RFC 0031 roadmap 5's
+  bound the harness is no longer racing what it measures. **A gap
+  honestly recorded is a gap somebody can close** — and the thing that
+  closed it was the thing the gap argued for.
 - **The corpus is served from the GUEST's own loopback** (busybox
   `httpd` on 127.0.0.1), so a failure is the browser's and not a
   network's — and the control is a benign page rendering in 0.1s with
@@ -870,6 +880,34 @@ NetSurf 3.11, HTML and CSS over real HTTP, **no JavaScript**.
   process sitting inert and every row in the table would be
   worthless. Same argument as every other probe in this file: a check
   that cannot distinguish working from absent is not a check.
+- **THE BROWSER IS BOUNDED NOW** (RFC 0031 roadmap 5): `pkg install
+  netsurf` puts a wrapper on PATH and the binary in `/usr/libexec` —
+  1 GiB of address space through `s6-softlimit -a`, and nice 5. A
+  bound somebody bypasses by typing the other name is not a bound,
+  which is why the real binary moves rather than the wrapper taking a
+  new name. Every step is an exec, so there is one pid and `ps` shows
+  `/usr/libexec/netsurf-fb`.
+- **RLIMIT_AS BOUNDS ADDRESS SPACE, SO THE NUMBER TO MEASURE IS
+  `VmPeak`, NOT `VmHWM`.** On a process with mmap'd fonts and shm
+  buffers those differ, and a bound picked off the resident figure
+  would fire on pages that were never using that much memory.
+- **NetSurf hitting the ceiling neither exits nor says anything** —
+  measured, not assumed, and the RFC's own filing of the item had
+  claimed it "has malloc failure paths". So what the bound converts an
+  unrecoverable machine into is a HUNG WINDOW. Say that rather than
+  "handles allocation failure".
+- **`RLIMIT_CPU` IS NOT THE CPU HALF.** `s6-softlimit -t` exists and is
+  the obvious reach; it is cumulative over the process's whole life,
+  so it cannot say "this layout is taking too long" without killing a
+  long browsing session that has done nothing wrong. `nice` is what
+  ships instead, and a priority is not a bound: it keeps the rest of
+  the machine usable and stops nothing.
+- **A wrapper's `off` switch needs its OWN branch, and one of them
+  could not fire.** `${VAR:-default}` substitutes for an EMPTY value as
+  well as an unset one, so the `''` alternative in the validation
+  `case` was unreachable — a branch reading as load-bearing that
+  nothing could reach, exactly like the dead `::`-guard in RFC 0033's
+  v6 validator. Provoking each branch on the host is what found it.
 - **A green corpus is not a safety property, and the scripts say so
   on every run.** It finds crashes and hangs on shapes somebody
   thought of. It says nothing about memory disclosure, nothing about
@@ -3527,6 +3565,33 @@ Things not to undo:
 - **The mirror fetch hooks into `locate_pkg()`, not `cmd_install`** — so
   dependency resolution and `pkg update` reach the network through the same
   verified path instead of growing their own copies.
+- **AND FOR A LONG TIME THAT HASH CHECK WAS ONLY ON THE MIRROR PATH.**
+  `fetch_from_mirror` hashed everything it handled, including a cached
+  copy, under a comment saying so in as many words. It was true of that
+  function and **false of the program**: `locate_pkg` searches
+  `/var/cache/pkg/archives` and the on-media repository FIRST and
+  returned a match from either without hashing it — so the verifying
+  path was the one taken only when nothing local matched, and a
+  modified archive in the cache was unpacked as root with a correctly
+  signed index sitting beside it naming a different hash. A comment
+  asserting the property is not the property, and this is the one path
+  where that is trust rather than tidiness. `archive_matches_index()`
+  is the single implementation now; `packages/tests/test-pkg-cache-hash.sh`
+  fails 7 of its 13 checks against the old code, one of them by
+  installing a file whose contents are `echo pwned`.
+- **A cached copy that fails is DELETED; one in a repo directory is
+  SKIPPED.** The cache is derived data this tool owns, so refetching is
+  right. A repo directory is somebody's media — possibly read-only, and
+  never ours to edit. Either way the archive is not installed.
+- **An archive the index says nothing about is not blocked.** There is
+  no published hash to check it against, and refusing would make an
+  unindexed local repository unusable rather than safer. Whether there
+  is a signed index at all is `pkg sync`'s question, not this one's.
+- **It was found by accident, which is the uncomfortable part**:
+  rebuilding a package at the SAME version and watching the old bytes
+  install from the cache on a machine whose index had just been
+  re-synced. Nothing about the symptom looked like security; it looked
+  like a stale build.
 - **`/etc/novi/pkg.conf` is deliberately not `system.conf`.** A mirror is a
   bootstrap parameter; `novi-state` cannot fetch a package from a setting it
   is in the middle of applying.

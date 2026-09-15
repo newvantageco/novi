@@ -390,19 +390,31 @@ written for this test. Nothing here has run on physical hardware.
    **AND RUNNING THOSE FIVE FOR LONGER TOOK THE WHOLE MACHINE DOWN.**
    Twice, on two fresh boots: QEMU pinned at 110% CPU with 4.5–4.9 GB
    resident against a **4096 MB** guest, the serial console
-   unresponsive, and — the part that matters — **the supervising
-   script unable to enforce its own 40-second deadline**, because the
-   shell meant to kill the browser was starved by it. The OOM killer
-   did not restore the machine within several minutes. That is not
-   "slow": one page, fetched over the network, puts this system into a
-   state a local shell cannot recover from.
+   unresponsive, and the supervising script unable to enforce its own
+   40-second deadline. The OOM killer did not restore the machine
+   within several minutes.
 
-   **Per-page attribution of the blowup is NOT established, and the
-   gap is the finding.** Two attempts to measure peak RSS one page at
-   a time ended in exactly the state above, which is why there is no
-   table. A harness that shares a machine with an unbounded allocator
-   gets starved by it — and a per-process memory bound is precisely
-   the thing whose absence this item exists to record.
+   **THE FIRST WRITE-UP SAID THE SHELL WAS STARVED BY THE CPU LOAD,
+   AND THAT WAS AN INFERENCE RATHER THAN A MEASUREMENT.** It is wrong.
+   Measured afterwards on the same 4-vCPU guest with an unrelated
+   shell probe: three runaway browsers cost it **nothing** (17
+   centiseconds, the idle figure), and it took **eight** to slow it to
+   40–43. What happened was memory — several half-gigabyte pages plus
+   one that grows without limit, on a guest with no swap, under which
+   everything stalls including the kill. The distinction decides the
+   fix: a CPU bound would not have prevented this and the
+   address-space bound does. Stated honestly, **one page costs a
+   pegged core indefinitely and up to half a gigabyte; one page here
+   reaches four gigabytes if left about half an hour; five together
+   did it in minutes.**
+
+   **Per-page attribution was NOT established when this item was
+   written, and the gap was the finding**: two attempts ended in the
+   state above, because a harness sharing a machine with an unbounded
+   allocator gets starved by it. **Roadmap 5 closed it** — under the
+   bound the harness is no longer racing what it measures, so the
+   table above is the one the missing bound prevented, taken by the
+   bound that replaced it.
 
    **Surviving a corpus is not a safety property**, and the scripts
    say so on every run. This finds crashes and hangs on shapes
@@ -418,14 +430,63 @@ written for this test. Nothing here has run on physical hardware.
    renders in **0.1s** with the window drawn and the links laid out,
    screendumped. Without it, "survived" could have meant a process
    sitting inert and every row would be worthless.
-5. **A resource bound on the browser**, which is what item 4 turned
-   from a precaution into a measured need. The cheapest honest version
-   is not a sandbox: it is `setrlimit(RLIMIT_AS)` on the process, so
-   an unbounded allocation fails inside NetSurf — which has malloc
-   failure paths — instead of taking the machine's memory and the
-   shell that would have killed it. A CPU bound is the harder half,
-   because a layout that is merely slow and one that will never finish
-   look the same from outside; the corpus has both (`deep-tables`
-   settled at 73%, `long-line` never did), so there is something to
-   test against. Neither is a substitute for process isolation, and
-   saying so is item 4's job.
+5. ~~**A resource bound on the browser.**~~ **Done.** `pkg install
+   netsurf` puts a wrapper on PATH and the binary in `/usr/libexec`:
+   **1 GiB of address space** (`s6-softlimit -a`, which is base
+   content because s6 is how this system boots, so no new dependency)
+   and **nice 5**. Not a shell alias and not a launcher-only argument
+   — a bound somebody bypasses by typing the other name is not a
+   bound. Every step is an exec, so there is one pid.
+
+   **Both numbers are measured rather than chosen.** The ceiling sits
+   above every page anyone here has rendered (benign 21 MB, heaviest
+   settling corpus page 36 MB, worst plateau 517 MB) and is not
+   decorative: `unclosed-tags.html` grows without limit and was held
+   at exactly 1048576 kB when it got there. The nice comes from the
+   correction in item 4 — eight runaways took an unrelated shell probe
+   from 17 to 40–43 centiseconds, nice 5 brought it back to 19–23,
+   nice 15 to 16, and on an idle machine it costs nothing. 15 was
+   rejected as the default: it demotes the browser against every
+   background job on the machine, which is a worse trade for a program
+   somebody is looking at.
+
+   **What the bound buys is exactly one thing and it is worth not
+   overstating.** NetSurf neither exits nor prints anything when it
+   hits the ceiling — measured, not assumed, and it means this RFC's
+   own filing of the item ("NetSurf has malloc failure paths") was
+   more confident than the behaviour deserves. What an unrecoverable
+   machine becomes is a **hung window**.
+
+   **`RLIMIT_CPU` is not the CPU half and was rejected.** It is
+   cumulative over the process's whole life, so it cannot express
+   "this layout is taking too long" without also killing a long
+   browsing session that has done nothing wrong. A priority is not a
+   bound either — it keeps the rest of the machine usable and stops
+   nothing. So the CPU half stands open, and item 6 is what is left of
+   it.
+
+   `NOVI_BROWSER_AS_LIMIT` and `NOVI_BROWSER_NICE` override either, in
+   bytes and in increments, or `off`. A machine with 512 MB of RAM
+   wants a smaller ceiling than a workstation does, and somebody
+   debugging a page that hit one wants to raise it for a single run.
+   Neither is a `system.conf` key: nothing converges them, their only
+   consumer is an optional package, and an environment variable is
+   what the person in front of the failure actually reaches for —
+   `keys.conf`'s argument about what a document is for, from the other
+   end.
+6. **The CPU half, which the bound does not touch.** Three of the five
+   runaways in the corpus peg a core on 29–44 MB, so no memory ceiling
+   will ever reach them, and the honest version of item 5 says a
+   cumulative CPU limit cannot either. What would: a watchdog that
+   notices a layout has made no progress and offers to stop it, which
+   needs a notion of progress NetSurf does not currently export, and
+   is the point at which "run the page in its own process and kill
+   that" stops being a bigger change than the alternatives. The corpus
+   has both cases to test against — `deep-tables` settles at 73%,
+   `long-line` never does — and that is the whole difficulty in one
+   sentence.
+7. **Process isolation, which none of the above is.** Said in item 4
+   and repeated here because it is the item that never gets written:
+   a bound and a priority change what a hostile page can do to the
+   machine, and nothing at all about what it can do inside the process
+   that parsed it.
