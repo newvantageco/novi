@@ -389,8 +389,57 @@ checks, including a deliberate `", "evil": "yes` injection attempt.
    a key `state.set` already reaches. The next candidates should be
    held to the same test — does this verb add a capability, or only a
    second path to one that exists?
-3. **A `describe --text` for humans.** JSON is the default here on
-   purpose, and a person reading it in a terminal deserves better.
+3. ~~**A `describe --text` for humans.**~~ **Done.**
+   `novi-agent describe --text` (or `-t`) prints the same document as
+   a table. JSON stays the default: this interface is for an
+   automated actor and a table is the wrong thing to hand one.
+
+   **One gatherer, two printers.** Each `describe_*` function reads
+   its sources once and branches on `$FMT` at the `printf`, so the
+   drift that matters — two paths that independently gather and
+   disagree about what the machine IS — cannot happen, because there
+   is one path. What remains is a *display* omission: a field added to
+   the JSON branch and forgotten in the text one, which is invisible
+   in a diff and looks like nothing at all when you run it.
+   `packages/tests/test-agent-text.sh` catches it mechanically and
+   with no list of its own — **every string value in the JSON must
+   appear in the table**. Strings and not numbers, because
+   reformatting a number is the work this mode exists to do
+   (`1998848 kB` is not a thing to read and `15.7 GiB` is), so
+   demanding the raw digits appear would forbid the feature.
+
+   **`state`, `drift` and `health` are not re-rendered.** novi-state
+   already has a human form of each, so the table runs `novi-state
+   diff` and `novi-state health` and indents them. That is one
+   renderer where reimplementing them would be two — the same
+   argument that made `describe` compose `--json` in the first place.
+
+   Three things the table decides on its own, none of which a
+   transliteration would get right:
+
+   - **A timeout that is off prints the word `off`**, never the `0`
+     the file spells it with — the same wrong answer the JSON branch
+     avoids with `null`, and for the same reason.
+   - **An absent socket is a sentence naming the fix**
+     (`none -- declare services.novi-agentd = on`) where the JSON is
+     `null`. "novi-agentd is not running" and "it is, and here is
+     where" are different problems, and the fix is the part a person
+     reading a table wants.
+   - **A permitted verb list under the word `disabled` reads as a
+     contradiction**, so the row says `(inert: agent.enabled is off)`.
+     The two-key rule (decision 3) is right and a program should
+     combine the fields itself; a person should be told which of the
+     two keys is the one in the way.
+
+   An unknown option is **refused**, not ignored: `describe --txt`
+   quietly producing JSON is a script that looks like it works.
+
+   The test's own first draft had a probe that could not fail —
+   `*"sleep after"*"off"*` was satisfied by the word "off" further
+   down the table, in the agent section's own message. It reads one
+   row out of the output now. That is the fourth time in this
+   repository that provoking an assertion found the assertion rather
+   than the code.
 4. ~~Rate limiting, or a reason not to~~ — **done, and the framing
    was the important half.** `agent.rate` caps how many verbs may
    **succeed** in a rolling minute; unset, `0`, `off` and `none` all

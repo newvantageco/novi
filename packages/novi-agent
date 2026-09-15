@@ -5,6 +5,7 @@
 # RFC 0029. Two commands and a policy:
 #
 #   novi-agent describe        what this machine IS, as one JSON document
+#   novi-agent describe --text the same document as a table, for a person
 #   novi-agent do <verb> ...   change it, within a list somebody declared
 #
 # WHY THIS EXISTS. Every operating system can be driven by a program --
@@ -344,16 +345,120 @@ os_release_field() {
     sed -n "s/^$1=//p" /etc/os-release 2>/dev/null | head -1 | tr -d '"'
 }
 
+# ── the text rendering ───────────────────────────────────────────────
+#
+# `describe --text` (RFC 0029 roadmap 3). JSON is the default and stays
+# the default: this interface exists for an automated actor, and a
+# table is the wrong thing to hand one. But a person reading a machine
+# over a serial console is the OTHER audience this command has always
+# had, and `novi-agent describe | head -c 400` is not a way to read
+# anything.
+#
+# ONE GATHERER, TWO PRINTERS, and the distinction is what keeps this
+# from being the drift every other part of this repository is written
+# to avoid. Each describe_* function reads its sources ONCE and then
+# branches on $FMT at the printf. The failure that matters -- two
+# independent paths that disagree about what the machine is -- cannot
+# happen, because there is one path. What remains is a display
+# omission: a field added to the JSON branch and forgotten in the text
+# one. packages/tests/test-agent-text.sh catches that mechanically, by
+# running both forms against one fixture and asserting every STRING
+# value in the document appears in the table.
+#
+# Strings, not numbers, and that asymmetry is deliberate: reformatting
+# a number is exactly the work this mode exists to do (1998848 kB is
+# not a thing to read, 1.9 GiB is), so demanding the raw digits appear
+# would forbid the feature. A string is never reformatted.
+#
+# state, drift and health are NOT re-rendered here. novi-state already
+# has a human form of each, and running it a second way is one
+# renderer, not two -- the same argument that made `describe` compose
+# `novi-state --json` rather than observe anything itself.
+FMT=json
+
+t_head() { printf '\n%s\n' "$1"; }
+
+# A label column wide enough for the longest label used below. A
+# printf field width, so a longer label pushes its own value right
+# rather than being truncated -- a truncated label is a wrong word.
+t_row() {
+    local label="$1"
+    shift
+    printf '  %-13s %s\n' "$label" "$*"
+}
+
+# "-" for an empty value, never a blank column. A row that is present
+# and empty and a row that is absent look identical otherwise, and
+# they are different facts about a machine.
+t_val() { [ -n "${1:-}" ] && printf '%s' "$1" || printf -- '-'; }
+
+t_yesno() {
+    case "${1:-}" in
+        on|yes|true|1|up|enabled) printf 'yes' ;;
+        '')                       printf -- '-' ;;
+        *)                        printf 'no' ;;
+    esac
+}
+
+# kB (what /proc/meminfo reports) to something a person reads. Integer
+# arithmetic only -- there is no floating point in ash -- so the one
+# decimal is done by hand.
+human_kb() {
+    local kb="${1:-}" whole frac
+    case "$kb" in ''|*[!0-9]*) printf -- '-'; return 0 ;; esac
+    if [ "$kb" -lt 1024 ]; then printf '%s kB' "$kb"; return 0; fi
+    if [ "$kb" -lt 1048576 ]; then
+        whole=$(( kb / 1024 )); frac=$(( (kb % 1024) * 10 / 1024 ))
+        printf '%s.%s MiB' "$whole" "$frac"; return 0
+    fi
+    whole=$(( kb / 1048576 )); frac=$(( (kb % 1048576) * 10 / 1048576 ))
+    printf '%s.%s GiB' "$whole" "$frac"
+}
+
+# 512-byte sectors, which is what /sys/block/*/size counts regardless
+# of the device's own sector size.
+human_sectors() { human_kb "$(( ${1:-0} / 2 ))"; }
+
+# Seconds are dropped only once the number is large enough for them to
+# be noise. They are NOT noise on the row this was written for: an idle
+# clock is a thing somebody watches tick, and "0m" for the first minute
+# of it looks like a reading that is not happening.
+human_secs() {
+    local s="${1:-}" d h m
+    case "$s" in ''|*[!0-9]*) printf -- '-'; return 0 ;; esac
+    d=$(( s / 86400 )); h=$(( s % 86400 / 3600 ))
+    m=$(( s % 3600 / 60 ))
+    if   [ "$d" -gt 0 ]; then printf '%sd %sh %sm' "$d" "$h" "$m"
+    elif [ "$h" -gt 0 ]; then printf '%sh %sm' "$h" "$m"
+    elif [ "$m" -gt 0 ]; then printf '%sm %ss' "$m" "$(( s % 60 ))"
+    else printf '%ss' "$s"
+    fi
+}
+
 describe_identity() {
+    local pretty id version host kernel arch up boot
+    pretty="$(os_release_field PRETTY_NAME)"
+    id="$(os_release_field ID)"
+    version="$(os_release_field VERSION_ID)"
+    host="$(cat /proc/sys/kernel/hostname 2>/dev/null)"
+    kernel="$(uname -r 2>/dev/null)"
+    arch="$(uname -m 2>/dev/null)"
+    up="$(cut -d. -f1 /proc/uptime 2>/dev/null)"
+    boot="$([ -d /run/live ] && printf live || printf installed)"
+
+    if [ "$FMT" = text ]; then
+        printf '%s\n' "$(t_val "$pretty")"
+        t_row host "$(t_val "$host")"
+        t_row id "$(t_val "$id") $(t_val "$version")"
+        t_row kernel "$(t_val "$kernel") $(t_val "$arch")"
+        t_row uptime "$(human_secs "$up")"
+        t_row boot "$(t_val "$boot")"
+        return 0
+    fi
     printf '{"pretty_name": %s, "id": %s, "version_id": %s, "hostname": %s, "kernel": %s, "arch": %s, "uptime_seconds": %s, "boot": %s}' \
-        "$(json_str "$(os_release_field PRETTY_NAME)")" \
-        "$(json_str "$(os_release_field ID)")" \
-        "$(json_str "$(os_release_field VERSION_ID)")" \
-        "$(json_str "$(cat /proc/sys/kernel/hostname 2>/dev/null)")" \
-        "$(json_str "$(uname -r 2>/dev/null)")" \
-        "$(json_str "$(uname -m 2>/dev/null)")" \
-        "$(json_num "$(cut -d. -f1 /proc/uptime 2>/dev/null)")" \
-        "$(json_str "$([ -d /run/live ] && printf live || printf installed)")"
+        "$(json_str "$pretty")" "$(json_str "$id")" "$(json_str "$version")" \
+        "$(json_str "$host")" "$(json_str "$kernel")" "$(json_str "$arch")" \
+        "$(json_num "$up")" "$(json_str "$boot")"
 }
 
 describe_hardware() {
@@ -362,10 +467,28 @@ describe_hardware() {
     model="$(sed -n 's/^model name[ \t]*: //p' /proc/cpuinfo 2>/dev/null | head -1)"
     memtotal="$(sed -n 's/^MemTotal:[ ]*\([0-9]*\).*/\1/p' /proc/meminfo 2>/dev/null)"
     memavail="$(sed -n 's/^MemAvailable:[ ]*\([0-9]*\).*/\1/p' /proc/meminfo 2>/dev/null)"
+    local firmware disks=''
+    firmware="$([ -d /sys/firmware/efi ] && printf uefi || printf bios)"
+
+    if [ "$FMT" = text ]; then
+        t_head hardware
+        t_row cpu "$(t_val "$model")${cpus:+ x}${cpus}"
+        t_row memory "$(human_kb "$memtotal") total, $(human_kb "$memavail") free"
+        t_row firmware "$(t_val "$firmware")"
+        for dev in /sys/block/*; do
+            [ -d "$dev" ] || continue
+            disks="${disks}${disks:+, }${dev##*/} $(human_sectors "$(cat "$dev/size" 2>/dev/null || printf 0)")"
+            [ "$(cat "$dev/removable" 2>/dev/null || printf 0)" = "1" ] \
+                && disks="${disks} (removable)"
+        done
+        t_row disks "$(t_val "$disks")"
+        return 0
+    fi
+
     printf '{"cpu_model": %s, "cpu_count": %s, "mem_total_kb": %s, "mem_available_kb": %s, "firmware": %s, "block_devices": [' \
         "$(json_str "$model")" "$(json_num "$cpus")" \
         "$(json_num "$memtotal")" "$(json_num "$memavail")" \
-        "$(json_str "$([ -d /sys/firmware/efi ] && printf uefi || printf bios)")"
+        "$(json_str "$firmware")"
     for dev in /sys/block/*; do
         [ -d "$dev" ] || continue
         [ "$first" -eq 1 ] || printf ','
@@ -401,11 +524,27 @@ describe_network() {
     # "what is on the wire" are different questions and an agent asking
     # this one wants the second.
     addr="$(first_of /run/novi/network.ip)"
+    local resolvers
+    resolvers="$(sed -n 's/^nameserver[ \t]*//p' /etc/resolv.conf 2>/dev/null | tr '\n' ' ')"
+
+    if [ "$FMT" = text ]; then
+        t_head network
+        if [ -n "$iface" ]; then
+            t_row interface "$iface  link $(t_yesno "$carrier")"
+        else
+            t_row interface '-'
+        fi
+        t_row address "$(t_val "$addr")"
+        t_row wifi "$(t_val "$wifi")"
+        t_row resolvers "$(t_val "${resolvers% }")"
+        return 0
+    fi
+
     printf '{"interface": %s, "address": %s, "wifi_interface": %s, "carrier": %s, "resolvers": [' \
         "$(json_str "$iface")" "$(json_str "$addr")" \
         "$(json_str "$wifi")" "$(json_bool "$carrier")"
     local first=1 ns
-    for ns in $(sed -n 's/^nameserver[ \t]*//p' /etc/resolv.conf 2>/dev/null); do
+    for ns in $resolvers; do
         [ "$first" -eq 1 ] || printf ','
         first=0
         printf '%s' "$(json_str "$ns")"
@@ -448,6 +587,11 @@ describe_idle() {
     # about an idle clock that does not exist here. There is no
     # compositor on a base install at all.
     if [ ! -r "$file" ]; then
+        if [ "$FMT" = text ]; then
+            t_head idle
+            t_row compositor 'none -- no idle clock on this machine'
+            return 0
+        fi
         printf '{"present": false}'
         return 0
     fi
@@ -467,6 +611,21 @@ describe_idle() {
         esac
     done < "$file"
 
+    if [ "$FMT" = text ]; then
+        t_head idle
+        t_row idle "$(human_secs "$idle")"
+        t_row blanked "$(t_yesno "$blanked")"
+        t_row locked "$(t_yesno "$locked")"
+        # The document's own word for a timeout that is off, never the
+        # 0 the file spells it with -- "0" reads as "immediately",
+        # which is the opposite of the truth. Same call the JSON
+        # branch makes with null.
+        t_row "blank after" "$(case "$blank" in ''|0|*[!0-9]*) printf off ;; *) human_secs "$blank" ;; esac)"
+        t_row "sleep after" "$(case "$suspend" in ''|0|*[!0-9]*) printf off ;; *) human_secs "$suspend" ;; esac)"
+        t_row "stay awake" "$(t_yesno "$awake")"
+        t_row inhibitors "$(t_val "$names")"
+        return 0
+    fi
     printf '{"present": true, "seconds": %s, "blanked": %s, "locked": %s, ' \
         "$(json_num "$idle")" "$(json_bool "$blanked")" "$(json_bool "$locked")"
     # NULL for a timeout that is off, never the 0 the file spells it
@@ -499,6 +658,17 @@ describe_idle() {
 
 describe_packages() {
     local first=1 name version
+    if [ "$FMT" = text ]; then
+        t_head packages
+        # `pkg list` is already a human table -- name and version,
+        # space-padded. Indenting it is the whole of the work; a second
+        # formatter here would be a second opinion about a list that
+        # has one owner.
+        if ! "$PKG" list 2>/dev/null | sed -n 's/^/  /p' | grep .; then
+            t_row '' 'none installed'
+        fi
+        return 0
+    fi
     printf '['
     # `pkg list` prints `%-30s %s` -- name and version, space-padded.
     # `read` splits on whitespace, so the padding costs nothing, and
@@ -523,6 +693,41 @@ describe_packages() {
 describe_agent() {
     local first=1 v allow
     allow="$("$STATE" get agent.allow 2>/dev/null || printf '')"
+
+    if [ "$FMT" = text ]; then
+        local permitted=''
+        for v in $VERBS; do
+            policy_allows "$v" || continue
+            permitted="${permitted}${permitted:+ }${v}"
+        done
+        t_head agent
+        t_row writes "$(policy_enabled && printf enabled || printf disabled)"
+        # The JSON reports `enabled` and `allowed_verbs` as two fields
+        # and leaves the reader to combine them, which is right for a
+        # program. For a person, a list of permitted verbs printed
+        # under the word "disabled" reads as a contradiction -- so say
+        # which of the two keys is the one standing in the way. Both
+        # are required (RFC 0029's two-key rule) and only one of them
+        # is usually the answer.
+        if policy_enabled; then
+            t_row allowed "$(t_val "$permitted")"
+        else
+            t_row allowed "$(t_val "$permitted")  (inert: agent.enabled is off)"
+        fi
+        t_row verbs "$VERBS"
+        # null in the JSON, a sentence here: "novi-agentd is not
+        # running" and "it is, and here is where" are different
+        # problems with different fixes, and the fix is the part a
+        # person reading a table wants.
+        if [ -S "$SOCK" ]; then
+            t_row socket "$SOCK"
+        else
+            t_row socket 'none -- declare services.novi-agentd = on'
+        fi
+        t_row audit "$AUDIT"
+        return 0
+    fi
+
     printf '{"enabled": %s, "audit_log": %s, "known_verbs": [' \
         "$(policy_enabled && printf true || printf false)" \
         "$(json_str "$AUDIT")"
@@ -561,6 +766,37 @@ describe_agent() {
 
 cmd_describe() {
     local state diff health
+    case "${1:-}" in
+        --text|-t) FMT=text ;;
+        --json|'') FMT=json ;;
+        # A rejected flag rather than an ignored one. `describe --txt`
+        # silently producing JSON is a script that looks like it works
+        # and a person who reads the wrong thing.
+        *) printf 'novi-agent describe: unknown option %s (want --text or --json)\n' "$1" >&2
+           exit 1 ;;
+    esac
+
+    if [ "$FMT" = text ]; then
+        describe_identity
+        describe_hardware
+        describe_network
+        describe_idle
+        describe_packages
+        describe_agent
+        # NOT re-rendered here. novi-state owns the human form of each
+        # of these, and calling it is one renderer where reimplementing
+        # it would be two -- the same argument that made `describe`
+        # compose `--json` rather than observe anything for itself.
+        # Both exit non-zero for a machine with something wrong, which
+        # is a thing to REPORT here, not an error: `|| true`.
+        t_head 'state (novi-state diff)'
+        "$STATE" diff 2>&1 | sed -n 's/^/  /p' || true
+        t_head 'health (novi-state health)'
+        "$STATE" health 2>&1 | sed -n 's/^/  /p' || true
+        printf '\n'
+        return 0
+    fi
+
     # `|| true` on each: `novi-state diff` exits 1 when there is drift,
     # and under `set -e` an assignment from a failing command
     # substitution ends the script. Drift is a THING TO REPORT, not an
@@ -832,6 +1068,7 @@ usage() {
 novi-agent — the interface an automated actor uses to this machine (RFC 0029)
 
   novi-agent describe            what this machine is, as one JSON document
+  novi-agent describe --text     the same, as a table for a person to read
   novi-agent capabilities        whether `do` is enabled, and which verbs
   novi-agent audit [-n N]        what has been attempted, refusals included
   novi-agent do <verb> [args]    change the machine, within the declared list

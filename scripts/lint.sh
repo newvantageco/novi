@@ -147,6 +147,12 @@ fi
 # `wifi.join <ssid> <passphrase>` with "$args" would write that
 # passphrase into a 0600 log permanently, by the very refusal meant to
 # protect it.
+# test-agent-text.sh is the sixth, and it guards a kind of drift the
+# others do not: `describe` emits the same facts twice, as JSON and as
+# a table, and a field added to one branch and forgotten in the other
+# is invisible in a diff and looks like nothing when you run it. The
+# check needs no list of its own -- every string value in the document
+# must appear in the table.
 # test-services.sh is the fifth, and the only one whose subject is a
 # DATA file: /etc/services is parsed by musl rather than by anything
 # in this repository, and every way to get it wrong -- a line past
@@ -167,7 +173,8 @@ for t in packages/tests/test-lib-json.sh packages/tests/test-agent-verbs.sh \
          packages/tests/test-power-idle.sh \
          packages/tests/test-agent-idle.sh \
          packages/tests/test-state-packages.sh \
-         packages/tests/test-services.sh; do
+         packages/tests/test-services.sh \
+         packages/tests/test-agent-text.sh; do
     echo ">>> ${t##*/}"
     if ! bash "$t"; then
         echo ">>> ${t} failed" >&2

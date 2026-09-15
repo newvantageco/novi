@@ -955,6 +955,20 @@ is one JSON document saying what this machine is; `novi-agent do
   defeats the engine it is talking to. `test-agent-verbs.sh` fails the
   lint run if an `exec)`/`shell)`/`run)` branch ever appears — "we
   agreed not to" is not a mechanism.
+- **`describe --text` is a VIEW of that document, not a second
+  answer.** Each `describe_*` reads its sources once and branches on
+  `$FMT` at the `printf` — one gatherer, two printers — so the drift
+  that matters cannot happen. What remains is a *display* omission,
+  and `test-agent-text.sh` catches it with no list of its own: every
+  STRING value in the JSON must appear in the table. Strings and not
+  numbers, because reformatting a number (`1998848 kB` → `15.7 GiB`)
+  is the work the mode exists to do. `state`/`drift`/`health` are not
+  re-rendered at all — the table runs `novi-state diff` and
+  `novi-state health` and indents them, which is one renderer where
+  reimplementing them would be two. And the test's own first probe
+  could not fail: `*"sleep after"*"off"*` was satisfied by the word
+  "off" further down the table, in the agent section's own message.
+  Read a ROW, not the whole output.
 - **`describe` COMPOSES and computes nothing.** State and drift from
   `novi-state --json`, verdicts from `health --json`, the interface
   from `/run/novi/network.device` (the file the service published, per
