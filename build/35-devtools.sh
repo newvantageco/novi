@@ -706,10 +706,94 @@ if [ "$ONLY" = "all" ] || [ "$ONLY" = "netsurf" ]; then
 
     strip_tree "${files}"
 
-    # A launcher entry, so it is reachable with a mouse. The binary is
-    # `netsurf-fb`, which is what the framebuffer frontend installs
-    # itself as -- not renamed, because a person reading `ps` should
-    # see the name upstream gave it.
+    # ── The address-space bound (RFC 0031 roadmap 5) ──────────────
+    # The corpus in tests/hostile-pages found a page that grows
+    # without bound, and an unbounded browser on a machine with no
+    # per-process limit took the whole guest down twice -- QEMU at
+    # 4.5-4.9 GB against a 4096 MB guest, the console gone, and the
+    # supervising shell too starved to run the kill it was holding.
+    #
+    # So the binary upstream installs moves to /usr/libexec and the
+    # name on PATH becomes a wrapper. Not a shell alias and not a
+    # launcher-only argument: a bound somebody bypasses by typing the
+    # other name is not a bound. Every step is an exec, so there is one
+    # pid and `ps` shows `/usr/libexec/netsurf-fb` -- the path moved,
+    # the process did not gain a layer.
+    #
+    # s6-softlimit is base content (s6 is how this system boots), so
+    # this needs no new depends= entry -- the same reasoning that lets
+    # the wrapper be #!/bin/sh.
+    install -d "${files}/usr/libexec"
+    mv "${files}/usr/bin/netsurf-fb" "${files}/usr/libexec/netsurf-fb"
+    cat > "${files}/usr/bin/netsurf-fb" <<'WRAP'
+#!/bin/sh
+# NetSurf under an address-space bound and a scheduling demotion --
+# RFC 0031 roadmap 5. Both numbers come from measurement on a booted
+# machine; neither is a sandbox, and saying so is roadmap 4's job.
+#
+# THE BOUND. 1 GiB of address space. On this machine a benign page
+# peaks at 21 MB of VIRTUAL size, the heaviest corpus page that
+# finishes at 36 MB, and the worst plateau 517 MB -- so the ceiling
+# sits above every page anyone here has measured. It is not
+# decorative: `unclosed-tags.html` in tests/hostile-pages grows
+# without limit (217 MB at 40s, 484 MB at 180s) and was held at
+# exactly 1048576 kB when it reached it.
+#
+# What that buys is one thing: a page cannot take the machine's
+# memory. NetSurf neither exits nor prints anything when it hits the
+# ceiling -- measured, not hoped for -- so the failure mode this
+# converts an unrecoverable machine into is a hung window.
+#
+# THE NICE. A runaway page pegs a core indefinitely and RLIMIT_AS does
+# nothing about that; three of the five runaways in the corpus are CPU
+# rather than memory. A priority is not a bound and cannot become one,
+# but it is what keeps the rest of the machine usable: eight runaway
+# browsers on this 4-vCPU guest slowed an unrelated shell probe from
+# 17 to 40-43 centiseconds, and at nice 5 that came back to 19-23.
+# (nice 15 recovered all of it and demotes the browser against every
+# background job on the machine, which is a worse trade for a program
+# somebody is looking at.) On an idle machine nice costs nothing at
+# all, which is most of why it is cheap enough to ship.
+#
+# NOVI_BROWSER_AS_LIMIT overrides the bound, in bytes, or `off`.
+# NOVI_BROWSER_NICE overrides the increment, or `off`. A machine with
+# 512 MB of RAM wants a smaller ceiling than a workstation does, and
+# somebody debugging a page that hit it wants to raise it for one run.
+LIMIT="${NOVI_BROWSER_AS_LIMIT:-1073741824}"
+NICE="${NOVI_BROWSER_NICE:-5}"
+REAL=/usr/libexec/netsurf-fb
+
+# No '' alternative in either case: ${VAR:-default} substitutes for an
+# EMPTY value as well as an unset one, so an empty variable is already
+# the default by the time these run. A branch that cannot fire reads
+# as load-bearing -- provoking each one is what found this, exactly as
+# it found the dead ::-guard in RFC 0033's v6 validator.
+case "${LIMIT}" in
+    off|none|0) LIMIT="" ;;
+    *[!0-9]*)
+        echo "netsurf-fb: NOVI_BROWSER_AS_LIMIT must be a byte count or 'off'" >&2
+        exit 2 ;;
+esac
+case "${NICE}" in
+    off|none|0) NICE="" ;;
+    *[!0-9]*)
+        echo "netsurf-fb: NOVI_BROWSER_NICE must be a positive increment or 'off'" >&2
+        exit 2 ;;
+esac
+
+# Built up rather than nested four ways, so each `off` really removes
+# its own step instead of selecting one of four spellings of the line.
+set -- "${REAL}" "$@"
+if [ -n "${LIMIT}" ]; then set -- s6-softlimit -a "${LIMIT}" "$@"; fi
+if [ -n "${NICE}" ];  then set -- nice -n "${NICE}" "$@"; fi
+exec "$@"
+WRAP
+    chmod 755 "${files}/usr/bin/netsurf-fb"
+
+    # A launcher entry, so it is reachable with a mouse. The name on
+    # PATH is `netsurf-fb` -- the wrapper above -- because that is what
+    # the framebuffer frontend installs itself as, and a person reading
+    # `ps` should still see the name upstream gave it.
     install -d "${files}/usr/share/novi/apps"
     cat > "${files}/usr/share/novi/apps/netsurf.app" <<APP
 name=Web
@@ -719,7 +803,7 @@ description=NetSurf -- a small web browser
 APP
 
     echo "  -> staged $(du -sh "${files}" | cut -f1)"
-    "${CROSS}-readelf" -d "${files}/usr/bin/netsurf-fb" | grep NEEDED || true
+    "${CROSS}-readelf" -d "${files}/usr/libexec/netsurf-fb" | grep NEEDED || true
 fi
 
 # ── Publish (called by 53-devtools-repo.sh, never by `all`) ───────────
