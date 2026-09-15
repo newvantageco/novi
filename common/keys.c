@@ -240,7 +240,42 @@ static void rewrite_text(struct novi_keys *k, size_t i) {
 		k->text[i], sizeof(k->text[i]));
 }
 
+bool novi_keys_cmdline_off(const char *cmdline) {
+	static const char *WORD = "novi.keys=off";
+	size_t n = strlen(WORD);
+	for (const char *p = cmdline; (p = strstr(p, WORD)) != NULL; p += n) {
+		bool start = (p == cmdline) || isspace((unsigned char)p[-1]);
+		bool end = (p[n] == '\0') || isspace((unsigned char)p[n]);
+		if (start && end) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/* THE SAME ANSWER FOR BOTH READERS, which is why this lives in the
+ * loader and not in novi-shell's main(). If the compositor honoured
+ * the escape hatch and the sheet did not, `novi-launcher --keys` would
+ * list the overrides on a session that is ignoring them -- the exact
+ * wrong-key document this whole arrangement is built to rule out. */
+static bool disabled_on_cmdline(void) {
+	FILE *f = fopen(NOVI_KEYS_CMDLINE, "r");
+	if (f == NULL) {
+		return false;
+	}
+	char line[1024];
+	bool off = false;
+	if (fgets(line, sizeof(line), f) != NULL) {
+		off = novi_keys_cmdline_off(line);
+	}
+	fclose(f);
+	return off;
+}
+
 int novi_keys_load(struct novi_keys *k, const char *path) {
+	if (disabled_on_cmdline()) {
+		return 0;
+	}
 	FILE *f = fopen(path, "r");
 	if (f == NULL) {
 		/* No file is not an error and never has been: the compiled

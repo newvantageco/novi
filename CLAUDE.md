@@ -1421,6 +1421,11 @@ applies it over the compiled table and BOTH binaries load it.
   and not the type; it compiled because every consumer happened to
   include `xkbcommon.h` (or wlroots) first. A header that only works
   second breaks the first time somebody includes it first.
+- **`novi.keys=off` is honoured IN THE LOADER, not in the
+  compositor.** A file read at startup can lock somebody out of their
+  own desktop, so it needs `novi.state=off`'s escape hatch -- and if
+  novi-shell honoured it while novi-launcher did not, the hatch itself
+  would produce the wrong-key sheet everything else here rules out.
 - **The shipped `keys.conf` is a THIRD list**, checked both ways by
   the host test: every action in the table is named in the file, and
   every action the file names exists. It is also the only place a

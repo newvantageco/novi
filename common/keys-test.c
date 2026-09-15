@@ -200,6 +200,24 @@ int main(void) {
 	ok(strcmp(buf, "Alt + Shift + Tab") == 0,
 		"ISO_Left_Tab reads as Shift + Tab, which is the key people press");
 
+	/* ── 8b. the way back out ────────────────────────────────────
+	 * A file read at startup can lock somebody out of their own
+	 * desktop, so `novi.keys=off` on the kernel command line ignores
+	 * it -- novi.state=off's argument, applied to the other file a
+	 * machine reads before anybody can type. Matched as a WHOLE WORD,
+	 * because a substring match would be switched off by a kernel
+	 * parameter that merely contains it. */
+	ok(novi_keys_cmdline_off("ro quiet novi.keys=off console=ttyS0"),
+		"the escape hatch is recognised among other parameters");
+	ok(novi_keys_cmdline_off("novi.keys=off"), "on its own");
+	ok(novi_keys_cmdline_off("quiet novi.keys=off"), "at the end");
+	ok(!novi_keys_cmdline_off("ro quiet console=ttyS0"), "absent");
+	ok(!novi_keys_cmdline_off("xnovi.keys=off"),
+		"not a suffix of another parameter");
+	ok(!novi_keys_cmdline_off("novi.keys=office"),
+		"not a prefix of another value");
+	ok(!novi_keys_cmdline_off("novi.keys=on"), "and not the opposite");
+
 	/* ── 9. the shipped file is a THIRD list ─────────────────────
 	 *
 	 * rootfs/etc/novi/keys.conf documents every action by name, with

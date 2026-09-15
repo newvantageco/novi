@@ -59,6 +59,20 @@ struct novi_keys {
 	int conflicts;   /* rows disabled for landing on a taken binding */
 };
 
+/* Does this kernel command line say to ignore the file? `novi.keys=off`
+ * is the way back for somebody who has locked themselves out of their
+ * own desktop with it -- the same escape hatch `novi.state=off` is for
+ * boot convergence, and for the same reason: a machine that reads a
+ * file at startup can be made unusable by that file, and the fix has
+ * to be reachable from the bootloader.
+ *
+ * Takes the text rather than reading /proc/cmdline so it can be
+ * tested; novi_keys_load() does the reading.
+ *
+ * Matched as a whole word: `xnovi.keys=off` and `novi.keys=office` are
+ * not this. */
+bool novi_keys_cmdline_off(const char *cmdline);
+
 /* The compiled defaults, ready to dispatch from. Always succeeds --
  * a client that never loads a file draws and dispatches exactly what
  * it always did. */
@@ -69,6 +83,9 @@ void novi_keys_defaults(struct novi_keys *k);
  * them and returns 0. Never leaves `k` half-applied in a way that
  * loses a row: a line that cannot be parsed leaves that row alone. */
 int novi_keys_load(struct novi_keys *k, const char *path);
+
+/* Where novi_keys_load() looks for the escape hatch. */
+#define NOVI_KEYS_CMDLINE "/proc/cmdline"
 
 /* "Super+Shift+q" -> mods and keysym. False for anything it cannot
  * make sense of. `off`, `none` and `disabled` parse as success with

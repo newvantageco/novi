@@ -133,7 +133,21 @@ derived from the binding count; a twentieth row would either hide a
 real binding or grow the card past the 768px a `_Static_assert`
 defends.
 
-### 7. `keybindings.h` became self-contained.
+### 7. `novi.keys=off`, in the loader and not in the compositor.
+
+A file read at startup can make a machine unusable, and the fix has to
+be reachable from the bootloader — which is the argument RFC 0002
+already made for `novi.state=off`. `novi.keys=off` on the kernel
+command line ignores the file for that boot.
+
+It is honoured **inside the shared loader**, deliberately. Put it in
+novi-shell's `main()` and the compositor would ignore the overrides
+while `novi-launcher --keys` went on listing them: the escape hatch
+would itself produce the wrong-key document the rest of this design
+exists to rule out. Matched as a whole word, so a kernel parameter
+that merely contains the string does not switch it off.
+
+### 8. `keybindings.h` became self-contained.
 
 It used `xkb_keysym_t` while including only `xkbcommon-keysyms.h`,
 which declares the constants and not the type. It compiled because
@@ -144,7 +158,7 @@ somebody includes it first — which is exactly what `keys.c` did.
 ## What is checked without a desktop
 
 `common/keys-test.c`, linking the real loader, run by
-`make -C common check` from `scripts/lint.sh`. **111 checks.** The
+`make -C common check` from `scripts/lint.sh`. **118 checks.** The
 interesting ones are all things a running desktop cannot show you: a
 well-formed file exercises one path, and the paths that matter are the
 misspelled modifier, the action that does not exist, the line that
