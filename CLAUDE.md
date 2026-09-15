@@ -846,6 +846,42 @@ NetSurf 3.11, HTML and CSS over real HTTP, **no JavaScript**.
   header — the libdrm `dlopen` blind spot (RFC 0007) in a different
   costume. Without them the package installs, the browser starts,
   cannot find its default font and exits.
+- **A HOSTILE PAGE CANNOT CRASH IT AND CAN TAKE THE MACHINE DOWN**
+  (`tests/hostile-pages/`, RFC 0031 roadmap 4). Sixteen deliberately
+  awkward documents, zero SIGSEGVs — 40k nested divs, 20k unclosed
+  tags, invalid UTF-8, a PNG claiming 65535×65535 — and **five of
+  them never settle**, at ~100% CPU. Running those five for longer
+  put QEMU at 110% CPU with 4.5–4.9 GB resident against a **4096 MB**
+  guest, twice on two fresh boots, with the serial console
+  unresponsive. Not a curiosity: one page, off the network, reaches a
+  state a local shell cannot recover from.
+- **THE HARNESS COULD NOT ENFORCE ITS OWN DEADLINE, and that is the
+  measurement.** The supervising script's 40-second kill never ran —
+  the shell meant to run it was starved by the thing it was meant to
+  kill. So per-page peak RSS is NOT in the README, because two
+  attempts to get it ended in that state. **A harness that shares a
+  machine with an unbounded allocator gets starved by it**, which is
+  exactly the absence a per-process memory bound would fill. An
+  honest gap beats a table nobody could measure.
+- **The corpus is served from the GUEST's own loopback** (busybox
+  `httpd` on 127.0.0.1), so a failure is the browser's and not a
+  network's — and the control is a benign page rendering in 0.1s with
+  its links laid out. Without that, "survived" could have meant a
+  process sitting inert and every row in the table would be
+  worthless. Same argument as every other probe in this file: a check
+  that cannot distinguish working from absent is not a check.
+- **A green corpus is not a safety property, and the scripts say so
+  on every run.** It finds crashes and hangs on shapes somebody
+  thought of. It says nothing about memory disclosure, nothing about
+  the shapes nobody thought of, and nothing about the absence of a
+  sandbox — which is still true. Do not let "we tested it against
+  hostile pages" become "it is safe to point at the web", the same
+  way "Mesa" must not imply a gaming stack.
+- **Generating 13 MB of pathological HTML in a shell loop takes
+  minutes; in `awk` it takes 0.083 seconds.** And `printf '%s'
+  '\200'` prints four characters, not a byte — the invalid-UTF-8
+  page needs `printf '\200'` with the escape in the FORMAT string.
+  Both were found by running the generator, not by reading it.
 
 ## Architecture: Python, and the module it does not have
 

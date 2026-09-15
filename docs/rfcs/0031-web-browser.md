@@ -366,8 +366,66 @@ written for this test. Nothing here has run on physical hardware.
 
    So `netsurf` goes on linking both, and the note in this RFC's
    decisions stands as written: not a rule broken, and worth stating.
-4. **Nothing here has been tested against a hostile page.** A layout
-   engine parsing arbitrary HTML off the network is among the larger
-   attack surfaces this project has ever shipped, and it ships with
-   none of the sandboxing a mainstream browser would put around it.
-   That is worth saying out loud rather than leaving implied.
+4. ~~**Nothing here has been tested against a hostile page.**~~
+   **Something has now** — `tests/hostile-pages/`, sixteen
+   deliberately awkward documents served to the browser from the
+   guest's own loopback. The sandboxing sentence below still stands;
+   what changed is that there are measurements beside it.
+
+   **Nothing crashed.** Zero SIGSEGVs across the corpus — 40k nested
+   `<div>`, 20k unclosed tags, thousands of unterminated entities,
+   invalid UTF-8 (lone continuation bytes, truncated multi-byte
+   starts, an overlong `/`), tag names two thousand characters long, a
+   self-importing stylesheet, and a PNG whose IHDR claims
+   65535×65535. That is a real result rather than a null one: error
+   recovery is the code path least exercised by the pages anybody
+   tests against, and it held.
+
+   **Five pages never settled**, at ~100% CPU through the whole
+   window: `deep-nesting` (100%), `long-line` — 4 MB with no
+   whitespace to break on — (100%), `unclosed-tags` (100%),
+   `many-siblings` (98%), `huge-table` (97%). `deep-tables` came in at
+   73% and settled; `css-pathological` at 25%.
+
+   **AND RUNNING THOSE FIVE FOR LONGER TOOK THE WHOLE MACHINE DOWN.**
+   Twice, on two fresh boots: QEMU pinned at 110% CPU with 4.5–4.9 GB
+   resident against a **4096 MB** guest, the serial console
+   unresponsive, and — the part that matters — **the supervising
+   script unable to enforce its own 40-second deadline**, because the
+   shell meant to kill the browser was starved by it. The OOM killer
+   did not restore the machine within several minutes. That is not
+   "slow": one page, fetched over the network, puts this system into a
+   state a local shell cannot recover from.
+
+   **Per-page attribution of the blowup is NOT established, and the
+   gap is the finding.** Two attempts to measure peak RSS one page at
+   a time ended in exactly the state above, which is why there is no
+   table. A harness that shares a machine with an unbounded allocator
+   gets starved by it — and a per-process memory bound is precisely
+   the thing whose absence this item exists to record.
+
+   **Surviving a corpus is not a safety property**, and the scripts
+   say so on every run. This finds crashes and hangs on shapes
+   somebody thought of. It says nothing about memory disclosure,
+   nothing about the shapes nobody thought of, and nothing about the
+   absence of a sandbox. **A layout engine parsing arbitrary HTML off
+   the network is among the larger attack surfaces this project has
+   ever shipped, and it still ships with none of the sandboxing a
+   mainstream browser would put around it** — that sentence was the
+   whole of this item before and is unretracted by any of the above.
+
+   The control is what makes the rest worth reading: a benign page
+   renders in **0.1s** with the window drawn and the links laid out,
+   screendumped. Without it, "survived" could have meant a process
+   sitting inert and every row would be worthless.
+5. **A resource bound on the browser**, which is what item 4 turned
+   from a precaution into a measured need. The cheapest honest version
+   is not a sandbox: it is `setrlimit(RLIMIT_AS)` on the process, so
+   an unbounded allocation fails inside NetSurf — which has malloc
+   failure paths — instead of taking the machine's memory and the
+   shell that would have killed it. A CPU bound is the harder half,
+   because a layout that is merely slow and one that will never finish
+   look the same from outside; the corpus has both (`deep-tables`
+   settled at 73%, `long-line` never did), so there is something to
+   test against. Neither is a substitute for process isolation, and
+   saying so is item 4's job.
