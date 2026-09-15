@@ -1332,6 +1332,13 @@ palette is a runtime table loaded from a plain-text file.
   yours. A file that parses to nothing counts as a MISS and falls
   through, so an empty override does not strand the desktop on
   whatever it had.
+- **Shadowing REPLACES, it does not patch.** The loader starts from
+  the BUILT-IN palette, so a two-line `/etc/novi/themes/paper.theme`
+  gives those two colours over *axiom's* values and not over the
+  shipped `paper`'s. Watched live: a brown base and panel with axiom's
+  accent. Right rule -- a file inheriting from a shipped one of the
+  same name would be a diff whose base can change under it -- and
+  exactly the thing somebody will expect the other way round.
 - **Eight of the nine checks for that could not see the shipped
   order.** They pass the test's own two directories, because the
   interesting behaviour is which of a pair wins and the real pair are

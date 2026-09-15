@@ -345,6 +345,18 @@ argument for shipping `paper`, made concrete on the first run.
    through to the shipped palette of that name — an empty override
    should not leave the desktop on whatever it had.
 
+   **Shadowing REPLACES, it does not patch.** A local file is a whole
+   theme: the loader starts from the built-in palette and applies what
+   the file says, so `/etc/novi/themes/paper.theme` containing two
+   lines gives those two colours over *axiom's* values, not over the
+   shipped `paper`'s. Verified on a booted machine — a two-line local
+   `paper` produced a brown base and panel with axiom's accent, and
+   the picker listed `paper` exactly once and marked it active. That
+   is the right rule (a file that inherited from a shipped one of the
+   same name would be a diff whose base could change under it), and it
+   is the kind of thing somebody will expect the other way round, so
+   it is written down here and in the shipped comments.
+
    Nine host checks. Eight of them use the test's own two directories,
    because the interesting behaviour is which of a pair wins and the
    real pair are absolute paths on the target — and that left the
