@@ -312,6 +312,31 @@ argument for shipping `paper`, made concrete on the first run.
    already carry. It is the longest-lived window on this desktop, so
    it is also the one most likely to be showing yesterday's palette.
 
+   **And then the compositor, which turned out to be the last one
+   and the worst one.** With every client following a switch, each of
+   their windows sat under a title bar in the previous theme —
+   server-side decorations are drawn by novi-shell, which read the
+   palette once at startup. On `paper` that is a dark bar on a white
+   window: the most conspicuous possible half-applied theme, drawn by
+   the one program that cannot be told to restart, because restarting
+   it ends the session. Screendumped before it was fixed —
+   `(31, 32, 43)` at the title bar while the canvas beside it read
+   `(255, 255, 255)`.
+
+   It uses the same watch, on its own `wl_event_loop` rather than on
+   the idle tick: the tick exists to count idleness and hanging this
+   on it would mean up to five seconds of mismatch. Two details:
+   `refresh()` skips a bar redraw when width, focus and title are all
+   as drawn — correct, and exactly wrong here, because the palette is
+   not one of the three, so `novi_decor_repaint()` invalidates
+   `drawn_width` first. And the **control-dot sprites are shared** and
+   bake their colour in at creation, so they are remade once, before
+   any window is repainted — a window repainted first would place the
+   old ones. They are remade into locals and swapped in only if both
+   succeed, which is the loader's own commit-on-success rule: a
+   half-swapped pair leaves one control in the old palette and a NULL
+   sprite for the other.
+
    **Still picked up only at startup:** novi-launcher and
    novi-lockscreen, both of which are spawned per keypress and live
    for seconds, and the terminal, which is foot and not ours.

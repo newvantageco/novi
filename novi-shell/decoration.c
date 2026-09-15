@@ -581,6 +581,50 @@ void novi_decor_set_title(struct novi_decor *d, const char *title) {
 	refresh(d);
 }
 
+/* A THEME SWITCH, which is the one thing that changes every colour
+ * under the decoration's feet without changing anything it caches
+ * (RFC 0030 roadmap 1). refresh() skips the bar redraw when width,
+ * focus and title are all as drawn -- correct, and exactly wrong here,
+ * because the palette is not one of the three. Invalidating
+ * drawn_width is what makes the next refresh() actually draw.
+ *
+ * The DOT SPRITES are shared and bake their colour in at creation, so
+ * they have to be remade globally rather than per window; the shadow
+ * sprites are black-with-alpha and carry no palette, so they are left
+ * alone. Remade into locals first and swapped in only if both
+ * succeed: a half-swapped pair would leave one control drawn in the
+ * old palette and, worse, a NULL sprite for the other -- the same
+ * commit-on-success rule the theme loader itself follows. */
+void novi_decor_retheme_shared(void) {
+	struct wlr_buffer *rest = make_dot(NOVI_TEXT_MUTED);
+	struct wlr_buffer *hover = make_dot(NOVI_TEXT_SECONDARY);
+	if (rest == NULL || hover == NULL) {
+		if (rest != NULL) {
+			wlr_buffer_drop(rest);
+		}
+		if (hover != NULL) {
+			wlr_buffer_drop(hover);
+		}
+		return;
+	}
+	if (dot_sprite[0] != NULL) {
+		wlr_buffer_drop(dot_sprite[0]);
+	}
+	if (dot_sprite[1] != NULL) {
+		wlr_buffer_drop(dot_sprite[1]);
+	}
+	dot_sprite[0] = rest;
+	dot_sprite[1] = hover;
+}
+
+void novi_decor_repaint(struct novi_decor *d) {
+	if (d == NULL) {
+		return;
+	}
+	d->drawn_width = -1;
+	refresh(d);
+}
+
 void novi_decor_set_focused(struct novi_decor *d, bool focused) {
 	if (d == NULL || focused == d->focused) {
 		return;

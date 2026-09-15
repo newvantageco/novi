@@ -1362,6 +1362,17 @@ palette is a runtime table loaded from a plain-text file.
   `while`, which has nowhere to put a second descriptor — so it got
   the prepare_read/read_events/cancel_read loop the others carry.
   A -1 watch fd needs no branch anywhere: `poll(2)` ignores it.
+- **The COMPOSITOR was the last surface still on the old palette, and
+  the worst one.** Server-side decorations are drawn by novi-shell,
+  which read the theme once at startup — so with every client
+  following a switch, each of their windows sat under a title bar in
+  the previous theme. On `paper` that is a dark bar on a white window,
+  drawn by the one program that cannot be told to restart. Two traps
+  in fixing it: `refresh()` skips the bar redraw when width, focus and
+  title are all as drawn (right, and exactly wrong here — the palette
+  is not one of the three), and the **control-dot sprites are shared**
+  and bake their colour in at creation, so they are remade ONCE before
+  any window is repainted and swapped in only if both succeed.
 - **The panel and the background follow a switch LIVE, by different
   mechanisms.** novi-panel already redraws at 1 Hz, so
   `novi_theme_reload()` is one `stat(2)` on a tick it had anyway; it

@@ -1367,7 +1367,16 @@ converge_key() {
             # the health service's /run/novi/health (RFC 0014).
             printf '%s\n' "$want" > "${THEME_ACTIVE}.new"
             mv "${THEME_ACTIVE}.new" "$THEME_ACTIVE"
-            info "theme '${want}' published; open windows keep the old palette until they restart"
+            # What this used to say -- "open windows keep the old
+            # palette until they restart" -- stopped being true when
+            # the clients with an event loop learned to follow a
+            # switch (RFC 0030 roadmap 1). Naming the exceptions is
+            # more useful than the old blanket warning and is the kind
+            # of sentence that rots, so it names a CLASS: a window is
+            # either long-lived and watching, or it is one of the
+            # short-lived ones that is about to be started again
+            # anyway.
+            info "theme '${want}' published; the desktop follows it live, and anything started fresh picks it up"
             ;;
         power.blank|power.suspend)
             case "$want" in

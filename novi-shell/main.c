@@ -429,6 +429,8 @@ struct novi_server {
 	 * it takes effect at the next idle period rather than needing the
 	 * session restarted. */
 	struct wl_event_source *idle_timer;
+	/* inotify on /run/novi, for a theme switch (RFC 0030 roadmap 1). */
+	int theme_fd;
 	int blank_after;
 	/* RFC 0035. Seconds of idleness before the machine suspends, 0
 	 * meaning never -- read from the same document on the same tick as
@@ -978,6 +980,41 @@ static void idle_notify_activity(struct novi_server *server) {
 		idle_set_outputs(server, true);
 		idle_publish(server);
 	}
+}
+
+/* A theme switch (RFC 0030 roadmap 1).
+ *
+ * The compositor was the LAST surface still showing the old palette
+ * once the clients learned to follow one: novi-bg, novi-panel,
+ * novi-files, novi-edit, novi-settings and novi-notifyd all repaint,
+ * and every one of their windows then sat under a title bar in the
+ * previous theme. On a light palette that is a dark bar on a white
+ * window -- the most conspicuous possible half-applied theme, drawn by
+ * the one program that cannot be told to restart because restarting it
+ * ends the session.
+ *
+ * This is the same watch every client uses (common/theme.c), attached
+ * to the compositor's own event loop rather than polled: novi-shell
+ * has an idle tick, but hanging this on it would mean up to five
+ * seconds of mismatch, and the tick exists to count idleness rather
+ * than to be a general timer.
+ *
+ * The shared dot sprites are remade ONCE and then every window is
+ * repainted, in that order -- a window repainted before the sprites
+ * are replaced would place the old ones. */
+static int theme_watch_fire(int fd, uint32_t mask, void *data) {
+	struct novi_server *server = data;
+	(void)mask;
+	if (!novi_theme_watch_drain(fd)) {
+		return 0;
+	}
+	novi_decor_retheme_shared();
+	struct novi_toplevel *t;
+	wl_list_for_each(t, &server->toplevels, link) {
+		novi_decor_repaint(t->decor);
+	}
+	wlr_log(WLR_INFO, "theme changed -- window decorations repainted");
+	return 0;
 }
 
 static int idle_timer_fire(void *data) {
@@ -4011,6 +4048,15 @@ int main(int argc, char *argv[]) {
 		wl_signal_add(&server.idle_inhibit_manager->events.new_inhibitor,
 			&server.new_idle_inhibitor);
 	}
+	/* The theme watch. -1 is not an error and needs no branch beyond
+	 * this one: the compositor is correct either way, it just will not
+	 * repaint its chrome until the session restarts. */
+	server.theme_fd = novi_theme_watch();
+	if (server.theme_fd >= 0) {
+		wl_event_loop_add_fd(wl_display_get_event_loop(server.wl_display),
+			server.theme_fd, WL_EVENT_READABLE, theme_watch_fire, &server);
+	}
+
 	idle_publish(&server);
 	server.idle_timer = wl_event_loop_add_timer(
 		wl_display_get_event_loop(server.wl_display), idle_timer_fire, &server);
