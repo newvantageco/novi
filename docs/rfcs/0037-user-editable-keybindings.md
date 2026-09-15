@@ -1,7 +1,6 @@
 # RFC 0037 — the keys are yours
 
-**Status:** Implemented (host checks green; **not yet run on a booted
-machine** — see "What was verified")
+**Status:** Implemented and verified on a booted machine
 **Depends on:** RFC 0001 (the compositor, and the promise this keeps),
 RFC 0002 (the config-first philosophy), RFC 0030 (the same
 load-a-table-at-startup shape)
@@ -190,10 +189,30 @@ missing skips itself exactly where it would have caught something.
 **On the build host:** the 111 checks above; both binaries
 cross-compiled clean at `-O2` with this project's hardening flags.
 
-**Not yet on a booted machine.** Nothing here has been through a real
-keypress: what a live run adds is the one thing the host cannot check,
-which is that the compositor's dispatch is reading the table the
-loader filled. Say that plainly until it has.
+**On a booted machine, done.** A live image with these five lines
+appended to the shipped `keys.conf`:
+
+```
+window.terminal = Super+Shift+T
+session.quit = off
+session.lock = Super+Q          # window.close already has it
+find.themes = Supper+T          # a typo
+window.teleport = Super+Z       # no such action
+```
+
+| | |
+|---|---|
+| the counts | `keys: 3 rebound, 2 line(s) not understood, 1 disabled for clashing (/etc/novi/keys.conf)` in the compositor's log — three because `off` is an override too |
+| the new key | **Super + Shift + T opened a terminal** (`foot`, pid 7554) |
+| the old key | **Super + Return did nothing** — no window, no process |
+| the sheet | Super+/ renders "Open a terminal — Super + Shift + T", "Lock the screen — (unbound)", "Quit the desktop — (unbound)", and "Change the colour theme — Super + T" (the typo'd line was refused, so its default stands) |
+| the warning | the search placeholder reads `keys.conf: 2 line(s) not understood, 1 binding(s) taken twice` |
+| **the escape hatch** | `novi.keys=off` bind-mounted over `/proc/cmdline` and novi-shell restarted: **no `keys:` line at all**, Super+Shift+T does nothing, and Super+Return opens a terminal again (a new pid — the old one went with the compositor) |
+
+The hatch was tested by bind-mounting a file over `/proc/cmdline`
+rather than by rebooting with an edited GRUB entry. That exercises
+every line of the reader and not the bootloader; the bootloader's half
+is the same `linux ...` line a person edits for `novi.state=off`.
 
 ## Consequences
 
