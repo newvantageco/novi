@@ -1747,6 +1747,26 @@ anything in it. The panel draws a bell and a count when there is.
   points at, not a wider buffer -- `novi_hist_unread()` counts lines
   in a file another program wrote, so a number wider than the list can
   hold is not a count of anything.
+- **CLEARING IS A SECOND MARKER, NOT A VERB ON THE SOCKET.** Ctrl+L
+  in the list writes `/run/novi/notifications.cleared` and the list
+  hides everything at or before it. A `clear` control message was the
+  obvious design and is wrong: that socket is world-writable by design
+  (RFC 0024), so it would let any process on the machine empty
+  somebody's notification list. A marker the READER owns cannot be
+  reached by a sender at all.
+- **Clearing writes BOTH markers.** `cleared` hides the rows; `seen`
+  has to move with it or the bell goes on counting entries the list no
+  longer shows.
+- **The clear mark is the newest entry the window LOADED**, never the
+  wall clock -- which is not reachable in that handler anyway, because
+  the Wayland event's `time` parameter shadows `time(3)` and is a
+  millisecond counter rather than a date. A notification arriving in
+  the same second and read by nobody must not be swept up.
+- **Dismissing ONE is not built on a timestamp**, and that is a
+  limit rather than laziness: a timestamp says "everything before
+  here" and cannot say "that one", and two notifications in the same
+  second share a `when`. It needs entry ids, which is a change to the
+  file two programs exchange.
 - **The host test's probe was wrong twice before the glyph was.** The
   bell's "rim is wider than the dome" check counted INKED COLUMNS,
   which on an outline glyph at the dome's centre row is two strokes --

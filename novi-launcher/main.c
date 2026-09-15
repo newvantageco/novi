@@ -365,6 +365,10 @@ struct novi_launcher {
 	 * marker is written once per session rather than once per
 	 * keystroke. */
 	int64_t notif_seen;
+	/* Everything at or before this has been cleared and is not shown.
+	 * Read once at startup and updated by Ctrl+L; the file is the
+	 * record, this is the copy the filter runs against. */
+	int64_t notif_cleared;
 	struct novi_clipboard *clipboard;
 	uint32_t last_key_serial;
 
@@ -1096,6 +1100,14 @@ static void rebuild_results(struct novi_launcher *state) {
 				if (h.when > newest) {
 					newest = h.when;
 				}
+				/* Cleared entries are not shown and do not count.
+				 * Tested BEFORE the search filter and after the
+				 * newest-seen bookkeeping above, so clearing hides a
+				 * row from every query rather than from the one
+				 * currently typed. */
+				if (h.when <= state->notif_cleared) {
+					continue;
+				}
 				if (state->input_len > 0 &&
 						!app_name_matches(h.summary, state->input) &&
 						!app_name_matches(h.body, state->input)) {
@@ -1606,7 +1618,7 @@ static void render(struct novi_launcher *state, uint32_t *px,
 			state->power_mode ? "End this session" :
 			state->symbol_mode ? "Search symbols" :
 			state->keys_mode ? keys_placeholder(state) :
-			state->notif_mode ? "Search notifications" :
+			state->notif_mode ? "Search notifications  --  Ctrl+L clears" :
 			"Search apps, or type a sum",
 			NOVI_PIX(NOVI_TEXT_MUTED));
 	} else {
@@ -1624,11 +1636,17 @@ static void render(struct novi_launcher *state, uint32_t *px,
 	 * notification mode needs this: every other mode's empty state is
 	 * "your query matched nothing", which the query itself explains. */
 	if (state->result_count == 0 && state->notif_mode) {
+		/* THREE answers now, not two: nothing has happened, the daemon
+		 * was never told anything, or you cleared the list yourself.
+		 * The third is the one a person is most likely to be looking
+		 * at, because they just pressed the key that caused it. */
 		const char *why = state->input_len > 0
 			? "No notification matches that"
-			: (access(NOVI_HIST_PATH, R_OK) == 0
-				? "Nothing has been notified yet"
-				: "No history yet -- novi-notifyd has not been told anything");
+			: (access(NOVI_HIST_PATH, R_OK) != 0
+				? "No history yet -- novi-notifyd has not been told anything"
+				: (state->notif_cleared > 0
+					? "Cleared -- nothing new since"
+					: "Nothing has been notified yet"));
 		novi_text_draw(card, state->font_row, TEXT_X,
 			list_top + (state->row_h - state->font_row->height) / 2 +
 				state->font_row->ascent,
@@ -1841,6 +1859,44 @@ static void keyboard_key(void *data, struct wl_keyboard *kb, uint32_t serial,
 
 	if (sym == XKB_KEY_Escape) {
 		state->running = false;
+		return;
+	}
+
+	/* Ctrl+L clears the notification list (RFC 0034 roadmap 2).
+	 *
+	 * Ctrl+L rather than Delete, which is the other obvious choice:
+	 * this is a window people open to READ, and a bare key that
+	 * throws the contents away is a key somebody will hit by accident
+	 * while reaching for something else. Ctrl+L is also what clears a
+	 * terminal, which is the nearest thing anybody already knows.
+	 *
+	 * It writes both markers. `cleared` is what hides the rows; `seen`
+	 * has to move with it or the panel's bell would go on counting
+	 * entries this window no longer shows -- two readers disagreeing
+	 * about the same list, which is the failure that whole pair of
+	 * files exists to avoid. */
+	if (state->notif_mode && (sym == XKB_KEY_l || sym == XKB_KEY_L) &&
+			state->xkb_state != NULL &&
+			xkb_state_mod_name_is_active(state->xkb_state, XKB_MOD_NAME_CTRL,
+				XKB_STATE_MODS_EFFECTIVE) > 0) {
+		/* The newest entry this window has actually seen, never the
+		 * wall clock -- which is not reachable here anyway, because
+		 * the event's own `time` parameter shadows time(3) and is a
+		 * millisecond counter rather than a date. That is the right
+		 * mark regardless: clearing must not hide a notification that
+		 * arrives in the same second and has been read by nobody.
+		 *
+		 * Zero means the window loaded no entries, so there is
+		 * nothing to clear and nothing to write. */
+		if (state->notif_seen > 0) {
+			state->notif_cleared = state->notif_seen;
+			(void)novi_hist_seen_write(NOVI_HIST_CLEARED_PATH,
+				state->notif_cleared);
+			(void)novi_hist_seen_write(NOVI_HIST_SEEN_PATH,
+				state->notif_cleared);
+			rebuild_results(state);
+			surface_draw_frame(state);
+		}
 		return;
 	}
 
@@ -2058,6 +2114,7 @@ int main(int argc, char *argv[]) {
 	 * was compiled (RFC 0037). */
 	novi_keys_defaults(&state.keys);
 	novi_keys_load(&state.keys, NOVI_KEYS_PATH);
+	state.notif_cleared = novi_hist_seen_read(NOVI_HIST_CLEARED_PATH);
 	state.themes_mode = argc > 1 && strcmp(argv[1], "--themes") == 0;
 	state.notif_mode = argc > 1 && strcmp(argv[1], "--notifications") == 0;
 	/* Notifications use the sheet's shorter row: these are lines of

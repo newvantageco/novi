@@ -263,7 +263,46 @@ the count following the machine rather than a flag that latches.
 
 1. ~~**A panel indicator**~~ — **done**, see decision 11. The notion of
    "read" it needed turned out to be one timestamp.
-2. **Dismiss, and clear all.** Both mean writing to the daemon, which
-   means the socket gains a direction it does not have.
+2. ~~**Clear all.**~~ **Done** — and *not* by giving the daemon a
+   direction. **Ctrl+L** in `novi-launcher --notifications` writes
+   `/run/novi/notifications.cleared`, and the list hides everything at
+   or before that timestamp.
+
+   A control message on the socket was the obvious design and is the
+   wrong one: that socket is **world-writable by design** (decision in
+   RFC 0024 — an unprivileged program has as much business notifying
+   as root does, and there is no session bus to arbitrate), so a
+   `clear` verb would let any process on the machine empty somebody's
+   notification list. A marker file the *reader* owns costs one line,
+   adds nothing to the daemon, and cannot be reached by a sender at
+   all. It is the seen marker's shape, and it uses the same two
+   functions: this pair is "a timestamp in a file", not two mechanisms
+   that happen to look alike.
+
+   It writes **both** markers. `cleared` hides the rows; `seen` has to
+   move with it or the panel's bell would go on counting entries this
+   window no longer shows — two readers disagreeing about one list,
+   which is the failure that pair of files exists to prevent.
+
+   The mark is the newest entry **this window loaded**, never the wall
+   clock, so a notification arriving in the same second and read by
+   nobody is not swept up. (The wall clock is not even reachable in
+   that handler: the Wayland event's own `time` parameter shadows
+   `time(3)`, and it is a millisecond counter rather than a date. The
+   compiler said so.)
+
+   Ctrl+L rather than Delete: this is a window people open to READ,
+   and a bare key that throws the contents away is one somebody will
+   hit while reaching for something else. Ctrl+L is also what clears a
+   terminal. The placeholder says so, because a key nobody can find is
+   a key nobody has.
+
+   **Dismissing ONE is deliberately not built on this.** A timestamp
+   can say "everything before here"; it cannot say "that one", and the
+   record format has no identity to name — two notifications in the
+   same second share a `when`. Doing it properly means giving entries
+   ids, which changes the file two programs exchange; doing it
+   improperly means a dismiss that sometimes takes its neighbour with
+   it.
 3. **Persistence across a restart**, if it turns out to be wanted. It
    is a `/var` file and a decision about how long is long enough.

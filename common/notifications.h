@@ -111,9 +111,33 @@ bool novi_hist_publish(const struct novi_history *h, const char *path);
  */
 #define NOVI_HIST_SEEN_PATH "/run/novi/notifications.seen"
 
+/* And where "I have dealt with everything up to here" is recorded.
+ *
+ * A SECOND MARKER RATHER THAN A VERB ON THE SOCKET, and that is the
+ * whole design. Clearing could have been a control message to
+ * novi-notifyd -- but that socket is world-writable by design (RFC
+ * 0024: an unprivileged program has as much business notifying as root
+ * does, and there is no session bus to arbitrate), so a clear verb
+ * would let any process on the machine empty your notification list.
+ * A marker file the reader owns costs one line, adds nothing to the
+ * daemon, and cannot be reached by a sender at all.
+ *
+ * It is the same shape as the seen marker above, and it uses the same
+ * two functions: this pair is "a timestamp in a file", not two
+ * different mechanisms that happen to look alike.
+ *
+ * DISMISSING ONE is deliberately not built on this. A timestamp can
+ * say "everything before here"; it cannot say "that one", and the
+ * record format has no identity to name -- two notifications in the
+ * same second share a `when`. Doing it properly means giving entries
+ * ids, which is a change to the file two programs exchange; doing it
+ * improperly means a dismiss that sometimes takes its neighbour with
+ * it. */
+#define NOVI_HIST_CLEARED_PATH "/run/novi/notifications.cleared"
+
 /* The marker, or 0 when there is none -- which is the right answer for
  * a machine where the list has never been opened: everything is
- * unread. */
+ * unread. Used for both markers; `path` is which one. */
 int64_t novi_hist_seen_read(const char *path);
 
 /* Writes the marker, temp-and-rename like the history itself. */

@@ -699,7 +699,8 @@ BUG_REPORT_URL="https://github.com/newvantageco/novi/issues"
       will actually fire (RFC 0037)
 - [x] Unread notifications — a bell and a count on the panel while
       something has happened that the list has not been opened since.
-      Super+N opens it and the bell goes out (RFC 0034)
+      Super+N opens it and the bell goes out; Ctrl+L clears it
+      (RFC 0034)
 - [x] ...and saying so — a coffee cup on the panel while anything is
       holding the machine awake, and an `idle` object in
       `novi-agent describe` so an automated actor can ask why a machine
