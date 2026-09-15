@@ -62,6 +62,21 @@ make_copy() {
 }
 make_copy "${TMP}/slow"
 make_copy "${TMP}/unlocked"
+# A fourth copy with need_root removed and NO pause: the lock-lifecycle
+# checks below want a plain, fast write.
+#
+# THEY USED THE SHIPPED SCRIPT AT FIRST, AND CI CAUGHT IT. This
+# container is root, so `novi-state set` ran; a CI runner is not, so
+# need_root refused, the write never happened and the stale lock was
+# never cleared -- two checks failing for a reason that has nothing to
+# do with locking. Worse, the "a live holder is obeyed" check PASSED
+# there for the wrong reason: it expects the command to fail, and
+# need_root failed it. A check that cannot tell why it passed is the
+# thing this repository keeps finding in its own tests. Same doctoring
+# test-state-packages.sh already does, and for the same reason: what is
+# under test is the write path, not the privilege check.
+sed 's|^    need_root$|    :|' packages/novi-state > "${TMP}/plain"
+chmod +x "${TMP}/plain"
 # Remove the lock from the second copy: state_lock becomes a no-op.
 sed -i 's|^state_lock() {$|state_lock() { return 0; }\nunused_state_lock() {|' "${TMP}/unlocked"
 
@@ -126,7 +141,7 @@ mkdir -p "${TMP}/conf.lock"
 printf '1 %s\n' "$$" > "${TMP}/conf.lock/owner"
 did
 NOVI_STATE_LOCK_TIMEOUT=3 NOVI_STATE_FILE="${TMP}/conf" \
-    "${SH[@]}" packages/novi-state set hostname after-stale >/dev/null 2>&1 \
+    "${SH[@]}" "${TMP}/plain" set hostname after-stale >/dev/null 2>&1 \
     || note "a lock from an earlier boot blocked a write"
 did
 grep -q 'hostname = after-stale' "${TMP}/conf" \
@@ -143,7 +158,7 @@ printf '%s 4194304\n' "$(sed -n 's/^btime //p' /proc/stat | head -1)" \
     > "${TMP}/conf.lock/owner"
 did
 NOVI_STATE_LOCK_TIMEOUT=3 NOVI_STATE_FILE="${TMP}/conf" \
-    "${SH[@]}" packages/novi-state set hostname after-dead >/dev/null 2>&1 \
+    "${SH[@]}" "${TMP}/plain" set hostname after-dead >/dev/null 2>&1 \
     || note "a lock held by a dead process blocked a write"
 did
 grep -q 'hostname = after-dead' "${TMP}/conf" \
@@ -161,7 +176,7 @@ printf '%s %s\n' "$(sed -n 's/^btime //p' /proc/stat | head -1)" "$holder" \
     > "${TMP}/conf.lock/owner"
 did
 if NOVI_STATE_LOCK_TIMEOUT=2 NOVI_STATE_FILE="${TMP}/conf" \
-       "${SH[@]}" packages/novi-state set hostname stolen >/dev/null 2>&1; then
+       "${SH[@]}" "${TMP}/plain" set hostname stolen >/dev/null 2>&1; then
     note "a live holder's lock was taken anyway"
 fi
 did
