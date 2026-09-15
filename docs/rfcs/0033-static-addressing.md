@@ -213,5 +213,35 @@ Two things worth recording from the run:
 2. **More than one address**, and more than one interface. Both wait
    on RFC 0009's per-interface work rather than growing a second
    answer beside it.
-3. **A GUI for it.** `novi-settings`' Network panel does WiFi; the
-   wired half is a text file today.
+3. ~~**A GUI for it.** `novi-settings`' Network panel does WiFi; the
+   wired half is a text file today.~~ **This item was stale when it
+   was written, and the correction is more useful than the feature.**
+
+   The wired half is not a text file. `novi-settings`' **System**
+   panel lists every declared key and gained an inline value editor,
+   so `network.dhcp`, `network.interface`, `network.address`,
+   `network.gateway` and `network.dns` are all there and all editable
+   with `e` — screendumped on a booted machine, five consecutive rows,
+   under a status line that says *"Space toggles, e edits, Enter
+   applies"*. The write goes through `novi-state set` like every other
+   row.
+
+   So a Wired section in the Network panel would add **no capability**
+   — it would be a second path to keys the GUI already reaches, which
+   is exactly the test RFC 0029 decision 10 sets for a new verb and
+   the reason `firewall.allow` was rejected there. What it would add
+   is discoverability, and that is real: somebody looking for network
+   settings opens the Network panel, not a flat list of twenty-nine
+   keys. But that is an argument for *how the System panel groups
+   itself*, not for a second writer.
+
+   The WiFi panel is not the counter-example it looks like. It exists
+   because joining a network needs a **passphrase**, which is
+   deliberately not a `system.conf` key (RFC 0009: configuration is
+   declared, secrets are not) — so there was no other path. A wired
+   address has no secret in it.
+
+   Left open as a presentation question, not a capability one: **should
+   the System panel group by domain** rather than listing the document
+   in file order? That would serve the discoverability argument without
+   a second writer anywhere.

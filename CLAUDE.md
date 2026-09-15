@@ -2467,6 +2467,19 @@ no DHCP server could not be given an address by the document at all.
   `novi-agent describe`'s `address` field now — "what did you declare"
   and "what is on the wire" are different questions, and an agent
   asking a machine what it is wants the second.
+- **THE WIRED HALF WAS NEVER "a text file", and RFC 0033's own
+  roadmap said it was.** The System panel lists every declared key and
+  edits values inline, so `network.dhcp`, `.interface`, `.address`,
+  `.gateway` and `.dns` have been reachable from the GUI since that
+  editor landed — five consecutive rows, screendumped. A Wired section
+  in the Network panel would be a second write path to keys the GUI
+  already reaches: RFC 0029 decision 10's test, which `firewall.allow`
+  failed for the same reason. The WiFi panel is not the counter-example
+  it looks like — it exists because a passphrase is deliberately not a
+  `system.conf` key, so there was no other path. **Third roadmap item
+  in this repository found to be wrong about what is already built**,
+  after RFC 0002's `packages.*` and RFC 0030's "a re-render is not one
+  function call". Check the code before believing an item.
 - **`novi-state apply | tail -5` reports `tail`'s status.** A refusal
   test read `exit=0` from that pipeline and nearly concluded `apply`
   swallowed the failure; it exits 1. This file already records the
