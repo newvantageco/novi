@@ -86,7 +86,7 @@ ${BUILD_DIR}/openssl-target      headers + libraries, for LINKING
 ${BUILD_DIR}/stage-devtools/openssl   the package
 ```
 
-Never `${ROOTFS}`, per decision 1. `38-python.sh` points
+Never `${ROOTFS}`, per decision 1. `41-python.sh` points
 `--with-openssl` at the first, and the second is published by
 `53-devtools-repo.sh` with no change to that stage — it already globs
 every staged directory carrying a `MANIFEST`.
@@ -134,7 +134,7 @@ same reason. After the fix: `{'x509': 143, 'crl': 0, 'x509_ca': 143}`.
 
 ### 5. A missing `_ssl` is a hard build failure now.
 
-RFC 0026 built `38-python.sh`'s missing-module check as a *warning*,
+RFC 0026 built `41-python.sh`'s missing-module check as a *warning*,
 because CPython's optional-module list shifts between point releases
 and a build that stops over `_dbm` would be worse than one that says
 so. `_ssl` and `_hashlib` are the exception: they are the entire reason

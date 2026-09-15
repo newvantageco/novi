@@ -158,6 +158,23 @@ OPENSSL_VERSION="3.5.8"
 # multi-minute build for no gain.
 PYTHON_VERSION="3.11.16"
 
+# ncurses and readline (RFC 0026 roadmap 2), for the Python REPL and
+# for `curses`. Packages, like everything else a developer installs.
+#
+# THE TERMINFO DATABASE IS NOT SHIPPED. Upstream's is ~7 MB of entries
+# for terminals nobody here has ever seen; `--with-fallbacks` compiles a
+# named few straight into the library, so a lookup needs no files at
+# all. See build/40-ncurses.sh for which names and why each one.
+#
+# readline is GPL-3.0-or-later where CPython's own licence is
+# permissive, so it ships as its own shared library with its COPYING
+# beside it and CPython's `readline` module links it dynamically --
+# the arrangement every distribution uses, and the same obligation
+# RFC 0031 had to learn about the OFL fonts: the licence travels with
+# the thing.
+NCURSES_VERSION="6.5"
+READLINE_VERSION="8.2"
+
 # Full-disk encryption (RFC 0018). The kernel has had CONFIG_DM_CRYPT
 # since the config was written and nothing could create a container.
 # Five upstreams, all small, all built static: cryptsetup links them and

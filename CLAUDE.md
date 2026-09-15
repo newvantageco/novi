@@ -116,7 +116,12 @@ below for why `/build` is hardcoded and unrelated to the repo checkout path.
   for the target. Never `${ROOTFS}`: the base image still ships no TLS
   library, and `novi-verify` is still static TweetNaCl. It exists
   because CPython's `ssl` accepts no other implementation
-- `bash build/38-python.sh` — CPython, cross-compiled against musl and
+- `bash build/40-ncurses.sh [ncurses|readline|package|all]` — ncurses
+  and GNU readline (RFC 0026 roadmap 2), into `/build/ncurses-target`
+  for linking and into their own packages. **Must run before
+  `41-python.sh`**: CPython decides at configure time whether
+  `readline` and `_curses` exist and says nothing afterwards
+- `bash build/41-python.sh` — CPython, cross-compiled against musl and
   staged into `/build/stage-devtools` for `53-devtools-repo.sh` to
   publish (RFC 0026). A package, never base. It reads zlib, libffi and
   expat out of `${ROOTFS}`, so it must run before
@@ -126,7 +131,7 @@ below for why `/build` is hardcoded and unrelated to the repo checkout path.
 - `bash build/15-novi-state.sh` also installs `/usr/lib/novi/json.sh`
   and `novi-agent` (RFC 0029) — the agent interface is base image, not
   a package
-- `bash build/39-novi-recon.sh` — `novi-recon` (RFC 0028), the recon
+- `bash build/42-novi-recon.sh` — `novi-recon` (RFC 0028), the recon
   tool. Nothing to compile: it is a Python script, which is the point.
   It runs the host test suite and parses the script with the target's
   exact major.minor before packaging — a syntax error in Python is a
@@ -855,7 +860,7 @@ package — the first scripting language this system has ever had.
   it.
 - **CPython prints missing modules and exits 0.** Correct for a
   language that runs everywhere, and exactly the failure shape this
-  repo keeps getting caught by. `38-python.sh` diffs that list against
+  repo keeps getting caught by. `41-python.sh` diffs that list against
   the set it expects and reports the rest loudly — not fatally, since
   the module list shifts between point releases. Its first version
   reported twelve words of English as missing modules: the block ends
@@ -877,6 +882,104 @@ package — the first scripting language this system has ever had.
   QEMU launcher pointed at a five-day-old `/build/initramfs.cpio.gz`
   rather than the `build/initramfs.cpio.gz` just written in the repo.
   The old image had the bug; the shipped one does not.
+
+## Architecture: the up-arrow, and the three layers under it
+
+RFC 0026 roadmap 2. `pkg install python` now brings `ncurses` and
+`readline`, and the REPL has line editing, history and `curses`.
+
+- **THIS WAS THREE PROBLEMS, NOT ONE, and the third was invisible.**
+  ncurses and readline did not exist; no terminfo existed; and
+  **nothing set `TERM`** — measured on a booted machine, `echo $TERM`
+  on the console printed nothing at all, for the life of the project.
+  The gettys pass a TERMTYPE argument now (`getty 38400 tty1 linux`,
+  `getty 115200 ttyS0 vt100`) — base content, one word each, and
+  nothing to do with the package.
+- **WHAT AN EMPTY `TERM` COSTS WAS WRITTEN INTO FOUR DOCUMENTS BEFORE
+  IT WAS MEASURED, AND IT WAS WRONG.** The claim was that the REPL
+  would still print `^[[A`. It does not: readline's arrow keys are
+  COMPILED-IN bindings rather than terminfo-derived, so history recall
+  survives an empty TERM — checked both ways on a booted machine,
+  which is the only reason it was caught. What does not survive is
+  `curses`: `setupterm()` fails outright with *"could not find
+  terminfo database"*, so half of what this item is for cannot work at
+  all, and readline gets no cursor capabilities either
+  (`tigetstr("cuu1")` returns nothing), which costs redisplay on a
+  resize and multi-line editing rather than basic recall. Right in
+  direction, wrong in mechanism — and a mechanism stated confidently
+  is what someone later reasons from. **Measure before writing it
+  down, not after.**
+- **THE TERMINFO DATABASE IS NOT SHIPPED.** Upstream's is ~7 MB of
+  entries for terminals nobody here has ever seen.
+  `--with-fallbacks` compiles a named few into the library and
+  `--disable-db-install` keeps the rest out. What that costs is exact:
+  **a TERM with no fallback gets NOTHING** — ncurses fails to
+  initialise rather than degrading — so the list is the terminals this
+  system produces plus the ones a person arriving over ssh announces
+  (`linux foot xterm-256color screen-256color tmux-256color vt100
+  dumb`). The two halves are coupled: changing a getty's TERMTYPE
+  without changing that list gives a description that cannot be found.
+- **foot's entry is DERIVED, not copied.** This build host has no
+  `foot` terminfo (`infocmp foot` fails), so the fallback generator
+  would have produced nothing for the one terminal this desktop ships.
+  foot's own source carries `foot.info` as a meson template with
+  `@default_terminfo@` placeholders; the stage substitutes it, `tic`s
+  it into a private database and points the generator at that. A
+  hand-copied entry would be a second copy of foot's capabilities to
+  keep in sync with foot.
+- **A NEW STAGE HAD TO GO BEFORE AN EXISTING ONE, AND THE FREE RANGE
+  IS AT THE END.** CPython detects readline and ncurses at CONFIGURE
+  time, so this had to precede the Python stage; 01–39 were all taken
+  and the free 40–49 sits after it. That is a gap in the numbering
+  rule rather than a violation: the rule protects the 49/50 boundary
+  between content and packaging and says nothing about ordering
+  WITHIN content. python moved 38 → 41, novi-recon 39 → 42, ncurses
+  took 40. Four files mentioned either number — the "about thirty
+  files" warning is about the PACKAGING stages, which are named all
+  over the prose; two content stages are cheap.
+- **readline is GPL-3.0-or-later and CPython's licence is not.** It
+  ships as its own shared library, unmodified from the pinned
+  tarball, with its `COPYING` in the package, and CPython's `readline`
+  module links it dynamically — what every distribution does. The
+  obligation is the one RFC 0031 learned about the OFL fonts: **the
+  licence travels with the thing.** ncurses' ships the same way.
+  libedit (BSD) was the alternative and was rejected: its readline
+  emulation is incomplete in ways that produce a REPL which ALMOST
+  works, which is the failure this item exists to end.
+- **`readline`, `_curses` and `_curses_panel` came OFF
+  `EXPECTED_MISSING`**, and that list is why it matters: it is what
+  the build expects to be absent, so a name on it is a name nobody
+  looks at. They also get a HARD check now — the sweep only warns, by
+  design, because the module list shifts between point releases, and
+  these three are the whole point of the stage.
+- **Four things in this stage were assumed instead of read, and each
+  one built cleanly first.** `libtinfow.so*` (the name a
+  `--with-termlib=tinfo` build does not use); a `libform w.so*` with a
+  space in it; `ncursesw/curses.h` (this build puts `curses.h` at the
+  top of the include directory); and two `ln -sf` lines "fixing up"
+  unsuffixed names, one of which **replaced a correct
+  `libtinfo.so` with a dangling link** and made readline fail on
+  `cannot find -ltinfow` — a library the stage had invented. The
+  terminal library's name is read out of ncurses' own `tinfo.pc` now,
+  and the header is found rather than named.
+- **A WILDCARD THAT MATCHES NOTHING IS SILENT, and counting files does
+  not catch it.** The package step checked that the total was above
+  zero and passed with THREE of five patterns matching nothing — so
+  `ncurses` shipped without `libtinfo`, the library `libreadline.so`
+  NEEDs. Every pattern is checked individually now. Same bug as the
+  tar extraction that shipped 393 MB of firmware with no iwlwifi.
+- **The fallback check read the generator's INTENT, not its result.**
+  `MKfallback.sh` writes a `fallback entries for: ...` comment
+  straight from its argument list, so a name it failed to produce
+  still appears there. What only a real entry produces is an
+  `<name>_alias_data[] = "<name>|..."` line. The first version looked
+  for the bare name in quotes and reported all seven missing on a
+  build where all seven were present — the data reads
+  `"linux|Linux console"`, not `"linux"`.
+- **readline's `make install` leaves `libreadline.so.8.2.old`
+  behind.** Dead weight is not inert (RFC 0007): it is bytes on every
+  machine that installs this, and a second copy of a library for
+  anything that reads the directory.
 
 ## Architecture: novi-recon, and a licence that ended a plan
 
@@ -929,7 +1032,7 @@ breached-password check and a TCP connect scan.
   are built and parsed back; every verdict is a table. `whois_chain`
   takes an `ask` callable purely so the referral chase is testable
   without the internet.
-- **A syntax error in Python is a runtime error.** `39-novi-recon.sh`
+- **A syntax error in Python is a runtime error.** `42-novi-recon.sh`
   parses the script with the target's exact major.minor before
   packaging, because otherwise the package builds, installs, signs and
   verifies perfectly and dies at the first invocation.

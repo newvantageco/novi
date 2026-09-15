@@ -323,6 +323,15 @@ fetch "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VE
 # CPython (RFC 0026). A package, like every other developer tool here.
 fetch "https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tar.xz"
 
+# ncurses and readline (RFC 0026 roadmap 2). A REPL where the up-arrow
+# prints ^[[A is a visibly unfinished interpreter, and `curses` is how a
+# large class of terminal tooling draws. Both are built in
+# build/40-ncurses.sh, which must run BEFORE 41-python.sh: CPython
+# detects them at configure time and builds `readline` and `_curses` as
+# extension modules or does not build them at all.
+fetch "https://invisible-mirror.net/archives/ncurses/ncurses-${NCURSES_VERSION}.tar.gz"
+fetch "https://ftp.gnu.org/gnu/readline/readline-${READLINE_VERSION}.tar.gz"
+
 # Full-disk encryption (RFC 0018). popt and json-c are cryptsetup's
 # hard dependencies; util-linux and LVM2 are enormous trees fetched for
 # exactly one library each (libuuid, libdevmapper) -- see

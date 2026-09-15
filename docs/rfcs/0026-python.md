@@ -50,7 +50,7 @@ between minors, so a 3.12 host genuinely cannot build a 3.11 target.
 range of hosts this project asks people to build on have as a distro
 package. Choosing a newer minor would mean building a native CPython
 first: a second multi-minute build, for a language version difference
-nobody asked for. `38-python.sh` checks for `python3.11` up front and
+nobody asked for. `41-python.sh` checks for `python3.11` up front and
 says `apt-get install python3.11` if it is absent, for the same reason
 `05-kernel.sh` checks for `depmod` and `06-wayland.sh` checks for
 `mako` — an unmet build-host dependency should not surface three
@@ -161,7 +161,7 @@ something, and nothing says so at a moment anyone is reading. `import
 ssl` failing is a five-line fix at build time and an afternoon at use
 time.
 
-So `38-python.sh` parses that paragraph and compares it against the set
+So `41-python.sh` parses that paragraph and compares it against the set
 this build *expects* to be missing, printing anything else loudly. Not
 a hard failure — CPython's module list shifts between point releases,
 and a build that stops because `_dbm` moved would be worse than one
@@ -252,12 +252,83 @@ running the artifact you think it is.
    **Done: RFC 0027.** OpenSSL as a package, CPython rebuilt against
    it, and the verification triple run from the interpreter against a
    local TLS server.
-2. **ncurses and readline.** A REPL where the up-arrow prints `^[[A` is
-   a visibly unfinished interpreter, and `curses` is how a large class
-   of terminal tooling draws. Two small autotools builds; the only
-   design question is how much of ncurses' 7 MB terminfo database to
-   ship (`--with-fallbacks` for `linux`, `xterm-256color` and `foot` is
-   probably the whole answer).
+2. ~~**ncurses and readline.**~~ **Done** — `build/40-ncurses.sh`, and
+   `pkg install python` brings both.
+
+   **It was three problems, and the third was invisible.** The item
+   above names two of them and guessed right about the design
+   question; what it missed is that **nothing set `TERM`**. Measured
+   on a booted machine before any of this was built: `echo $TERM` on
+   the console printed nothing at all, and had for the life of the
+   project. The gettys pass a TERMTYPE argument now
+   (`getty 38400 tty1 linux`, `getty 115200 ttyS0 vt100`), which is
+   base content and nothing to do with the package.
+
+   **What an empty TERM costs was written into four documents before
+   it was measured, and it was wrong.** The claim was that the REPL
+   would still print `^[[A`. It does not — readline's arrow keys are
+   *compiled-in* bindings rather than terminfo-derived, so history
+   recall survives an empty TERM. Checked both ways on a booted
+   machine, which is the only reason it was caught. What does not
+   survive is `curses`: `setupterm()` fails outright with *"could not
+   find terminfo database"*, so half of what this item is for cannot
+   work at all, and readline gets no cursor capabilities either
+   (`tigetstr("cuu1")` returns nothing) — which costs redisplay on a
+   resize and multi-line editing, not basic recall. Right in
+   direction, wrong in mechanism; and a mechanism stated confidently
+   is what somebody later reasons from.
+
+   **The database is not shipped, and what that costs is exact.**
+   `--with-fallbacks` compiles a named set into the library and
+   `--disable-db-install` keeps the other ~7 MB out. A TERM with no
+   fallback then gets **nothing** — ncurses fails to initialise rather
+   than degrading — so the list is the terminals this system produces
+   plus the ones a person arriving over ssh announces: `linux`,
+   `foot`, `xterm-256color`, `screen-256color`, `tmux-256color`,
+   `vt100`, `dumb`. The two halves are coupled: changing a getty's
+   TERMTYPE without changing that list gives a terminal description
+   that cannot be found.
+
+   **foot's entry is derived, not copied.** This build host has no
+   `foot` terminfo (`infocmp foot` fails), so the fallback generator
+   would have produced nothing for the one terminal this desktop
+   ships. foot's own source carries `foot.info` as a meson template;
+   the stage substitutes it, compiles it into a private database and
+   points the generator at that.
+
+   **readline is GPL-3.0-or-later where CPython's licence is
+   permissive.** It ships as its own shared library, unmodified from
+   the pinned tarball, with its `COPYING` in the package, and
+   CPython's `readline` module links it dynamically — what every
+   distribution does. The obligation is the one RFC 0031 learned about
+   the OFL fonts: the licence travels with the thing. libedit (BSD)
+   was the alternative and was rejected: its readline emulation is
+   incomplete in ways that produce a REPL which *almost* works, which
+   is the failure this item exists to end.
+
+   **A new stage had to precede an existing one, and the free range is
+   at the end.** CPython detects both at configure time, so this had
+   to run before the Python stage; 01–39 were taken and 40–49 sits
+   after it. That is a gap in the numbering rule rather than a
+   violation of it — the rule protects the 49/50 boundary between
+   content and packaging and says nothing about ordering *within*
+   content. python moved 38 → 41, novi-recon 39 → 42, ncurses took 40.
+
+   **Four things in the first draft were assumed rather than read, and
+   each built cleanly.** `libtinfow.so*`, a `libform w.so*` with a
+   space in it, `ncursesw/curses.h` (this build puts `curses.h` at the
+   top of the include directory), and two `ln -sf` lines "fixing up"
+   unsuffixed names — one of which replaced a correct `libtinfo.so`
+   with a dangling link, so readline failed on `cannot find -ltinfow`,
+   a library the stage had invented. Names are read out of ncurses'
+   own `tinfo.pc` now and headers are found rather than named. Two
+   checks were wrong in the same way: the package step counted files
+   and passed with **three of five patterns matching nothing** (so
+   `ncurses` shipped without the terminal library `libreadline.so`
+   NEEDs), and the fallback check read the generator's *intent* — the
+   `fallback entries for:` comment, written straight from its argument
+   list — rather than the `<name>_alias_data[]` lines only a real
+   entry produces.
 3. **sqlite3**, which is what most local-state Python assumes exists.
 4. **A way to install Python code.** `pkg` handles Novi's own packages;
    there is no story at all for third-party Python, and pip cannot be
