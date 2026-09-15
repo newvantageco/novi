@@ -45,6 +45,15 @@ def check(name, got, want):
         FAILURES.append(f"{name}\n     got:  {got!r}\n     want: {want!r}")
 
 
+def _raises(fn, *a):
+    """The exception a call produced, or None. For asserting its TYPE."""
+    try:
+        fn(*a)
+    except BaseException as e:                               # noqa: BLE001
+        return e
+    return None
+
+
 def check_raises(name, exc, fn, *a):
     try:
         fn(*a)
@@ -621,6 +630,341 @@ check("a sweep with four of five down still exits 0",
 check("a sweep where nothing answered exits 1",
       _main_status({n: R.Fail("down") for n in ALL}), 1)
 
+
+# ─────────────────────────────────────────────────────────────────────
+# The DER walk (RFC 0028 roadmap 4)
+#
+# `_ssl.Certificate.get_info()` returns no extensions, so the one CT
+# question a recon tool wants to ask cannot be answered from anything
+# the standard library exposes -- hence a walk of the certificate's own
+# bytes, and hence this. Certificates are BUILT here and parsed back,
+# the same argument the DNS section makes: a real CA never serves a
+# truncated length or an indefinite one, and those are exactly the
+# cases where the difference between a typed error and a traceback is
+# a recon sweep that stops three checks in.
+
+
+def _der(tag, body):
+    if len(body) < 0x80:
+        return bytes([tag, len(body)]) + body
+    n = (len(body).bit_length() + 7) // 8
+    return bytes([tag, 0x80 | n]) + len(body).to_bytes(n, "big") + body
+
+
+def _sct_list(sizes):
+    """A TLS SignedCertificateTimestampList holding len(sizes) entries."""
+    body = b"".join(s.to_bytes(2, "big") + b"\xAA" * s for s in sizes)
+    return len(body).to_bytes(2, "big") + body
+
+
+def _ext(oid_body, value_der):
+    return _der(0x30, _der(0x06, oid_body) + _der(0x04, value_der))
+
+
+def _cert(tbs_fields, exts=None):
+    inner = b"".join(tbs_fields)
+    if exts is not None:
+        inner += _der(0xA3, _der(0x30, b"".join(exts)))
+    tbs = _der(0x30, inner)
+    return _der(0x30, tbs + _der(0x30, b"") + _der(0x03, b"\x00"))
+
+
+SCT_EXT = lambda n: _ext(R.SCT_OID_DER, _der(0x04, _sct_list([40] * n)))
+OTHER_OID = bytes((0x55, 0x1D, 0x0F))          # 2.5.29.15, key usage
+
+# The count, for a list a CA would actually produce.
+for n in (1, 2, 3, 5):
+    check(f"{n} embedded SCT(s) counted",
+          R.count_scts(_cert([_der(0x02, b"\x01")], [SCT_EXT(n)])), n)
+
+# Entries of DIFFERENT sizes, because a real list has them: the SCTs
+# from two logs are not the same length, and a counter that assumed one
+# stride would be right on the fixtures and wrong on the internet.
+check("entries of unequal size are counted, not assumed uniform",
+      R.count_scts(_cert([_der(0x02, b"\x01")],
+                         [_ext(R.SCT_OID_DER, _der(0x04, _sct_list([40, 63, 119])))])), 3)
+
+# NONE IS NOT ZERO. "No CT extension" and "a CT extension holding an
+# empty list" are different things a CA did.
+check("a certificate with no extensions at all",
+      R.count_scts(_cert([_der(0x02, b"\x01")])), None)
+check("extensions, but no CT one",
+      R.count_scts(_cert([_der(0x02, b"\x01")],
+                         [_ext(OTHER_OID, _der(0x04, b"\x00"))])), None)
+check("the CT extension beside others is still found",
+      R.count_scts(_cert([_der(0x02, b"\x01")],
+                         [_ext(OTHER_OID, _der(0x04, b"\x00")),
+                          SCT_EXT(2),
+                          _ext(bytes((0x55, 0x1D, 0x13)), _der(0x04, b"\x00"))])), 2)
+
+# THE ASSERTION THIS WALK EXISTS FOR. Finding the OID's bytes anywhere
+# inside the certificate would be a heuristic wearing a fact's clothes.
+# Here they sit in the SERIAL NUMBER, where a substring search reports
+# SCTs on a certificate that has none.
+poisoned = _cert([_der(0x02, b"\x01" + R.SCT_OID_DER + b"\x02")],
+                 [_ext(OTHER_OID, _der(0x04, b"\x00"))])
+check("the OID inside a serial number is not an SCT extension",
+      R.count_scts(poisoned), None)
+check("...and the same bytes as a real extension still are",
+      R.count_scts(_cert([_der(0x02, b"\x01" + R.SCT_OID_DER + b"\x02")],
+                         [SCT_EXT(4)])), 4)
+
+# A long-form length, which every real certificate uses -- the fixtures
+# above are all short-form, so without this the multi-byte branch is
+# never taken by a single check in this file.
+check("a certificate large enough to need a long-form length",
+      R.count_scts(_cert([_der(0x02, b"\x01"), _der(0x04, b"\x00" * 400)],
+                         [SCT_EXT(2)])), 2)
+
+# MALFORMED INPUT IS TESTED AT `der_tlv`, NOT THROUGH `count_scts`, and
+# the first draft of this block got that wrong in five places. count_scts
+# answers None for a certificate that has no SCTs -- which is also what
+# a parser with its bounds checks deleted answers, because the damage
+# shows up as a DERError it swallows. So `count_scts(junk) is None`
+# passes whether or not the check it is supposedly covering exists.
+# Found by deleting each check in turn and watching the suite stay
+# green. Down here a wrong answer is a wrong answer.
+# The WORDING is asserted, not only the type, and that is not
+# fussiness: a truncated length and an indefinite one are both caught
+# further down by "length runs past the end", so deleting either
+# specific guard leaves the input still refused and a type-only check
+# still green. What the specific guards buy is a message that names
+# what is actually wrong with the bytes -- so that is what is checked.
+for name, blob, why in [
+        ("empty input", b"", "truncated tag"),
+        ("a tag with no length", b"\x30", "truncated tag"),
+        ("a length running past the end", b"\x30\x7f\x01\x02",
+         "length runs past the end"),
+        # BER's indefinite length is forbidden in DER, and accepting it
+        # would mean guessing where the value ends.
+        ("an indefinite length", b"\x30\x80\x00\x00", "indefinite length"),
+        ("a long-form length with no bytes", b"\x30\x81", "bad long-form length"),
+        ("a long-form length wider than four bytes",
+         b"\x30\x85\x01\x02\x03\x04\x05", "bad long-form length"),
+        ("a long-form length whose bytes are truncated", b"\x30\x83\x01\x02",
+         "bad long-form length"),
+        ("a long-form length describing more than there is",
+         b"\x30\x82\xff\xff" + b"\x00" * 4, "length runs past the end"),
+]:
+    e = _raises(R.der_tlv, blob, 0)
+    check(f"der_tlv refuses {name}", isinstance(e, R.DERError), True)
+    check(f"...and says so: {name}", str(e), why)
+
+# And the well-formed cases still parse, or the refusals above would be
+# satisfied by a function that refuses everything.
+check("der_tlv reads a short-form value",
+      R.der_tlv(_der(0x04, b"abc"), 0), (0x04, 2, 5, 5))
+big = _der(0x04, b"z" * 300)
+tag, bs, be, nxt = R.der_tlv(big, 0)
+check("der_tlv reads a long-form value", (tag, be - bs, nxt), (0x04, 300, len(big)))
+
+# cert_extensions raises rather than guessing, and the error is typed so
+# a caller can tell it apart from every other failure. The payload is an
+# OCTET STRING WRAPPING a well-formed body on purpose: with `_der(0x02,
+# b"\x01")` the walk dies one step later on a truncated tag, so the
+# check passed with the outer-tag test deleted.
+not_a_cert = _der(0x04, _der(0x30, _der(0x02, b"\x01")) + _der(0x30, b""))
+check_raises("a certificate that is not a SEQUENCE is refused",
+             R.DERError, R.cert_extensions, not_a_cert)
+check_raises("a certificate with no TBSCertificate is refused",
+             R.DERError, R.cert_extensions, _der(0x30, b""))
+check_raises("a TBSCertificate that is not a SEQUENCE is refused",
+             R.DERError, R.cert_extensions,
+             _der(0x30, _der(0x02, b"\x01") + _der(0x30, b"")))
+check_raises("an extensions block that is not a SEQUENCE is refused",
+             R.DERError, R.cert_extensions,
+             _der(0x30, _der(0x30, _der(0x02, b"\x01") +
+                             _der(0xA3, _der(0x02, b"\x01")))))
+check("a certificate with no extensions has none, rather than failing",
+      R.cert_extensions(_cert([_der(0x02, b"\x01")])), {})
+check("a truncated certificate is refused rather than half-read",
+      isinstance(_raises(R.cert_extensions,
+                         _cert([_der(0x02, b"\x01")], [SCT_EXT(2)])[:12]),
+                 R.DERError), True)
+
+# The SCT LIST's own framing. Its declared total must match what is
+# there -- without that check a list with trailing bytes still counts
+# entries and returns a number, which is the one outcome worse than
+# None: a count nobody wrote.
+# The trailing bytes are a WELL-FORMED third entry on purpose. Junk
+# would be refused by the per-entry bounds check further down, so this
+# check passed with the total-length test deleted -- caught by deleting
+# it. Only a plausible extra entry can tell the two guards apart, and
+# a count nobody wrote is the outcome worse than None.
+bad_total = _ext(R.SCT_OID_DER,
+                 _der(0x04, _sct_list([40, 40]) +
+                      (8).to_bytes(2, "big") + b"\xAA" * 8))
+check("an SCT list whose length does not match its body is refused",
+      R.count_scts(_cert([_der(0x02, b"\x01")], [bad_total])), None)
+check("...where the list SAYING it has three does read three",
+      R.count_scts(_cert([_der(0x02, b"\x01")],
+                         [_ext(R.SCT_OID_DER,
+                               _der(0x04, _sct_list([40, 40, 8])))])), 3)
+short = _sct_list([40])
+truncated = short[:2] + short[2:-3]
+check("an SCT list cut short is refused",
+      R.count_scts(_cert([_der(0x02, b"\x01")],
+                         [_ext(R.SCT_OID_DER, _der(0x04, truncated))])), None)
+check("an SCT entry claiming zero length is refused",
+      R.count_scts(_cert([_der(0x02, b"\x01")],
+                         [_ext(R.SCT_OID_DER,
+                               _der(0x04, (2).to_bytes(2, "big") +
+                                    (0).to_bytes(2, "big")))])), None)
+check("an SCT entry running past the list is refused",
+      R.count_scts(_cert([_der(0x02, b"\x01")],
+                         [_ext(R.SCT_OID_DER,
+                               _der(0x04, (4).to_bytes(2, "big") +
+                                    (99).to_bytes(2, "big") + b"\x00\x00"))])), None)
+check("an extension value that is not an OCTET STRING is refused",
+      R.count_scts(_cert([_der(0x02, b"\x01")],
+                         [_ext(R.SCT_OID_DER, _der(0x02, b"\x01"))])), None)
+
+# _ct_facts: the shape the report carries, and the caveat that has to
+# be on it EVERY time -- a note printed only when interesting is one a
+# reader learns to skip, and this one is the difference between "a CA
+# said so" and "this tool checked".
+f = R._ct_facts(_cert([_der(0x02, b"\x01")], [SCT_EXT(3)]))
+check("_ct_facts reports the count", f["sct_count"], 3)
+check("_ct_facts says nothing was verified",
+      "NOT verified against any log" in f["sct_note"], True)
+f = R._ct_facts(_cert([_der(0x02, b"\x01")]))
+check("_ct_facts reports absence as None", f["sct_count"], None)
+check("absence is not overstated either",
+      "handshake" in f["sct_note"] and "OCSP" in f["sct_note"], True)
+check("no certificate at all is its own answer",
+      R._ct_facts(b"")["sct_note"], "no certificate to read")
+
+class _Obj:
+    def __init__(self, **kw):
+        self.__dict__.update(kw)
+
+
+# A FAILED VERIFICATION IS WHERE A READER MOST WANTS THE CHAIN, and it
+# is the one place the tool cannot produce it: the handshake that failed
+# left no connection to ask, and reading it means connecting again,
+# which is what -k does. Found on a booted machine, where the guest does
+# not trust this network's CA -- the chain section was simply absent and
+# `ct` printed the bare word "unknown". Both say why now.
+import io as _io
+import contextlib as _ctx
+
+failed_shape = {
+    "host": "example.com", "port": 443, "verified": False,
+    "verify_error": "SSLCertVerificationError: self-signed certificate",
+    "chain": None,
+    "chain_note": "not read -- the handshake failed, so there was no "
+                  "connection left to ask; -k connects again and lists it",
+    "sct_count": None,
+    "sct_note": "not read -- no certificate was accepted; -k connects "
+                "again and reads it",
+}
+# Driven through cmd_tls, not asserted against a hand-written dict.
+# The first version did the latter and could not fail: replacing both
+# notes in the producer with the word "unknown" left it green, because
+# the fixture was the test's own. Provoked and fixed.
+
+
+class _Shim:
+    """The real module, with named attributes replaced."""
+
+    def __init__(self, real, **over):
+        self._real, self._over = real, over
+
+    def __getattr__(self, n):
+        return self._over[n] if n in self._over else getattr(self._real, n)
+
+
+class _FakeRaw:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def _verify_fails(*a, **k):
+    raise ssl_mod.SSLCertVerificationError("self-signed certificate")
+
+
+ssl_mod = R.ssl
+_saved_ssl, _saved_socket = R.ssl, R.socket
+R.socket = _Shim(R.socket, create_connection=lambda *a, **k: _FakeRaw())
+R.ssl = _Shim(R.ssl, create_default_context=lambda *a, **k:
+              _Obj(wrap_socket=_verify_fails))
+try:
+    failed_shape = R.cmd_tls(_Obj(target="example.com", servername=None,
+                                  insecure=False, timeout=1.0))
+finally:
+    R.ssl, R.socket = _saved_ssl, _saved_socket
+
+check("a refused certificate is reported, not raised", failed_shape["verified"], False)
+check("...with the verification error kept",
+      "self-signed" in failed_shape["verify_error"], True)
+check("...and no chain, because there is no connection left",
+      failed_shape["chain"], None)
+
+_b = _io.StringIO()
+with _ctx.redirect_stdout(_b):
+    R.render_tls(failed_shape)
+_out = _b.getvalue()
+check("a failed verification says why there is no chain",
+      "no connection left to ask" in _out, True)
+check("...and points at the flag that would get one", "-k" in _out, True)
+check("a failed verification says why there is no CT answer",
+      "no certificate was accepted" in _out, True)
+check("neither is reported as a bare 'unknown'", "unknown" in _out, False)
+
+# The renderer's own fallback, for a future path that forgets the note.
+_b = _io.StringIO()
+with _ctx.redirect_stdout(_b):
+    R.render_tls({"host": "h", "port": 443, "verified": True, "sct_count": None})
+check("a missing note is still not the bare word 'unknown'",
+      "no reason recorded" in _b.getvalue(), True)
+
+
+# The chain, without a socket: _chain must degrade rather than raise
+# when the private attribute it needs is missing, because that is the
+# whole risk of reaching through `_sslobj` at all.
+
+
+class _NoSslObj:
+    pass
+
+
+def _chain_of(sock, verified=True, what="chain"):
+    """_chain's answer, with an escaping exception turned into a named
+    failure. Letting it end this script would report the bug these
+    checks exist for as a traceback with no rule attached."""
+    try:
+        return R._chain(sock, verified=verified)
+    except BaseException as e:                               # noqa: BLE001
+        FAILURES.append(f"{what}: _chain raised instead of degrading ({e!r})")
+        return "raised", "raised"
+
+
+chain, note = _chain_of(_NoSslObj(), what="no _sslobj")
+check("a socket with no _sslobj gives no chain", chain, None)
+check("...and says why", "does not expose" in (note or ""), True)
+chain, note = _chain_of(_Obj(_sslobj=_Obj()), what="no getter")
+check("an _sslobj without the getter gives no chain", chain, None)
+check("...and says why too", "does not expose" in (note or ""), True)
+chain, note = _chain_of(
+    _Obj(_sslobj=_Obj(get_verified_chain=lambda: (_ for _ in ()).throw(
+        ValueError("no peer certificate")))), what="raising getter")
+check("a getter that raises is reported, not propagated", chain, None)
+check("...naming what went wrong", "no peer certificate" in (note or ""), True)
+chain, note = _chain_of(_Obj(_sslobj=_Obj(get_verified_chain=lambda: [])),
+                        what="empty chain")
+check("a server that sent nothing is an empty chain, not an error", chain, [])
+
+# verified=False must reach for the UNVERIFIED getter: the chain is
+# most worth listing exactly when verification failed, and asking for
+# the verified one there gets nothing.
+asked = []
+R._chain(_Obj(_sslobj=_Obj(get_unverified_chain=lambda: asked.append("unverified") or [])),
+         verified=False)
+check("an unverified connection asks for the unverified chain",
+      asked, ["unverified"])
 
 # ─────────────────────────────────────────────────────────────────────
 

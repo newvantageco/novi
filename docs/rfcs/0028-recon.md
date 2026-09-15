@@ -420,5 +420,95 @@ setting AD in the query the load-bearing half rather than a detail.
    A port that is not in the table still prints as a number, and that
    is the right answer rather than a gap — inventing a name for a port
    nobody registered would be the tool guessing.
-4. **Certificate transparency and chain listing** in `tls` — the leaf is
-   there, the intermediates are not.
+4. ~~**Certificate transparency and chain listing** in `tls` — the leaf
+   is there, the intermediates are not.~~ **Done, and the two halves
+   turned out to be different problems.**
+
+   **The chain was never a gap in this tool** — `getpeercert()` decodes
+   the leaf and nothing else, so "the intermediates are not there" is
+   all the public `ssl` API offers. They are reachable, on
+   `_ssl._SSLSocket.get_verified_chain()`, which was undocumented until
+   CPython 3.13. `tls` now lists every certificate the server sent,
+   leaf first, with subject, issuer, validity, serial and SHA-256, and
+   marks a self-signed one.
+
+   **Reaching through `_sslobj` is the risk, so it degrades rather than
+   crashes.** Every step is behind a `getattr`: a Python without the
+   getter, or a getter that raises, produces `chain: null` and a line
+   saying why. A recon tool that died three checks into a sweep because
+   a private attribute moved would be worse than one that never listed
+   the chain.
+
+   **A FAILED VERIFICATION IS WHERE A READER MOST WANTS THE CHAIN, AND
+   IT IS THE ONE PLACE THIS CANNOT PRODUCE IT.** The handshake that
+   failed left no connection to ask, so reading it means connecting
+   again — which is what `-k` does, and the `-k` path does list it,
+   from `get_unverified_chain()`. Found on a booted machine, where the
+   guest does not trust this network's CA: the chain section was simply
+   absent and `ct` printed the bare word *"unknown"*. Both say why now,
+   and name the flag that would get an answer. A report that silently
+   omits the interesting half reads as a tool that found nothing.
+
+   **That same test found a crash.** `cmd_tls` read `e.verify_message`
+   unguarded, and OpenSSL's own raise is the only thing that sets it —
+   so an `SSLCertVerificationError` reaching there re-raised or wrapped
+   would turn a *reported* verification failure into an AttributeError
+   traceback, inside a sweep. It is a `getattr` now. The bug was
+   invisible until a host test raised the exception directly, because
+   every live failure came from OpenSSL and carried the attribute.
+
+   **CT could not be done the same way, because `get_info()` returns no
+   extensions.** Checked rather than assumed: `ssl` exposes no CT
+   option and `_ssl` no SCT attribute of any kind. Embedded SCTs live
+   in extension OID `1.3.6.1.4.1.11129.2.4.2`, so reporting them at all
+   means walking the certificate's DER — which this tool now does, and
+   three things about that are load-bearing:
+
+   - **IT IS A PARSE, NOT A SEARCH.** Finding the OID's bytes somewhere
+     inside a certificate would be a heuristic wearing a fact's
+     clothes: the sequence can occur inside a key or a serial, and a
+     tool whose value is not lying to you does not get to answer
+     "unlikely". The walk goes Certificate → TBSCertificate → `[3]`
+     extensions → the matching Extension, and finds nothing anywhere
+     else. The host test drives exactly that: a certificate whose
+     **serial number contains the OID bytes** must report no SCTs, and
+     the same bytes as a real extension must still count.
+   - **IT IS FOR DISPLAY, NEVER FOR TRUST.** OpenSSL decided whether
+     the chain verifies before any of this runs, and nothing here votes
+     on that. A hand-written parser in the trust path is the thing
+     `novi-verify` being static TweetNaCl exists to avoid.
+   - **PRESENCE IS NOT VALIDITY, and the line says so every run.** An
+     SCT is a log's signed promise; checking one needs that log's
+     public key and an inclusion proof, and this tool holds none. Same
+     rule as the DNSSEC verdict, for the same reason — and `None` is
+     deliberately not `0`, because "no CT extension" and "a CT
+     extension holding an empty list" are different things a CA did.
+
+   **Five of the first draft's malformed-input checks could not fail.**
+   They asserted `count_scts(junk) is None` — which is also what a
+   parser with its bounds checks deleted returns, because the damage
+   surfaces as a `DERError` that `count_scts` swallows. Found by
+   deleting each guard in turn and watching the suite stay green. They
+   test `der_tlv` directly now, and assert the **wording**: a truncated
+   length and an indefinite one are both caught further down by
+   "length runs past the end", so a type-only check stays green when
+   the specific guard goes. Two more were the same shape — the
+   not-a-SEQUENCE payload died one step later on a truncated tag
+   whether or not the tag check existed, and the bad-total SCT list
+   needed **well-formed** trailing bytes before removing the
+   total-length check changed the answer.
+
+   Verified two ways. The synthetic certificates are built and parsed
+   back, like the DNS messages. And the extension walk was cross-checked
+   against **OpenSSL's own parser** on three real certificates: same
+   OIDs, every time. (The first version of that comparison reported a
+   mismatch on all three — its regex for reading OpenSSL's output
+   dropped every `: critical` header. The probe was broken, not the
+   code, for the second time in this feature.)
+
+   **What is NOT verified is the SCT list framing against a real
+   CT-logged certificate.** Every TLS endpoint reachable from this
+   build environment is re-issued by an egress proxy that strips SCTs,
+   so the count has only ever been exercised against lists this
+   repository built. The extension-finding half is cross-checked
+   against OpenSSL; the list-walking half is not.

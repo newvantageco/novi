@@ -43,6 +43,15 @@ import re
 import socket
 import ssl
 import struct
+# The chain and the DER encoding live on `_ssl`, not on `ssl`:
+# `getpeercert()` decodes the leaf and nothing else, which is why "the
+# intermediates are not there" was never a gap in this file. Imported
+# defensively -- every use is behind a getattr, so a Python built
+# without it degrades to a report that says the chain is unavailable.
+try:
+    import _ssl
+except ImportError:                           # pragma: no cover
+    _ssl = None
 import sys
 import urllib.error
 import urllib.parse
@@ -522,6 +531,158 @@ def render_whois(r):
 # concludes a host is fine when it is not.
 # ─────────────────────────────────────────────────────────────────────
 
+# ─────────────────────────────────────────────────────────────────────
+# A DER walk, for two facts OpenSSL will not hand over
+#
+# `_ssl.Certificate.get_info()` returns subject, issuer, validity,
+# serial, SAN and version -- and NO extensions. Certificate
+# Transparency lives in an extension (OID 1.3.6.1.4.1.11129.2.4.2,
+# a SignedCertificateTimestampList embedded in the leaf), so the one
+# question a recon tool wants to ask about CT cannot be answered from
+# anything the standard library exposes. Checked rather than assumed:
+# `ssl` has no CT option and `_ssl` has no SCT attribute of any kind.
+#
+# So this walks the certificate's own DER. Three things about that:
+#
+#   * IT IS A PARSE, NOT A SEARCH. Finding the OID's bytes somewhere
+#     inside a certificate would be a heuristic wearing a fact's
+#     clothes -- the sequence could occur inside a key or a serial,
+#     and a tool whose value is not lying to you does not get to say
+#     "unlikely". The walk goes Certificate -> TBSCertificate ->
+#     [3] extensions -> the Extension whose OID matches, and finds
+#     nothing anywhere else.
+#
+#   * IT IS FOR DISPLAY, NEVER FOR TRUST. OpenSSL decided whether this
+#     chain verifies, before any of this runs. Nothing here votes on
+#     that, and nothing here may: a hand-written parser in the trust
+#     path is the thing `novi-verify` being static TweetNaCl exists to
+#     avoid.
+#
+#   * PRESENCE IS NOT VALIDITY. An SCT is a log's signed promise, and
+#     checking one needs that log's public key and an inclusion proof.
+#     This tool holds no log keys and says so on every run -- the rule
+#     the DNSSEC verdict already follows.
+
+SCT_OID_DER = bytes((0x2B, 0x06, 0x01, 0x04, 0x01, 0xD6, 0x79, 0x02, 0x04, 0x02))
+
+
+class DERError(ValueError):
+    """A certificate this walker cannot read. Never fatal to a report."""
+
+
+def der_tlv(buf, i):
+    """One tag-length-value at offset i -> (tag, body_start, body_end, next).
+
+    Bounds are checked at every step rather than left to IndexError:
+    the input is a certificate a stranger served, and the difference
+    between "this field is malformed" and a traceback is the whole
+    reason this returns a typed error.
+    """
+    if i + 2 > len(buf):
+        raise DERError("truncated tag")
+    tag = buf[i]
+    n = buf[i + 1]
+    i += 2
+    if n == 0x80:
+        # Indefinite length is BER and forbidden in DER. Accepting it
+        # would mean guessing where the value ends.
+        raise DERError("indefinite length")
+    if n & 0x80:
+        count = n & 0x7F
+        if count == 0 or count > 4 or i + count > len(buf):
+            raise DERError("bad long-form length")
+        n = int.from_bytes(buf[i:i + count], "big")
+        i += count
+    end = i + n
+    if end > len(buf):
+        raise DERError("length runs past the end")
+    return tag, i, end, end
+
+
+def der_children(buf, start, end):
+    i = start
+    while i < end:
+        tag, bs, be, nxt = der_tlv(buf, i)
+        yield tag, bs, be
+        if nxt <= i:
+            raise DERError("zero-width element")   # cannot happen; not assumed
+        i = nxt
+
+
+def cert_extensions(der):
+    """{oid_bytes: value_bytes} for the certificate's extensions.
+
+    Empty when the certificate carries none -- which is legal, and is
+    a different answer from "this certificate could not be read".
+    """
+    tag, bs, be, _ = der_tlv(der, 0)
+    if tag != 0x30:
+        raise DERError("certificate is not a SEQUENCE")
+    tbs = next(der_children(der, bs, be), None)
+    if tbs is None or tbs[0] != 0x30:
+        raise DERError("no TBSCertificate")
+    _, tbs_start, tbs_end = tbs
+    out = {}
+    for ctag, cbs, cbe in der_children(der, tbs_start, tbs_end):
+        if ctag != 0xA3:                     # [3] EXPLICIT extensions
+            continue
+        seq = next(der_children(der, cbs, cbe), None)
+        if seq is None or seq[0] != 0x30:
+            raise DERError("extensions is not a SEQUENCE")
+        for etag, ebs, ebe in der_children(der, seq[1], seq[2]):
+            if etag != 0x30:
+                raise DERError("extension is not a SEQUENCE")
+            oid = value = None
+            for ftag, fbs, fbe in der_children(der, ebs, ebe):
+                if ftag == 0x06 and oid is None:
+                    oid = der[fbs:fbe]
+                elif ftag == 0x04:
+                    value = der[fbs:fbe]     # the OCTET STRING wrapper
+            if oid is not None and value is not None:
+                out.setdefault(oid, value)
+        break
+    return out
+
+
+def count_scts(der):
+    """Embedded SCTs in a leaf certificate: an int, or None.
+
+    None means "this certificate has no CT extension", which is a real
+    answer and not zero: zero would say the list was there and empty,
+    which is a different and much stranger thing for a CA to have done.
+    """
+    try:
+        ext = cert_extensions(der)
+    except DERError:
+        return None
+    raw = ext.get(SCT_OID_DER)
+    if raw is None:
+        return None
+    # The extension's value is itself a DER OCTET STRING wrapping the
+    # TLS SignedCertificateTimestampList: uint16 total length, then
+    # repeated (uint16 length, SCT).
+    try:
+        tag, bs, be, _ = der_tlv(raw, 0)
+    except DERError:
+        return None
+    if tag != 0x04:
+        return None
+    body = raw[bs:be]
+    if len(body) < 2:
+        return None
+    total = int.from_bytes(body[0:2], "big")
+    if total != len(body) - 2:
+        return None                          # not the list we expected
+    i, n = 2, 0
+    while i + 2 <= len(body):
+        size = int.from_bytes(body[i:i + 2], "big")
+        i += 2 + size
+        if size == 0 or i > len(body):
+            return None                      # malformed; do not guess
+        n += 1
+    return n
+
+
 def _flatten_name(rdns):
     out = {}
     for rdn in rdns or ():
@@ -546,7 +707,14 @@ def cmd_tls(args):
                 result.update(_tls_facts(s))
     except ssl.SSLCertVerificationError as e:
         verified = False
-        error = f"{e.__class__.__name__}: {e.verify_message or e}"
+        # getattr, because `verify_message` is set by OpenSSL's own
+        # raise and by nothing else: a re-raised or wrapped
+        # SSLCertVerificationError reaching here without it would turn
+        # a reported verification failure into an AttributeError
+        # traceback -- the one outcome worse than the failure itself,
+        # since this runs inside a sweep. Found by a host test that
+        # raises the exception directly.
+        error = f"{e.__class__.__name__}: {getattr(e, 'verify_message', None) or e}"
     except (OSError, ssl.SSLError) as e:
         raise Fail(f"{host}:{port}: {e}")
 
@@ -554,6 +722,24 @@ def cmd_tls(args):
         result["verify_error"] = error
         if not args.insecure:
             result["verified"] = False
+            # THE FAILED HANDSHAKE LEFT NO SOCKET TO ASK. The chain and
+            # the certificate's own bytes are exactly what somebody
+            # wants at this moment -- "which certificate did it hand
+            # me, and who claims to have issued it" -- and neither is
+            # reachable without connecting again, which is what -k
+            # does. Said out loud rather than left as an empty field:
+            # a report that silently omits the interesting half reads
+            # as a tool that found nothing. (Found on a booted machine,
+            # where the guest does not trust this network's CA: the
+            # chain section was simply absent and `ct` printed the bare
+            # word "unknown".)
+            result["chain"] = None
+            result["chain_note"] = ("not read -- the handshake failed, so "
+                                    "there was no connection left to ask; "
+                                    "-k connects again and lists it")
+            result["sct_count"] = None
+            result["sct_note"] = ("not read -- no certificate was accepted; "
+                                  "-k connects again and reads it")
             return result
         ctx2 = ssl.create_default_context()
         ctx2.check_hostname = False
@@ -565,6 +751,53 @@ def cmd_tls(args):
     return result
 
 
+def _cert_summary(cert):
+    """One chain entry, from OpenSSL's own parse -- never a hand-written one."""
+    info = cert.get_info()
+    subject = _flatten_name(info.get("subject"))
+    issuer = _flatten_name(info.get("issuer"))
+    der = cert.public_bytes(_ssl.ENCODING_DER)
+    return {
+        "subject_cn": subject.get("commonName"),
+        "subject_o": subject.get("organizationName"),
+        "issuer_cn": issuer.get("commonName"),
+        "issuer_o": issuer.get("organizationName"),
+        "not_before": info.get("notBefore"),
+        "not_after": info.get("notAfter"),
+        "serial": info.get("serialNumber"),
+        "fingerprint_sha256": hashlib.sha256(der).hexdigest(),
+        "self_signed": subject == issuer and bool(subject),
+    }
+
+
+def _chain(s, verified):
+    """The certificates the server sent, leaf first.
+
+    REACHED THROUGH A PRIVATE ATTRIBUTE, and that is the whole risk in
+    this function. `getpeercert()` decodes the LEAF and nothing else --
+    so "the intermediates are not there" was not an oversight in this
+    tool, it is all the public API offers. `get_verified_chain()` lives
+    on `_ssl._SSLSocket` and was undocumented until CPython 3.13, so
+    everything here is behind `getattr`: a Python that does not have it
+    gets `(None, why)` and a report that says so, never a traceback
+    from a recon tool three checks into a sweep.
+    """
+    obj = getattr(s, "_sslobj", None)
+    if obj is None:
+        return None, "this Python does not expose the peer chain"
+    getter = getattr(obj, "get_verified_chain" if verified
+                     else "get_unverified_chain", None)
+    if getter is None:
+        return None, "this Python does not expose the peer chain"
+    if _ssl is None or not hasattr(_ssl, "ENCODING_DER"):
+        return None, "this Python cannot hand back a certificate's DER"
+    try:
+        certs = getter()
+    except (ValueError, OSError, AttributeError) as e:
+        return None, f"chain unavailable: {e}"
+    return [_cert_summary(c) for c in certs or ()], None
+
+
 def _tls_facts(s, unverified=False):
     facts = {"protocol": s.version(), "cipher": s.cipher()[0] if s.cipher() else None}
     if unverified:
@@ -574,6 +807,15 @@ def _tls_facts(s, unverified=False):
         der = s.getpeercert(binary_form=True)
         facts["fingerprint_sha256"] = hashlib.sha256(der).hexdigest() if der else None
         facts["certificate"] = "not parsed (connection was not verified)"
+        # The chain is still worth listing when verification FAILED --
+        # "which certificate did it hand me, and who claims to have
+        # issued it" is most of the question at that point. It comes
+        # from get_UNverified_chain here, and the caller has already
+        # recorded verified: false beside it.
+        facts["chain"], note = _chain(s, verified=False)
+        if note:
+            facts["chain_note"] = note
+        facts.update(_ct_facts(der))
         return facts
     cert = s.getpeercert() or {}
     subject = _flatten_name(cert.get("subject"))
@@ -590,7 +832,38 @@ def _tls_facts(s, unverified=False):
     })
     der = s.getpeercert(binary_form=True)
     facts["fingerprint_sha256"] = hashlib.sha256(der).hexdigest() if der else None
+    facts["chain"], note = _chain(s, verified=True)
+    if note:
+        facts["chain_note"] = note
+    facts.update(_ct_facts(der))
     return facts
+
+
+def _ct_facts(der):
+    """Embedded SCTs in the leaf, and the caveat that always goes with them.
+
+    PRESENCE IS NOT VALIDITY, and the note says so on every run rather
+    than only when it is interesting -- the rule the DNSSEC verdict
+    already follows, for the same reason. An SCT is a log's signed
+    promise that it has seen this certificate; checking one needs that
+    log's public key and an inclusion proof, and this tool holds no log
+    keys. What it can honestly report is that the CA put some there.
+
+    None is not zero. "No CT extension" and "a CT extension containing
+    an empty list" are different things a CA did, and folding the first
+    into the second would report a number nobody wrote.
+    """
+    if not der:
+        return {"sct_count": None,
+                "sct_note": "no certificate to read"}
+    n = count_scts(der)
+    if n is None:
+        return {"sct_count": None,
+                "sct_note": "no embedded SCTs (this says nothing about "
+                            "SCTs delivered in the handshake or by OCSP)"}
+    return {"sct_count": n,
+            "sct_note": "embedded by the CA; NOT verified against any log -- "
+                        "this tool holds no log keys"}
 
 
 def render_tls(r):
@@ -606,6 +879,35 @@ def render_tls(r):
         kv("sha256", r["fingerprint_sha256"])
     if r.get("san"):
         kv("names", ", ".join(r["san"][:12]) + (" ..." if len(r["san"]) > 12 else ""))
+
+    # Said on every run, like the DNSSEC line, and for the same reason:
+    # a caveat printed only sometimes is one a reader stops seeing, and
+    # the whole point of this one is that "SCTs present" never means
+    # "SCTs checked".
+    if r.get("sct_count") is None:
+        # Never a bare word. Every path that can reach here sets a note
+        # saying WHY there is no count; this fallback exists so that a
+        # future one which forgets says something a reader can act on
+        # rather than "unknown".
+        kv("ct", r.get("sct_note") or "not read (no reason recorded)")
+    else:
+        kv("ct", f"{r['sct_count']} embedded SCT(s) -- {r['sct_note']}")
+
+    if r.get("chain_note"):
+        kv("chain", r["chain_note"])
+    elif r.get("chain"):
+        print()
+        print(f"CHAIN ({len(r['chain'])} certificate(s), leaf first)")
+        for i, c in enumerate(r["chain"]):
+            who = c.get("subject_cn") or c.get("subject_o") or "(no name)"
+            by = c.get("issuer_cn") or c.get("issuer_o") or "(no issuer name)"
+            tail = " [self-signed]" if c.get("self_signed") else ""
+            print(f"  {i}  {who}{tail}")
+            print(f"     issued by  {by}")
+            if c.get("not_after"):
+                print(f"     valid      {c.get('not_before')} .. {c['not_after']}")
+            if c.get("fingerprint_sha256"):
+                print(f"     sha256     {c['fingerprint_sha256']}")
 
 
 # ─────────────────────────────────────────────────────────────────────

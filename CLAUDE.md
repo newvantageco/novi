@@ -959,6 +959,53 @@ breached-password check and a TCP connect scan.
   asserts it by COUNTING CALLS into a stand-in table -- a
   reimplementation would render the same report with none, so
   comparing the text could not tell the two apart.
+- **THE CHAIN IS ON `_ssl`, NOT `ssl`.** `getpeercert()` decodes the
+  LEAF and nothing else, so "the intermediates are not there" was
+  never a gap in this tool -- it is all the public API offers.
+  `_ssl._SSLSocket.get_verified_chain()` has them and was undocumented
+  until CPython 3.13, so every step is behind a `getattr` and a
+  missing getter produces `chain: null` with a reason. A recon tool
+  that died three checks into a sweep because a private attribute
+  moved is worse than one that never listed the chain.
+- **CT NEEDED A DER WALK, because `get_info()` returns no
+  extensions** -- checked, not assumed: `ssl` has no CT option and
+  `_ssl` no SCT attribute. Three rules on that walk: **it is a parse,
+  not a search** (the OID's bytes can occur inside a key or a serial,
+  and the host test puts them in a SERIAL NUMBER to prove the
+  difference); **it is for display, never for trust** (OpenSSL decided
+  whether the chain verifies before any of it runs); and **presence is
+  not validity**, said on every run, because an SCT is a log's signed
+  promise and this tool holds no log keys. `None` is not `0` -- "no CT
+  extension" and "an extension holding an empty list" are different
+  things a CA did.
+- **A FAILED VERIFICATION IS WHERE A READER MOST WANTS THE CHAIN, AND
+  IT IS THE ONE PLACE THE TOOL CANNOT PRODUCE IT.** The handshake that
+  failed left no connection to ask; reading it means connecting again,
+  which is what `-k` does. Found on a booted machine where the guest
+  does not trust this network's CA -- the chain section was absent and
+  `ct` printed the bare word "unknown". Both say why now and name the
+  flag. **The same test found a crash**: `cmd_tls` read
+  `e.verify_message` unguarded, and OpenSSL's own raise is the only
+  thing that sets it, so a re-raised or wrapped
+  `SSLCertVerificationError` turned a REPORTED failure into an
+  AttributeError traceback inside a sweep. Invisible live, because
+  every real failure carried the attribute.
+- **FIVE MALFORMED-INPUT CHECKS COULD NOT FAIL.** They asserted
+  `count_scts(junk) is None`, which is also what a parser with its
+  bounds checks deleted returns, because the damage surfaces as a
+  `DERError` that `count_scts` swallows. Test the layer where a wrong
+  answer is a wrong answer -- `der_tlv` -- and assert the WORDING: a
+  truncated length and an indefinite one are both caught further down
+  by "length runs past the end", so a type-only check stays green when
+  the specific guard goes. Two more of the same shape: the
+  not-a-SEQUENCE payload died a step later on a truncated tag either
+  way, and the bad-total SCT list needed WELL-FORMED trailing bytes
+  before deleting the total-length check changed the answer.
+- **The cross-check's first version was the broken thing.** Comparing
+  the extension walk against `openssl x509 -text` reported a mismatch
+  on all three real certificates; the regex reading OpenSSL's output
+  dropped every `: critical` header. They agree exactly. Second time
+  in one feature that a probe, not the code, was wrong.
 - **`sweep_host()` counts colons.** One is `host:port`; two or more is
   a bare IPv6 address, where splitting at the first leaves `2606` --
   which resolves to nothing while still looking like a host.
