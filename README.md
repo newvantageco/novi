@@ -693,6 +693,10 @@ BUG_REPORT_URL="https://github.com/newvantageco/novi/issues"
       with a ten-second blank timeout untouched for thirty seconds and
       watching it stay lit, then blank twenty seconds after the toggle
       went off. Nothing in this image speaks the protocol yet (RFC 0036)
+- [x] The keys are yours — `/etc/novi/keys.conf`, one line per shortcut
+      you want moved, everything else left as it ships. The sheet
+      (Super + /) reads the same file, so it always lists the key that
+      will actually fire (RFC 0037)
 - [x] Unread notifications — a bell and a count on the panel while
       something has happened that the list has not been opened since.
       Super+N opens it and the bell goes out (RFC 0034)

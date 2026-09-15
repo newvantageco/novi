@@ -1375,6 +1375,62 @@ DISPLAYS it.
   more rows and shorter ones, so neither count nor height alone gives
   the right answer.
 
+## Architecture: the keys are a file now
+
+RFC 0037 (`docs/rfcs/0037-user-editable-keybindings.md`).
+`/etc/novi/keys.conf` is `<action> = <binding>`; `common/keys.c`
+applies it over the compiled table and BOTH binaries load it.
+
+- **RFC 0001 promised this in its own words and it was never true.**
+  "novi-shell's bindings live in a plaintext config file a user can
+  edit directly" -- they were compiled-in constants for the life of
+  the project, which made the one part of a desktop people reliably
+  want to change the one part they could not. A promise in an RFC is
+  a claim about the code like any other; check it before repeating it.
+- **The sheet's text is GENERATED now, and the hand-written strings
+  are deleted.** `novi-launcher --keys` renders every row through
+  `novi_keys_format()` from the binding that will actually fire,
+  because an override file is a new way to produce exactly the drift
+  `keybindings.h` exists to prevent. Deleting the nineteen literals
+  was safe only because the formatter reproduced all of them
+  character for character first -- including `Alt + Shift + Tab` for
+  the `ISO_Left_Tab` row and `Print Screen` for `XKB_KEY_Print`.
+- **AN UNKNOWN MODIFIER WORD IS A REFUSAL, NOT A SKIP.** `Ctrl+Q` is
+  the case: this compositor has no control modifier, so ignoring the
+  word binds the shortcut to **Q alone** -- a line that silently does
+  something far worse than what it says.
+- **A collision unbinds the LATER row.** Dispatch stops at its first
+  match, so "earlier wins" happens whether or not anybody decides it;
+  the decision is that the shadowed row reads `(unbound)` instead of
+  going on advertising a key it can never win.
+- **A line that cannot be parsed leaves ITS row alone.** Refusing the
+  whole file over one typo takes nineteen working shortcuts away from
+  somebody who is already confused. Same for an action name this
+  build has never heard of: counted, not fatal, because one file is
+  read by whatever novi-shell is installed.
+- **Base content, NOT part of the novi-shell package.** `pkg`
+  overwrites a package's files on upgrade, and this is a file whose
+  whole purpose is to be edited -- the same reason `system.conf` and
+  `pkg.conf` are base.
+- **Not a `system.conf` key either.** Nothing converges a keyboard
+  shortcut: novi-shell reads the file when it starts and that is the
+  mechanism. Nineteen keys that cannot drift, in the document whose
+  point is drift, with `apply` having nothing to do for any of them.
+- **`keybindings.h` was not self-contained.** It used `xkb_keysym_t`
+  while including only `xkbcommon-keysyms.h`, which has the constants
+  and not the type; it compiled because every consumer happened to
+  include `xkbcommon.h` (or wlroots) first. A header that only works
+  second breaks the first time somebody includes it first.
+- **The shipped `keys.conf` is a THIRD list**, checked both ways by
+  the host test: every action in the table is named in the file, and
+  every action the file names exists. It is also the only place a
+  person learns what an action is called.
+- **CI installs `libxkbcommon-dev` for the host test.** The parser
+  turns "Return" into a keysym with `xkb_keysym_from_name()`; the
+  alternative is a hand-copied table of xkbcommon's, and a test that
+  skips itself where the header is missing skips itself exactly where
+  it would have caught something.
+
 ## Architecture: nothing reaped the compositor's children
 
 `spawn()` forked and never waited, and novi-shell installed no SIGCHLD

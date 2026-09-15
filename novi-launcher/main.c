@@ -63,7 +63,7 @@
 /* The one list of keyboard shortcuts, shared with novi-shell, which
  * dispatches from it. A sheet kept separately from the bindings it
  * documents drifts, and a drifted sheet is worse than none. */
-#include "../common/keybindings.h"
+#include "../common/keys.h"
 #include "../common/notifications.h"
 #include "../common/clipboard.h"
 #include "../common/text.h"
@@ -351,6 +351,10 @@ struct novi_launcher {
 	 * dispatches from -- see that header for why a sheet maintained
 	 * separately from the bindings was not acceptable. */
 	bool keys_mode;
+	/* The effective bindings, loaded in main() for --keys. Held even
+	 * in the other modes because it costs one struct and the
+	 * alternative is a conditional the next reader has to check. */
+	struct novi_keys keys;
 	bool themes_mode;
 	/* --notifications: what this desktop said while you were looking
 	 * somewhere else (RFC 0034). Rows come from the file novi-notifyd
@@ -1132,16 +1136,24 @@ static void rebuild_results(struct novi_launcher *state) {
 		 * "window" finds the window group even though the word appears
 		 * in only some of its descriptions. */
 		for (size_t i = 0; i < NOVI_BINDINGS_COUNT; i++) {
-			const struct novi_binding *b = &NOVI_BINDINGS[i];
+			/* The EFFECTIVE binding, not the compiled one: this window
+			 * is the answer to "what are my keys", and on a machine
+			 * with an /etc/novi/keys.conf the compiled table is not
+			 * that answer (RFC 0037). The text comes from the same
+			 * formatter the compositor's own table was rendered with,
+			 * so the sheet cannot spell a binding differently from
+			 * the thing that fires it. */
+			const struct novi_binding *b = &state->keys.v[i];
+			const char *keys = state->keys.text[i];
 			if (state->input_len > 0 &&
 					!app_name_matches(b->what, state->input) &&
-					!app_name_matches(b->keys, state->input) &&
+					!app_name_matches(keys, state->input) &&
 					!app_name_matches(b->group, state->input)) {
 				continue;
 			}
 			struct result r = { .kind = RESULT_KEY, .icon_id = -1 };
 			snprintf(r.primary, sizeof(r.primary), "%s", b->what);
-			snprintf(r.meta, sizeof(r.meta), "%s", b->keys);
+			snprintf(r.meta, sizeof(r.meta), "%s", keys);
 			push_result(state, &r);
 		}
 	} else if (state->symbol_mode) {
@@ -1420,6 +1432,38 @@ static void draw_drop_shadow(uint32_t *px, uint32_t stride_px,
 	}
 }
 
+/* "Search shortcuts", unless /etc/novi/keys.conf had something in it
+ * this build could not use -- in which case say so here, where the
+ * person looking for their missing shortcut is already looking.
+ *
+ * In the PLACEHOLDER rather than as a row of its own: the sheet has no
+ * scroll by design and its card height is derived from the number of
+ * bindings, so a twentieth row would either push a real binding out of
+ * view or grow the card past the 768px the _Static_assert above
+ * defends. The compositor logs the same counts, and a log on a desktop
+ * machine is somewhere nobody looks.
+ *
+ * Returns a pointer to a static buffer: one caller, once per frame. */
+static const char *keys_placeholder(const struct novi_launcher *state) {
+	static char buf[96];
+	if (state->keys.unreadable == 0 && state->keys.conflicts == 0) {
+		return "Search shortcuts";
+	}
+	if (state->keys.unreadable > 0 && state->keys.conflicts > 0) {
+		snprintf(buf, sizeof(buf),
+			"keys.conf: %d line(s) not understood, %d binding(s) taken twice",
+			state->keys.unreadable, state->keys.conflicts);
+	} else if (state->keys.unreadable > 0) {
+		snprintf(buf, sizeof(buf),
+			"keys.conf: %d line(s) not understood", state->keys.unreadable);
+	} else {
+		snprintf(buf, sizeof(buf),
+			"keys.conf: %d shortcut(s) unbound -- two rows wanted one key",
+			state->keys.conflicts);
+	}
+	return buf;
+}
+
 static void render(struct novi_launcher *state, uint32_t *px,
 		uint32_t stride_px) {
 	uint32_t w = state->width, h = state->height;
@@ -1538,7 +1582,7 @@ static void render(struct novi_launcher *state, uint32_t *px,
 			state->themes_mode ? "Applies at each window's next start" :
 			state->power_mode ? "End this session" :
 			state->symbol_mode ? "Search symbols" :
-			state->keys_mode ? "Search shortcuts" :
+			state->keys_mode ? keys_placeholder(state) :
 			state->notif_mode ? "Search notifications" :
 			"Search apps, or type a sum",
 			NOVI_PIX(NOVI_TEXT_MUTED));
@@ -1986,6 +2030,11 @@ int main(int argc, char *argv[]) {
 	 * everyone except the person who does not yet know any of them --
 	 * which is exactly who it is for. */
 	state.keys_mode = argc > 1 && strcmp(argv[1], "--keys") == 0;
+	/* Same two calls the compositor makes, over the same file, so the
+	 * sheet is a view of what will actually fire rather than of what
+	 * was compiled (RFC 0037). */
+	novi_keys_defaults(&state.keys);
+	novi_keys_load(&state.keys, NOVI_KEYS_PATH);
 	state.themes_mode = argc > 1 && strcmp(argv[1], "--themes") == 0;
 	state.notif_mode = argc > 1 && strcmp(argv[1], "--notifications") == 0;
 	/* Notifications use the sheet's shorter row: these are lines of

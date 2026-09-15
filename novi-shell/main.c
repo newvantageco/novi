@@ -61,7 +61,7 @@
 
 /* The one list of keyboard shortcuts, shared with novi-launcher
  * --keys so the sheet and the dispatcher cannot disagree. */
-#include "keybindings.h"
+#include "keys.h"
 #include "decoration.h"
 #include "../common/theme.h"
 
@@ -362,6 +362,12 @@ enum novi_cursor_mode {
 struct novi_clip_read;
 
 struct novi_server {
+	/* The keyboard shortcuts this session is actually honouring: the
+	 * compiled defaults with /etc/novi/keys.conf applied over them,
+	 * read once at startup (RFC 0037). Held on the server rather than
+	 * looked up per keypress because it is the answer to "what do the
+	 * keys do", and that question has one answer per session. */
+	struct novi_keys keys;
 	struct wl_display *wl_display;
 	struct wlr_backend *backend;
 	struct wlr_renderer *renderer;
@@ -1518,7 +1524,18 @@ static bool handle_keybinding(struct novi_server *server, uint32_t modifiers,
 
 	for (int exact = 1; exact >= 0; exact--) {
 		for (size_t i = 0; i < NOVI_BINDINGS_COUNT; i++) {
-			const struct novi_binding *b = &NOVI_BINDINGS[i];
+			/* The EFFECTIVE table -- the compiled defaults with
+			 * /etc/novi/keys.conf applied over them (RFC 0037) --
+			 * never NOVI_BINDINGS directly, or somebody's config
+			 * would change the sheet and not the machine. */
+			const struct novi_binding *b = &server->keys.v[i];
+			/* A row switched off, or one disabled for colliding with
+			 * an earlier binding. Skipped here rather than removed
+			 * from the table, so the sheet can still list it and say
+			 * that it is unbound. */
+			if (b->sym == XKB_KEY_NoSymbol) {
+				continue;
+			}
 			if (exact ? (b->mods != held)
 					: ((b->mods & held) != b->mods)) {
 				continue;
@@ -3749,6 +3766,24 @@ int main(int argc, char *argv[]) {
 	 * workspace switch belong to a workspace number no keybinding can
 	 * ever reach again once one *is* pressed. */
 	server.active_workspace = 1;
+	/* The shortcuts this session will honour: the compiled defaults
+	 * with /etc/novi/keys.conf over them (RFC 0037). Loaded before the
+	 * backend exists, so there is no window in which a key could be
+	 * dispatched against a half-built table -- and a missing file is
+	 * the normal case, leaving the defaults exactly as they were.
+	 *
+	 * The counts are logged rather than left silent: a person whose
+	 * key does nothing needs somewhere to find out that their line was
+	 * not understood, and `novi-launcher --keys` says so too. */
+	novi_keys_defaults(&server.keys);
+	novi_keys_load(&server.keys, NOVI_KEYS_PATH);
+	if (server.keys.overridden > 0 || server.keys.unreadable > 0 ||
+			server.keys.conflicts > 0) {
+		wlr_log(WLR_INFO, "keys: %d rebound, %d line(s) not understood, "
+			"%d disabled for clashing (%s)",
+			server.keys.overridden, server.keys.unreadable,
+			server.keys.conflicts, NOVI_KEYS_PATH);
+	}
 	/* The Wayland display is managed by libwayland. It handles accepting
 	 * clients from the Unix socket, manging Wayland globals, and so on. */
 	server.wl_display = wl_display_create();

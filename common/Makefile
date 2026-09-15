@@ -22,9 +22,17 @@ CFLAGS ?= -O1 -Wall -Wextra
 # same reason: the format's safety rests on the sanitiser dropping
 # tabs, and a test with its own copy of that would prove nothing about
 # the file two clients actually exchange.
-check: theme-test notifications-test
+# keys-test is the one here with an external dependency, and it is not
+# avoidable: the thing under test parses key NAMES, and the only sane
+# way to turn "Return" into a keysym is xkb_keysym_from_name() -- the
+# alternative is a hand-copied table of xkbcommon's, which is exactly
+# the second copy of a derived answer this repository keeps deleting.
+# So CI installs libxkbcommon-dev (one line in the workflow) rather
+# than this test skipping itself where it would matter most.
+check: theme-test notifications-test keys-test
 	@cd .. && common/theme-test
 	@cd .. && common/notifications-test
+	@cd .. && common/keys-test
 
 theme-test: theme-test.c theme.c theme.h
 	$(CC) $(CFLAGS) -DNOVI_THEME_NO_PIXMAN -I. -o $@ theme-test.c theme.c -lm
@@ -32,7 +40,10 @@ theme-test: theme-test.c theme.c theme.h
 notifications-test: notifications-test.c notifications.c notifications.h
 	$(CC) $(CFLAGS) -Werror -I. -o $@ notifications-test.c notifications.c
 
+keys-test: keys-test.c keys.c keys.h keybindings.h
+	$(CC) $(CFLAGS) -Werror -I. -o $@ keys-test.c keys.c -lxkbcommon
+
 clean:
-	rm -f theme-test notifications-test
+	rm -f theme-test notifications-test keys-test
 
 .PHONY: check clean

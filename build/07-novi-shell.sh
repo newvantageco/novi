@@ -49,6 +49,19 @@ make \
     DESTDIR="${ROOTFS}" PREFIX=/usr install
 make clean
 
+# The shortcut file (RFC 0037). BASE CONTENT, not part of the
+# novi-shell package, and that is a data-loss argument rather than a
+# tidiness one: `pkg` overwrites a package's files on upgrade, so a
+# config file somebody has edited must not live inside one. The same
+# reason /etc/novi/system.conf and /etc/novi/pkg.conf are base.
+#
+# It ships fully commented out -- every line in it is the default --
+# so an unedited machine behaves exactly as it did before this file
+# existed, and a person can see every action's name without going
+# near the source.
+install -D -m 644 "${REPO_ROOT}/rootfs/etc/novi/keys.conf" \
+    "${ROOTFS}/etc/novi/keys.conf"
+
 echo ""
 echo "novi-shell installed:"
 ls -la "${ROOTFS}/usr/bin/novi-shell"
