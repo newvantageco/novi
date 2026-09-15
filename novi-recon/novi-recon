@@ -925,6 +925,136 @@ def render_ports(r):
 
 
 # ─────────────────────────────────────────────────────────────────────
+# all — the sweep
+#
+# RFC 0028 roadmap 1. Every other subcommand answers one question about
+# one target; "run everything against this domain" is the shape the
+# original tool actually had, and doing it by hand is five invocations
+# whose arguments have to be derived correctly each time.
+#
+# Three decisions, and the first is the one that matters:
+#
+#   * `ports` IS NOT IN THE SWEEP. Every check here asks a third party
+#     about the target -- a resolver, a WHOIS server, the site's own
+#     TLS and HTTP endpoints, which is what a browser does. A port scan
+#     is the one thing this tool does that reaches for a machine's
+#     OTHER services, and this tool's own epilog says to point it only
+#     at systems you are authorised to test. A subcommand called "all"
+#     that quietly scanned would turn a decision the person makes per
+#     target into one the tool makes on their behalf, at the moment
+#     they are least likely to be thinking about it. `--ports` opts in,
+#     and then it is a scan somebody typed.
+#
+#   * `pwned` is not in it either, and that is not a judgement call: it
+#     takes a PASSWORD on stdin and knows nothing about a domain. There
+#     is nothing for a sweep to pass it.
+#
+#   * ONE CHECK FAILING IS A FIELD, NOT THE END. Each runs inside its
+#     own guard and a failure becomes `ok: false` with the reason,
+#     because the whole value of a sweep is the parts that answered --
+#     a WHOIS server being down must not throw away the DNS, TLS,
+#     header and robots findings gathered before it. Same shape as
+#     novi-state running each converge in a subshell so that one
+#     impossible key does not abandon the rest of the document.
+#
+# The renderer COMPOSES the existing ones. A second formatting of any
+# check would be exactly the drift `novi-agent describe --text` avoids
+# by having one gatherer and two printers; here there is one printer
+# per check already, and this mode only decides which of them to call.
+
+# Each entry says how to build that check's argument namespace from the
+# sweep's own target, so "what does `all` run, and with what" has one
+# answer rather than five inline guesses.
+SWEEP = (
+    ("dns", lambda t, a: argparse.Namespace(
+        name=t, type=None, server=a.server, timeout=a.timeout)),
+    ("whois", lambda t, a: argparse.Namespace(
+        target=t, server=None, timeout=a.timeout)),
+    ("tls", lambda t, a: argparse.Namespace(
+        target=t, servername=None, insecure=a.insecure, timeout=a.timeout)),
+    ("headers", lambda t, a: argparse.Namespace(
+        url=t, timeout=a.timeout)),
+    ("robots", lambda t, a: argparse.Namespace(
+        url=t, timeout=a.timeout)),
+)
+
+
+def sweep_host(target):
+    """The hostname inside whatever was typed.
+
+    A sweep is about a domain, but somebody who has just run
+    `headers https://example.com/path` will type the same thing here.
+    Refusing it is unhelpful and passing it straight through is worse:
+    the DNS client would look up a name containing a slash and report
+    NXDOMAIN about a domain that plainly exists. Take the host out, and
+    have `render_all` SAY so when the answer was derived, rather than
+    silently rewriting what somebody typed.
+    """
+    t = target.strip()
+    if "://" in t:
+        t = t.split("://", 1)[1]
+    t = t.split("/", 1)[0]
+    if "@" in t:                        # user:pass@host, as a URL may carry
+        t = t.rsplit("@", 1)[1]
+    if t.startswith("["):               # [v6]:port
+        close = t.find("]")
+        if close > 0:
+            t = t[1:close]
+    elif t.count(":") == 1:
+        # ONE colon is host:port. Two or more is a bare IPv6 address,
+        # where splitting at the first colon produces a fragment that
+        # is not an address and not an error either -- it would just
+        # resolve to nothing, about a host that answers.
+        t = t.split(":", 1)[0]
+    if not t:
+        raise Fail(f"no host in {target!r}")
+    return t
+
+
+def cmd_all(args):
+    host = sweep_host(args.target)
+    checks = [name for name, _ in SWEEP]
+    if args.ports:
+        checks.append("ports")
+    builders = dict(SWEEP)
+
+    result = {"target": host, "given": args.target, "checks": checks,
+              "results": {}, "failed": []}
+    for name in checks:
+        if name == "ports":
+            ns = argparse.Namespace(host=host, ports=None,
+                                    concurrency=args.concurrency,
+                                    timeout=args.timeout)
+        else:
+            ns = builders[name](host, args)
+        try:
+            result["results"][name] = {"ok": True, "result": COMMANDS[name][0](ns)}
+        except Fail as e:
+            result["results"][name] = {"ok": False, "error": str(e)}
+            result["failed"].append(name)
+        except (OSError, urllib.error.URLError, ssl.SSLError) as e:
+            result["results"][name] = {"ok": False, "error": str(e)}
+            result["failed"].append(name)
+    return result
+
+
+def render_all(r):
+    kv("target", r["target"])
+    if r["given"] != r["target"]:
+        kv("from", r["given"])
+    answered = len(r["checks"]) - len(r["failed"])
+    kv("checks", f"{answered} of {len(r['checks'])} answered")
+    for name in r["checks"]:
+        entry = r["results"][name]
+        print()
+        print(f"── {name} " + "─" * max(0, 62 - len(name)))
+        if not entry["ok"]:
+            print(f"failed: {entry['error']}")
+            continue
+        COMMANDS[name][1](entry["result"])
+
+
+# ─────────────────────────────────────────────────────────────────────
 
 COMMANDS = {
     "dns": (cmd_dns, render_dns),
@@ -934,6 +1064,10 @@ COMMANDS = {
     "robots": (cmd_robots, render_robots),
     "pwned": (cmd_pwned, render_pwned),
     "ports": (cmd_ports, render_ports),
+    # Last, and after the checks it dispatches: `cmd_all` looks its
+    # sub-checks up in this same table, so there is one list of what
+    # this tool can do rather than a second one inside the sweep.
+    "all": (cmd_all, render_all),
 }
 
 
@@ -976,6 +1110,16 @@ def build_parser():
     o.add_argument("host")
     o.add_argument("-p", "--ports", help="e.g. 22,80,443 or 1-1024; default a common set")
     o.add_argument("-c", "--concurrency", type=int, default=64)
+
+    a = sub.add_parser("all", help="dns, whois, tls, headers and robots for one domain")
+    a.add_argument("target", help="domain (a URL is accepted; the host is taken out)")
+    a.add_argument("-s", "--server", help="resolver for the DNS check")
+    a.add_argument("-k", "--insecure", action="store_true",
+                   help="TLS check: connect anyway when verification fails")
+    # Opt-in, never implied by the word "all": see the SWEEP comment.
+    a.add_argument("--ports", action="store_true",
+                   help="also run the port scan (authorised targets only)")
+    a.add_argument("-c", "--concurrency", type=int, default=64)
     return p
 
 
@@ -983,7 +1127,17 @@ def main(argv=None):
     args = build_parser().parse_args(argv)
     run, render = COMMANDS[args.command]
     try:
-        emit(run(args), args.json, render)
+        result = run(args)
+        emit(result, args.json, render)
+        if args.command == "all" and len(result["failed"]) == len(result["checks"]):
+            # A partial sweep is a real answer and exits 0 -- the point
+            # of running everything is the parts that worked, and a
+            # non-zero status for "WHOIS was down" would make this
+            # unusable from a script. Nothing at all answering is a
+            # different thing: usually the name does not resolve, and
+            # reporting success for it would be the tool agreeing that
+            # it found out something.
+            return 1
     except Fail as e:
         print(f"novi-recon: {e}", file=sys.stderr)
         return 1

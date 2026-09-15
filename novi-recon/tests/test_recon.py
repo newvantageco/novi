@@ -394,6 +394,235 @@ check("the validated verdict names who validated",
 
 
 # ─────────────────────────────────────────────────────────────────────
+# `all` — the sweep (RFC 0028 roadmap 1)
+#
+# Nothing here touches the network: cmd_all looks its sub-checks up in
+# COMMANDS, so a stand-in table is all it takes to drive every branch,
+# including the ones a live run would never produce on purpose (a check
+# that raises, every check raising).
+
+# sweep_host: what a sweep decides it was pointed at. The interesting
+# rows are the ones a live run makes look fine -- a URL handed straight
+# to the DNS client resolves a name with a slash in it and reports
+# NXDOMAIN about a domain that plainly exists.
+for given, want in [
+        ("example.com", "example.com"),
+        ("  example.com  ", "example.com"),
+        ("https://example.com", "example.com"),
+        ("http://example.com/robots.txt", "example.com"),
+        ("https://example.com:8443/x", "example.com"),
+        ("example.com/", "example.com"),
+        ("example.com:443", "example.com"),
+        ("https://user:pw@example.com/x", "example.com"),
+        ("[2606:2800:220:1:248:1893:25c8:1946]:443",
+         "2606:2800:220:1:248:1893:25c8:1946"),
+        # A BARE v6 address has more than one colon and no brackets.
+        # Splitting at the first one leaves "2606", which resolves to
+        # nothing while looking like a host -- the failure this rule
+        # exists for.
+        ("2606:2800:220:1:248:1893:25c8:1946",
+         "2606:2800:220:1:248:1893:25c8:1946"),
+]:
+    check(f"sweep_host({given!r})", R.sweep_host(given), want)
+
+check_raises("a target with no host in it is refused", R.Fail, R.sweep_host, "https://")
+check_raises("an empty target is refused", R.Fail, R.sweep_host, "")
+
+
+class _Args:
+    def __init__(self, **kw):
+        self.target = kw.pop("target", "example.com")
+        self.server = kw.pop("server", None)
+        self.insecure = kw.pop("insecure", False)
+        self.ports = kw.pop("ports", False)
+        self.concurrency = kw.pop("concurrency", 64)
+        self.timeout = kw.pop("timeout", 1.0)
+        assert not kw, kw
+
+
+def _stub_commands(behaviour):
+    """COMMANDS with every runner replaced by a canned outcome."""
+    table = {}
+    for name in ("dns", "whois", "tls", "headers", "robots", "ports", "pwned"):
+        def run(ns, _n=name):
+            outcome = behaviour.get(_n, "ok")
+            if outcome != "ok":
+                raise outcome
+            return {"ran": _n}
+        table[name] = (run, lambda r: None)
+    table["all"] = R.COMMANDS["all"]
+    return table
+
+
+def _with_commands(behaviour, args, what="sweep"):
+    """Run cmd_all against the stand-in table.
+
+    An exception ESCAPING here is the exact bug the "a failed check is a
+    field" checks below exist to catch, so it is recorded as a named
+    failure rather than allowed to end this script with a traceback --
+    a test that dies says less than a test that says which rule broke.
+    """
+    saved = R.COMMANDS
+    R.COMMANDS = _stub_commands(behaviour)
+    try:
+        return R.cmd_all(args)
+    except BaseException as e:                       # noqa: BLE001
+        FAILURES.append(f"{what}: a check's failure escaped cmd_all ({e!r})")
+        names = [n for n, _ in R.SWEEP] + (["ports"] if args.ports else [])
+        return {"target": "", "given": "", "checks": names, "failed": names,
+                "results": {n: {"ok": None, "error": None, "result": None}
+                            for n in names}}
+    finally:
+        R.COMMANDS = saved
+
+
+# THE DECISION THIS FEATURE IS ABOUT. A subcommand called "all" that
+# port-scans is the tool making a decision about authorisation on
+# somebody's behalf, at the moment they are least likely to be thinking
+# about it. Asserted in both directions, because "ports is absent" also
+# passes on a build where the sweep runs nothing at all.
+r = _with_commands({}, _Args())
+check("the default sweep does not scan ports", "ports" in r["checks"], False)
+check("the default sweep is the five passive checks",
+      r["checks"], ["dns", "whois", "tls", "headers", "robots"])
+check("--ports opts in", "ports" in _with_commands({}, _Args(ports=True))["checks"], True)
+check("--ports adds it LAST, after the passive checks",
+      _with_commands({}, _Args(ports=True))["checks"][-1], "ports")
+
+# `pwned` reads a password from stdin and knows nothing about a domain.
+# There is nothing for a sweep to pass it, with or without --ports.
+for kw in ({}, {"ports": True}):
+    check(f"pwned is never in the sweep ({kw})",
+          "pwned" in _with_commands({}, _Args(**kw))["checks"], False)
+
+# Each sub-check actually RAN, rather than the sweep reporting a list it
+# never dispatched.
+for name in ("dns", "whois", "tls", "headers", "robots"):
+    check(f"{name} ran", r["results"][name]["result"], {"ran": name})
+
+# ONE CHECK FAILING IS A FIELD, NOT THE END. The whole value of a sweep
+# is the parts that answered; a WHOIS server being down must not throw
+# away the four findings gathered around it.
+r = _with_commands({"whois": R.Fail("whois.example: connection refused")}, _Args())
+check("a failed check is named", r["failed"], ["whois"])
+check("a failed check records why",
+      r["results"]["whois"]["error"], "whois.example: connection refused")
+check("a failed check is marked not-ok", r["results"]["whois"]["ok"], False)
+check("the checks AFTER the failure still ran",
+      [n for n in ("tls", "headers", "robots") if r["results"][n]["ok"]],
+      ["tls", "headers", "robots"])
+check("the check BEFORE the failure survived it", r["results"]["dns"]["ok"], True)
+
+# An OSError is the other way a check dies -- a socket timeout is not a
+# Fail -- and it must land in the same place rather than ending the run.
+r = _with_commands({"tls": OSError("timed out")}, _Args())
+check("an OSError is caught too", r["results"]["tls"]["error"], "timed out")
+check("and does not stop the sweep", r["results"]["robots"]["ok"], True)
+
+# Everything failing is a different outcome from some things failing,
+# and main() reads exactly this to decide its exit status.
+r = _with_commands({n: R.Fail("no") for n in
+                    ("dns", "whois", "tls", "headers", "robots")}, _Args())
+check("all-failed is visible as such", len(r["failed"]), len(r["checks"]))
+
+# The target is DERIVED and the derivation is reported, so a sweep that
+# rewrote what you typed is a sweep you can check.
+r = _with_commands({}, _Args(target="https://example.com/path"))
+check("the derived host is used", r["target"], "example.com")
+check("what was typed is kept beside it", r["given"], "https://example.com/path")
+
+# The arguments each check is handed come from SWEEP, in one place.
+# Asserted because the alternative -- five inline namespaces -- is how
+# one of them ends up pointed at the wrong host.
+seen = {}
+
+
+def _capture(ns, _n=None):
+    seen[_n] = ns
+    return {}
+
+
+saved = R.COMMANDS
+R.COMMANDS = {n: ((lambda ns, _n=n: _capture(ns, _n)), (lambda r: None))
+              for n in ("dns", "whois", "tls", "headers", "robots", "ports")}
+R.COMMANDS["all"] = saved["all"]
+try:
+    R.cmd_all(_Args(target="https://example.com/x", insecure=True, timeout=3.0))
+finally:
+    R.COMMANDS = saved
+check("dns is asked about the host", seen["dns"].name, "example.com")
+check("whois is asked about the host", seen["whois"].target, "example.com")
+check("tls is pointed at the host", seen["tls"].target, "example.com")
+check("-k reaches the tls check", seen["tls"].insecure, True)
+check("headers gets the host, not the URL", seen["headers"].url, "example.com")
+check("robots gets the host, not the URL", seen["robots"].url, "example.com")
+for n in ("dns", "whois", "tls", "headers", "robots"):
+    check(f"--timeout reaches {n}", seen[n].timeout, 3.0)
+
+# The sweep must not quietly narrow a check: `dns` with type=None is
+# that command's own default list, not a shorter one chosen here.
+check("the dns check keeps its own default record types", seen["dns"].type, None)
+
+# render_all COMPOSES the existing renderers rather than formatting any
+# check a second time. Checked by counting calls into a stand-in table:
+# a reimplementation would render the same report with none.
+calls = []
+saved = R.COMMANDS
+R.COMMANDS = {n: ((lambda ns: {}), (lambda r, _n=n: calls.append(_n)))
+              for n in ("dns", "whois", "tls", "headers", "robots", "ports")}
+R.COMMANDS["all"] = saved["all"]
+try:
+    import io
+    import contextlib
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        R.render_all({"target": "example.com", "given": "example.com",
+                      "checks": ["dns", "whois"], "failed": ["whois"],
+                      "results": {"dns": {"ok": True, "result": {}},
+                                  "whois": {"ok": False, "error": "refused"}}})
+    text = buf.getvalue()
+finally:
+    R.COMMANDS = saved
+check("render_all calls the check's own renderer", calls, ["dns"])
+check("and does not call it for a check that failed", "whois" in calls, False)
+check("a failed check's reason is printed", "refused" in text, True)
+check("the tally counts what answered", "1 of 2 answered" in text, True)
+
+
+# The EXIT STATUS, driven through main() rather than inferred. A
+# partial sweep exits 0 -- the point of running everything is the parts
+# that worked, and a non-zero status for "the WHOIS server was down"
+# makes this unusable from a script. Nothing at all answering is a
+# different machine state (in practice: no resolver, so not even the
+# DNS check could start) and says so.
+#
+# Worth driving here rather than against the network, because the
+# all-failed branch is hard to provoke live: `dns` reports NXDOMAIN as
+# a FINDING and returns normally, so a domain that does not exist still
+# answers. A rule nobody can make fire is a rule nobody can rely on.
+def _main_status(behaviour):
+    saved = R.COMMANDS
+    R.COMMANDS = _stub_commands(behaviour)
+    try:
+        import io
+        import contextlib
+        with contextlib.redirect_stdout(io.StringIO()):
+            return R.main(["all", "example.com"])
+    finally:
+        R.COMMANDS = saved
+
+
+ALL = ("dns", "whois", "tls", "headers", "robots")
+check("a sweep where everything answered exits 0", _main_status({}), 0)
+check("a sweep with one check down still exits 0",
+      _main_status({"whois": R.Fail("down")}), 0)
+check("a sweep with four of five down still exits 0",
+      _main_status({n: R.Fail("down") for n in ALL[1:]}), 0)
+check("a sweep where nothing answered exits 1",
+      _main_status({n: R.Fail("down") for n in ALL}), 1)
+
+
+# ─────────────────────────────────────────────────────────────────────
 
 if FAILURES:
     print(f"novi-recon: {len(FAILURES)} check(s) FAILED\n")

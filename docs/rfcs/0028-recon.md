@@ -275,9 +275,68 @@ setting AD in the query the load-bearing half rather than a detail.
 
 ## Roadmap
 
-1. **A subcommand that reads a target list and writes a report.** Right
-   now each command answers one question about one target; the original
-   tool's actual shape is "run everything against this domain".
+1. ~~**A subcommand that reads a target list and writes a report.**~~
+   **Done, for one target** — `novi-recon all <domain>` runs `dns`,
+   `whois`, `tls`, `headers` and `robots` and prints one report. A
+   target *list* is deliberately not part of it: see below.
+
+   **`ports` IS NOT IN THE SWEEP, and that is the decision this
+   feature is about.** Every check in it asks a third party about the
+   target — a resolver, a WHOIS server, the site's own TLS and HTTP
+   endpoints, which is what a browser does on its own. A port scan is
+   the one thing this tool does that reaches for a machine's *other*
+   services, and this tool's own epilog says to point it only at
+   systems you are authorised to test. A subcommand called "all" that
+   quietly scanned would move that decision from the person to the
+   tool, at exactly the moment they are least likely to be thinking
+   about it — so `--ports` opts in, and then it is a scan somebody
+   typed. `pwned` is out for a duller reason: it reads a **password**
+   from stdin and knows nothing about a domain, so there is nothing
+   for a sweep to hand it.
+
+   **One check failing is a FIELD, not the end.** Each runs inside its
+   own guard and a failure becomes `ok: false` with the reason,
+   because the whole value of a sweep is the parts that answered — a
+   WHOIS server being down must not throw away the DNS, TLS, header
+   and robots findings gathered around it. Same shape as `novi-state`
+   running each converge in a subshell so one impossible key does not
+   abandon the rest of the document. Measured on a real run:
+   `4 of 5 answered`, with four full reports and one named failure.
+
+   **A partial sweep exits 0; nothing answering exits 1.** A non-zero
+   status for "the WHOIS server was down" would make this unusable
+   from a script. That second branch is hard to provoke against the
+   network — `dns` reports NXDOMAIN as a *finding* and returns
+   normally, so a domain that does not exist still answers — which is
+   why the exit status is driven through `main()` in the host test
+   instead. **A rule nobody can make fire is a rule nobody can rely
+   on.**
+
+   **The renderer composes the existing ones.** There is already one
+   printer per check; this mode only decides which to call. A second
+   formatting of any check would be exactly the drift `novi-agent
+   describe --text` avoids by keeping one gatherer and two printers —
+   and the host test asserts it by counting calls into a stand-in
+   table, because a reimplementation would render the same report with
+   none.
+
+   **The host is taken out of whatever was typed, and the derivation
+   is reported.** Somebody who has just run
+   `headers https://example.com/path` will type the same thing here;
+   handing that to the DNS client would look up a name containing a
+   slash and report NXDOMAIN about a domain that plainly exists.
+   `sweep_host()` also distinguishes `host:port` from a bare IPv6
+   address by counting colons — splitting at the first one leaves
+   `2606`, which resolves to nothing while still looking like a host.
+   `render_all` prints a `from` line whenever the target it used is
+   not the one given, so a sweep that rewrote what you typed is a
+   sweep you can check.
+
+   **What is still not done is the LIST**, and it needs a decision
+   this RFC has not made: a file of targets is a scan campaign, and
+   the rate at which it hits third-party WHOIS and DNS servers is a
+   policy question rather than a flag. One target per invocation and a
+   shell loop is the honest interim.
 2. ~~**DNSSEC validation**, or an explicit statement that there is
    none.~~ **Done — the second one, plus one real fact.**
 

@@ -933,6 +933,35 @@ breached-password check and a TCP connect scan.
   parses the script with the target's exact major.minor before
   packaging, because otherwise the package builds, installs, signs and
   verifies perfectly and dies at the first invocation.
+- **`novi-recon all <domain>` IS THE SWEEP, AND `ports` IS NOT IN
+  IT.** Every check in it asks a third party about the target -- a
+  resolver, a WHOIS server, the site's own TLS and HTTP endpoints,
+  which is what a browser does. A port scan reaches for a machine's
+  OTHER services, and this tool's own epilog says to point it only at
+  systems you are authorised to test: a subcommand called "all" that
+  quietly scanned would move that decision from the person to the
+  tool, at the moment they are least likely to be thinking about it.
+  `--ports` opts in. `pwned` is out for a duller reason -- it reads a
+  password from stdin and knows nothing about a domain.
+- **One check failing is a FIELD, not the end.** A WHOIS server being
+  down must not throw away the DNS, TLS, header and robots findings
+  gathered around it -- `novi-state` running each converge in a
+  subshell, in a different costume. A partial sweep exits 0; only
+  nothing-answered exits 1, because a non-zero status for "WHOIS was
+  down" makes this unusable from a script.
+- **THAT EXIT-1 BRANCH CANNOT BE PROVOKED AGAINST THE NETWORK**, which
+  is why it is driven through `main()` in the host test: `cmd_dns`
+  reports NXDOMAIN as a FINDING and returns normally, so a domain that
+  does not exist still answers, and the only realistic all-failed
+  machine is one with no resolver at all. A rule nobody can make fire
+  is a rule nobody can rely on.
+- **`render_all` composes the existing renderers**, and the test
+  asserts it by COUNTING CALLS into a stand-in table -- a
+  reimplementation would render the same report with none, so
+  comparing the text could not tell the two apart.
+- **`sweep_host()` counts colons.** One is `host:port`; two or more is
+  a bare IPv6 address, where splitting at the first leaves `2606` --
+  which resolves to nothing while still looking like a host.
 - **The installed shebang is `/usr/bin/python3`, not `/usr/bin/env
   python3`.** `env` costs a PATH search per invocation, and a `$PATH`
   that finds a different python3 first makes a system tool behave
