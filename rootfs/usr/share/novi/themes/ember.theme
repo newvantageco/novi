@@ -1,0 +1,30 @@
+# ember — warm, amber accent on a browner dark ground.
+#
+# The point of shipping more than one theme is to prove the mechanism
+# changes what you see; the point of shipping only a few is that a
+# palette is a design decision and a list of forty is a shrug. Each of
+# these keeps the design language's STRUCTURE -- four background layers
+# a fixed step apart, one accent used as a signal, three text weights --
+# and changes only the hues.
+
+bg.base        = #100c09
+bg.panel       = #1b1611
+bg.card        = #221b15
+bg.card-raised = #2d241b
+
+accent         = #f59e0b
+accent.hover   = #fbbf24
+accent.active  = #d97706
+accent.subtle  = #3a2a10
+text.on-accent = #1a1205
+
+text.primary   = #f7f3ee
+text.secondary = #bdb0a0
+text.muted     = #857a6c
+
+border.subtle  = #332a21
+border.strong  = #4a3e30
+
+status.success = #84cc16
+status.warning = #fbbf24
+status.error   = #f87171

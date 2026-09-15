@@ -77,6 +77,10 @@ int main(void) {
 		NET_ICON_W, NET_ICON_H);
 	show("power", novi_power_coverage, NULL, POWER_ICON_W, POWER_ICON_H);
 	show("health warning", novi_warn_coverage, NULL, WARN_ICON_W, WARN_ICON_H);
+	show("stay awake", novi_awake_coverage, NULL,
+		AWAKE_ICON_W, AWAKE_ICON_H);
+	show("unread notifications", novi_bell_coverage, NULL,
+		BELL_ICON_W, BELL_ICON_H);
 
 	struct net_fan fan[6];
 	for (int bars = 0; bars <= 4; bars++) {
@@ -291,6 +295,190 @@ int main(void) {
 			edge += novi_volume_coverage(VOL_ICON_W - 0.5, y + 0.5, &vol_muted);
 		}
 		check("volume: nothing touches the icon box's border", edge < 0.05);
+	}
+
+	/* ── The stay-awake glyph ──────────────────────────────────────
+	 *
+	 * A cup, a handle and two ticks of steam, at a size where every
+	 * one of those is three or four pixels. The states a booted
+	 * machine can show are "drawn" and "not drawn", so a live
+	 * screenshot can only ever say the glyph exists -- whether it
+	 * still reads as a coffee cup is what these check.
+	 */
+	{
+		/* Nothing touches the box's border. draw_icon() clips to it,
+		 * so ink that lands there is a handle sheared off flat or a
+		 * steam tick with its cap missing -- and at 16px neither
+		 * looks like damage, they just look like a slightly different
+		 * icon. The same assertion caught both edges of the speaker. */
+		double edge = 0.0;
+		for (int x = 0; x < AWAKE_ICON_W; x++) {
+			edge += novi_awake_coverage(x + 0.5, 0.5, NULL);
+			edge += novi_awake_coverage(x + 0.5, AWAKE_ICON_H - 0.5, NULL);
+		}
+		for (int y = 0; y < AWAKE_ICON_H; y++) {
+			edge += novi_awake_coverage(0.5, y + 0.5, NULL);
+			edge += novi_awake_coverage(AWAKE_ICON_W - 0.5, y + 0.5, NULL);
+		}
+		check("awake: nothing touches the icon box's border", edge < 0.05);
+
+		/* The steam is ABOVE the cup. A vertically mirrored glyph is
+		 * clean, plausible and wrong, which is exactly what the RJ45
+		 * jack shipped as until its own asymmetry was asserted. The
+		 * cup's base is a full-width bar and the steam is two short
+		 * ticks, so the ink is lopsided downward and a flip inverts
+		 * that. */
+		double top_ink = 0.0, bottom_ink = 0.0;
+		for (int y = 0; y < AWAKE_ICON_H / 4; y++) {
+			for (int x = 0; x < AWAKE_ICON_W; x++) {
+				top_ink += novi_awake_coverage(x + 0.5, y + 0.5, NULL);
+				bottom_ink += novi_awake_coverage(x + 0.5,
+					AWAKE_ICON_H - 1 - y + 0.5, NULL);
+			}
+		}
+		check("awake: the steam is above the cup, not below it",
+			bottom_ink > top_ink + 4.0 && top_ink > 1.0);
+
+		/* An EMPTY ROW between them. Steam that meets the rim is not
+		 * steam, it is a lid -- and the two are one row apart at this
+		 * size, so nothing about the shape makes this automatic. */
+		int gap_rows = 0;
+		for (int y = (int)AWAKE_STEAM_TOP; y < (int)AWAKE_CUP_TOP; y++) {
+			double row = 0.0;
+			for (int x = 0; x < AWAKE_ICON_W; x++) {
+				row += novi_awake_coverage(x + 0.5, y + 0.5, NULL);
+			}
+			if (row < 0.05) {
+				gap_rows++;
+			}
+		}
+		check("awake: an empty row separates the steam from the cup",
+			gap_rows >= 1);
+
+		/* Two ticks, not one wide one: a column between them with no
+		 * ink in the steam's own band. */
+		double between = 0.0;
+		double mid_x = (AWAKE_STEAM_X1 + AWAKE_STEAM_X2) / 2.0;
+		for (double y = AWAKE_STEAM_TOP; y <= AWAKE_STEAM_BOTTOM; y += 0.25) {
+			between += novi_awake_coverage(mid_x, y, NULL);
+		}
+		check("awake: the steam is two separate ticks", between < 0.05);
+
+		/* The handle is to the RIGHT of the cup and reaches past it.
+		 * Without it the glyph is a bucket. */
+		double handle = novi_awake_coverage(AWAKE_HANDLE_CX + AWAKE_HANDLE_R,
+			AWAKE_HANDLE_CY, NULL);
+		check("awake: the handle hangs off the cup's right side",
+			handle > 0.5 && AWAKE_HANDLE_CX + AWAKE_HANDLE_R > AWAKE_CUP_TOP_RIGHT);
+
+		/* The polygon is CLOSED. The loop over pairs of points draws
+		 * the top, the right side and the base; the LEFT WALL is the
+		 * segment that closes 3 back to 0, and it is the one a loop
+		 * written the obvious way leaves out. Probed at the left
+		 * wall's own midpoint, therefore -- the base is drawn either
+		 * way, so a probe down there cannot fail. (It was written down
+		 * there first, and passed with the closing segment deleted:
+		 * the provocation is what found the probe, not the glyph.) */
+		double wall = novi_awake_coverage(
+			(AWAKE_CUP_TOP_LEFT + AWAKE_CUP_BOTTOM_LEFT) / 2.0,
+			(AWAKE_CUP_TOP + AWAKE_CUP_BOTTOM) / 2.0, NULL);
+		check("awake: the cup's left wall is closed", wall > 0.7);
+	}
+
+	/* ── The unread-notification bell ──────────────────────────────
+	 *
+	 * A dome, a rim, and a clapper hanging under it. The two things
+	 * that make it read as a bell rather than as an arch or a blob
+	 * are the rim's overhang and the AIR between the rim and the
+	 * clapper -- and both are quantities that disappear quietly when
+	 * a radius moves.
+	 */
+	{
+		double edge = 0.0;
+		for (int x = 0; x < BELL_ICON_W; x++) {
+			edge += novi_bell_coverage(x + 0.5, 0.5, NULL);
+			edge += novi_bell_coverage(x + 0.5, BELL_ICON_H - 0.5, NULL);
+		}
+		for (int y = 0; y < BELL_ICON_H; y++) {
+			edge += novi_bell_coverage(0.5, y + 0.5, NULL);
+			edge += novi_bell_coverage(BELL_ICON_W - 0.5, y + 0.5, NULL);
+		}
+		check("bell: nothing touches the icon box's border", edge < 0.05);
+
+		/* The rim overhangs the dome. Without it this is an arch.
+		 *
+		 * Measured as an EXTENT -- rightmost inked column minus
+		 * leftmost -- and not as a count of inked columns, which is
+		 * what this asked first and which cannot answer the question
+		 * on an outline glyph: at the dome's own centre row the only
+		 * ink is its two arc ends, four columns, so a rim narrower
+		 * than the dome still "counted" wider and the check passed
+		 * with the overhang taken away. Provoking it is what found
+		 * that; the glyph was right and the probe was not, for the
+		 * second time in this file. */
+		int rim_l = BELL_ICON_W, rim_r = -1, dome_l = BELL_ICON_W, dome_r = -1;
+		for (int x = 0; x < BELL_ICON_W; x++) {
+			if (novi_bell_coverage(x + 0.5, BELL_RIM_Y, NULL) > 0.05) {
+				if (x < rim_l) { rim_l = x; }
+				rim_r = x;
+			}
+			if (novi_bell_coverage(x + 0.5, BELL_DOME_CY, NULL) > 0.05) {
+				if (x < dome_l) { dome_l = x; }
+				dome_r = x;
+			}
+		}
+		check("bell: the rim is wider than the dome it sits under",
+			dome_r > dome_l && rim_r - rim_l > dome_r - dome_l);
+
+		/* AIR between the rim and the clapper. At 16 rows tall this
+		 * closed to half a pixel, the clapper welded itself to the
+		 * bell, and the glyph read as a blob with a tail -- which is
+		 * why the box is 17 rows and not 16. */
+		int gap_rows = 0;
+		for (int y = (int)BELL_RIM_Y + 1; y < (int)BELL_CLAPPER_CY; y++) {
+			double row = 0.0;
+			for (int x = 0; x < BELL_ICON_W; x++) {
+				row += novi_bell_coverage(x + 0.5, y + 0.5, NULL);
+			}
+			if (row < 0.05) {
+				gap_rows++;
+			}
+		}
+		check("bell: the clapper hangs clear of the rim", gap_rows >= 1);
+
+		/* Half-circles, not circles. The clapper's UPPER half would
+		 * close it into a bead, and a bead under a bell is a bell
+		 * with a bug rather than a bell with a clapper.
+		 *
+		 * Against 0.5, not against zero, and the difference is the
+		 * point: the rim's own antialiasing reaches this row and
+		 * leaves about 0.1 there whatever the clapper does, so a
+		 * probe demanding zero fails on a correct glyph. A closed
+		 * bead puts full ink here. The margin between 0.1 and 1.0 is
+		 * what the check is actually reading. */
+		double clapper_top = novi_bell_coverage(BELL_CX,
+			BELL_CLAPPER_CY - BELL_CLAPPER_R, NULL);
+		check("bell: the clapper is an arc, not a closed bead",
+			clapper_top < 0.5);
+		double clapper_bottom = novi_bell_coverage(BELL_CX,
+			BELL_CLAPPER_CY + BELL_CLAPPER_R, NULL);
+		check("bell: ...and the arc it is has a bottom",
+			clapper_bottom > 0.7);
+
+		/* Right way up. The dome is most of the ink and the clapper
+		 * is a few pixels, so a flip inverts a large margin -- the
+		 * RJ45 jack's lesson, in the glyph that would look most
+		 * plausible upside down. */
+		double top_ink = 0.0, bottom_ink = 0.0;
+		for (int y = 0; y < BELL_ICON_H / 3; y++) {
+			for (int x = 0; x < BELL_ICON_W; x++) {
+				top_ink += novi_bell_coverage(x + 0.5, y + 0.5, NULL);
+				bottom_ink += novi_bell_coverage(x + 0.5,
+					BELL_ICON_H - 1 - y + 0.5, NULL);
+			}
+		}
+		check("bell: the dome is above and the clapper below",
+			top_ink > bottom_ink + 4.0 && bottom_ink > 1.0);
 	}
 
 	/* The jack's tab is below its body. The upside-down version passed

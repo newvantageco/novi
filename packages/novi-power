@@ -4,6 +4,7 @@
 #   novi-power status      what the machine's power state is
 #   novi-power suspend     suspend to RAM
 #   novi-power governors   what CPU frequency governors are available
+#   novi-power idle        the compositor's idle state and any inhibitors
 #   novi-power event WHAT  act on a lid/button event (called by acpid)
 #
 # The kernel has had CONFIG_ACPI_BATTERY, CONFIG_ACPI_AC,
@@ -35,6 +36,8 @@ Usage:
   novi-power suspend     suspend to RAM (s2idle or deep, whichever the
                          firmware offers)
   novi-power governors   list the CPU frequency governors this kernel has
+  novi-power idle        what the compositor is doing about idling, and
+                         which clients (if any) are holding it awake
   novi-power event WHAT  act on a hardware event; WHAT is `lid` or
                          `button`. Called by acpid from /etc/acpi/,
                          not normally by a person.
@@ -158,6 +161,96 @@ cmd_governors() {
 }
 
 # ---------------------------------------------------------------------------
+# Idle
+# ---------------------------------------------------------------------------
+#
+# novi-shell publishes what it is doing about idling to /run/novi/idle
+# (RFC 0035), the same arrangement the network service uses for the
+# interface it chose. This reads that file and nothing else -- it does
+# not talk to the compositor, count anything, or read system.conf, so
+# there is no way for it to disagree with the thing it is reporting on.
+#
+# It exists because of ONE question: a machine whose screen will not
+# blank, and no way to find out which program is holding it awake. An
+# idle inhibitor is a client saying "not now" and there is no other
+# trace of it anywhere on the system -- that is the actual complaint
+# people have about this protocol on other desktops, and a published
+# file nobody can read is not an answer to it.
+#
+# The inhibitor names come from client-chosen app_ids. novi-shell
+# filters them to printable, space-free text before publishing (see
+# inhibitor_name()), so this can print them as they arrive.
+cmd_idle() {
+    local file=/run/novi/idle
+    local blanked='' locked='' idle='' blank='' suspend='' inhibit='' awake=''
+    local key value
+    local names=""
+
+    if [ ! -r "$file" ]; then
+        info "nothing is publishing idle state at ${file}"
+        info "novi-shell is what writes it, so either the desktop is not"
+        info "running or this machine has no compositor at all"
+        return 0
+    fi
+
+    # `key value` lines. Unknown keys are ignored rather than refused:
+    # a novi-shell newer than this script should not make it fail.
+    while read -r key value; do
+        case "$key" in
+            blanked)   blanked="$value" ;;
+            locked)    locked="$value" ;;
+            idle)      idle="$value" ;;
+            blank)     blank="$value" ;;
+            suspend)   suspend="$value" ;;
+            awake)     awake="$value" ;;
+            inhibit)   inhibit="$value" ;;
+            inhibitor) names="${names}${names:+ }${value}" ;;
+        esac
+    done < "$file"
+
+    printf '%-10s %s\n' idle "${idle:-?}s since the last input"
+    printf '%-10s %s\n' blanked \
+        "$([ "${blanked:-0}" = "1" ] && printf 'yes' || printf 'no')"
+    printf '%-10s %s\n' locked \
+        "$([ "${locked:-0}" = "1" ] && printf 'yes' || printf 'no')"
+    # 0 is how novi-shell spells "never" for both timeouts, and `off` is
+    # how the document spells it -- print the document's word.
+    printf '%-10s %s\n' blank \
+        "$([ "${blank:-0}" = "0" ] && printf 'off' || printf '%ss' "$blank")  (power.blank)"
+    printf '%-10s %s\n' suspend \
+        "$([ "${suspend:-0}" = "0" ] && printf 'off' || printf '%ss' "$suspend")  (power.suspend)"
+
+    # Two separate claims, printed separately. `awake` is somebody
+    # having pressed Super+A; `inhibit` is programs asking. Rolling
+    # them into one line would say that something is holding this
+    # machine awake and hide which kind of thing, which is the only
+    # part worth knowing.
+    if [ "${awake:-0}" = "1" ]; then
+        printf '%-10s %s\n' awake "yes -- somebody pressed Super+A"
+        info "press Super+A again to let the idle timers run."
+        info "unlike a program's inhibitor, this one survives locking the"
+        info "screen: it was set by a person, deliberately, at this keyboard."
+    else
+        printf '%-10s %s\n' awake "no"
+    fi
+
+    if [ "${inhibit:-0}" -gt 0 ] 2>/dev/null; then
+        printf '%-10s %s\n' inhibit \
+            "$inhibit visible surface(s) are keeping this machine awake"
+        local n
+        for n in $names; do
+            printf '%-10s %s\n' '' "$n"
+        done
+        info "an inhibitor is a client asking not to be interrupted."
+        info "it stops counting the moment its window is hidden, minimized"
+        info "or on another workspace -- and while the session is locked."
+    else
+        printf '%-10s %s\n' inhibit "no"
+    fi
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # Hardware events
 # ---------------------------------------------------------------------------
 #
@@ -224,6 +317,7 @@ case "${1:-}" in
     status)     shift; cmd_status "$@" ;;
     suspend)    shift; cmd_suspend "$@" ;;
     governors)  shift; cmd_governors "$@" ;;
+    idle)       shift; cmd_idle "$@" ;;
     event)      shift; cmd_event "$@" ;;
     -h|--help|help) usage ;;
     *)          usage; exit 1 ;;

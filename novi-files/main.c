@@ -115,15 +115,14 @@
  * exactly one thing in this window: this row is selected. */
 #define ICON_DIR_COLOR  NOVI_TEXT_SECONDARY
 #define ICON_FILE_COLOR NOVI_TEXT_MUTED
-
-static const pixman_color_t NAME_PIX    = NOVI_PIX(NOVI_TEXT_SECONDARY);
-static const pixman_color_t DIR_PIX     = NOVI_PIX(NOVI_TEXT_PRIMARY);
-static const pixman_color_t SIZE_PIX    = NOVI_PIX(NOVI_TEXT_MUTED);
-static const pixman_color_t PATH_PIX    = NOVI_PIX(NOVI_TEXT_SECONDARY);
-static const pixman_color_t STATUS_PIX  = NOVI_PIX(NOVI_TEXT_SECONDARY);
-static const pixman_color_t ERROR_PIX   = NOVI_PIX(NOVI_STATUS_ERROR);
-static const pixman_color_t PLACE_PIX   = NOVI_PIX(NOVI_TEXT_SECONDARY);
-static const pixman_color_t PLACE_HEAD_PIX = NOVI_PIX(NOVI_TEXT_MUTED);
+#define NAME_PIX NOVI_PIX(NOVI_TEXT_SECONDARY)
+#define DIR_PIX NOVI_PIX(NOVI_TEXT_PRIMARY)
+#define SIZE_PIX NOVI_PIX(NOVI_TEXT_MUTED)
+#define PATH_PIX NOVI_PIX(NOVI_TEXT_SECONDARY)
+#define STATUS_PIX NOVI_PIX(NOVI_TEXT_SECONDARY)
+#define ERROR_PIX NOVI_PIX(NOVI_STATUS_ERROR)
+#define PLACE_PIX NOVI_PIX(NOVI_TEXT_SECONDARY)
+#define PLACE_HEAD_PIX NOVI_PIX(NOVI_TEXT_MUTED)
 
 /* A prompt takes over the status bar and the keyboard until it is
  * answered. There is exactly one at a time and it is never nested. */
@@ -2002,6 +2001,11 @@ static const struct wl_registry_listener registry_listener = {
 };
 
 int main(int argc, char **argv) {
+	/* Colours are a runtime table now (RFC 0030). Load the active
+	 * theme BEFORE anything computes a colour; on failure the
+	 * compiled-in defaults stay in force, so this cannot leave the
+	 * client worse off than it was. */
+	novi_theme_load();
 	struct novi_files s = {0};
 	s.running = true;
 	s.width = WINDOW_WIDTH;
@@ -2082,6 +2086,14 @@ int main(int argc, char **argv) {
 	 * blocks forever (RFC 0017 learned that one the hard way).
 	 */
 	s.mounts_fd = novi_places_watch_open();
+	/* And a theme switch (RFC 0030 roadmap 1). A file manager is a
+	 * window people leave open, so before this it was one of the
+	 * surfaces that kept the old palette while the panel and the
+	 * wallpaper changed under it -- which reads as a half-applied
+	 * theme, the one outcome the loader itself is written to avoid.
+	 * -1 is not an error: the client is correct either way, it just
+	 * will not follow a switch until it restarts. */
+	int theme_fd = novi_theme_watch();
 
 	while (s.running) {
 		while (wl_display_prepare_read(s.display) != 0) {
@@ -2096,15 +2108,30 @@ int main(int argc, char **argv) {
 		}
 		wl_display_flush(s.display);
 
-		struct pollfd fds[2] = {
+		/* Three descriptors, and the two non-Wayland ones want
+		 * DIFFERENT events -- POLLPRI for the mount table, POLLIN for
+		 * inotify. They are separate slots rather than one loop
+		 * because a single `events` mask for both would have to be
+		 * the union, and POLLPRI on an inotify fd is never asserted
+		 * while POLLIN on /proc/self/mounts never is either: the
+		 * union works only by accident of each fd ignoring the bit
+		 * that is not its own. Naming each one keeps the reason
+		 * POLLPRI is here (the comment below) attached to the fd it
+		 * is about.
+		 *
+		 * A -1 fd in a pollfd is ignored by poll(2), so an absent
+		 * watch needs no branch -- but `nfds` still has to cover the
+		 * slots that exist, hence the fixed 3 rather than a count. */
+		struct pollfd fds[3] = {
 			{.fd = wl_display_get_fd(s.display), .events = POLLIN},
 			/* POLLPRI, not POLLIN: /proc/self/mounts never becomes
 			 * "readable" in the ordinary sense, and a poll set up for
 			 * POLLIN here waits forever while the sidebar quietly
 			 * never updates. */
 			{.fd = s.mounts_fd, .events = POLLPRI},
+			{.fd = theme_fd, .events = POLLIN},
 		};
-		int nfds = s.mounts_fd >= 0 ? 2 : 1;
+		int nfds = 3;
 		int ret = poll(fds, (nfds_t)nfds, -1);
 		if (ret < 0) {
 			wl_display_cancel_read(s.display);
@@ -2123,7 +2150,7 @@ int main(int argc, char **argv) {
 			break;
 		}
 
-		if (nfds == 2 && (fds[1].revents & (POLLPRI | POLLERR))) {
+		if (s.mounts_fd >= 0 && (fds[1].revents & (POLLPRI | POLLERR))) {
 			/* Drain FIRST. POLLPRI stays asserted until the file is
 			 * read again, so a wake that redraws and polls again
 			 * without this spins at 100% CPU forever -- silent, and
@@ -2131,6 +2158,10 @@ int main(int argc, char **argv) {
 			novi_places_watch_drain(s.mounts_fd);
 			places_refresh(&s);
 			leave_if_gone(&s);
+			surface_draw_frame(&s);
+		}
+
+		if ((fds[2].revents & POLLIN) && novi_theme_watch_drain(theme_fd)) {
 			surface_draw_frame(&s);
 		}
 
@@ -2147,6 +2178,7 @@ int main(int argc, char **argv) {
 	if (s.mounts_fd >= 0) {
 		close(s.mounts_fd);
 	}
+	novi_theme_watch_close(theme_fd);
 
 	if (s.pointer != NULL) {
 		wl_pointer_destroy(s.pointer);

@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-# 38-python.sh — CPython, as a package
+# 43-python.sh — CPython, as a package
 #
 # Until this stage there was NO SCRIPTING LANGUAGE ON THIS SYSTEM. Not
 # a slow one, not an old one -- none. No Python, no Perl, no Ruby.
@@ -13,19 +13,19 @@
 # automation tooling that exists is Python, and so is most of what a
 # person writes for themselves on a machine they control.
 #
-#   bash build/38-python.sh
+#   bash build/43-python.sh
 #
 # A PACKAGE, NEVER THE BASE IMAGE. ~32 MB installed. RFC 0007 keeps
 # the base console-only and small; a language runtime is exactly the
 # kind of thing that belongs behind `pkg install`. It stages into
 # ${BUILD_DIR}/stage-devtools alongside git and the ssh client, so
-# 43-devtools-repo.sh publishes it with no change to that stage --
+# 53-devtools-repo.sh publishes it with no change to that stage --
 # its repo phase globs every directory there that has a MANIFEST.
 #
-# WHY THE STAGE NUMBER IS 38: 40+ is packaging, and 40-repo.sh must
+# WHY THE STAGE NUMBER IS 38: 50+ is packaging, and 50-repo.sh must
 # see a finished tree. This builds nothing into ${ROOTFS} at all, but
 # it does READ from it (zlib, libffi, expat), so it has to run while
-# those are still there -- i.e. before 41-desktop-split.sh takes them
+# those are still there -- i.e. before 51-desktop-split.sh takes them
 # out.
 #
 # ── ssl comes from OpenSSL, which is a package of its own ─────────────
@@ -95,7 +95,7 @@ fi
 
 # ── zlib, libffi and expat come out of ${ROOTFS} ──────────────────────
 #
-# All three are packages, so 41-desktop-split.sh moves them out and in
+# All three are packages, so 51-desktop-split.sh moves them out and in
 # any tree where a full build has run this stage would otherwise stop
 # on "zlib.h: No such file or directory" with no clue what to do.
 # Same guard, same wording, as 35-devtools.sh's require_zlib().
@@ -106,18 +106,71 @@ require_lib() {
     fi
     echo "ERROR: ${what} is not in ${ROOTFS} (header or library missing)." >&2
     echo "" >&2
-    echo "  41-desktop-split.sh has moved it out -- it is a package." >&2
+    echo "  51-desktop-split.sh has moved it out -- it is a package." >&2
     echo "  Put it back before building against it:" >&2
     echo "" >&2
     echo "      bash scripts/restore-build-inputs.sh" >&2
     echo "" >&2
-    echo "  Then re-run this stage, and re-run 40-repo.sh," >&2
-    echo "  41-desktop-split.sh and the 42/43 publish stages." >&2
+    echo "  Then re-run this stage, and re-run 50-repo.sh," >&2
+    echo "  51-desktop-split.sh, 52-toolchain-repo.sh and" >&2
+    echo "  53-devtools-repo.sh." >&2
     exit 1
 }
 require_lib zlib.h   libz.so     "zlib"
 require_lib ffi.h    libffi.so   "libffi"
 require_lib expat.h  libexpat.so "expat"
+
+# ── ncurses and readline come out of their own prefix ─────────────────
+#
+# Not ${ROOTFS}: neither belongs in the base image, and 40-ncurses.sh
+# builds them into ${BUILD_DIR}/ncurses-target for linking and into
+# their own packages for the target -- the same arrangement
+# 32-openssl.sh uses, for the same reason.
+#
+# CPython decides AT CONFIGURE TIME whether `readline` and `_curses`
+# exist. Missing headers here do not fail the build: they produce an
+# interpreter without them, which prints its missing modules and exits
+# 0 (see the module check at the end of this file). So this is a hard
+# stop rather than a warning.
+#
+# The header is FOUND, not assumed: whether a widec ncurses installs
+# curses.h at the top of the include directory or under ncursesw/ is a
+# configure-time decision, and the first version of this guard asserted
+# the second and stopped a build whose headers were all present.
+NCURSES_PREFIX="${BUILD_DIR}/ncurses-target"
+NCURSES_INCLUDE=""
+for d in "${NCURSES_PREFIX}/usr/include" "${NCURSES_PREFIX}/usr/include/ncursesw"; do
+    [ -f "${d}/curses.h" ] && NCURSES_INCLUDE="${d}"
+done
+if [ ! -f "${NCURSES_PREFIX}/usr/include/readline/readline.h" ] ||
+   [ -z "${NCURSES_INCLUDE}" ]; then
+    echo "ERROR: ncurses and readline are not in ${NCURSES_PREFIX}." >&2
+    echo "" >&2
+    echo "  CPython detects them at configure time and builds the" >&2
+    echo "  'readline' and '_curses' modules or does not build them at" >&2
+    echo "  all -- and a Python without readline is an interpreter whose" >&2
+    echo "  up-arrow prints ^[[A, which is not a build failure anybody" >&2
+    echo "  would notice here." >&2
+    echo "" >&2
+    echo "      bash build/40-ncurses.sh" >&2
+    exit 1
+fi
+
+# SQLite, same shape and the same trap (RFC 0026 roadmap 3). CPython
+# probes for sqlite3.h at configure time and builds `_sqlite3` or does
+# not; a Python whose `import sqlite3` fails is not a build failure
+# here, it is a paragraph in a log and exit 0.
+SQLITE_PREFIX="${BUILD_DIR}/sqlite-target"
+if [ ! -f "${SQLITE_PREFIX}/usr/include/sqlite3.h" ]; then
+    echo "ERROR: SQLite is not in ${SQLITE_PREFIX}." >&2
+    echo "" >&2
+    echo "  It is what most local-state Python assumes exists, and a" >&2
+    echo "  missing _sqlite3 surfaces at the first import on somebody" >&2
+    echo "  else's machine rather than here." >&2
+    echo "" >&2
+    echo "      bash build/41-sqlite.sh" >&2
+    exit 1
+fi
 
 # OpenSSL is not in ${ROOTFS} and must not be: it lives in its own
 # linking prefix, like mbedTLS. A different message, because the fix is
@@ -155,13 +208,21 @@ tar xf "${SOURCES}/Python-${PYTHON_VERSION}.tar.xz" -C "${WORK}"
 export CFLAGS="-O2 -fstack-protector-strong -D_FORTIFY_SOURCE=2"
 export CPPFLAGS="-I${ROOTFS}/usr/include"
 export CPPFLAGS="${CPPFLAGS} -I${OPENSSL_PREFIX}/include"
+# CPython's setup looks for <readline/readline.h> and for curses.h.
+# NCURSES_INCLUDE is whichever directory the build actually put the
+# latter in, found above rather than assumed.
+export CPPFLAGS="${CPPFLAGS} -I${NCURSES_PREFIX}/usr/include -I${NCURSES_INCLUDE}"
+export CPPFLAGS="${CPPFLAGS} -I${SQLITE_PREFIX}/usr/include"
 # -rpath-link for BOTH prefixes, and this is the fifth time in this
 # repository. -L is consulted only for a library named directly with
 # -l; the linker will not use it to resolve a shared library's own
 # DT_NEEDED entries, and libssl.so names libcrypto.so.3.
 export LDFLAGS="-L${ROOTFS}/usr/lib -L${OPENSSL_PREFIX}/lib \
+    -L${NCURSES_PREFIX}/usr/lib -L${SQLITE_PREFIX}/usr/lib \
     -Wl,-z,relro,-z,now -Wl,-z,noexecstack \
-    -Wl,-rpath-link,${ROOTFS}/usr/lib -Wl,-rpath-link,${OPENSSL_PREFIX}/lib"
+    -Wl,-rpath-link,${ROOTFS}/usr/lib -Wl,-rpath-link,${OPENSSL_PREFIX}/lib \
+    -Wl,-rpath-link,${NCURSES_PREFIX}/usr/lib \
+    -Wl,-rpath-link,${SQLITE_PREFIX}/usr/lib"
 
 # -pie is deliberately NOT in LDFLAGS, and there is no variable it
 # could go in. Read Makefile.pre.in: LDSHARED and BLDSHARED -- the
@@ -244,7 +305,12 @@ make -C "${SRC}" -j"${JOBS}" LINKFORSHARED="${LINKFORSHARED}" \
 # a hard failure -- CPython's module list shifts between point releases
 # and a build that stops because `_dbm` moved would be worse than one
 # that says so.
-EXPECTED_MISSING="_sqlite3 _bz2 _lzma _curses _curses_panel _tkinter _gdbm _dbm _uuid readline nis ossaudiodev spwd _crypt"
+# `_curses`, `_curses_panel` and `readline` came OFF this list when
+# 40-ncurses.sh started building what they need. Leaving them on would
+# have made the one check that could notice a silently
+# readline-less interpreter say nothing -- the list is what this build
+# expects to be missing, so a name on it is a name nobody looks at.
+EXPECTED_MISSING="_bz2 _lzma _tkinter _gdbm _dbm _uuid nis ossaudiodev spwd _crypt"
 # The block ends with a sentence, not a blank line -- "To find the
 # necessary bits, look in setup.py ..." -- and ranging to /^$/ swallows
 # it, so every word of that sentence came back as an unexpected missing
@@ -320,9 +386,32 @@ rm -rf "${D}/files/usr/lib/python${PY_XY}/test" \
     echo "name=python"
     echo "version=${PYTHON_VERSION}"
     echo "arch=${TARGET_ARCH}"
-    echo "depends=zlib,libffi,expat,openssl"
+    echo "depends=zlib,libffi,expat,openssl,ncurses,readline,sqlite"
     echo "description=CPython ${PYTHON_VERSION} -- the interpreter and the standard library"
 } > "${D}/MANIFEST"
+
+# ── The two modules this stage exists for ─────────────────────────────
+#
+# The EXPECTED_MISSING sweep above prints a WARNING, deliberately: the
+# module list shifts between point releases and a new name there should
+# not stop a build. These two are different. 40-ncurses.sh exists so
+# that they are built, and an interpreter without them is exactly the
+# "visibly unfinished" REPL RFC 0026 roadmap 2 is about -- shipped
+# silently, because CPython prints its missing modules and exits 0.
+DYNLOAD="${D}/files/usr/lib/python${PY_XY}/lib-dynload"
+for want in readline _curses _curses_panel _sqlite3; do
+    if ! find "${DYNLOAD}" -maxdepth 1 -name "${want}.*.so" | grep -q .; then
+        echo "ERROR: ${want} was not built." >&2
+        echo "       CPython decides this at configure time and says nothing" >&2
+        echo "       afterwards; the interpreter would ship with an up-arrow" >&2
+        echo "       that prints ^[[A, or an import of sqlite3 that fails on" >&2
+        echo "       somebody else's machine. Check ${WORK}/configure.log for" >&2
+        echo "       what it could not find under ${NCURSES_PREFIX} or" >&2
+        echo "       ${SQLITE_PREFIX}." >&2
+        exit 1
+    fi
+done
+echo "   readline, curses and sqlite3 modules built"
 
 # ── Check the artifact, not the flags ─────────────────────────────────
 #
@@ -348,4 +437,4 @@ if [ -n "${MISSING}" ]; then
     echo "    not built   : $(printf '%s' "${MISSING}" | tr '\n' ' ')"
 fi
 echo ""
-echo "Publish it with:  bash build/43-devtools-repo.sh"
+echo "Publish it with:  bash build/53-devtools-repo.sh"

@@ -1,0 +1,541 @@
+# RFC 0031 — a web browser, and the stage range that ran out
+
+**Status:** Implemented
+**Depends on:** RFC 0007 (base/desktop split), RFC 0020 (HTTPS), RFC 0025 (Mesa), RFC 0027 (OpenSSL)
+
+> **Summary.** `pkg install netsurf` puts NetSurf 3.11 on a Novi
+> desktop: HTML and CSS, real HTTPS, no JavaScript. It is a package,
+> never base. The one patch this needs is a port of libnsfb's Wayland
+> surface from `wl_shell` — dead since 2016 — to xdg-shell, without
+> which the browser starts, finds no shell global, and shows nothing.
+
+## Motivation & Problem Statement
+
+This desktop could open a terminal, a text editor, a file manager, an
+image viewer, a settings window and a shortcut sheet. It could not open
+a web page. For most people that is not one missing application among
+several — it is the application, and its absence is the difference
+between a desktop somebody could use for an afternoon and one they
+could not.
+
+The constraint that makes this hard is the same one that makes the rest
+of Novi what it is. A modern browser engine is the largest C++ program
+most distributions ship; Chromium wants its own build system, its own
+toolchain assumptions, a GPU stack, and more build machine than this
+whole project uses. RFC 0025 already recorded that this image has EGL
+and GLESv2 and **no desktop `libGL`**, and that `-Dglx=disabled` is not
+a gap to be closed but a consequence of never having had X.
+
+So the question was never "which browser" in the abstract. It was
+whether any browser at all could be built here as it stands.
+
+## Decisions
+
+### 1. NetSurf, and the arithmetic behind that.
+
+NetSurf is C, builds with make, has its own layout engine and CSS
+implementation, and its dependencies are thirteen small libraries the
+same project maintains. Nothing in it wants a GPU, a JIT, or a C++
+toolchain.
+
+Every external library it needs was **already in this image**, and two
+of them only because earlier RFCs put them there: curl and OpenSSL are
+RFC 0020's and RFC 0027's, libpng and zlib are RFC 0007's, expat and
+libwayland are the desktop's. That is the whole reason this was a
+week's work rather than a subsystem — the browser is the first thing
+built here that needed nothing new.
+
+### 2. No JavaScript, and that is stated rather than discovered.
+
+`NETSURF_USE_DUKTAPE=NO`. NetSurf can embed Duktape, and turning it on
+is one flag; it is off because a browser that runs *some* JavaScript
+badly is harder to reason about than one that runs none. A page that
+needs scripting fails the same way every time and says so, rather than
+rendering half of itself.
+
+**This must be said wherever the browser is described.** "Novi has a
+web browser" and "Novi can open most of the modern web" are different
+claims and only the first is true. Sites that render their content from
+JavaScript — which is most large sites — will show an empty page or a
+noscript notice. Static pages, documentation, RFCs, plain HTML: those
+work.
+
+### 3. The framebuffer frontend, over a Wayland surface.
+
+NetSurf has GTK, Qt and framebuffer frontends. GTK and Qt are not
+happening here. The framebuffer frontend draws its own widgets into a
+buffer that libnsfb puts on a surface, and libnsfb has a Wayland
+backend (`NETSURF_FB_FRONTEND=wld`).
+
+It shipped first with `NETSURF_FB_FONTLIB=internal`, a compiled-in
+bitmap face, which made the one window on this desktop that renders the
+most text the one window not drawing it in Inter. That is fixed — see
+decision 8.
+
+### 4. The patch, and why the build fails without it.
+
+`patches/netsurf-libnsfb-xdg-shell.patch` ports `libnsfb/src/surface/wld.c`
+from `wl_shell` to xdg-shell.
+
+`wl_shell` was deprecated in 2016 and replaced by `xdg_shell`. wlroots
+never implemented it and neither does novi-shell, so upstream libnsfb
+**cannot open a window on this desktop at all**: it binds a global that
+is not advertised, gets NULL, and carries on. The browser starts, the
+process runs, and nothing is ever visible.
+
+That is the worst failure shape there is, so the build stage **refuses
+to continue** if the patch stops applying rather than producing a
+browser that cannot open a window — the same rule `23-e2fsprogs.sh`
+applies to its musl patch.
+
+The generated half — `xdg-shell-protocol.c` and `.h` from
+`wayland-scanner` — is deliberately **not** in the patch file. It is ~88
+KB of machine output; a diff of it is not something anyone can review,
+and generating it at build time from the rootfs's own `xdg-shell.xml`
+is a derived answer that cannot rot.
+
+### 5. It is a package, and it is not base.
+
+Same call as every other application: a console-only Novi has no
+Wayland compositor, and a browser on it would be 6 MB of unreachable
+code. `depends=` names curl, openssl, libpng, zlib, expat and wayland —
+so installing it installs what it needs, and on a machine with no
+desktop it plainly says what it wants.
+
+### 6. This image now runs two TLS stacks in one process.
+
+`netsurf-fb`'s `DT_NEEDED` names `libcurl.so`, `libssl.so` and
+`libcrypto.so`. curl here is built against **mbedTLS** (RFC 0020) and
+NetSurf links **OpenSSL** (RFC 0027) directly, for certificate-chain
+inspection — so a single process carries both.
+
+That is not a rule being broken. RFC 0020's rule is about the **base
+image**, which still ships no TLS library at all, and RFC 0006's is
+about the **trust path**, where `novi-verify` is still static TweetNaCl
+and reaches neither. This project has now had to recover that precise
+reading four times (RFC 0021, RFC 0026, RFC 0027, here); the vague
+version of the rule would have blocked every one of them.
+
+It is still worth stating plainly: **network traffic from this browser
+is validated by two independent implementations depending on which
+component made the request**, and only one of them (curl's) has ever
+been exercised by this project's HTTPS verification triple.
+
+### 7. Where the stage goes, and the renumber that is now due.
+
+The build phase lives in `35-devtools.sh`, not `build/44-netsurf.sh`,
+and the reason is a constraint with no remaining slack.
+
+It **reads** `${ROOTFS}` — wayland, libpng, zlib and expat headers —
+which `51-desktop-split.sh` removes, so it must run before 51. It
+**publishes** into a repository `50-repo.sh` wipes, so its package must
+be written after 50. That is the "build early, publish late" split that
+35, 38 and 39 already use.
+
+CLAUDE.md records this trap biting twice, and both times the resolution
+was to move the packaging stages up to make room. **This was the third
+time and the room was gone: every number from 01 to 39 was taken**, so
+the browser became a phase here rather than a stage of its own.
+
+That renumber has since been done — the packaging stages are 50..53 and
+**40–49 is free for content**. The browser stayed a phase of 35 because
+moving it now would be churn for its own sake: its build-early /
+publish-late constraint is real either way, and 35 is where it works.
+A *new* content stage takes a number in 40–49.
+
+### 8. The browser draws in this desktop's own faces.
+
+`NETSURF_FB_FONTLIB=freetype`, `NETSURF_FB_FONTPATH` pointed at the
+`fonts-inter` and `fonts-jetbrains-mono` directories, and each of the
+ten `NETSURF_FB_FONT_*` faces named.
+
+The first version of this RFC called wiring real type in "a bigger
+change than this RFC". It is not: freetype is a fontlib upstream
+already supports (`frontends/framebuffer/font_freetype.c`), and
+freetype has been in this build since stage 06 for fcft — so this is a
+new **link**, not a new dependency. `NETSURF_FB_FONTPATH` feeds
+`respaths` in `gui.c` and `fb_new_face()` resolves each name through
+`filepath_sfind()` against it, so the faces are plain filenames.
+
+**Sans-serif bold is Inter SemiBold, not Bold.** SemiBold is what
+`NOVI_FONT_TITLE` uses; matching the desktop beats matching the CSS
+keyword.
+
+**Italic came next, and it was not a nicety.** The first pass shipped
+Regular/Medium/SemiBold — the three faces §2's type scale names,
+because *nothing in this desktop's own UI is italic* — and a screendump
+confirmed `<i>` rendering upright. But **a web page is not this UI.**
+`<em>`, citations and titles are italic constantly, and with no italic
+face every one of them rendered identically to body text: emphasis, the
+entire point of the markup, was **invisible**. That is a correctness
+problem in a browser rather than a matter of taste. `Inter-Italic.ttf`
+and `Inter-SemiBoldItalic.ttf` were already inside the zip
+`09-foot.sh` downloads, so it cost ~840 KB and two lines. SemiBoldItalic
+to match the upright bold, for the same reason.
+
+**There is a real serif now: Source Serif 4** (OFL-1.1, pinned at
+4.004, its own `fonts-source-serif` package). `font-family: serif` and
+the default serif of an unstyled page used to land on Inter — a sans,
+silently, with nothing to say so, because every other face falls back
+to the one below it and this one had nothing below it.
+
+It is **not** a member of `novi-desktop`. Only NetSurf renders a serif,
+so it rides on `netsurf`'s `depends=`: a desktop that never draws a web
+page has no use for one, and shipping it anyway is the dead weight RFC
+0007 says is not inert.
+
+**Two faces, not four, and NetSurf decides that.** Its framebuffer
+frontend has `NETSURF_FB_FONT_SERIF` and `NETSURF_FB_FONT_SERIF_BOLD`
+and no italic option at all — checked in
+`frontends/framebuffer/Makefile`, not assumed. So `<em>` inside a serif
+paragraph renders upright, which is the frontend's limit rather than a
+missing font, and installing an italic nothing can select would be
+weight for nothing.
+
+Cursive and fantasy still map to Inter. Only the sans-serif face is
+fatal if missing (`font_freetype.c` returns false and the browser
+exits); every other face falls back to the one below it, which is why
+these gaps degrade rather than crash.
+
+**Verified on a booted desktop**, on a page with one line each of
+`font-family: serif`, serif bold, `sans-serif` and `monospace`: three
+visibly different families, the serif with real bracket serifs and a
+real bold rather than a synthesised one. `fonts-source-serif` arrived
+as a dependency of `netsurf` without being asked for, which is the
+derived `depends=` doing its job.
+
+**All three families now ship their licence.** OFL-1.1 requires the
+licence to travel with the font, and it was not travelling: Inter's
+`LICENSE.txt` and JetBrains Mono's `OFL.txt` were sitting unread in
+their zips. Source Serif forced the question, because its release asset
+contains font files and nothing else — the text is fetched separately
+and installed beside the faces, and the other two are fixed with it.
+
+**`fonts-inter`, `fonts-jetbrains-mono` and `fonts-source-serif` are
+named in `depends=` by hand, because nothing can derive them.** pkgsplit reads `DT_NEEDED`,
+and a `.ttf` opened by path at runtime appears in no ELF header — the
+same blind spot that hides libdrm's `dlopen`'d drivers (RFC 0007),
+wearing a different costume. Without them the package installs, the
+browser starts, fails to find its default font, and exits.
+
+## What was verified
+
+The stage was run from a **wiped** `/build/netsurf-build`, so what
+follows is a reproducible build and not a warm tree: 2.7 MB staged, a
+2,606,672-byte stripped `netsurf-fb`, and a `DT_NEEDED` list that is
+musl only —
+
+```
+libexpat.so.1  libz.so.1  libcurl.so.4  libssl.so.3
+libcrypto.so.3  libpng16.so.16  libwayland-client.so.0  libc.so
+```
+
+The packaging stages (then `40..43`, now `50..53`) then produced a
+repository of **54 packages** (139 MB on the
+ISO), `netsurf-3.11-x86_64.pkg.tar.gz` at 1,026,298 bytes among them.
+
+On a booted live image, driven over QMP:
+
+| | result |
+|---|---|
+| `pkg sync` | signature on the repository index **verified**; 54 packages available |
+| `pkg install netsurf` | dependencies resolved and installed in order — mbedtls 3.6.2, ca-certificates, curl 8.11.1, openssl 3.5.8, then netsurf 3.11 — each `sha256 verified` |
+| `netsurf-fb http://10.0.2.2:8099/` | **`Done (0.2s)`** |
+
+The page was served over plain HTTP from the build host and is a real
+layout test rather than a "it started" test. In the screendump the
+browser has:
+
+- **a window with novi-shell's own chrome** — title bar reading
+  `NetSurf`, the three control dots, the drop shadow — and a `NetSurf`
+  entry in the panel's taskbar beside `foot`;
+- **CSS actually applied**: the teal `h1` with its 3px
+  `border-bottom`, the tinted box with a 6px `border-left`, a table
+  with borders and a shaded header row, and the closing line in
+  italic. None of that is default rendering.
+
+So the whole path is exercised end to end: libcurl fetched it, NetSurf's
+own engine parsed and laid it out, libnsfb painted it into a
+`wl_shm` buffer, and the patched xdg-shell surface put it on the
+screen under the compositor's decoration.
+
+**Typography, on the same booted machine** (`NETSURF_FB_FONTLIB=freetype`):
+the heading, body, table and status line render in **Inter**, and
+`<code>`/`<pre>` in **JetBrains Mono**, anti-aliased. `<b>` genuinely
+selects Inter SemiBold. Both documented gaps were confirmed **on
+screen** rather than reasoned about: on the first pass a paragraph
+marked `<i>` rendered upright and a `font-family: serif` line rendered
+in Inter. Shipping the two italic faces fixed the first, confirmed on a clean
+06..39 rebuild: the same page re-rendered with `<i>` genuinely slanted
+and `<b><i>` in SemiBoldItalic, while the `font-family: serif` line
+still falls back to Inter, as designed.
+`netsurf-fb`'s `DT_NEEDED` gained `libfreetype.so.6`, and the package
+index carries
+`curl,openssl,libpng,zlib,expat,wayland,freetype,fonts-inter,fonts-jetbrains-mono`.
+
+**What was not tested.** HTTPS from this browser (the VM has no route
+to the public internet in this harness — curl's TLS path has RFC 0020's
+verification triple behind it, NetSurf's OpenSSL certificate-inspection
+path has nothing); JavaScript, because there is none; and any page not
+written for this test. Nothing here has run on physical hardware.
+
+## Consequences
+
+- **`icon=globe` finally means what its own comment says.**
+  `ICON_GLOBE` is annotated "app-grid: web" in `shared/icons/icons.h`
+  and had been novi-view's icon since the viewer shipped, because
+  `resolve_icon_name()` never listed `image` and `globe` was the
+  nearest thing offered. `ICON_IMAGE` was already vendored and already
+  generated for novi-files; it just needed a row in the table. No new
+  asset, and the Apps grid no longer shows two globes.
+- **Fifth `-Wl,-rpath-link`** in this repository, after nftables,
+  git/curl, the meson cross file and novi-glinfo. `libcurl.so`'s
+  `DT_NEEDED` names `libmbedtls.so.21`, and `-L` does not let the
+  linker resolve a shared library's own dependencies: the link fails on
+  undefined `mbedtls_*` symbols, from a library whose own source
+  contains none of them.
+- **`CFLAGS=` on NetSurf's make command line deletes NetSurf's own
+  include paths.** Its buildsystem does `CFLAGS += …`, and a variable
+  set on the command line overrides every assignment in the makefile,
+  `+=` included. The build then dies on its own headers. They go in the
+  **environment**. That is RFC 0021's wolfSSL `.config` trap one level
+  out, and it caught this build too.
+- **The build directory is named after HOST and TARGET but not after
+  the compiler.** A first attempt compiled the tree with the build
+  host's gcc (the buildsystem derives `CC` from `HOST` only when its
+  origin is `default`, and the browser's makefile does not take that
+  path); naming `CC=` and `AR=` explicitly fixed the compiler but left
+  glibc objects behind, and the musl link failed on `__snprintf_chk`
+  and `__memset_chk` — fortify symbols that belong to a libc this image
+  does not have. **The error names the libc you are linking, not the
+  one that built the object.** The stage extracts the tree fresh.
+- **`NETSURF_USE_LIBICONV_PLUG=YES`** means "iconv is part of libc",
+  which is true of musl. `NO` links `-liconv`, which does not exist
+  here and never will.
+
+## Roadmap
+
+1. ~~fcft in libnsfb~~ — **done**, and by a shorter route than this
+   RFC first assumed: freetype rather than fcft, which upstream
+   already supports. See decision 8. Italic followed immediately, and
+   **the serif is in too** — Source Serif 4, a new pinned source and a
+   design decision, which is why it took longer than the italics.
+2. ~~**JavaScript, or a decision not to.**~~ **Measured, and the
+   decision is not to.** `NETSURF_USE_DUKTAPE=NO` stands, now as a
+   number rather than a shrug. The instrument is kept at
+   `tests/js-probe/` so the next person can re-run this rather than
+   re-argue it.
+
+   **It builds and it works.** Duktape is vendored in the NetSurf
+   bundle, so the flag needs no new upstream and no new pin, and a
+   probe page renders `SCRIPT RAN: DOM WRITE OK` with an element its
+   script created. Two things silently do nothing first, though:
+   `enable_javascript` defaults to **false** in NetSurf's options, and
+   the framebuffer frontend reads `Choices` off its RESOURCE path —
+   **`~/.netsurf/Choices`**, not `~/.config/netsurf/Choices`, where
+   the first attempt put it and where it was ignored without comment.
+
+   **The syntax is ES5.** `let`, arrow functions, template literals,
+   `class` and `for…of` are each a SyntaxError; `const` and the ES5
+   core work. **And a syntax error is a WHOLE-SCRIPT failure** — one
+   arrow function anywhere in a bundle and nothing in it runs, which
+   is not a guess: this RFC's own first probe page was written in ES6
+   and sat on its `loading...` placeholder exactly as a 2020s site
+   would.
+
+   **The APIs that make a page dynamic are absent.**
+   `querySelector`, `addEventListener`, `innerHTML`, `setTimeout` and
+   `canvas.getContext` are all there; **`Promise`, `fetch`,
+   `XMLHttpRequest` and `localStorage` are `undefined`.** No `fetch`
+   and no XHR means a page cannot load anything after its initial
+   HTML — that rules out not just React but 2005-era AJAX.
+
+   **Speed is interpreter-class, two orders off a JIT.** On the guest:
+   fib(24) **308 ms**, a 2-million-iteration modulo loop **9153 ms**,
+   50k string appends plus a join **654 ms**, and the page's own
+   status bar reading *Done (10.2s)* because the script blocks the
+   load. That guest is TCG, so the number is corrected rather than
+   quoted: the same loop in CPython takes 4577 ms there and 151 ms on
+   the build host, a **30× emulation penalty** — so Duktape is about
+   **305 ms** of real hardware, **within 2× of CPython** and roughly
+   **60–150× slower than the JIT'd engines these pages are written
+   for**.
+
+   **So: +1.34 MB on the binary (2,557,840 → 3,901,840, +52%)**, an
+   interpreter parsing hostile script in a browser that roadmap items
+   4 and 5 just established has no sandbox and no CPU bound, and what
+   it buys is ES5 DOM manipulation with no network — menus, tabs and
+   accordions written before 2015, or jQuery's DOM half. Real, and
+   small. The RFC's original framing was right in direction and for
+   the wrong reason: the problem is not that the interpreter is slow,
+   it is that **the language it implements is not the language the web
+   is written in**.
+
+   Worth revisiting when item 6 gives the browser a CPU bound, or if
+   somebody demonstrates a class of sites that comes to life.
+3. ~~**The OpenSSL/mbedTLS split is worth removing.**~~ **Measured,
+   and the answer is no — keep both.** This item asserted the
+   conclusion in its own first sentence; the measurement says the
+   opposite, which is the whole reason to take one.
+
+   **Installed on the target: mbedTLS is 972 KB (three libraries),
+   OpenSSL is 8.0 MB** (libcrypto 6.1 MB, libssl 1.0 MB, the legacy
+   provider 142 KB). 8.2x. And the dependency graph says who would pay
+   it — `git` → `curl` → `mbedtls` and nothing else, so **a machine
+   with git and no Python goes from 972 KB of TLS to 8.0 MB, +7 MB,
+   for no capability it did not have.** What the collapse saves is
+   under 1 MB, and only on a machine already carrying OpenSSL for
+   another reason: `netsurf` (which depends on both) or `python`.
+
+   The maintenance argument is real and small: two pinned upstreams to
+   bump instead of one, and two CVE watch-lists. Set against 7 MB on
+   the commonest developer machine, it does not carry — and the second
+   half of it cuts the other way, because **the smaller stack is the
+   one on the HTTPS fetch path.** 972 KB of audited code parsing
+   certificates from the internet is a better place to be than 8 MB
+   of it, which is RFC 0020's original reasoning still standing on its
+   own terms.
+
+   The asymmetry is worth naming, because it is what makes this a
+   decision rather than a preference: **OpenSSL can never leave** —
+   CPython's `ssl` accepts no other implementation (RFC 0027) — so the
+   only question ever available was whether mbedTLS goes. It earns its
+   972 KB.
+
+   **What WOULD change the answer is a trimmed OpenSSL**, and that is
+   a better item than this one was: the build is near-stock today
+   (`no-tests`, `no-docs`, `enable-ktls` and nothing else), so the
+   legacy provider, the deprecated API surface and every algorithm
+   ship. Trimming benefits **every** machine that has OpenSSL,
+   including the Python ones this collapse would not have helped at
+   all. It is not free — CPython uses some of the deprecated surface,
+   so it needs a rebuild and RFC 0020's HTTPS triple to verify — and
+   it is unmeasured here. Filed as RFC 0027 roadmap item 4 —
+   OpenSSL's own business, not the browser's — rather than claimed.
+
+   So `netsurf` goes on linking both, and the note in this RFC's
+   decisions stands as written: not a rule broken, and worth stating.
+4. ~~**Nothing here has been tested against a hostile page.**~~
+   **Something has now** — `tests/hostile-pages/`, sixteen
+   deliberately awkward documents served to the browser from the
+   guest's own loopback. The sandboxing sentence below still stands;
+   what changed is that there are measurements beside it.
+
+   **Nothing crashed.** Zero SIGSEGVs across the corpus — 40k nested
+   `<div>`, 20k unclosed tags, thousands of unterminated entities,
+   invalid UTF-8 (lone continuation bytes, truncated multi-byte
+   starts, an overlong `/`), tag names two thousand characters long, a
+   self-importing stylesheet, and a PNG whose IHDR claims
+   65535×65535. That is a real result rather than a null one: error
+   recovery is the code path least exercised by the pages anybody
+   tests against, and it held.
+
+   **Five pages never settled**, at ~100% CPU through the whole
+   window: `deep-nesting` (100%), `long-line` — 4 MB with no
+   whitespace to break on — (100%), `unclosed-tags` (100%),
+   `many-siblings` (98%), `huge-table` (97%). `deep-tables` came in at
+   73% and settled; `css-pathological` at 25%.
+
+   **AND RUNNING THOSE FIVE FOR LONGER TOOK THE WHOLE MACHINE DOWN.**
+   Twice, on two fresh boots: QEMU pinned at 110% CPU with 4.5–4.9 GB
+   resident against a **4096 MB** guest, the serial console
+   unresponsive, and the supervising script unable to enforce its own
+   40-second deadline. The OOM killer did not restore the machine
+   within several minutes.
+
+   **THE FIRST WRITE-UP SAID THE SHELL WAS STARVED BY THE CPU LOAD,
+   AND THAT WAS AN INFERENCE RATHER THAN A MEASUREMENT.** It is wrong.
+   Measured afterwards on the same 4-vCPU guest with an unrelated
+   shell probe: three runaway browsers cost it **nothing** (17
+   centiseconds, the idle figure), and it took **eight** to slow it to
+   40–43. What happened was memory — several half-gigabyte pages plus
+   one that grows without limit, on a guest with no swap, under which
+   everything stalls including the kill. The distinction decides the
+   fix: a CPU bound would not have prevented this and the
+   address-space bound does. Stated honestly, **one page costs a
+   pegged core indefinitely and up to half a gigabyte; one page here
+   reaches four gigabytes if left about half an hour; five together
+   did it in minutes.**
+
+   **Per-page attribution was NOT established when this item was
+   written, and the gap was the finding**: two attempts ended in the
+   state above, because a harness sharing a machine with an unbounded
+   allocator gets starved by it. **Roadmap 5 closed it** — under the
+   bound the harness is no longer racing what it measures, so the
+   table above is the one the missing bound prevented, taken by the
+   bound that replaced it.
+
+   **Surviving a corpus is not a safety property**, and the scripts
+   say so on every run. This finds crashes and hangs on shapes
+   somebody thought of. It says nothing about memory disclosure,
+   nothing about the shapes nobody thought of, and nothing about the
+   absence of a sandbox. **A layout engine parsing arbitrary HTML off
+   the network is among the larger attack surfaces this project has
+   ever shipped, and it still ships with none of the sandboxing a
+   mainstream browser would put around it** — that sentence was the
+   whole of this item before and is unretracted by any of the above.
+
+   The control is what makes the rest worth reading: a benign page
+   renders in **0.1s** with the window drawn and the links laid out,
+   screendumped. Without it, "survived" could have meant a process
+   sitting inert and every row would be worthless.
+5. ~~**A resource bound on the browser.**~~ **Done.** `pkg install
+   netsurf` puts a wrapper on PATH and the binary in `/usr/libexec`:
+   **1 GiB of address space** (`s6-softlimit -a`, which is base
+   content because s6 is how this system boots, so no new dependency)
+   and **nice 5**. Not a shell alias and not a launcher-only argument
+   — a bound somebody bypasses by typing the other name is not a
+   bound. Every step is an exec, so there is one pid.
+
+   **Both numbers are measured rather than chosen.** The ceiling sits
+   above every page anyone here has rendered (benign 21 MB, heaviest
+   settling corpus page 36 MB, worst plateau 517 MB) and is not
+   decorative: `unclosed-tags.html` grows without limit and was held
+   at exactly 1048576 kB when it got there. The nice comes from the
+   correction in item 4 — eight runaways took an unrelated shell probe
+   from 17 to 40–43 centiseconds, nice 5 brought it back to 19–23,
+   nice 15 to 16, and on an idle machine it costs nothing. 15 was
+   rejected as the default: it demotes the browser against every
+   background job on the machine, which is a worse trade for a program
+   somebody is looking at.
+
+   **What the bound buys is exactly one thing and it is worth not
+   overstating.** NetSurf neither exits nor prints anything when it
+   hits the ceiling — measured, not assumed, and it means this RFC's
+   own filing of the item ("NetSurf has malloc failure paths") was
+   more confident than the behaviour deserves. What an unrecoverable
+   machine becomes is a **hung window**.
+
+   **`RLIMIT_CPU` is not the CPU half and was rejected.** It is
+   cumulative over the process's whole life, so it cannot express
+   "this layout is taking too long" without also killing a long
+   browsing session that has done nothing wrong. A priority is not a
+   bound either — it keeps the rest of the machine usable and stops
+   nothing. So the CPU half stands open, and item 6 is what is left of
+   it.
+
+   `NOVI_BROWSER_AS_LIMIT` and `NOVI_BROWSER_NICE` override either, in
+   bytes and in increments, or `off`. A machine with 512 MB of RAM
+   wants a smaller ceiling than a workstation does, and somebody
+   debugging a page that hit one wants to raise it for a single run.
+   Neither is a `system.conf` key: nothing converges them, their only
+   consumer is an optional package, and an environment variable is
+   what the person in front of the failure actually reaches for —
+   `keys.conf`'s argument about what a document is for, from the other
+   end.
+6. **The CPU half, which the bound does not touch.** Three of the five
+   runaways in the corpus peg a core on 29–44 MB, so no memory ceiling
+   will ever reach them, and the honest version of item 5 says a
+   cumulative CPU limit cannot either. What would: a watchdog that
+   notices a layout has made no progress and offers to stop it, which
+   needs a notion of progress NetSurf does not currently export, and
+   is the point at which "run the page in its own process and kill
+   that" stops being a bigger change than the alternatives. The corpus
+   has both cases to test against — `deep-tables` settles at 73%,
+   `long-line` never does — and that is the whole difficulty in one
+   sentence.
+7. **Process isolation, which none of the above is.** Said in item 4
+   and repeated here because it is the item that never gets written:
+   a bound and a priority change what a hostile page can do to the
+   machine, and nothing at all about what it can do inside the process
+   that parsed it.

@@ -111,6 +111,16 @@ install -D -m 600 "${REPO_ROOT}/rootfs/etc/shadow" "${ROOTFS}/etc/shadow"
 # even though /sbin/ip is the same BusyBox binary as /bin/ls. See the
 # file's own comments.
 install -D -m 644 "${REPO_ROOT}/rootfs/etc/profile" "${ROOTFS}/etc/profile"
+# Port numbers and their names. BusyBox ships none, so getservbyport(3)
+# answered nothing on this system and every tool that looks a port up
+# printed a bare number -- `novi-recon ports` most visibly, which is a
+# tool whose entire job is saying what is listening (RFC 0028's roadmap
+# item 3). Curated rather than IANA's whole registry, for the reason
+# kernel/config-x86_64 is curated: a list somebody chose beats a list
+# nobody has read. musl reads it in both directions, with two silent
+# limits on line and name length that packages/tests/test-services.sh
+# asserts -- see the file's own header.
+install -D -m 644 "${REPO_ROOT}/rootfs/etc/services" "${ROOTFS}/etc/services"
 
 # The generic driver loader (RFC 0011). Base image, not a package: a
 # machine that cannot load the driver for its own disk or NIC cannot

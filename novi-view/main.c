@@ -69,9 +69,8 @@
  * colours, and the frame around it should get out of their way. */
 #define BG_COLOR      NOVI_BG_BASE
 #define STATUS_BG     NOVI_BG_PANEL
-
-static const pixman_color_t STATUS_PIX = NOVI_PIX(NOVI_TEXT_SECONDARY);
-static const pixman_color_t ERROR_PIX  = NOVI_PIX(NOVI_STATUS_ERROR);
+#define STATUS_PIX NOVI_PIX(NOVI_TEXT_SECONDARY)
+#define ERROR_PIX NOVI_PIX(NOVI_STATUS_ERROR)
 
 struct novi_view {
 	struct wl_display *display;
@@ -683,6 +682,11 @@ static const struct wl_registry_listener registry_listener = {
 };
 
 int main(int argc, char **argv) {
+	/* Colours are a runtime table now (RFC 0030). Load the active
+	 * theme BEFORE anything computes a colour; on failure the
+	 * compiled-in defaults stay in force, so this cannot leave the
+	 * client worse off than it was. */
+	novi_theme_load();
 	struct novi_view v = {0};
 	v.running = true;
 	v.fit = true;

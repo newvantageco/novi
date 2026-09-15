@@ -42,6 +42,7 @@
 
 #define _GNU_SOURCE
 #include <errno.h>
+#include <poll.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <stdarg.h>
@@ -100,12 +101,12 @@
  * here mean the same thing it means in novi-files and the launcher --
  * it used to be a blue of its own. */
 #define SEL_COLOR      NOVI_ACCENT_SUBTLE
-static const pixman_color_t TEXT_PIX      = NOVI_PIX(NOVI_TEXT_PRIMARY);
-static const pixman_color_t GUTTER_PIX    = NOVI_PIX(NOVI_TEXT_MUTED);
-static const pixman_color_t GUTTER_CUR_PIX= NOVI_PIX(NOVI_TEXT_SECONDARY);
-static const pixman_color_t STATUS_PIX    = NOVI_PIX(NOVI_TEXT_SECONDARY);
-static const pixman_color_t MODIFIED_PIX  = NOVI_PIX(NOVI_STATUS_WARNING);
-static const pixman_color_t ERROR_PIX     = NOVI_PIX(NOVI_STATUS_ERROR);
+#define TEXT_PIX NOVI_PIX(NOVI_TEXT_PRIMARY)
+#define GUTTER_PIX NOVI_PIX(NOVI_TEXT_MUTED)
+#define GUTTER_CUR_PIX NOVI_PIX(NOVI_TEXT_SECONDARY)
+#define STATUS_PIX NOVI_PIX(NOVI_TEXT_SECONDARY)
+#define MODIFIED_PIX NOVI_PIX(NOVI_STATUS_WARNING)
+#define ERROR_PIX NOVI_PIX(NOVI_STATUS_ERROR)
 
 /* One whole-document state, held so undo can put it back. */
 struct snapshot {
@@ -1636,6 +1637,11 @@ static const struct wl_registry_listener registry_listener = {
 };
 
 int main(int argc, char **argv) {
+	/* Colours are a runtime table now (RFC 0030). Load the active
+	 * theme BEFORE anything computes a colour; on failure the
+	 * compiled-in defaults stay in force, so this cannot leave the
+	 * client worse off than it was. */
+	novi_theme_load();
 	struct novi_edit e = {0};
 	e.running = true;
 	e.width = WINDOW_WIDTH;
@@ -1699,9 +1705,65 @@ int main(int argc, char **argv) {
 
 	wl_surface_commit(e.surface);
 
-	while (e.running && wl_display_dispatch(e.display) != -1) {
-		;
+	/* A poll loop, where this was `wl_display_dispatch()` in a while
+	 * (RFC 0030 roadmap 1). The editor is the longest-lived window on
+	 * this desktop -- it is what somebody has open for an hour -- so
+	 * it is the one most likely to still be showing yesterday's
+	 * palette, and dispatch() has nowhere to put a second descriptor.
+	 *
+	 * prepare_read / read_events / cancel_read is libwayland's own
+	 * protocol and the only correct way to poll() the display fd:
+	 * dispatch() does its own internal read and racing it loses
+	 * events. cancel_read() on EVERY path that does not read, poll
+	 * errors included, or the next prepare_read() blocks forever --
+	 * the trap RFC 0017 records and three other clients here already
+	 * carry the comment for. */
+	int theme_fd = novi_theme_watch();
+
+	while (e.running) {
+		while (wl_display_prepare_read(e.display) != 0) {
+			if (wl_display_dispatch_pending(e.display) < 0) {
+				e.running = false;
+				break;
+			}
+		}
+		if (!e.running) {
+			wl_display_cancel_read(e.display);
+			break;
+		}
+		if (wl_display_flush(e.display) < 0 && errno != EAGAIN) {
+			wl_display_cancel_read(e.display);
+			break;
+		}
+
+		struct pollfd fds[2] = {
+			{.fd = wl_display_get_fd(e.display), .events = POLLIN},
+			{.fd = theme_fd, .events = POLLIN},
+		};
+		if (poll(fds, 2, -1) < 0) {
+			wl_display_cancel_read(e.display);
+			if (errno == EINTR) {
+				continue;
+			}
+			break;
+		}
+
+		if (fds[0].revents & POLLIN) {
+			if (wl_display_read_events(e.display) < 0) {
+				break;
+			}
+		} else {
+			wl_display_cancel_read(e.display);
+		}
+		if (wl_display_dispatch_pending(e.display) < 0) {
+			break;
+		}
+
+		if ((fds[1].revents & POLLIN) && novi_theme_watch_drain(theme_fd)) {
+			surface_draw_frame(&e);
+		}
 	}
+	novi_theme_watch_close(theme_fd);
 
 	novi_clipboard_destroy(e.clipboard);
 	history_free(&e);

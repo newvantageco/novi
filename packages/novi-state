@@ -36,6 +36,22 @@ GEN_DIR="${NOVI_STATE_GENERATIONS:-/var/lib/novi-state/generations}"
 # language in system.conf: the escape hatch for anything this key
 # cannot express is editing a real file in nftables' real format.
 FIREWALL_RULES="${NOVI_FIREWALL_RULES:-/etc/novi/firewall.nft}"
+# The desktop's colour palettes (RFC 0030). display.theme names one of
+# these by basename; the converger publishes the resolved name to
+# THEME_ACTIVE, which is what every client reads at startup.
+THEME_DIR="${NOVI_THEME_DIR:-/usr/share/novi/themes}"
+THEME_ACTIVE="${NOVI_THEME_ACTIVE:-/run/novi/theme}"
+
+# The shell JSON escaper (RFC 0029), shared with novi-agent. Sourced
+# with a guard rather than bare: `.` is a SPECIAL BUILTIN, so in ash a
+# missing file ends the script immediately with no message anyone would
+# connect to a missing library -- exit status 2 and nothing on stderr.
+# Found the hard way writing this file's own test.
+NOVI_JSON_LIB="${NOVI_JSON_LIB:-/usr/lib/novi/json.sh}"
+if [ -f "$NOVI_JSON_LIB" ]; then
+    # shellcheck disable=SC1090
+    . "$NOVI_JSON_LIB"
+fi
 
 msg()  { printf '==> %s\n'    "$*" >&2; }
 info() { printf '  -> %s\n'   "$*" >&2; }
@@ -98,10 +114,132 @@ key_regex() {
 # two-way: a GUI writing a key must not destroy the comments a person
 # wrote around it, or the file stops being something anyone wants to
 # hand-edit and the whole single-source-of-truth claim collapses.
+# ---------------------------------------------------------------------------
+# One writer at a time
+# ---------------------------------------------------------------------------
+#
+# RFC 0002 roadmap 4. THE STATE FILE HAS MORE THAN ONE WRITER and
+# always has: `novi-state set` at a shell, novi-settings' System panel
+# (which shells out to exactly that), `novi-install`, and `rollback`
+# restoring a generation. Each write is a read-modify-write of the
+# WHOLE document -- awk reads it, the result goes to a temp file, the
+# temp file is renamed over it.
+#
+# The rename is atomic, so the file is never half-written, and that
+# was the whole of the protection. Which means two writers that
+# overlap produce a document containing one of the two changes, with
+# no error from either side: the losing caller is told it succeeded,
+# and the setting it declared is simply not there. Exactly the failure
+# mode this whole engine exists to abolish -- a machine that does not
+# match what somebody declared, and nothing saying so.
+#
+# `apply` has the same problem one level up. next_generation() picks
+# the highest existing number and adds one, so two applies racing
+# choose the SAME number and one snapshot overwrites the other -- the
+# generation a rollback would restore, quietly replaced by a different
+# machine's idea of the past. And two s6-rc transitions running at
+# once is its own kind of wrong. So apply holds the lock for its whole
+# run, and a `set` that arrives mid-apply waits rather than changing
+# the document an apply is in the middle of reading.
+#
+# mkdir(2) IS THE LOCK, because BusyBox has no flock(1): creating a
+# directory that already exists fails, atomically, on every filesystem
+# this system can keep /etc on. Same mechanism novi-mount uses for the
+# same reason (RFC 0023).
+#
+# A HOLDER THAT DIED leaves the directory behind, and a lock nobody
+# holds that nobody can clear is worse than no lock: it wedges every
+# future write until somebody deletes a directory they have no reason
+# to know about. So the owner file records the boot time as well as
+# the pid, and staleness is a fact rather than a timeout:
+#
+#   * a different boot time means the machine restarted, so whatever
+#     held this is gone whether or not something now has that pid --
+#     without it, a lock that survived a crash could be permanently
+#     held by an innocent process that happened to inherit the number;
+#   * the same boot and no /proc/<pid> means the holder died.
+#
+# A timeout would be a guess about how long the work takes, and this
+# work takes milliseconds except when the machine is busy, which is
+# exactly when the guess is wrong.
+STATE_LOCK_HELD=0
+
+boot_time() {
+    # btime is the wall clock at boot, in /proc/stat. Constant for the
+    # life of a boot and different across one, which is all this needs.
+    sed -n 's/^btime //p' /proc/stat 2>/dev/null | head -1
+}
+
+state_lock_release() {
+    [ "$STATE_LOCK_HELD" -eq 1 ] || return 0
+    STATE_LOCK_HELD=0
+    rm -rf "${STATE_FILE}.lock"
+}
+
+# The wait is bounded because a bug that never releases should say so
+# rather than hang a boot. It is bounded GENEROUSLY -- an apply holds
+# this across s6-rc transitions and, since the packages domain, across
+# a package install, so anything shorter would turn a slow convergence
+# into a failed `set` in the GUI.
+STATE_LOCK_TIMEOUT="${NOVI_STATE_LOCK_TIMEOUT:-300}"
+
+state_lock() {
+    local dir="${STATE_FILE}.lock" owner obt opid now waited=0
+    # Reentrant within one process. `rollback` takes the lock, then
+    # calls `apply`, which takes it again; and every `set` inside an
+    # apply's convergers would deadlock against the apply that is
+    # holding it. A recursive mkdir lock without this is a program
+    # that hangs on its own correctness.
+    [ "$STATE_LOCK_HELD" -eq 1 ] && return 0
+    mkdir -p "$(dirname "$STATE_FILE")"
+    now="$(boot_time)"
+    while ! mkdir "$dir" 2>/dev/null; do
+        # The owner file is written AFTER the directory, so there is a
+        # window where the lock exists and says nothing. Treat that as
+        # held -- it is, by somebody two instructions from recording
+        # it -- and come back.
+        owner="$(cat "$dir/owner" 2>/dev/null || printf '')"
+        if [ -n "$owner" ]; then
+            # shellcheck disable=SC2086
+            set -- $owner
+            obt="${1:-}"; opid="${2:-}"
+            if [ "$obt" != "$now" ] || { [ -n "$opid" ] && [ ! -d "/proc/$opid" ]; }; then
+                warn "clearing a stale lock at $dir (held by pid ${opid:-?} of an earlier boot or a dead process)"
+                rm -rf "$dir"
+                continue
+            fi
+        fi
+        waited=$(( waited + 1 ))
+        if [ "$waited" -gt $(( STATE_LOCK_TIMEOUT * 10 )) ]; then
+            die "timed out waiting for $dir -- another novi-state is holding it (pid ${opid:-unknown}); remove the directory if you are sure it is not"
+        fi
+        # Fractional sleep: busybox ash's own `sleep` takes it (checked
+        # against the shipped binary, not assumed -- it is a compile-
+        # time option upstream).
+        sleep 0.1
+    done
+    printf '%s %s\n' "$now" "$$" > "$dir/owner"
+    STATE_LOCK_HELD=1
+    # Every path out of the script, including die(). A lock left behind
+    # by an error is the stale lock above, and the check above is a
+    # backstop rather than an excuse not to clean up.
+    # INT and TERM release and then DIE, rather than release and carry
+    # on: a handler that swallows Ctrl-C is a program you cannot stop.
+    trap 'state_lock_release' EXIT
+    trap 'state_lock_release; exit 130' INT
+    trap 'state_lock_release; exit 143' TERM
+}
+
 state_set() {
     local key="$1" value="$2"
-    local key_re tmp
+    local key_re tmp held
     key_re="$(key_regex "$key")"
+    # Taken around the whole read-modify-write, and released only if
+    # THIS call took it: inside an apply the lock is already held and
+    # releasing it here would hand the document to another writer
+    # halfway through a convergence.
+    held="$STATE_LOCK_HELD"
+    state_lock
     mkdir -p "$(dirname "$STATE_FILE")"
     [ -f "$STATE_FILE" ] || : > "$STATE_FILE"
     tmp="${STATE_FILE}.tmp.$$"
@@ -121,8 +259,10 @@ state_set() {
     ' "$STATE_FILE" > "$tmp"
 
     # Atomic replace: a crash mid-write can never leave the system's
-    # single source of truth half-written.
+    # single source of truth half-written. The lock above is what stops
+    # a well-formed document from being the wrong one.
     mv "$tmp" "$STATE_FILE"
+    [ "$held" -eq 1 ] || state_lock_release
 }
 
 # ---------------------------------------------------------------------------
@@ -294,6 +434,214 @@ firewall_live_ports() {
     firewall_ports_canon "${raw#,}" 2>/dev/null || printf 'unparseable'
 }
 
+# An IPv4 address, checked properly rather than by looking for dots.
+#
+# This is the first value in this document that BECOMES A KERNEL
+# ARGUMENT rather than a service's business: `ip addr add` takes it,
+# and a machine that gets it wrong has no network and an error message
+# from `ip` that names neither the key nor the file. So the checks are
+# the pedantic ones:
+#
+#   * exactly four octets -- `1.2.3` and `1.2.3.4.5` both split into
+#     something `ip` will reject in its own words;
+#   * a leading or trailing dot, or `..`, rejected explicitly, because
+#     field splitting drops the empty field they produce and `.1.2.3`
+#     would otherwise pass as four octets;
+#   * no leading zero on an octet: `010` is eight to anything that
+#     reads it as octal and ten to anything that does not, and an
+#     address whose meaning depends on the reader is not an address.
+valid_ipv4() {
+    local ip="$1" o oldifs
+    case "$ip" in
+        ''|*[!0-9.]*|.*|*.|*..*) return 1 ;;
+    esac
+    oldifs="$IFS"; IFS=.
+    # shellcheck disable=SC2086
+    set -- $ip
+    IFS="$oldifs"
+    [ "$#" -eq 4 ] || return 1
+    for o in "$@"; do
+        case "$o" in
+            ''|*[!0-9]*) return 1 ;;
+            0) continue ;;
+            0*) return 1 ;;
+        esac
+        [ "${#o}" -le 3 ] || return 1
+        [ "$o" -le 255 ] || return 1
+    done
+    return 0
+}
+
+# `dhcp`, or an address with a prefix length. A bare address is
+# REFUSED rather than assumed to be /24: guessing a netmask decides
+# which hosts this machine believes are local, which is not a guess
+# anything should make on somebody's behalf.
+valid_cidr() {
+    local spec="$1" addr prefix
+    [ "$spec" = "dhcp" ] && return 0
+    case "$spec" in
+        */*) addr="${spec%/*}"; prefix="${spec##*/}" ;;
+        *)   return 1 ;;
+    esac
+    valid_ipv4 "$addr" || return 1
+    case "$prefix" in ''|*[!0-9]*) return 1 ;; esac
+    [ "${#prefix}" -le 2 ] || return 1
+    [ "$prefix" -ge 1 ] && [ "$prefix" -le 32 ]
+}
+
+# `auto` (the default, and what a lease supplies), `none` (a real
+# answer -- an isolated segment has nowhere for a default route to
+# point), or an address.
+valid_gateway() {
+    case "$1" in
+        auto|none|'') return 0 ;;
+    esac
+    valid_ipv4 "$1"
+}
+
+# ── IPv6 (RFC 0033 roadmap 1) ────────────────────────────────────────
+#
+# TWO KEYS, NOT ONE THAT TAKES EITHER FAMILY, and that is forced rather
+# than chosen: dual-stack is the ordinary case, so a machine has to be
+# able to declare a v4 address AND a v6 address at once. One key whose
+# meaning depends on the shape of its value could express only one of
+# them, and would make "what is my address" a question with an answer
+# that depends on which family you meant.
+#
+# The VOCABULARY differs from v4 deliberately. There is no `dhcp`:
+# DHCPv6 is a different protocol on a different port with different
+# semantics, and udhcpc does not speak it -- offering the word would be
+# a key that reads as supported and does nothing. `auto` here means
+# SLAAC: the kernel configures itself from router advertisements, which
+# it does with no help from this service, so `auto` is genuinely "leave
+# it alone" rather than a code path.
+#
+# THE VALIDATOR IS THE INTERESTING HALF, and the sharp edges are not
+# the ones IPv4 has:
+#
+#   * `::` may appear AT MOST ONCE, and it cannot be found by
+#     splitting: field splitting on `:` drops the empty fields it
+#     produces, exactly as splitting on `.` drops the one `.1.2.3`
+#     produces. That trap cost this file a bug on the v4 side already;
+#     here it is load-bearing in both directions, because the empty
+#     fields are the whole syntax.
+#   * LEADING ZEROS ARE FINE. `0001` is 1 to every reader, because hex
+#     has no octal convention -- so the v4 rule that rejects `010` must
+#     NOT be carried over. Two validators, two rules, for a reason.
+#   * A group is 1 to 4 hex digits; without a `::` there are exactly
+#     eight; with one there are at most seven written out.
+#   * The last 32 bits may be written as dotted-quad
+#     (`::ffff:192.0.2.1`), which is a real and common form, so the
+#     tail is handed to valid_ipv4 rather than rejected.
+#   * A zone id (`fe80::1%eth0`) is REFUSED: this key names an address
+#     and `network.interface` names the interface, so a scope written
+#     here would be a second, quieter answer to a question that already
+#     has a key.
+valid_ipv6() {
+    local ip="$1" head tail g n oldifs
+
+    case "$ip" in
+        ''|*[!0-9A-Fa-f:.]*) return 1 ;;
+        *:::*) return 1 ;;                 # three colons is never a thing
+    esac
+
+    # `::` splits the address in two. A SECOND one is not rejected
+    # here, and that is deliberate rather than an omission: a `1::2::3`
+    # leaves `2::3` in the tail, which splits on `:` into `2`, an EMPTY
+    # field and `3`, and the empty-group check below refuses it. An
+    # explicit `case "$tail" in *::*)` was written first and then
+    # removed -- provoking every rule in this function showed it was
+    # the one guard that could not be made to fire, so it was dead code
+    # that read as load-bearing.
+    case "$ip" in
+        *::*)
+            head="${ip%%::*}"
+            tail="${ip#*::}"
+            # A single leading or trailing colon that is not part of
+            # the `::` is malformed: `:1:2` and `1:2:` are not
+            # addresses, while `::1` and `1::` are.
+            case "$head" in *:) return 1 ;; esac
+            case "$tail" in :*|*:) return 1 ;; esac
+            n=0
+            ;;
+        *)
+            case "$ip" in :*|*:) return 1 ;; esac
+            head="$ip"
+            tail=""
+            n=1                            # no `::`: the count must be exact
+            ;;
+    esac
+
+    # An embedded IPv4 tail occupies the last two groups, and "last" is
+    # tracked as a POSITION rather than inferred from which half it
+    # turned up in. The first version tested whether the dotted-quad
+    # was in `head` while `tail` was non-empty, which is a different
+    # question and let `::1.2.3.4:5` through -- a v4 group in the
+    # MIDDLE of the tail. Once one is seen, nothing may follow it.
+    local groups=0 v4=0 part
+    for part in "$head" "$tail"; do
+        [ -n "$part" ] || continue
+        oldifs="$IFS"; IFS=:
+        # shellcheck disable=SC2086
+        set -- $part
+        IFS="$oldifs"
+        for g in "$@"; do
+            [ "$v4" = 0 ] || return 1      # a group after the dotted quad
+            case "$g" in
+                '') return 1 ;;            # `1::2:` style, already split out
+                *.*)
+                    valid_ipv4 "$g" || return 1
+                    v4=1
+                    groups=$((groups + 2))
+                    continue ;;
+                *[!0-9A-Fa-f]*) return 1 ;;
+            esac
+            [ "${#g}" -le 4 ] || return 1
+            groups=$((groups + 1))
+        done
+        # A dotted quad is the LAST 32 BITS, so with a `::` present it
+        # can only be in the tail: `1.2.3.4::` puts it first and is not
+        # an address. inet_pton agrees, which is how this was found --
+        # the hand-written case list did not have it.
+        if [ "$v4" = 1 ] && [ "$n" = 0 ] && [ "$part" = "$head" ]; then
+            return 1
+        fi
+    done
+
+    if [ "$n" = 1 ]; then
+        [ "$groups" -eq 8 ] || return 1
+    else
+        # `::` stands for one or more groups of zeros, so what is
+        # written out must leave room for at least one.
+        [ "$groups" -le 7 ] || return 1
+    fi
+    return 0
+}
+
+# `auto` (SLAAC -- the default, and what the kernel does on its own),
+# `none` (no IPv6 on this interface), or an address with a prefix.
+# A bare address is refused for the same reason as v4: the prefix
+# decides what this machine believes is on its own link.
+valid_cidr6() {
+    local spec="$1" addr prefix
+    case "$spec" in
+        auto|none|'') return 0 ;;
+        */*) addr="${spec%/*}"; prefix="${spec##*/}" ;;
+        *)   return 1 ;;
+    esac
+    valid_ipv6 "$addr" || return 1
+    case "$prefix" in ''|*[!0-9]*) return 1 ;; esac
+    [ "${#prefix}" -le 3 ] || return 1
+    [ "$prefix" -ge 1 ] && [ "$prefix" -le 128 ]
+}
+
+valid_gateway6() {
+    case "$1" in
+        auto|none|'') return 0 ;;
+    esac
+    valid_ipv6 "$1"
+}
+
 observe_network() {
     local sub="$1"
     case "$sub" in
@@ -368,7 +716,17 @@ observe_network() {
                 printf 'unknown'
             fi
             ;;
-        interface|dns)
+        # address and gateway (RFC 0033) join interface and dns: all
+        # four are read by the network service when it starts and
+        # recorded under /run, so a change to any of them shows up as
+        # real drift and `apply` has something to do about it, instead
+        # of silently having no effect until the next reboot.
+        #
+        # An UNDECLARED network.address is `dhcp` -- the service reads
+        # it that way, so the observation has to agree or every machine
+        # that has never heard of this key reports drift on it forever.
+        # Same for gateway and `auto`.
+        interface|dns|address|gateway|address6|gateway6)
             # With the service down there is no running configuration
             # to be out of step with, so the declared value is the
             # honest observation. Anything else would report permanent,
@@ -379,6 +737,16 @@ observe_network() {
             fi
             if [ -r "/run/novi/network.$sub" ]; then
                 cat "/run/novi/network.$sub"
+            elif [ "$sub" = "address" ]; then
+                printf 'dhcp'
+            elif [ "$sub" = "gateway" ] || [ "$sub" = "gateway6" ]; then
+                printf 'auto'
+            elif [ "$sub" = "address6" ]; then
+                # `auto` is SLAAC, which is what the kernel does with no
+                # help at all -- so it is both the default and the
+                # honest observation for a machine that has never heard
+                # of this key.
+                printf 'auto'
             else
                 printf 'unknown'
             fi
@@ -542,6 +910,39 @@ converge_governor() {
 # forward-compatibility case (a newer novi-state, a hand-written note),
 # not corruption, and `diff` should say so plainly instead of refusing
 # to run at all.
+# The verbs novi-agent will act on. Declared here as well as in
+# novi-agent because this is where a typo is CAUGHT, and a list that
+# lives only in the tool being configured cannot be validated by the
+# thing that validates the document. The two are checked against each
+# other by packages/tests/test-agent-verbs.sh, which is the answer to
+# "then they will drift".
+AGENT_VERBS="state.set state.apply state.rollback pkg.sync pkg.install wifi.join"
+
+observe_agent_allow() {
+    local want v
+    want="$(state_get agent.allow)"
+    # `none` and an empty value are the same policy, and both are fine.
+    case "$want" in ''|none) printf 'none'; return 0 ;; esac
+    for v in $(printf '%s' "$want" | tr ',' ' '); do
+        case " $AGENT_VERBS " in
+            *" $v "*) ;;
+            # ONE unknown verb makes the whole line untrustworthy. A
+            # person who wrote `pkg.instal` believes installs are
+            # permitted; reporting the other four as converged hides
+            # that from exactly the diff they would look at.
+            *) printf 'unsupported'; return 0 ;;
+        esac
+    done
+    # Nothing holds this key, so there is no observed value to compare
+    # against and no canonical form to impose -- echoing the declared
+    # string back verbatim is what makes a valid policy converged and
+    # leaves the document's own spacing and ordering alone. Same as
+    # power.lid, and deliberately NOT the firewall's sorted comparison
+    # (RFC 0022), which exists because there the other side is the
+    # kernel.
+    printf '%s' "$want"
+}
+
 observe_key() {
     local key="$1"
     case "$key" in
@@ -591,17 +992,109 @@ observe_key() {
         # can surface. Changing it takes effect on the next start of
         # the compositor, not immediately: this is the one
         # read-at-use-time key whose "use" is a process launch.
+        # agent.enabled / agent.allow are read at use time by
+        # novi-agent, on every invocation of `novi-agent do` -- so
+        # nothing holds them, they cannot drift, and `apply` has
+        # nothing to converge. Same shape as power.lid, and the
+        # observer is again the only place a typo can surface.
+        #
+        # It matters more here than for a lid switch. `agent.allow =
+        # pkg.instal` is a policy file that looks like it permits
+        # something and permits nothing, and the failure shows up as a
+        # refusal three layers away from the typo. Reporting an
+        # unusable value as drift is where a person finds out.
+        agent.enabled)
+            case "$(state_get "$key")" in
+                on|off) state_get "$key" ;;
+                *) printf 'unsupported' ;;
+            esac
+            ;;
+        # Every named verb must be one novi-agent knows. A comma
+        # separated list, compared canonically so `state.set, pkg.sync`
+        # and `pkg.sync,state.set` are the same policy and neither
+        # reports eternal drift against the other -- the same call
+        # network.firewall.allow makes about port lists (RFC 0022).
+        agent.allow)
+            observe_agent_allow
+            ;;
+        # agent.rate is read at use time by novi-agent, so nothing
+        # holds it, it cannot drift, and converge_key never runs to
+        # reject a typo -- the power.lid / storage.automount pattern.
+        # The observer is therefore the only place `agent.rate = twenty`
+        # can surface, and it surfaces as drift, which is where a
+        # person finds out.
+        #
+        # 0, off and none all mean no limit and are echoed back
+        # verbatim, because the document's own wording is not this
+        # tool's to correct.
+        agent.rate)
+            case "$(state_get "$key")" in
+                ''|0|off|none) state_get "$key" ;;
+                *[!0-9]*) printf 'unsupported' ;;
+                *) state_get "$key" ;;
+            esac
+            ;;
         display.renderer)
             case "$(state_get "$key")" in
                 pixman|gles2|auto) state_get "$key" ;;
                 *) printf 'unsupported' ;;
             esac
             ;;
+        # display.theme IS observable, unlike every other display.* key:
+        # the converger publishes the resolved name to /run/novi/theme
+        # and that file is what the clients actually read, so "what
+        # theme is this machine running" has a real answer to compare
+        # against. Reading the declared value back would make this key
+        # permanently converged and the file permanently unchecked.
+        #
+        # A theme that is declared but not installed reports
+        # `missing`, not the name: `apply` genuinely cannot fix it (the
+        # file is not there to publish), and reporting the name would
+        # call a machine drawing the default palette converged on a
+        # theme it does not have.
+        display.theme)
+            local want_theme
+            want_theme="$(state_get "$key")"
+            if [ ! -f "${THEME_DIR}/${want_theme}.theme" ]; then
+                printf 'missing'
+            elif [ -r "$THEME_ACTIVE" ]; then
+                cat "$THEME_ACTIVE"
+            else
+                printf 'unset'
+            fi
+            ;;
         power.blank)
             case "$(state_get "$key")" in
                 off) printf 'off' ;;
                 ''|*[!0-9]*) printf 'unsupported' ;;
                 *) state_get "$key" ;;
+            esac
+            ;;
+        # power.suspend (RFC 0035) is power.blank's shape exactly:
+        # novi-shell re-reads it on the idle tick, so nothing holds it,
+        # it cannot drift, and `apply` has nothing to converge -- which
+        # again makes this the only place a typo can surface.
+        #
+        # An UNDECLARED value is `off`, not the compositor's default,
+        # because the compositor's default IS off. A machine that has
+        # never heard of this key must not report drift on it forever.
+        power.suspend)
+            case "$(state_get "$key")" in
+                ''|off) printf 'off' ;;
+                *[!0-9]*) printf 'unsupported' ;;
+                *) state_get "$key" ;;
+            esac
+            ;;
+        # Whether an idle suspend locks the screen first. ON when
+        # undeclared, which is what novi-shell falls back to -- so a
+        # machine that has never heard of this key does not report
+        # drift on it, and one that HAS declared it gets its own word
+        # back.
+        power.suspend.lock)
+            case "$(state_get "$key")" in
+                ''|on) printf 'on' ;;
+                off) printf 'off' ;;
+                *) printf 'unsupported' ;;
             esac
             ;;
         # storage.automount is the same shape as power.lid, for the
@@ -789,7 +1282,23 @@ converge_network() {
                     die "failed to restart 'wifi' after setting network.$sub"
             fi
             ;;
-        interface|dns)
+        interface|dns|address|gateway|address6|gateway6)
+            # address and gateway are checked before anything is
+            # restarted, because a malformed one costs the machine its
+            # network and the error `ip` gives for it names neither the
+            # key nor the document. `die` here means this key is
+            # skipped and every other key still converges (each runs in
+            # its own subshell), and `apply` exits non-zero.
+            case "$sub" in
+                address) valid_cidr "$want" ||
+                    die "network.address: '$want' is not 'dhcp' or an address like 192.168.1.50/24" ;;
+                gateway) valid_gateway "$want" ||
+                    die "network.gateway: '$want' is not 'auto', 'none' or an address like 192.168.1.1" ;;
+                address6) valid_cidr6 "$want" ||
+                    die "network.address6: '$want' is not 'auto', 'none' or an address like 2001:db8::5/64" ;;
+                gateway6) valid_gateway6 "$want" ||
+                    die "network.gateway6: '$want' is not 'auto', 'none' or an address like fe80::1" ;;
+            esac
             # The service reads these once, at start, so making the
             # declaration true means restarting it. Only if it is
             # actually up: bringing a stopped network service into
@@ -904,6 +1413,52 @@ converge_package() {
                 die "failed to install '$name' (is the index synced? try: pkg sync)"
             ;;
         absent)
+            # REFUSED when something installed still needs it, and the
+            # refusal is the point. `pkg remove` run by a person warns
+            # about reverse dependencies and proceeds, which is right:
+            # they typed it, they are reading the warning. This path is
+            # a document being applied -- at BOOT, with nobody there --
+            # and "remove libpng" quietly taking the image viewer's
+            # only decoder with it is not a thing an unattended
+            # converger should do.
+            #
+            # The list comes from `pkg rdeps`, not from a second scan
+            # written here: one implementation of "what depends on
+            # this", in the tool that owns the database.
+            #
+            # The cost is that the document cannot express "remove it
+            # anyway", and that is deliberate. The result is permanent
+            # DRIFT, which is the honest report -- the machine does not
+            # match the document and this engine will not make it
+            # match. Declare the dependants absent too, or run
+            # `pkg remove` by hand, which still does exactly what it
+            # always did.
+            #
+            # A QUERY THAT FAILED IS NOT AN EMPTY ANSWER. `|| true` on
+            # this would turn "pkg could not tell me" into "nothing
+            # depends on it" and remove the package anyway -- a
+            # refusal degrading into permission at exactly the moment
+            # it is least justified. A pkg too old to know the
+            # subcommand exits non-zero, which is the case that makes
+            # this reachable rather than theoretical. Found by the
+            # test: the stub's shell rejected `set -o pipefail`, the
+            # query died, and the removal went through.
+            #
+            # NOT `$(pkg rdeps ... | tr ...)`: a pipeline reports the
+            # status of its LAST command, so `tr` succeeding would
+            # report the whole substitution as a success and hand back
+            # the empty answer anyway -- the fix failing in precisely
+            # the way the bug did. That is the third time this
+            # repository has been caught by a pipeline's exit status.
+            # Capture first, reshape after.
+            local rdeps=""
+            if ! rdeps="$(pkg rdeps "$name" 2>/dev/null)"; then
+                die "refusing to remove '$name': 'pkg rdeps' failed, so nothing here knows what still depends on it"
+            fi
+            rdeps="$(printf '%s' "$rdeps" | tr '\n' ' ')"
+            if [ -n "${rdeps% }" ]; then
+                die "refusing to remove '$name': ${rdeps% } still depend(s) on it (declare those absent too, or remove it by hand)"
+            fi
             pkg remove "$name" || die "failed to remove '$name'"
             ;;
         *)
@@ -941,11 +1496,54 @@ converge_key() {
                 *) die "$key: must be 'pixman', 'gles2' or 'auto', got '$want'" ;;
             esac
             ;;
-        power.blank)
+        # Publishing the name is the whole convergence. Clients read
+        # THEME_ACTIVE when they START, so a change reaches a window
+        # that is already open only when that window reopens -- stated
+        # here rather than left to be discovered, and the reason
+        # `apply` prints the note below.
+        #
+        # A theme name becomes a path in every client that reads it, so
+        # it is validated HERE, once, rather than trusted seventeen
+        # times. `..` survives a plain character filter because dots
+        # are legal in a name -- the trap RFC 0023 records from the
+        # other direction.
+        display.theme)
+            case "$want" in
+                ''|.*|*/*|*[!A-Za-z0-9._-]*)
+                    die "$key: '$want' is not a theme name" ;;
+            esac
+            [ -f "${THEME_DIR}/${want}.theme" ] || \
+                die "$key: no such theme '${want}' in ${THEME_DIR} (have: $(cd "$THEME_DIR" 2>/dev/null && printf '%s ' *.theme))"
+            mkdir -p "$(dirname "$THEME_ACTIVE")"
+            # Temp file and rename: a client reading this while it is
+            # being written must never see half a name. Same rule as
+            # the health service's /run/novi/health (RFC 0014).
+            printf '%s\n' "$want" > "${THEME_ACTIVE}.new"
+            mv "${THEME_ACTIVE}.new" "$THEME_ACTIVE"
+            # What this used to say -- "open windows keep the old
+            # palette until they restart" -- stopped being true when
+            # the clients with an event loop learned to follow a
+            # switch (RFC 0030 roadmap 1). Naming the exceptions is
+            # more useful than the old blanket warning and is the kind
+            # of sentence that rots, so it names a CLASS: a window is
+            # either long-lived and watching, or it is one of the
+            # short-lived ones that is about to be started again
+            # anyway.
+            info "theme '${want}' published; the desktop follows it live, and anything started fresh picks it up"
+            ;;
+        power.blank|power.suspend)
             case "$want" in
                 off) : ;;
                 ''|*[!0-9]*) die "$key: must be a number of seconds or 'off', got '$want'" ;;
                 *) : ;;
+            esac
+            ;;
+        # Read on novi-shell's idle tick, like power.blank. Nothing to
+        # converge; `apply` is where the typo is reported.
+        power.suspend.lock)
+            case "$want" in
+                on|off) : ;;
+                *) die "$key: must be 'on' or 'off', got '$want'" ;;
             esac
             ;;
         # Read at event time by novi-mount, like power.lid -- nothing
@@ -1058,7 +1656,30 @@ snapshot_generation() {
 # Commands
 # ---------------------------------------------------------------------------
 
+# Every --json command starts here. A JSON mode that silently emits a
+# broken document because the escaper is missing is worse than one that
+# is not offered: an agent parsing the output cannot tell the
+# difference between "this machine has no services" and "this string
+# had a quote in it".
+need_json_lib() {
+    command -v json_str >/dev/null 2>&1 \
+        || die "$NOVI_JSON_LIB is missing; --json needs it"
+}
+
 cmd_show() {
+    if [ "${1:-}" = "--json" ]; then
+        need_json_lib
+        [ -f "$STATE_FILE" ] || die "no state file at $STATE_FILE"
+        local key first=1
+        printf '{"state_file": %s, "declared": {' "$(json_str "$STATE_FILE")"
+        for key in $(state_keys); do
+            [ "$first" -eq 1 ] || printf ','
+            first=0
+            printf '%s: %s' "$(json_str "$key")" "$(json_str "$(state_get "$key")")"
+        done
+        printf '}}\n'
+        return 0
+    fi
     [ -f "$STATE_FILE" ] || die "no state file at $STATE_FILE"
     cat "$STATE_FILE"
 }
@@ -1082,8 +1703,47 @@ cmd_set() {
 # Declared vs. actual. Exit status is deliberately meaningful:
 # 0 = converged (no drift), 1 = drift found. That makes it usable as a
 # check in a script or a CI job, not just something a human reads.
+# The JSON form reports the SAME comparison as the text form and adds
+# nothing of its own -- one loop over state_keys, one observe_key per
+# key. A second implementation of "what is drifting" is a second answer
+# to a question that has one, which is the whole argument novi-state
+# exists to make.
+cmd_diff_json() {
+    need_json_lib
+    local key want have first=1 drift=0
+    [ -f "$STATE_FILE" ] || die "no state file at $STATE_FILE"
+    service_cache_load
+    printf '{"drift": ['
+    for key in $(state_keys); do
+        want="$(state_get "$key")"
+        have="$(observe_key "$key")"
+        [ "$want" = "$have" ] && continue
+        drift=1
+        [ "$first" -eq 1 ] || printf ','
+        first=0
+        printf '{"key": %s, "declared": %s, "actual": %s}' \
+            "$(json_str "$key")" "$(json_str "$want")" "$(json_str "$have")"
+    done
+    printf '], "converged": %s, "unhealthy": [' \
+        "$([ "$drift" -eq 0 ] && printf true || printf false)"
+    first=1
+    health_problems | while IFS= read -r l; do
+        [ -n "$l" ] || continue
+        [ "$first" -eq 1 ] || printf ','
+        first=0
+        printf '%s' "$(json_str "$l")"
+    done
+    printf ']}\n'
+    return "$drift"
+}
+
 cmd_diff() {
     local key want have drift=0
+    # `|| return $?` rather than `; return $?`: under `set -e` a bare
+    # call that returns 1 (which is what drift means here) ends the
+    # script before the `return` runs. Same exit status by luck today,
+    # and a trap for the next branch added below it.
+    [ "${1:-}" = "--json" ] && { cmd_diff_json || return $?; return 0; }
     [ -f "$STATE_FILE" ] || die "no state file at $STATE_FILE"
     # Nothing changes during a diff, so one snapshot of the live
     # service list serves every key.
@@ -1129,9 +1789,19 @@ diff_health_note() {
 }
 
 cmd_apply() {
-    local dry=0 key want have gen changed=0
+    local dry=0 key want have gen changed=0 held
     [ "${1:-}" = "--dry-run" ] && dry=1
     [ -f "$STATE_FILE" ] || die "no state file at $STATE_FILE"
+
+    # Held for the WHOLE run, not just around the snapshot. Two applies
+    # at once pick the same generation number (next_generation() reads
+    # the highest and adds one), so one snapshot silently overwrites
+    # the other -- and the thing overwritten is the record a rollback
+    # would restore. It also stops a `set` from changing the document
+    # halfway through the passes that are converging it. `rollback`
+    # already holds it when it calls this, hence `held`.
+    held="$STATE_LOCK_HELD"
+    state_lock
 
     # Nothing to do is worth saying plainly, and worth NOT burning a
     # generation on -- generations should mean "the system actually
@@ -1139,12 +1809,14 @@ cmd_apply() {
     if cmd_diff >/dev/null 2>&1; then
         msg "already converged -- nothing to apply"
         firewall_hole_note
+        [ "$held" -eq 1 ] || state_lock_release
         return 0
     fi
 
     if [ "$dry" -eq 1 ]; then
         msg "would apply (dry run):"
         cmd_diff || true
+        [ "$held" -eq 1 ] || state_lock_release
         return 0
     fi
 
@@ -1187,8 +1859,23 @@ cmd_apply() {
     # value instead of the end of the program. `converge_key` sets no
     # globals (its effects are on the system -- files, s6-rc), so
     # nothing is lost by isolating it. A key that fails is recorded and
-    # SKIPPED in later passes, or a document with one bad key would
-    # print the same error three times over.
+    # skipped for the REST OF THAT PASS.
+    #
+    # It is retried in the next pass IF the pass made progress, and
+    # that condition is the whole of it. The first version skipped a
+    # failed key for the rest of the apply, to stop one bad key
+    # printing the same error three times -- and that defeated the
+    # passes for exactly the case they exist for. Watched live:
+    # `packages.expat = absent` and `packages.fontconfig = absent`
+    # declared in one edit, expat sorts first, expat's removal is
+    # refused because fontconfig still depends on it, fontconfig is
+    # then removed... and expat stays, because it had been struck off.
+    # `diff` reported the drift and a second `apply` fixed it, which
+    # is honest and is still one apply too many.
+    #
+    # A key that is simply wrong costs one extra error line for this:
+    # nothing else converges on the retry pass, so the loop ends
+    # there. A key that was merely EARLY costs nothing and now works.
     local pass=0 total=0 failed="" failed_n=0
     while [ "$pass" -lt 3 ]; do
         pass=$((pass + 1))
@@ -1217,6 +1904,11 @@ cmd_apply() {
         done
         total=$((total + changed))
         [ "$changed" -eq 0 ] && break
+        # Progress was made, so whatever failed may only have been
+        # waiting for it. Cleared here rather than never, per the
+        # comment above.
+        failed=""
+        failed_n=0
     done
 
     if [ "$changed" -ne 0 ]; then
@@ -1229,6 +1921,7 @@ cmd_apply() {
     # looking at. Non-zero exit: the document was not reached in full,
     # and a caller that checks (boot convergence does not -- it must
     # always exit 0) should hear about it.
+    [ "$held" -eq 1 ] || state_lock_release
     if [ "$failed_n" -ne 0 ]; then
         warn "$failed_n key(s) could not be applied:$failed"
         return 1
@@ -1379,9 +2072,24 @@ cmd_rollback() {
     src="$GEN_DIR/${gen}.conf"
     [ -f "$src" ] || die "no such generation: $gen"
     need_root
+    # Held across the COPY and the apply together, which is the part
+    # that needs it: `cp` over the state file is the one write in this
+    # program that does not go through state_set, and a `set` landing
+    # between the copy and the apply would be applied and then not be
+    # in the document -- drift created by the command whose whole job
+    # is removing it.
+    state_lock
     msg "rolling back to generation $gen"
     cp "$src" "$STATE_FILE"
-    cmd_apply
+    # `|| rc=$?` and not a bare call: this script is `set -e`, apply
+    # returns 1 when a key could not be converged, and that would end
+    # the script here with the lock released only by the EXIT trap and
+    # the caller told nothing. The same trap cmd_diff's own comment
+    # records, two functions up.
+    local rc=0
+    cmd_apply || rc=$?
+    state_lock_release
+    return "$rc"
 }
 
 usage() {
@@ -1411,6 +2119,10 @@ Keys:
   services.<name>                 on | off  (an s6-rc service)
   network.dhcp                    on | off  (the DHCP client service)
   network.interface               auto | <name>  (which NIC to use)
+  network.address                 dhcp | 192.168.1.50/24  (RFC 0033)
+  network.gateway                 auto | none | 192.168.1.1
+  network.address6                auto | none | 2001:db8::5/64
+  network.gateway6                auto | none | fe80::1
   network.dns                     auto | 1.1.1.1,9.9.9.9
   network.wifi                    on | off  (the supplicant; see novi-wifi)
   network.wifi.interface          auto | <name>
@@ -1420,9 +2132,17 @@ Keys:
   users.<name>.groups             wheel,video,input | none
   packages.<name>                 present | absent
   display.renderer                pixman | gles2 | auto  (compositor renderer)
+  display.theme                   a file in /usr/share/novi/themes (colours)
   power.blank                     <seconds> | off  (idle screen blank)
+  power.suspend                   <seconds> | off  (idle suspend; off by default)
+  power.suspend.lock              on | off  (lock before an idle suspend)
   power.governor                  performance | powersave | schedutil | ...
+  power.lid                       suspend | poweroff | ignore  (lid switch)
+  power.button                    suspend | poweroff | ignore  (power button)
   storage.automount               on | off  (removable media -> /run/media)
+  agent.enabled                   on | off  (novi-agent may CHANGE things)
+  agent.allow                     none | pkg.install,state.set,...  (verbs)
+  agent.rate                      <calls per minute> | off
   state.apply_on_boot             on | off  (converge on every boot)
 
 Recovery:
@@ -1542,8 +2262,34 @@ health_problems() {
 # Exit 0 when every supervised service is doing its job, 1 when one is
 # not -- so this is the command a CI job or a health check runs, and
 # `diff` keeps meaning exactly "declared vs actual".
+cmd_health_json() {
+    need_json_lib
+    local n line name verdict detail first=1 bad=0
+    command -v s6-svstat >/dev/null 2>&1 || die "s6-svstat not found; cannot inspect services"
+    printf '{"services": ['
+    for n in $(health_services); do
+        line="$(service_health "$n")"
+        # service_health prints `<name> <verdict> <detail>`, and the
+        # detail may be `-`. Split on whitespace rather than parsing,
+        # because this is our own format and there is no third field
+        # that can contain a space.
+        # shellcheck disable=SC2086
+        set -- $line
+        name="${1:-$n}"; verdict="${2:-unknown}"; detail="${3:--}"
+        case "$verdict" in DOWN|CRASHLOOP|NOTREADY) bad=1 ;; esac
+        [ "$first" -eq 1 ] || printf ','
+        first=0
+        printf '{"service": %s, "verdict": %s, "detail": %s}' \
+            "$(json_str "$name")" "$(json_str "$verdict")" "$(json_str "$detail")"
+    done
+    printf '], "healthy": %s}\n' \
+        "$([ "$bad" -eq 0 ] && printf true || printf false)"
+    return "$bad"
+}
+
 cmd_health() {
     local n bad=0 line
+    [ "${1:-}" = "--json" ] && { cmd_health_json || return $?; return 0; }
     command -v s6-svstat >/dev/null 2>&1 || die "s6-svstat not found; cannot inspect services"
     for n in $(health_services); do
         line="$(service_health "$n")"

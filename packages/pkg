@@ -52,6 +52,20 @@ PKG_MIRROR=""
 PKG_KEY="/etc/novi/keys/novi-repo.pub"
 PKG_ALLOW_UNSIGNED="no"
 PKG_ALLOW_STALE="no"
+# Network read timeout, in seconds, for every fetch this tool makes.
+#
+# BusyBox wget's own default is 900 -- fifteen minutes of no data before
+# it gives up -- and that is not a number anybody chose for this
+# situation. `packages.<name> = present` is converged by novi-state,
+# which runs at BOOT, so an unreachable mirror (a laptop that opened its
+# lid somewhere else, a mirror that has moved) would stall the boot for
+# a quarter of an hour per declared package, silently, with the console
+# showing nothing.
+#
+# It is a READ timeout, not a total one, so a slow but progressing
+# download of a 90 MB toolchain package is unaffected: the clock only
+# runs while nothing at all is arriving.
+PKG_TIMEOUT="30"
 
 conf_value() {
     [ -r "$PKG_CONF" ] || { printf ''; return 0; }
@@ -65,6 +79,11 @@ load_conf() {
     v="$(conf_value key)";             [ -n "$v" ] && PKG_KEY="$v"
     v="$(conf_value allow_unsigned)";  [ -n "$v" ] && PKG_ALLOW_UNSIGNED="$v"
     v="$(conf_value allow_stale)";     [ -n "$v" ] && PKG_ALLOW_STALE="$v"
+    v="$(conf_value timeout)"
+    case "$v" in
+        ''|*[!0-9]*) ;;   # absent or not a number: keep the default
+        *)           PKG_TIMEOUT="$v" ;;
+    esac
     # The environment wins over the file, so a one-off
     # `PKG_MIRROR=... pkg sync` works without editing anything.
     [ -n "${PKG_MIRROR_ENV:-}" ] && PKG_MIRROR="$PKG_MIRROR_ENV"
@@ -240,7 +259,7 @@ fetch_repo_file() {
     else
         command -v wget >/dev/null 2>&1 ||
             die "wget not found; cannot fetch $rel from $PKG_MIRROR"
-        if ! wget -q -O "$dest.part" "${PKG_MIRROR%/}/$rel"; then
+        if ! wget -q -T "$PKG_TIMEOUT" -O "$dest.part" "${PKG_MIRROR%/}/$rel"; then
             rm -f "$dest.part"
             return 1
         fi
@@ -298,7 +317,9 @@ fetch_from_mirror() {
 $line
 EOF
     [ -n "$i_file" ] || return 1
-    : "$i_arch" "$i_size"
+    # i_sha is read positionally to reach i_file and is checked by
+    # archive_matches_index rather than here.
+    : "$i_arch" "$i_size" "$i_sha"
 
     # The caller asked for a specific version and the index does not
     # have it. Failing here is better than quietly handing back a
@@ -320,15 +341,47 @@ EOF
             die "could not fetch $i_file from $PKG_MIRROR"
     fi
 
-    local got
-    got="$(sha256sum "$dest" | cut -d' ' -f1)"
-    if [ "$got" != "$i_sha" ]; then
+    archive_matches_index "$dest" "$i_name" || {
         rm -f "$dest"
-        die "$i_file failed its SHA-256 check (index says $i_sha, file is $got) -- discarded"
-    fi
-    info "sha256 verified: $i_name $i_ver"
+        die "$i_file failed its SHA-256 check -- discarded"
+    }
 
     FOUND_PKG="$dest"
+    return 0
+}
+
+# archive_matches_index <path> <name>
+#
+# True when the index has nothing to say about <name> (an unindexed
+# local archive is governed by whether there is an index at all, not by
+# a hash nobody published), and true when it does and the file's
+# SHA-256 is the one it published. False otherwise.
+#
+# THIS LIVED INSIDE fetch_from_mirror AND THAT IS WHERE THE HOLE WAS.
+# Its comment there -- "a cached copy still gets hashed; the cache is a
+# directory anything with root can write to" -- was true of that
+# function and false of the program, because `locate_pkg` searches the
+# cache and the on-media repository FIRST and returned a match from
+# either without hashing it. So the one path that verified was the one
+# taken only when nothing local matched: a modified archive in
+# /var/cache/pkg/archives was installed as root, unverified, with a
+# correctly signed index sitting beside it naming a different hash.
+# Found by rebuilding a package at the same version and watching the
+# old bytes install from the cache. A comment asserting the property is
+# not the property -- this repository's oldest recurring bug, here on
+# the one path where it is trust and not tidiness.
+archive_matches_index() {
+    local path="$1" name="$2" line i_sha got
+    line="$(index_line "$name" 2>/dev/null)" || return 0
+    [ -n "$line" ] || return 0
+    i_sha="$(printf '%s' "$line" | cut -d'|' -f5)"
+    [ -n "$i_sha" ] || return 0
+    got="$(sha256sum "$path" | cut -d' ' -f1)"
+    if [ "$got" != "$i_sha" ]; then
+        warn "$(basename "$path") does not match the index (index says $i_sha, file is $got)"
+        return 1
+    fi
+    info "sha256 verified: $name"
     return 0
 }
 
@@ -370,8 +423,21 @@ locate_pkg() {
             | sort -t'-' -k2 -V -r \
             | head -n1)
         if [ -n "$f" ]; then
-            FOUND_PKG="$f"
-            return 0
+            if archive_matches_index "$f" "$name"; then
+                FOUND_PKG="$f"
+                return 0
+            fi
+            # The cache is derived data, so a copy that does not match
+            # the index is deleted and the mirror asked again. A repo
+            # directory is somebody's media -- possibly read-only, and
+            # never ours to edit -- so that one is left alone and
+            # skipped. Either way the archive is not installed.
+            if [ "$dir" = "$PKG_CACHE" ]; then
+                warn "discarding the cached copy and refetching"
+                rm -f "$f"
+            else
+                warn "ignoring $f"
+            fi
         fi
     done
 
@@ -614,6 +680,46 @@ cmd_install() {
     done
 }
 
+# Which installed packages name $1 in their `depends`, space-separated
+# and empty when nothing does.
+#
+# Its own function, and a subcommand (`pkg rdeps`), because there are
+# now two callers: `pkg remove` warns with it, and novi-state's
+# packages.* converger REFUSES with it. A second copy of this matching
+# in novi-state would be a second answer to "what depends on this",
+# written in a different language, drifting the first time the depends
+# syntax gains a spelling -- which is what the version-constrained
+# patterns below already are.
+rdeps_of() {
+    local name="$1" rdeps="" other_manifest other_name other_deps
+    for other_manifest in "$PKG_DB"/*/MANIFEST; do
+        [ -f "$other_manifest" ] || continue
+        other_name="$(manifest_field "$other_manifest" "name")"
+        [ "$other_name" = "$name" ] && continue
+        other_deps="$(manifest_field "$other_manifest" "depends")"
+        case ",$other_deps," in
+            *",${name},"*|*",${name}>"*|*",${name}<"*|*",${name}="*|\
+            "${name},"*|"${name}>"*|"${name}<"*|"${name}="*|\
+            *",$name"|"$name")
+                rdeps="$rdeps $other_name";;
+        esac
+    done
+    # Leading space trimmed so a caller can test emptiness with -n and
+    # print the list without a stray gap in the middle of a sentence.
+    printf '%s' "${rdeps# }"
+}
+
+cmd_rdeps() {
+    [ $# -eq 1 ] || die "Usage: pkg rdeps <package>"
+    local list
+    list="$(rdeps_of "$1")"
+    [ -n "$list" ] || return 0
+    local d
+    for d in $list; do
+        printf '%s\n' "$d"
+    done
+}
+
 cmd_remove() {
     need_root
     [ $# -ge 1 ] || die "Usage: pkg remove <package> [...]"
@@ -623,22 +729,8 @@ cmd_remove() {
 
         msg "Removing $name"
 
-        # Check reverse dependencies (packages that depend on this one)
-        local rdeps=""
-        for other_manifest in "$PKG_DB"/*/MANIFEST; do
-            [ -f "$other_manifest" ] || continue
-            local other_name
-            other_name="$(manifest_field "$other_manifest" "name")"
-            [ "$other_name" = "$name" ] && continue
-            local other_deps
-            other_deps="$(manifest_field "$other_manifest" "depends")"
-            case ",$other_deps," in
-                *",${name},"*|*",${name}>"*|*",${name}<"*|*",${name}="*|\
-                "${name},"*|"${name}>"*|"${name}<"*|"${name}="*|\
-                *",$name"|"$name")
-                    rdeps="$rdeps $other_name";;
-            esac
-        done
+        local rdeps
+        rdeps="$(rdeps_of "$name")"
 
         if [ -n "$rdeps" ]; then
             warn "The following installed packages depend on '$name':$rdeps"
@@ -1011,6 +1103,7 @@ Usage:
   pkg search  <pattern>                Search for packages
   pkg list    [filter]                 List installed packages
   pkg info    <package>                Show package information
+  pkg rdeps   <package>                List installed packages that need it
 
 `sync` refreshes the index; `update` upgrades installed packages. They
 are different operations and have different names on purpose.
@@ -1020,6 +1113,7 @@ Configuration (/etc/novi/pkg.conf):
   key             = /etc/novi/keys/novi-repo.pub
   allow_unsigned  = no
   allow_stale     = no
+  timeout         = 30                                 (network read, seconds)
 
 The index is signed and `pkg sync` verifies it with novi-verify before
 believing a line of it; every package's SHA-256 comes from that index,
@@ -1044,5 +1138,6 @@ case "$cmd" in
     search)  cmd_search  "$@";;
     list)    cmd_list    "$@";;
     info)    cmd_info    "$@";;
+    rdeps)   cmd_rdeps   "$@";;
     *)       usage;;
 esac

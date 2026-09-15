@@ -83,7 +83,128 @@ if command -v cc >/dev/null 2>&1; then
         exit 1
     fi
     echo ">>> clean"
+    # The shipped palettes, parsed by the REAL loader (common/theme.c)
+    # and checked against §1's invariants. RFC 0030 found its two bugs
+    # by shipping a light theme, screendumping it and looking; that
+    # worked and does not scale, because the next palette mistake needs
+    # somebody to boot an image and notice. This is the part that can
+    # be checked without a VM: elevation ordering, text contrast on
+    # every ground it is drawn on, and a pressed control that sinks
+    # rather than pops.
+    echo ">>> theme palettes"
+    if ! make -s -C common check; then
+        echo ">>> theme checks failed -- run: make -C common check" >&2
+        exit 1
+    fi
 else
     echo ">>> no host cc -- skipping novi-panel icon geometry checks" >&2
+    echo ">>> no host cc -- skipping theme palette checks" >&2
 fi
+
+# novi-recon is pure Python and most of what can be wrong in it cannot
+# be shown by running it: a real resolver never sends a compression
+# pointer loop, a mismatched transaction ID, or a TXT record split
+# across chunks, and a live site exercises one row of the clickjacking
+# truth table. So the wire format is tested by building messages and
+# parsing them back. No network, no downloaded fixtures -- same
+# argument as the icon geometry test above.
+if command -v python3 >/dev/null 2>&1; then
+    echo ">>> novi-recon"
+    if ! python3 novi-recon/tests/test_recon.py; then
+        echo ">>> novi-recon checks failed -- run: python3 novi-recon/tests/test_recon.py" >&2
+        exit 1
+    fi
+else
+    echo ">>> no host python3 -- skipping novi-recon checks" >&2
+fi
+
+# pkgsplit's meta-package checks. These are here because provoking
+# them for real is disproportionately expensive: 50-repo.sh wipes
+# /build/repo before pkgsplit runs and refuses outright on a rootfs
+# 41 has already split, so watching the check fire costs a full
+# content rebuild. A meta-package that silently drops a member is
+# exactly the failure that shipped once already -- a repository of 51
+# packages instead of 54, novi-desktop naming three fewer clients, and
+# `pkg install novi-desktop` reporting success.
+if command -v python3 >/dev/null 2>&1; then
+    echo ">>> pkgsplit"
+    if ! python3 tools/pkgsplit/test_pkgsplit.py; then
+        echo ">>> pkgsplit checks failed -- run: python3 tools/pkgsplit/test_pkgsplit.py" >&2
+        exit 1
+    fi
+fi
+
+# The shell JSON escaper (RFC 0029) is checked under the SHIPPED
+# busybox ash, not the host's bash, and against a real JSON parser
+# rather than a string comparison. Every JSON document this system
+# emits is assembled by a shell script out of strings the shell did
+# not choose. The verb-list check catches the other thing two files
+# can do to each other: novi-agent dispatches on a list novi-state
+# also carries, because that is where a typo in agent.allow is caught.
+# The secrets check is the third: wifi.join is the first agent verb
+# that handles one, and its refusal path is the part that is easy to
+# get wrong -- cmd_do captures args="$*" before dispatch, so refusing
+# `wifi.join <ssid> <passphrase>` with "$args" would write that
+# passphrase into a 0600 log permanently, by the very refusal meant to
+# protect it.
+# test-state-document.sh is the last, and it is RFC 0002 roadmap 3's
+# half that CI can actually do. That item asked for "`novi-state diff`
+# in CI, and a --json projection for tooling", and the --json half
+# ALREADY EXISTED when it was written -- built for RFC 0029's agent
+# interface, which composes its document out of exactly those modes.
+# Fourth roadmap item in this repository found to be wrong about what
+# is already built. The real `diff` observes a RUNNING machine, which a
+# runner is not; what a runner CAN do is drive the observer over the
+# SHIPPED system.conf and check no key comes back `unmanaged`, because
+# an unrecognised key is deliberately not an error -- so a typo in that
+# document ships as a line that reads declarative and converges
+# nothing, the same class as the `power.governor` line that got
+# accidentally uncommented. It checks three lists against each other:
+# the document, the dispatcher, and the help text that is the only
+# place a person learns what a key is called. Its first run found
+# `power.lid`, `power.button` and `agent.enabled` live in the shipped
+# document and absent from that reference.
+#
+# test-state-lock.sh is the seventh, and it is the only one here that
+# has to PROVE ITS OWN BUG before it can prove the fix: it runs the
+# same two-writer race against a copy with the locking removed and
+# fails if that copy stops losing a write. A green test over a race
+# that no longer reproduces is a test that has stopped watching.
+# test-agent-text.sh is the sixth, and it guards a kind of drift the
+# others do not: `describe` emits the same facts twice, as JSON and as
+# a table, and a field added to one branch and forgotten in the other
+# is invisible in a diff and looks like nothing when you run it. The
+# check needs no list of its own -- every string value in the document
+# must appear in the table.
+# test-services.sh is the fifth, and the only one whose subject is a
+# DATA file: /etc/services is parsed by musl rather than by anything
+# in this repository, and every way to get it wrong -- a line past
+# musl's 128-byte fgets buffer, a name past the 32 bytes
+# reverse_services() will copy, a duplicated port -- is skipped
+# silently and comes back as a bare number, which is exactly what a
+# port with no name looks like. A typo in it is indistinguishable from
+# the feature working.
+# test-network-static.sh is the fourth of this shape: `network.address`
+# is the first value in system.conf that becomes an argument to `ip
+# addr add`, and every interesting way to get it wrong is textual --
+# an octet of 256, a leading zero, a leading dot whose empty field
+# field-splitting silently drops. None of those need a machine, and
+# none of them would ever be produced by one.
+for t in packages/tests/test-lib-json.sh packages/tests/test-agent-verbs.sh \
+         packages/tests/test-agent-secrets.sh packages/tests/test-agent-rate.sh \
+         packages/tests/test-agent-socket.sh packages/tests/test-network-static.sh \
+         packages/tests/test-power-idle.sh \
+         packages/tests/test-agent-idle.sh \
+         packages/tests/test-state-packages.sh \
+         packages/tests/test-services.sh \
+         packages/tests/test-agent-text.sh \
+         packages/tests/test-state-lock.sh \
+         packages/tests/test-state-document.sh \
+         packages/tests/test-pkg-cache-hash.sh; do
+    echo ">>> ${t##*/}"
+    if ! bash "$t"; then
+        echo ">>> ${t} failed" >&2
+        exit 1
+    fi
+done
 exit 0
