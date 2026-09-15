@@ -33,7 +33,7 @@
 # Two outputs, like 31-mbedtls.sh:
 #
 #   ${BUILD_DIR}/openssl-target   headers + libraries, for LINKING
-#                                 (41-python.sh points at this)
+#                                 (43-python.sh points at this)
 #   ${BUILD_DIR}/stage-devtools/openssl   the package, published by
 #                                 53-devtools-repo.sh
 #
@@ -95,7 +95,7 @@ echo ">>> Configuring ..."
     # -DOPENSSL_NO_BUFFER_OVERFLOW... is deliberately NOT set, and
     # neither is any -O3: the flags are this repo's ordinary hardening
     # set, minus the -pie/-fPIE pair, because most of what is built here
-    # is a shared object (the same constraint 41-python.sh hits).
+    # is a shared object (the same constraint 43-python.sh hits).
     CFLAGS="-O2 -fstack-protector-strong -D_FORTIFY_SOURCE=2" \
     ./Configure linux-x86_64 \
         --cross-compile-prefix="${TARGET_TRIPLE}-" \

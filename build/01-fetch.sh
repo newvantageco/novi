@@ -326,11 +326,17 @@ fetch "https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSI
 # ncurses and readline (RFC 0026 roadmap 2). A REPL where the up-arrow
 # prints ^[[A is a visibly unfinished interpreter, and `curses` is how a
 # large class of terminal tooling draws. Both are built in
-# build/40-ncurses.sh, which must run BEFORE 41-python.sh: CPython
+# build/40-ncurses.sh, which must run BEFORE 43-python.sh: CPython
 # detects them at configure time and builds `readline` and `_curses` as
 # extension modules or does not build them at all.
 fetch "https://invisible-mirror.net/archives/ncurses/ncurses-${NCURSES_VERSION}.tar.gz"
 fetch "https://ftp.gnu.org/gnu/readline/readline-${READLINE_VERSION}.tar.gz"
+
+# SQLite (RFC 0026 roadmap 3), built by build/41-sqlite.sh -- which must
+# run BEFORE 43-python.sh for the same reason ncurses does: CPython
+# decides at configure time whether `_sqlite3` exists, and says nothing
+# afterwards. It runs AFTER 40 because its shell links that readline.
+fetch "${SQLITE_URL}"
 
 # Full-disk encryption (RFC 0018). popt and json-c are cryptsetup's
 # hard dependencies; util-linux and LVM2 are enormous trees fetched for

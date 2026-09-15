@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-# 41-python.sh — CPython, as a package
+# 43-python.sh — CPython, as a package
 #
 # Until this stage there was NO SCRIPTING LANGUAGE ON THIS SYSTEM. Not
 # a slow one, not an old one -- none. No Python, no Perl, no Ruby.
@@ -13,7 +13,7 @@
 # automation tooling that exists is Python, and so is most of what a
 # person writes for themselves on a machine they control.
 #
-#   bash build/41-python.sh
+#   bash build/43-python.sh
 #
 # A PACKAGE, NEVER THE BASE IMAGE. ~32 MB installed. RFC 0007 keeps
 # the base console-only and small; a language runtime is exactly the
@@ -156,6 +156,22 @@ if [ ! -f "${NCURSES_PREFIX}/usr/include/readline/readline.h" ] ||
     exit 1
 fi
 
+# SQLite, same shape and the same trap (RFC 0026 roadmap 3). CPython
+# probes for sqlite3.h at configure time and builds `_sqlite3` or does
+# not; a Python whose `import sqlite3` fails is not a build failure
+# here, it is a paragraph in a log and exit 0.
+SQLITE_PREFIX="${BUILD_DIR}/sqlite-target"
+if [ ! -f "${SQLITE_PREFIX}/usr/include/sqlite3.h" ]; then
+    echo "ERROR: SQLite is not in ${SQLITE_PREFIX}." >&2
+    echo "" >&2
+    echo "  It is what most local-state Python assumes exists, and a" >&2
+    echo "  missing _sqlite3 surfaces at the first import on somebody" >&2
+    echo "  else's machine rather than here." >&2
+    echo "" >&2
+    echo "      bash build/41-sqlite.sh" >&2
+    exit 1
+fi
+
 # OpenSSL is not in ${ROOTFS} and must not be: it lives in its own
 # linking prefix, like mbedTLS. A different message, because the fix is
 # a different stage rather than restore-build-inputs.sh.
@@ -196,15 +212,17 @@ export CPPFLAGS="${CPPFLAGS} -I${OPENSSL_PREFIX}/include"
 # NCURSES_INCLUDE is whichever directory the build actually put the
 # latter in, found above rather than assumed.
 export CPPFLAGS="${CPPFLAGS} -I${NCURSES_PREFIX}/usr/include -I${NCURSES_INCLUDE}"
+export CPPFLAGS="${CPPFLAGS} -I${SQLITE_PREFIX}/usr/include"
 # -rpath-link for BOTH prefixes, and this is the fifth time in this
 # repository. -L is consulted only for a library named directly with
 # -l; the linker will not use it to resolve a shared library's own
 # DT_NEEDED entries, and libssl.so names libcrypto.so.3.
 export LDFLAGS="-L${ROOTFS}/usr/lib -L${OPENSSL_PREFIX}/lib \
-    -L${NCURSES_PREFIX}/usr/lib \
+    -L${NCURSES_PREFIX}/usr/lib -L${SQLITE_PREFIX}/usr/lib \
     -Wl,-z,relro,-z,now -Wl,-z,noexecstack \
     -Wl,-rpath-link,${ROOTFS}/usr/lib -Wl,-rpath-link,${OPENSSL_PREFIX}/lib \
-    -Wl,-rpath-link,${NCURSES_PREFIX}/usr/lib"
+    -Wl,-rpath-link,${NCURSES_PREFIX}/usr/lib \
+    -Wl,-rpath-link,${SQLITE_PREFIX}/usr/lib"
 
 # -pie is deliberately NOT in LDFLAGS, and there is no variable it
 # could go in. Read Makefile.pre.in: LDSHARED and BLDSHARED -- the
@@ -292,7 +310,7 @@ make -C "${SRC}" -j"${JOBS}" LINKFORSHARED="${LINKFORSHARED}" \
 # have made the one check that could notice a silently
 # readline-less interpreter say nothing -- the list is what this build
 # expects to be missing, so a name on it is a name nobody looks at.
-EXPECTED_MISSING="_sqlite3 _bz2 _lzma _tkinter _gdbm _dbm _uuid nis ossaudiodev spwd _crypt"
+EXPECTED_MISSING="_bz2 _lzma _tkinter _gdbm _dbm _uuid nis ossaudiodev spwd _crypt"
 # The block ends with a sentence, not a blank line -- "To find the
 # necessary bits, look in setup.py ..." -- and ranging to /^$/ swallows
 # it, so every word of that sentence came back as an unexpected missing
@@ -368,7 +386,7 @@ rm -rf "${D}/files/usr/lib/python${PY_XY}/test" \
     echo "name=python"
     echo "version=${PYTHON_VERSION}"
     echo "arch=${TARGET_ARCH}"
-    echo "depends=zlib,libffi,expat,openssl,ncurses,readline"
+    echo "depends=zlib,libffi,expat,openssl,ncurses,readline,sqlite"
     echo "description=CPython ${PYTHON_VERSION} -- the interpreter and the standard library"
 } > "${D}/MANIFEST"
 
@@ -381,17 +399,19 @@ rm -rf "${D}/files/usr/lib/python${PY_XY}/test" \
 # "visibly unfinished" REPL RFC 0026 roadmap 2 is about -- shipped
 # silently, because CPython prints its missing modules and exits 0.
 DYNLOAD="${D}/files/usr/lib/python${PY_XY}/lib-dynload"
-for want in readline _curses _curses_panel; do
+for want in readline _curses _curses_panel _sqlite3; do
     if ! find "${DYNLOAD}" -maxdepth 1 -name "${want}.*.so" | grep -q .; then
         echo "ERROR: ${want} was not built." >&2
         echo "       CPython decides this at configure time and says nothing" >&2
         echo "       afterwards; the interpreter would ship with an up-arrow" >&2
-        echo "       that prints ^[[A. Check ${WORK}/configure.log for what it" >&2
-        echo "       could not find under ${NCURSES_PREFIX}." >&2
+        echo "       that prints ^[[A, or an import of sqlite3 that fails on" >&2
+        echo "       somebody else's machine. Check ${WORK}/configure.log for" >&2
+        echo "       what it could not find under ${NCURSES_PREFIX} or" >&2
+        echo "       ${SQLITE_PREFIX}." >&2
         exit 1
     fi
 done
-echo "   readline and curses modules built"
+echo "   readline, curses and sqlite3 modules built"
 
 # ── Check the artifact, not the flags ─────────────────────────────────
 #

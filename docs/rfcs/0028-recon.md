@@ -41,7 +41,7 @@ to ship.
 
 So: the capability was worth having, the code was not ours to give
 away, and it is written here instead. The licence check is the first
-thing `42-novi-recon.sh`'s header explains, so nobody re-derives it.
+thing `44-novi-recon.sh`'s header explains, so nobody re-derives it.
 
 ## Decisions
 
@@ -158,7 +158,7 @@ here cannot be shown by running the tool:
 So DNS messages are **built here and parsed back**, and every verdict is
 tested as a table. No network, no downloaded fixtures, nothing that can
 go red because a third party changed. `scripts/lint.sh` runs it, and so
-does `42-novi-recon.sh` immediately before packaging — the same reason
+does `44-novi-recon.sh` immediately before packaging — the same reason
 `50-repo.sh` runs `check-hardening.sh` there rather than trusting that
 lint was run on the tree that produced the artifact.
 
@@ -177,7 +177,7 @@ costs a PATH search and an exec on every invocation — worse, a `$PATH`
 that finds a different `python3` first is a way for a system tool to
 behave differently for different users.
 
-`42-novi-recon.sh` also **parses the script with the target's exact
+`44-novi-recon.sh` also **parses the script with the target's exact
 major.minor** before packaging. A syntax error in Python is a runtime
 error: without that check the package builds, installs, signs and
 verifies perfectly, and fails at the first invocation.

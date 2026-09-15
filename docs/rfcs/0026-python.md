@@ -50,7 +50,7 @@ between minors, so a 3.12 host genuinely cannot build a 3.11 target.
 range of hosts this project asks people to build on have as a distro
 package. Choosing a newer minor would mean building a native CPython
 first: a second multi-minute build, for a language version difference
-nobody asked for. `41-python.sh` checks for `python3.11` up front and
+nobody asked for. `43-python.sh` checks for `python3.11` up front and
 says `apt-get install python3.11` if it is absent, for the same reason
 `05-kernel.sh` checks for `depmod` and `06-wayland.sh` checks for
 `mako` — an unmet build-host dependency should not surface three
@@ -161,7 +161,7 @@ something, and nothing says so at a moment anyone is reading. `import
 ssl` failing is a five-line fix at build time and an afternoon at use
 time.
 
-So `41-python.sh` parses that paragraph and compares it against the set
+So `43-python.sh` parses that paragraph and compares it against the set
 this build *expects* to be missing, printing anything else loudly. Not
 a hard failure — CPython's module list shifts between point releases,
 and a build that stops because `_dbm` moved would be worse than one
@@ -313,6 +313,9 @@ running the artifact you think it is.
    violation of it — the rule protects the 49/50 boundary between
    content and packaging and says nothing about ordering *within*
    content. python moved 38 → 41, novi-recon 39 → 42, ncurses took 40.
+   (Both moved again for sqlite — 41 → 43 and 42 → 44 — and the
+   vacated 38 and 39 are free, which is the thing to check before
+   assuming the free range is still only at the end.)
 
    **Four things in the first draft were assumed rather than read, and
    each built cleanly.** `libtinfow.so*`, a `libform w.so*` with a
@@ -329,7 +332,59 @@ running the artifact you think it is.
    `fallback entries for:` comment, written straight from its argument
    list — rather than the `<name>_alias_data[]` lines only a real
    entry produces.
-3. **sqlite3**, which is what most local-state Python assumes exists.
+3. ~~**sqlite3**, which is what most local-state Python assumes
+   exists.~~ **Done** — `build/41-sqlite.sh`, and `pkg install python`
+   brings it. SQLite 3.53.4 from the amalgamation: the whole library
+   as one translation unit, wrapped by upstream's "autoconf" bundle
+   (autosetup, not GNU autoconf despite the name), which is why a
+   database engine costs one stage and 1.4 MB installed.
+
+   **The stage is bracketed from both sides, and that is why it is
+   41.** CPython probes for `sqlite3.h` at configure time and builds
+   `_sqlite3` or does not, so it must precede the Python stage — the
+   readline trap from item 2, wearing the same clothes. And the CLI
+   links the readline built at 40, so it cannot precede that. python
+   moved 41 → 43 and novi-recon 42 → 44, the second time those two
+   have shifted for a build input of Python's. **38 and 39 are free**
+   — vacated by item 2's renumber, which nobody noticed, because a
+   vacated number does not announce itself. They are no use here.
+
+   **SQLite'S SHARED LIBRARY HAS NO SONAME BY DEFAULT.** Upstream's
+   autosetup says so in as many words: "this project has no direct use
+   for soname, so default to none". What that costs a distribution is
+   that every consumer records the FILENAME it linked against — here
+   `libsqlite3.so`, the development symlink — so the runtime package
+   would have had to ship a dev symlink for anything to start, and an
+   ABI bump would be invisible to the loader. `--soname=legacy` gives
+   `libsqlite3.so.0`, which is what `_sqlite3.so` now records.
+   Verified on the artifact and confirmed by deleting the flag and
+   watching the check fire.
+
+   **The CLI's readline can silently not happen**, which is item 2's
+   whole argument arriving through a different door: configure reports
+   what it found and carries on, so the shell builds and installs with
+   no line editing. The stage asks the binary rather than the log. And
+   the flags name the CROSS-BUILT readline explicitly, because
+   autosetup's probe searches the build host's paths and a cross build
+   that finds them links a library that cannot load on the target.
+
+   **Public domain, and the binary is not.** SQLite has no licence
+   text to travel with it; the CLI links GPL-3 readline, so `sqlite3`
+   as a binary is a combined work under those terms. `depends=readline`
+   puts readline's `COPYING` on the machine, so RFC 0031's rule is
+   satisfied through the dependency rather than by a second copy.
+
+   **FTS5, JSON, R*Tree and math functions are on; ICU is not.** The
+   first four are what a Python program written elsewhere expects to
+   find, and discovering `json_extract` is missing happens at runtime,
+   in a query, on somebody else's machine. ICU is ~30 MB this system
+   does not have, for collations most programs never ask for.
+
+   Verified on a booted machine: the CLI creating a table, an FTS5
+   match, `json_extract`, an R*Tree query and `sqrt`; `sqlite3` module
+   2.6.0 against library 3.53.4 from Python doing the same; and **the
+   up-arrow recalling the previous statement** in the interactive
+   shell over a vt100 serial console.
 4. **A way to install Python code.** `pkg` handles Novi's own packages;
    there is no story at all for third-party Python, and pip cannot be
    the answer until item 1 is. Vendoring a program's dependencies into

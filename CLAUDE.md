@@ -119,9 +119,15 @@ below for why `/build` is hardcoded and unrelated to the repo checkout path.
 - `bash build/40-ncurses.sh [ncurses|readline|package|all]` — ncurses
   and GNU readline (RFC 0026 roadmap 2), into `/build/ncurses-target`
   for linking and into their own packages. **Must run before
-  `41-python.sh`**: CPython decides at configure time whether
-  `readline` and `_curses` exist and says nothing afterwards
-- `bash build/41-python.sh` — CPython, cross-compiled against musl and
+  `41-sqlite.sh` and `43-python.sh`**: CPython decides at configure
+  time whether `readline` and `_curses` exist and says nothing
+  afterwards, and sqlite's CLI links this readline
+- `bash build/41-sqlite.sh [sqlite|package|all]` — SQLite (RFC 0026
+  roadmap 3), into `/build/sqlite-target` for linking and into its own
+  package. **Between 40 and 43, and bracketed by both**: the CLI links
+  the readline built at 40, and CPython decides at configure time
+  whether `_sqlite3` exists. 38 and 39 are free and are no use here
+- `bash build/43-python.sh` — CPython, cross-compiled against musl and
   staged into `/build/stage-devtools` for `53-devtools-repo.sh` to
   publish (RFC 0026). A package, never base. It reads zlib, libffi and
   expat out of `${ROOTFS}`, so it must run before
@@ -131,7 +137,7 @@ below for why `/build` is hardcoded and unrelated to the repo checkout path.
 - `bash build/15-novi-state.sh` also installs `/usr/lib/novi/json.sh`
   and `novi-agent` (RFC 0029) — the agent interface is base image, not
   a package
-- `bash build/42-novi-recon.sh` — `novi-recon` (RFC 0028), the recon
+- `bash build/44-novi-recon.sh` — `novi-recon` (RFC 0028), the recon
   tool. Nothing to compile: it is a Python script, which is the point.
   It runs the host test suite and parses the script with the target's
   exact major.minor before packaging — a syntax error in Python is a
@@ -996,7 +1002,7 @@ package — the first scripting language this system has ever had.
   it.
 - **CPython prints missing modules and exits 0.** Correct for a
   language that runs everywhere, and exactly the failure shape this
-  repo keeps getting caught by. `41-python.sh` diffs that list against
+  repo keeps getting caught by. `43-python.sh` diffs that list against
   the set it expects and reports the rest loudly — not fatally, since
   the module list shifts between point releases. Its first version
   reported twelve words of English as missing modules: the block ends
@@ -1073,6 +1079,16 @@ RFC 0026 roadmap 2. `pkg install python` now brings `ncurses` and
   took 40. Four files mentioned either number — the "about thirty
   files" warning is about the PACKAGING stages, which are named all
   over the prose; two content stages are cheap.
+- **AND THAT RENUMBER LEFT 38 AND 39 FREE, which nobody noticed.**
+  Vacating a number does not announce itself, so the next person
+  reads "01–39 were all taken" above and believes it. sqlite (RFC
+  0026 roadmap 3) needed to precede the Python stage too and could
+  have taken 38 — it did not, because it links the readline BUILT AT
+  40, so its order is ncurses → sqlite → python and 38 is too early.
+  python moved again (41 → 43), novi-recon with it (42 → 44), sqlite
+  took 41. **Count the free numbers before believing a sentence about
+  them**, and remember that "free" and "usable here" are different
+  questions once a stage has a build input.
 - **readline is GPL-3.0-or-later and CPython's licence is not.** It
   ships as its own shared library, unmodified from the pinned
   tarball, with its `COPYING` in the package, and CPython's `readline`
@@ -1116,6 +1132,62 @@ RFC 0026 roadmap 2. `pkg install python` now brings `ncurses` and
   behind.** Dead weight is not inert (RFC 0007): it is bytes on every
   machine that installs this, and a second copy of a library for
   anything that reads the directory.
+
+## Architecture: the database, and the SONAME upstream does not set
+
+RFC 0026 roadmap 3. `build/41-sqlite.sh` — `pkg install sqlite`
+brings the `sqlite3` CLI, and `pkg install python` now brings
+`import sqlite3` with it.
+
+- **SQLITE'S SHARED LIBRARY HAS NO SONAME BY DEFAULT, and that is
+  upstream's deliberate choice.** autosetup's `sqlite-handle-soname`
+  says "this project has no direct use for soname, so default to
+  none". What it costs a distribution is that every consumer records
+  the FILENAME it linked against: here that was `libsqlite3.so`, the
+  development symlink, so the runtime package would have had to ship
+  a dev symlink for anything to start, and an ABI bump would be
+  invisible to the loader. `--soname=legacy` is `libsqlite3.so.0`,
+  which is what every distribution passes — checked on the artifact
+  with `readelf`, because the default is silent in both directions,
+  and confirmed by deleting the flag and watching the check fire.
+- **The amalgamation, not the source tree.** Upstream ships the whole
+  library as ONE 9 MB translation unit; the "autoconf" bundle wraps it
+  in a configure script (autosetup, NOT GNU autoconf despite the name)
+  and adds `shell.c`. That is why a database engine costs one stage
+  here and 1.4 MB installed.
+- **The CLI's readline can silently not happen.** configure reports
+  what it found and carries on either way, so the shell builds,
+  installs and runs with no line editing at all — the "almost works"
+  failure RFC 0026 roadmap 2 exists to have ended, arriving through a
+  different door. The stage asks the BINARY (`readelf -d`), not the
+  log. And it is not the build host's readline: `--with-readline-
+  ldflags` names the cross-built one explicitly, because autosetup's
+  probe searches the host's paths and a cross build that finds them
+  links a library that cannot load on the target.
+- **The features are chosen, not "everything".** FTS5, JSON, R*Tree,
+  math functions, `SQLITE_ENABLE_COLUMN_METADATA` — what a Python
+  program written elsewhere expects to find, because discovering
+  `json_extract` is missing happens at runtime, in a query, on
+  somebody else's machine. **ICU is NOT enabled**: a ~30 MB dependency
+  this system does not have, for collations most programs never ask
+  for.
+- **SQLite is public domain and the `sqlite3` BINARY is not.** There
+  is no licence text to travel with the library — but the CLI links
+  GPL-3 readline, so the binary is a combined work under those terms.
+  That is what every distribution ships, and it is fine here because
+  `depends=readline` puts readline's `COPYING` on the machine: RFC
+  0031's OFL rule, satisfied through the dependency rather than by a
+  second copy.
+- **`_sqlite3` came off `EXPECTED_MISSING` and onto the hard check**,
+  beside `readline`, `_curses` and `_curses_panel`. That list is what
+  the build expects to be absent, so a name on it is a name nobody
+  looks at — and CPython prints its missing modules and exits 0.
+- Verified on a booted machine: the CLI creating a table, an FTS5
+  match, `json_extract`, an R*Tree query and `sqrt`; Python's
+  `sqlite3` module 2.6.0 against library 3.53.4 doing the same;
+  **and the up-arrow recalling the previous statement in the
+  interactive shell** over a vt100 serial console, which is the half
+  that could have been quietly missing.
 
 ## Architecture: novi-recon, and a licence that ended a plan
 
@@ -1168,7 +1240,7 @@ breached-password check and a TCP connect scan.
   are built and parsed back; every verdict is a table. `whois_chain`
   takes an `ask` callable purely so the referral chase is testable
   without the internet.
-- **A syntax error in Python is a runtime error.** `42-novi-recon.sh`
+- **A syntax error in Python is a runtime error.** `44-novi-recon.sh`
   parses the script with the target's exact major.minor before
   packaging, because otherwise the package builds, installs, signs and
   verifies perfectly and dies at the first invocation.

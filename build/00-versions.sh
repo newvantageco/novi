@@ -175,6 +175,21 @@ PYTHON_VERSION="3.11.16"
 NCURSES_VERSION="6.5"
 READLINE_VERSION="8.2"
 
+# SQLite (RFC 0026 roadmap 3) -- "what most local-state Python assumes
+# exists", and the reason `import sqlite3` is a package's business
+# rather than a program's. The amalgamation tarball, not the source
+# tree: it is one .c file plus a shell, which is why this is the
+# cheapest database anybody ships. Public domain, so unlike readline
+# there is no licence to travel with it -- but the CLI links readline
+# for its line editing, so the BINARY is a combined work and readline's
+# COPYING travels in the package it depends on.
+#
+# The URL carries a year directory that does NOT follow from the
+# version number, so it is spelled out rather than derived.
+SQLITE_VERSION="3.53.4"
+SQLITE_TARBALL="sqlite-autoconf-3530400.tar.gz"
+SQLITE_URL="https://sqlite.org/2026/${SQLITE_TARBALL}"
+
 # Full-disk encryption (RFC 0018). The kernel has had CONFIG_DM_CRYPT
 # since the config was written and nothing could create a container.
 # Five upstreams, all small, all built static: cryptsetup links them and

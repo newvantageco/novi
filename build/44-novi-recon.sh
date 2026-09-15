@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-# 42-novi-recon.sh — the recon tool, as a package
+# 44-novi-recon.sh — the recon tool, as a package
 #
 # RFC 0028. Nothing to compile: novi-recon is a Python script, which
 # is the point of it. RFC 0026 and RFC 0027 put a working interpreter
@@ -8,7 +8,7 @@
 # written in Python; a build stage that only copies a file is what
 # "there is a scripting language here" is supposed to look like.
 #
-#   bash build/42-novi-recon.sh
+#   bash build/44-novi-recon.sh
 #
 # WHY IT EXISTS RATHER THAN A PORT. The obvious thing to reach for was
 # the "God's Eye" information gathering tool on GitHub, and it cannot
