@@ -842,8 +842,11 @@ static const struct {
  * a hardcoded list beside a directory of files is the drift this
  * project keeps writing tests to prevent.
  */
-#define THEME_DIR "/usr/share/novi/themes"
-#define THEME_ACTIVE "/run/novi/theme"
+/* Not a path of its own: common/theme.h owns where themes live, and
+ * this had its own copy of the same string until /etc/novi/themes
+ * became a second directory and the two would have had to agree about
+ * an ORDER as well as a path. */
+#define THEME_ACTIVE NOVI_THEME_ACTIVE
 /* 31, not 32, and that is `copy`'s size minus its NUL.
  *
  * `copy` is what apply_theme() acts on, and it is 32 bytes for the
@@ -871,26 +874,46 @@ static int theme_cmp(const void *a, const void *b) {
  * order is filesystem order and a menu whose rows move between
  * openings is one you cannot build muscle memory for. */
 static size_t scan_themes(struct theme_entry *out, size_t cap) {
-	DIR *d = opendir(THEME_DIR);
 	size_t n = 0;
-	if (d == NULL) {
-		return 0;
-	}
-	struct dirent *e;
-	while ((e = readdir(d)) != NULL && n < cap) {
-		const char *dot = strrchr(e->d_name, '.');
-		if (dot == NULL || strcmp(dot, ".theme") != 0) {
+	/* Both directories, in the loader's own order, and a name seen in
+	 * the earlier one is not offered twice by the later: a theme in
+	 * /etc SHADOWS a shipped one of the same name, so listing both
+	 * would offer two rows that do the same thing and give no way to
+	 * tell which. The list is what you can pick; the loader decides
+	 * what a pick means, and the two have to agree. */
+	for (size_t d = 0; d < NOVI_THEME_DIR_COUNT && n < cap; d++) {
+		DIR *dir = opendir(novi_theme_dirs[d]);
+		if (dir == NULL) {
+			/* /etc/novi/themes does not exist on a machine where
+			 * nobody has written one. That is the normal case, not
+			 * an error. */
 			continue;
 		}
-		size_t len = (size_t)(dot - e->d_name);
-		if (len == 0 || len > THEME_NAME_MAX) {
-			continue;
+		struct dirent *e;
+		while ((e = readdir(dir)) != NULL && n < cap) {
+			const char *dot = strrchr(e->d_name, '.');
+			if (dot == NULL || strcmp(dot, ".theme") != 0) {
+				continue;
+			}
+			size_t len = (size_t)(dot - e->d_name);
+			if (len == 0 || len > THEME_NAME_MAX) {
+				continue;
+			}
+			char name[THEME_NAME_MAX + 1];
+			memcpy(name, e->d_name, len);
+			name[len] = '\0';
+			bool seen = false;
+			for (size_t i = 0; i < n && !seen; i++) {
+				seen = strcmp(out[i].name, name) == 0;
+			}
+			if (seen) {
+				continue;
+			}
+			snprintf(out[n].name, sizeof(out[n].name), "%s", name);
+			n++;
 		}
-		memcpy(out[n].name, e->d_name, len);
-		out[n].name[len] = '\0';
-		n++;
+		closedir(dir);
 	}
-	closedir(d);
 	qsort(out, n, sizeof(out[0]), theme_cmp);
 	return n;
 }

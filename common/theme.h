@@ -49,6 +49,7 @@
 #define NOVI_THEME_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #define NOVI_R(c) (((c) >> 16) & 0xff)
@@ -170,6 +171,14 @@ bool novi_theme_read(const char *name, struct novi_palette *out);
 bool novi_theme_read_from(const char *dir, const char *name,
 			  struct novi_palette *out);
 
+/* The same read, over a LIST of directories, first hit wins. This is
+ * what novi_theme_read() is; it takes the list as a parameter for the
+ * same reason novi_theme_read_from() takes a directory -- the search
+ * order is the interesting part of the behaviour, and a test that
+ * cannot point it at two directories of its own cannot check it. */
+bool novi_theme_read_first(const char *const *dirs, size_t ndirs,
+			   const char *name, struct novi_palette *out);
+
 /* Where the active theme's name is published, by novi-state's
  * converger for display.theme. A file rather than an environment
  * variable, for the same reason the network interface and the health
@@ -183,7 +192,21 @@ bool novi_theme_read_from(const char *dir, const char *name,
  * nothing was ever published, and the alternative is that name
  * appearing a second time inside the picker. */
 #define NOVI_THEME_DEFAULT "axiom"
-#define NOVI_THEME_DIR    "/usr/share/novi/themes"
+/* Where the shipped palettes live, and where somebody's own go.
+ *
+ * /etc first: a theme you wrote shadows a theme we ship, by name, in
+ * the same way /etc/novi/keys.conf shadows the compiled shortcuts
+ * (RFC 0037). Writing into /usr/share to get a colour you like means
+ * editing something a package upgrade will overwrite -- and /usr is
+ * the distribution's, /etc is yours. RFC 0030's roadmap item 4.
+ *
+ * The ORDER is the whole of the rule, so it is one array in theme.c
+ * that everything walks, rather than each reader repeating the two
+ * paths in whatever order it happens to write them. */
+#define NOVI_THEME_DIR_LOCAL "/etc/novi/themes"
+#define NOVI_THEME_DIR       "/usr/share/novi/themes"
+#define NOVI_THEME_DIR_COUNT 2
+extern const char *const novi_theme_dirs[NOVI_THEME_DIR_COUNT];
 
 #define NOVI_BG_BASE        (novi_theme.bg_base)
 #define NOVI_BG_PANEL       (novi_theme.bg_panel)

@@ -255,9 +255,30 @@ bool novi_theme_read_from(const char *dir, const char *name,
 	return load_file(path, out) != 0;
 }
 
+const char *const novi_theme_dirs[NOVI_THEME_DIR_COUNT] = {
+	NOVI_THEME_DIR_LOCAL,
+	NOVI_THEME_DIR,
+};
+
+bool novi_theme_read_first(const char *const *dirs, size_t ndirs,
+			   const char *name, struct novi_palette *out)
+{
+	for (size_t i = 0; i < ndirs; i++) {
+		if (novi_theme_read_from(dirs[i], name, out)) {
+			return true;
+		}
+	}
+	/* Every attempt failed, and each one left `out` as the built-in
+	 * palette on the way past -- so the caller gets a usable palette
+	 * and a false, which is what it got before there were two
+	 * directories. */
+	return false;
+}
+
 bool novi_theme_read(const char *name, struct novi_palette *out)
 {
-	return novi_theme_read_from(NOVI_THEME_DIR, name, out);
+	return novi_theme_read_first(novi_theme_dirs, NOVI_THEME_DIR_COUNT,
+				     name, out);
 }
 
 const char *novi_theme_load(void)
@@ -285,15 +306,23 @@ const char *novi_theme_load(void)
 	if (!name_ok(name))
 		return NULL;
 
-	if ((size_t)snprintf(path, sizeof path, "%s/%s.theme",
-			     NOVI_THEME_DIR, name) >= sizeof path)
-		return NULL;
-
 	/* Parse into a COPY and commit only on success. A half-applied
 	 * theme -- new background, old text colour -- is the one outcome
 	 * worse than not switching at all, because it can be
-	 * unreadable. */
-	if (!load_file(path, &next))
+	 * unreadable.
+	 *
+	 * /etc before /usr/share, and a file that parses to nothing counts
+	 * as a miss: an empty or unreadable override should fall through
+	 * to the shipped palette of that name rather than leave the
+	 * desktop on whatever it had. */
+	bool loaded = false;
+	for (size_t i = 0; i < NOVI_THEME_DIR_COUNT && !loaded; i++) {
+		if ((size_t)snprintf(path, sizeof path, "%s/%s.theme",
+				     novi_theme_dirs[i], name) >= sizeof path)
+			continue;
+		loaded = load_file(path, &next) != 0;
+	}
+	if (!loaded)
 		return NULL;
 
 	novi_theme = next;

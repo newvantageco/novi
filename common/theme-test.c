@@ -33,6 +33,8 @@
 #include <dirent.h>
 #include <math.h>
 #include <stdio.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -230,6 +232,66 @@ int main(void)
 		fprintf(stderr, "FAIL: found %d theme(s), expected at least 4"
 			" -- is the path right?\n", themes);
 		failures++;
+	}
+
+	/* ── the search order ────────────────────────────────────────
+	 *
+	 * /etc/novi/themes shadows /usr/share/novi/themes by name (RFC
+	 * 0030 roadmap 4). Pointed at two directories of this test's own
+	 * making, because the real pair are absolute paths on the target
+	 * and the interesting behaviour is which of them wins -- a test
+	 * that can only read one of them cannot check an order.
+	 */
+	{
+		const char *local = "/tmp/novi-theme-local";
+		const char *shipped = "/tmp/novi-theme-shipped";
+		const char *dirs[2] = { local, shipped };
+		struct novi_palette p;
+		FILE *tf;
+
+		mkdir(local, 0755);
+		mkdir(shipped, 0755);
+
+		tf = fopen("/tmp/novi-theme-shipped/probe.theme", "w");
+		ok(tf != NULL, "search order", "the shipped probe theme writes");
+		if (tf != NULL) {
+			fputs("bg.base = #010203\n", tf);
+			fclose(tf);
+		}
+		ok(novi_theme_read_first(dirs, 2, "probe", &p), "search order",
+			"a theme only in the shipped directory is found");
+		ok(p.bg_base == 0xff010203u, "search order",
+			"and it is the shipped one");
+
+		tf = fopen("/tmp/novi-theme-local/probe.theme", "w");
+		if (tf != NULL) {
+			fputs("bg.base = #0a0b0c\n", tf);
+			fclose(tf);
+		}
+		ok(novi_theme_read_first(dirs, 2, "probe", &p), "search order",
+			"with both present it still reads");
+		ok(p.bg_base == 0xff0a0b0cu, "search order",
+			"and /etc wins -- a theme you wrote shadows one we ship");
+
+		ok(!novi_theme_read_first(dirs, 2, "nosuch", &p), "search order",
+			"a name in neither directory is a miss");
+		ok(p.bg_base == 0xff0a0b0cu ? false : true, "search order",
+			"and a miss leaves the built-in palette, not the last one read");
+
+		/* And the SHIPPED order, which everything above misses: the
+		 * checks use this test's own array, so swapping the two
+		 * entries in theme.c would leave every one of them passing
+		 * while every real client looked in /usr/share first.
+		 * Confirmed by swapping them and watching this fire. */
+		ok(strcmp(novi_theme_dirs[0], NOVI_THEME_DIR_LOCAL) == 0,
+			"search order", "the shipped search order puts /etc first");
+		ok(strcmp(novi_theme_dirs[1], NOVI_THEME_DIR) == 0,
+			"search order", "and /usr/share second");
+
+		remove("/tmp/novi-theme-local/probe.theme");
+		remove("/tmp/novi-theme-shipped/probe.theme");
+		rmdir(local);
+		rmdir(shipped);
 	}
 
 	if (failures > 0) {

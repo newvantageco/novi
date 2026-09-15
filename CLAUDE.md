@@ -1323,6 +1323,23 @@ palette is a runtime table loaded from a plain-text file.
 - **A theme swatch is two rects, not an icon.** `draw_icon()` blends a
   monochrome glyph in one colour and cannot express a ground plus an
   accent, which is the whole information a swatch carries.
+- **A theme in `/etc` SHADOWS a shipped one of the same name.**
+  `novi_theme_dirs` is `/etc/novi/themes` then
+  `/usr/share/novi/themes`, and the order is ONE ARRAY in theme.c that
+  every reader walks -- the loader, and novi-launcher's picker, which
+  will not offer a name twice. Same argument as `keys.conf`: `/usr` is
+  the distribution's and a package upgrade overwrites it; `/etc` is
+  yours. A file that parses to nothing counts as a MISS and falls
+  through, so an empty override does not strand the desktop on
+  whatever it had.
+- **Eight of the nine checks for that could not see the shipped
+  order.** They pass the test's own two directories, because the
+  interesting behaviour is which of a pair wins and the real pair are
+  absolute target paths -- so swapping the two entries in `theme.c`
+  left every one of them passing while every client looked in
+  `/usr/share` first. The ninth asserts the array. A test that
+  parameterises the thing it is checking stops checking the value the
+  product actually uses.
 - **`usr/share/novi` is no longer claimed wholesale by novi-launcher**
   in pkgsplit's `DATA_FILES`. That list is walked in full for every
   entry rather than first-match, so a parent and a child both listed

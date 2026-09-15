@@ -329,6 +329,25 @@ argument for shipping `paper`, made concrete on the first run.
    and arithmetic that mangles a token on the way to a pixel (that was
    novi-shell's unsigned wrap). Different bug classes, different
    tools.
-4. **A theme in `/etc`**, so somebody can write their own without
-   putting it in `/usr/share`. The loader would take the first hit of
-   `/etc/novi/themes` then `/usr/share/novi/themes`.
+4. ~~**A theme in `/etc`**~~ — **done.** `novi_theme_dirs` is
+   `/etc/novi/themes` then `/usr/share/novi/themes`, first hit wins, and
+   **the order is one array everything walks** rather than two paths
+   each reader repeats. A theme you write shadows a shipped one of the
+   same name, for the reason `/etc/novi/keys.conf` shadows the compiled
+   shortcuts (RFC 0037): editing `/usr/share` to get a colour you like
+   means editing something a package upgrade overwrites, and `/usr` is
+   the distribution's while `/etc` is yours.
+
+   `novi-launcher --themes` walks the same array and **will not offer
+   a name twice**: a shadowed theme is not a second thing you can pick,
+   and two rows that do the same thing give no way to tell which is
+   which. A file that parses to nothing counts as a miss and falls
+   through to the shipped palette of that name — an empty override
+   should not leave the desktop on whatever it had.
+
+   Nine host checks. Eight of them use the test's own two directories,
+   because the interesting behaviour is which of a pair wins and the
+   real pair are absolute paths on the target — and that left the
+   SHIPPED order untested, so swapping the two entries in `theme.c`
+   passed everything. The ninth asserts the array itself, and was
+   confirmed by making that swap.
