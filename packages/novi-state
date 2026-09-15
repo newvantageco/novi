@@ -499,6 +499,149 @@ valid_gateway() {
     valid_ipv4 "$1"
 }
 
+# ── IPv6 (RFC 0033 roadmap 1) ────────────────────────────────────────
+#
+# TWO KEYS, NOT ONE THAT TAKES EITHER FAMILY, and that is forced rather
+# than chosen: dual-stack is the ordinary case, so a machine has to be
+# able to declare a v4 address AND a v6 address at once. One key whose
+# meaning depends on the shape of its value could express only one of
+# them, and would make "what is my address" a question with an answer
+# that depends on which family you meant.
+#
+# The VOCABULARY differs from v4 deliberately. There is no `dhcp`:
+# DHCPv6 is a different protocol on a different port with different
+# semantics, and udhcpc does not speak it -- offering the word would be
+# a key that reads as supported and does nothing. `auto` here means
+# SLAAC: the kernel configures itself from router advertisements, which
+# it does with no help from this service, so `auto` is genuinely "leave
+# it alone" rather than a code path.
+#
+# THE VALIDATOR IS THE INTERESTING HALF, and the sharp edges are not
+# the ones IPv4 has:
+#
+#   * `::` may appear AT MOST ONCE, and it cannot be found by
+#     splitting: field splitting on `:` drops the empty fields it
+#     produces, exactly as splitting on `.` drops the one `.1.2.3`
+#     produces. That trap cost this file a bug on the v4 side already;
+#     here it is load-bearing in both directions, because the empty
+#     fields are the whole syntax.
+#   * LEADING ZEROS ARE FINE. `0001` is 1 to every reader, because hex
+#     has no octal convention -- so the v4 rule that rejects `010` must
+#     NOT be carried over. Two validators, two rules, for a reason.
+#   * A group is 1 to 4 hex digits; without a `::` there are exactly
+#     eight; with one there are at most seven written out.
+#   * The last 32 bits may be written as dotted-quad
+#     (`::ffff:192.0.2.1`), which is a real and common form, so the
+#     tail is handed to valid_ipv4 rather than rejected.
+#   * A zone id (`fe80::1%eth0`) is REFUSED: this key names an address
+#     and `network.interface` names the interface, so a scope written
+#     here would be a second, quieter answer to a question that already
+#     has a key.
+valid_ipv6() {
+    local ip="$1" head tail g n oldifs
+
+    case "$ip" in
+        ''|*[!0-9A-Fa-f:.]*) return 1 ;;
+        *:::*) return 1 ;;                 # three colons is never a thing
+    esac
+
+    # `::` splits the address in two. A SECOND one is not rejected
+    # here, and that is deliberate rather than an omission: a `1::2::3`
+    # leaves `2::3` in the tail, which splits on `:` into `2`, an EMPTY
+    # field and `3`, and the empty-group check below refuses it. An
+    # explicit `case "$tail" in *::*)` was written first and then
+    # removed -- provoking every rule in this function showed it was
+    # the one guard that could not be made to fire, so it was dead code
+    # that read as load-bearing.
+    case "$ip" in
+        *::*)
+            head="${ip%%::*}"
+            tail="${ip#*::}"
+            # A single leading or trailing colon that is not part of
+            # the `::` is malformed: `:1:2` and `1:2:` are not
+            # addresses, while `::1` and `1::` are.
+            case "$head" in *:) return 1 ;; esac
+            case "$tail" in :*|*:) return 1 ;; esac
+            n=0
+            ;;
+        *)
+            case "$ip" in :*|*:) return 1 ;; esac
+            head="$ip"
+            tail=""
+            n=1                            # no `::`: the count must be exact
+            ;;
+    esac
+
+    # An embedded IPv4 tail occupies the last two groups, and "last" is
+    # tracked as a POSITION rather than inferred from which half it
+    # turned up in. The first version tested whether the dotted-quad
+    # was in `head` while `tail` was non-empty, which is a different
+    # question and let `::1.2.3.4:5` through -- a v4 group in the
+    # MIDDLE of the tail. Once one is seen, nothing may follow it.
+    local groups=0 v4=0 part
+    for part in "$head" "$tail"; do
+        [ -n "$part" ] || continue
+        oldifs="$IFS"; IFS=:
+        # shellcheck disable=SC2086
+        set -- $part
+        IFS="$oldifs"
+        for g in "$@"; do
+            [ "$v4" = 0 ] || return 1      # a group after the dotted quad
+            case "$g" in
+                '') return 1 ;;            # `1::2:` style, already split out
+                *.*)
+                    valid_ipv4 "$g" || return 1
+                    v4=1
+                    groups=$((groups + 2))
+                    continue ;;
+                *[!0-9A-Fa-f]*) return 1 ;;
+            esac
+            [ "${#g}" -le 4 ] || return 1
+            groups=$((groups + 1))
+        done
+        # A dotted quad is the LAST 32 BITS, so with a `::` present it
+        # can only be in the tail: `1.2.3.4::` puts it first and is not
+        # an address. inet_pton agrees, which is how this was found --
+        # the hand-written case list did not have it.
+        if [ "$v4" = 1 ] && [ "$n" = 0 ] && [ "$part" = "$head" ]; then
+            return 1
+        fi
+    done
+
+    if [ "$n" = 1 ]; then
+        [ "$groups" -eq 8 ] || return 1
+    else
+        # `::` stands for one or more groups of zeros, so what is
+        # written out must leave room for at least one.
+        [ "$groups" -le 7 ] || return 1
+    fi
+    return 0
+}
+
+# `auto` (SLAAC -- the default, and what the kernel does on its own),
+# `none` (no IPv6 on this interface), or an address with a prefix.
+# A bare address is refused for the same reason as v4: the prefix
+# decides what this machine believes is on its own link.
+valid_cidr6() {
+    local spec="$1" addr prefix
+    case "$spec" in
+        auto|none|'') return 0 ;;
+        */*) addr="${spec%/*}"; prefix="${spec##*/}" ;;
+        *)   return 1 ;;
+    esac
+    valid_ipv6 "$addr" || return 1
+    case "$prefix" in ''|*[!0-9]*) return 1 ;; esac
+    [ "${#prefix}" -le 3 ] || return 1
+    [ "$prefix" -ge 1 ] && [ "$prefix" -le 128 ]
+}
+
+valid_gateway6() {
+    case "$1" in
+        auto|none|'') return 0 ;;
+    esac
+    valid_ipv6 "$1"
+}
+
 observe_network() {
     local sub="$1"
     case "$sub" in
@@ -583,7 +726,7 @@ observe_network() {
         # it that way, so the observation has to agree or every machine
         # that has never heard of this key reports drift on it forever.
         # Same for gateway and `auto`.
-        interface|dns|address|gateway)
+        interface|dns|address|gateway|address6|gateway6)
             # With the service down there is no running configuration
             # to be out of step with, so the declared value is the
             # honest observation. Anything else would report permanent,
@@ -596,7 +739,13 @@ observe_network() {
                 cat "/run/novi/network.$sub"
             elif [ "$sub" = "address" ]; then
                 printf 'dhcp'
-            elif [ "$sub" = "gateway" ]; then
+            elif [ "$sub" = "gateway" ] || [ "$sub" = "gateway6" ]; then
+                printf 'auto'
+            elif [ "$sub" = "address6" ]; then
+                # `auto` is SLAAC, which is what the kernel does with no
+                # help at all -- so it is both the default and the
+                # honest observation for a machine that has never heard
+                # of this key.
                 printf 'auto'
             else
                 printf 'unknown'
@@ -1133,7 +1282,7 @@ converge_network() {
                     die "failed to restart 'wifi' after setting network.$sub"
             fi
             ;;
-        interface|dns|address|gateway)
+        interface|dns|address|gateway|address6|gateway6)
             # address and gateway are checked before anything is
             # restarted, because a malformed one costs the machine its
             # network and the error `ip` gives for it names neither the
@@ -1145,6 +1294,10 @@ converge_network() {
                     die "network.address: '$want' is not 'dhcp' or an address like 192.168.1.50/24" ;;
                 gateway) valid_gateway "$want" ||
                     die "network.gateway: '$want' is not 'auto', 'none' or an address like 192.168.1.1" ;;
+                address6) valid_cidr6 "$want" ||
+                    die "network.address6: '$want' is not 'auto', 'none' or an address like 2001:db8::5/64" ;;
+                gateway6) valid_gateway6 "$want" ||
+                    die "network.gateway6: '$want' is not 'auto', 'none' or an address like fe80::1" ;;
             esac
             # The service reads these once, at start, so making the
             # declaration true means restarting it. Only if it is
@@ -1968,6 +2121,8 @@ Keys:
   network.interface               auto | <name>  (which NIC to use)
   network.address                 dhcp | 192.168.1.50/24  (RFC 0033)
   network.gateway                 auto | none | 192.168.1.1
+  network.address6                auto | none | 2001:db8::5/64
+  network.gateway6                auto | none | fe80::1
   network.dns                     auto | 1.1.1.1,9.9.9.9
   network.wifi                    on | off  (the supplicant; see novi-wifi)
   network.wifi.interface          auto | <name>

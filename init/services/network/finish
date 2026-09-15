@@ -23,23 +23,72 @@
 #
 # Only for the static path -- with a lease, `deconfig` has already run
 # and flushing again would be a second writer for no reason.
+#
+# "The static path" is PER FAMILY (RFC 0033 roadmap 1). A machine can
+# be on DHCPv4 and a declared IPv6 address at once, so the two halves
+# are decided separately below; treating "v4 is dhcp" as "nothing to
+# clean up" would have left a declared v6 address on the interface
+# after the service stopped.
 # ============================================================
 
 RUN_DIR=/run/novi
 ADDR_FILE="${RUN_DIR}/network.address"
+ADDR6_FILE="${RUN_DIR}/network.address6"
 DEV_FILE="${RUN_DIR}/network.device"
 
-[ -r "$ADDR_FILE" ] || exit 0
 [ -r "$DEV_FILE" ] || exit 0
-
-ADDRSPEC="$(cat "$ADDR_FILE")"
 IFACE="$(cat "$DEV_FILE")"
+[ -n "$IFACE" ] || exit 0
+[ -d "/sys/class/net/${IFACE}" ] || exit 0
 
+# ── IPv6 (RFC 0033 roadmap 1) ────────────────────────────────────────
+#
+# THE v6 HALF IS CHECKED FIRST AND SEPARATELY, because the two families
+# are declared independently: a machine on DHCPv4 with a declared
+# `network.address6` reaches this script with ADDRSPEC=dhcp, and the
+# v4 early-exit below would have skipped the v6 cleanup entirely. Same
+# bug as putting the v6 setup after `exec udhcpc` in ./run, from the
+# other end of the service's life.
+if [ -r "$ADDR6_FILE" ]; then
+    ADDR6SPEC="$(cat "$ADDR6_FILE")"
+    case "$ADDR6SPEC" in
+        ''|auto) : ;;
+        none)
+            # Put the knobs back rather than leaving IPv6 disabled on
+            # an interface after the service that disabled it has
+            # stopped. A sysctl outlives the process that set it, so
+            # not undoing this would make `none` permanent in a way
+            # nothing in the document could explain.
+            for knob in disable_ipv6 accept_ra; do
+                k="/proc/sys/net/ipv6/conf/${IFACE}/${knob}"
+                [ -w "$k" ] || continue
+                case "$knob" in
+                    disable_ipv6) printf '0\n' > "$k" 2>/dev/null || true ;;
+                    accept_ra)    printf '1\n' > "$k" 2>/dev/null || true ;;
+                esac
+            done
+            echo "network: IPv6 re-enabled on ${IFACE}" >&2
+            ;;
+        *)
+            ip -6 route flush dev "$IFACE" 2>/dev/null || true
+            # global AND site: site-local (fec0::/10) is deprecated and
+            # still advertised by some routers, QEMU's slirp among
+            # them, and `scope global` alone leaves it behind. The
+            # link-local is deliberately kept.
+            ip -6 addr flush dev "$IFACE" scope global 2>/dev/null || true
+            ip -6 addr flush dev "$IFACE" scope site 2>/dev/null || true
+            k="/proc/sys/net/ipv6/conf/${IFACE}/accept_ra"
+            [ -w "$k" ] && { printf '1\n' > "$k" 2>/dev/null || true; }
+            echo "network: released ${ADDR6SPEC} from ${IFACE}" >&2
+            ;;
+    esac
+fi
+
+[ -r "$ADDR_FILE" ] || exit 0
+ADDRSPEC="$(cat "$ADDR_FILE")"
 case "$ADDRSPEC" in
     ''|dhcp) exit 0 ;;
 esac
-[ -n "$IFACE" ] || exit 0
-[ -d "/sys/class/net/${IFACE}" ] || exit 0
 
 ip -4 route flush dev "$IFACE" 2>/dev/null || true
 ip -4 addr flush dev "$IFACE" 2>/dev/null || true

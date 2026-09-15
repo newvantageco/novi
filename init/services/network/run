@@ -51,6 +51,25 @@ GWSPEC="$(novi-state get network.gateway 2>/dev/null || printf 'auto')"
 [ -n "$GWSPEC" ] || GWSPEC=auto
 printf '%s\n' "$GWSPEC" > "$RUN_DIR/network.gateway"
 
+# IPv6 (RFC 0033 roadmap 1). SEPARATE KEYS FROM THE v4 PAIR, because
+# dual-stack is the ordinary case and a machine has to be able to
+# declare both at once -- one key whose meaning depends on the shape of
+# its value could only ever express one family.
+#
+# `auto` means SLAAC and is the default: the kernel configures itself
+# from router advertisements with no help from this service, so `auto`
+# is genuinely "leave it alone" rather than a code path. There is
+# deliberately no `dhcp`: DHCPv6 is a different protocol and udhcpc
+# does not speak it, so offering the word would be a key that reads as
+# supported and does nothing.
+ADDR6SPEC="$(novi-state get network.address6 2>/dev/null || printf 'auto')"
+[ -n "$ADDR6SPEC" ] || ADDR6SPEC=auto
+printf '%s\n' "$ADDR6SPEC" > "$RUN_DIR/network.address6"
+
+GW6SPEC="$(novi-state get network.gateway6 2>/dev/null || printf 'auto')"
+[ -n "$GW6SPEC" ] || GW6SPEC=auto
+printf '%s\n' "$GW6SPEC" > "$RUN_DIR/network.gateway6"
+
 # Readiness, declared to s6 via ./notification-fd. Everything s6-rc
 # needs to consider this service usable -- the recorded spec that
 # `novi-state diff` reads -- exists as of this line, and everything
@@ -161,6 +180,108 @@ done
 echo "network: using ${IFACE} (declared: ${IFSPEC}, addr: ${ADDRSPEC}, dns: ${DNSSPEC})" >&2
 printf '%s\n' "$IFACE" > "$RUN_DIR/network.device"
 ip link set "$IFACE" up 2>/dev/null || true
+
+# ── IPv6 (RFC 0033 roadmap 1) ────────────────────────────────────────
+#
+# BEFORE the DHCP branch below, and that placement is the whole reason
+# dual-stack works. `exec udhcpc` never returns, so anything after it
+# runs only on a machine with a STATIC v4 address -- the v6 keys would
+# have been silently ignored on every DHCP machine, which is most of
+# them, with nothing anywhere saying so.
+#
+# sysctl writes go through a helper because `echo x > /proc/... 2>/dev/null`
+# DOES NOT suppress the redirection's own failure: redirections are set
+# up left to right, so `>` fails while stderr is still the console.
+# CLAUDE.md records that from /init's module loading; it applies to
+# every /proc write, including these.
+v6_sysctl() {
+    local knob="/proc/sys/net/ipv6/conf/${IFACE}/$1" value="$2"
+    [ -w "$knob" ] || return 1
+    printf '%s\n' "$value" > "$knob" 2>/dev/null || return 1
+    return 0
+}
+
+if [ ! -d "/proc/sys/net/ipv6/conf/${IFACE}" ]; then
+    # A kernel built without IPv6, or with it disabled at boot. Said
+    # once rather than silently, and only when the document asked for
+    # something -- a machine on `auto` that has no IPv6 is not a
+    # machine anybody configured wrongly.
+    case "$ADDR6SPEC" in
+        auto|none|'') : ;;
+        *) echo "network: network.address6 = '${ADDR6SPEC}' but this kernel has no IPv6 on ${IFACE}" >&2 ;;
+    esac
+else
+    case "$ADDR6SPEC" in
+        none)
+            # The strong form: disable_ipv6 takes the link-local off
+            # too, which is what "no IPv6 on this interface" honestly
+            # means. accept_ra as well, so turning it back on later
+            # does not depend on which knob was remembered.
+            v6_sysctl accept_ra 0 || true
+            v6_sysctl disable_ipv6 1 || true
+            ip -6 route flush dev "$IFACE" 2>/dev/null || true
+            ip -6 addr flush dev "$IFACE" 2>/dev/null || true
+            echo "network: IPv6 off on ${IFACE} (network.address6 = none)" >&2
+            ;;
+        auto|'')
+            # SLAAC, which the kernel does by itself -- so this path
+            # sets nothing except the two knobs a previous `none` may
+            # have left off. THAT IS NOT BELT AND BRACES: a sysctl is
+            # sticky, so without it a machine that went none -> auto
+            # would report converged with IPv6 still dead, which is
+            # exactly the bug ./finish exists to prevent on the v4
+            # side.
+            v6_sysctl disable_ipv6 0 || true
+            v6_sysctl accept_ra 1 || true
+            ;;
+        *)
+            # A declared address. accept_ra goes OFF: a machine told
+            # what its address is should not also take one from a
+            # router, or `ip addr` has two answers and the document
+            # explains one of them.
+            v6_sysctl disable_ipv6 0 || true
+            v6_sysctl accept_ra 0 || true
+            ip -6 route flush dev "$IFACE" 2>/dev/null || true
+            # Flushing every v6 address would take the LINK-LOCAL with
+            # it, which the kernel generated and which neighbour
+            # discovery needs -- so the flush is by scope, and it is
+            # BOTH global and site.
+            #
+            # `scope global` alone was the first version and left a
+            # SLAAC address behind on a booted machine: QEMU's slirp
+            # advertises fec0::/64, which is deprecated site-local and
+            # which the kernel labels `scope site`, so it survived the
+            # flush and sat beside the declared address with a
+            # day-long lifetime. `ip addr` with two answers is exactly
+            # what turning accept_ra off is supposed to prevent.
+            ip -6 addr flush dev "$IFACE" scope global 2>/dev/null || true
+            ip -6 addr flush dev "$IFACE" scope site 2>/dev/null || true
+            if ip -6 addr add "$ADDR6SPEC" dev "$IFACE"; then
+                echo "network: ${IFACE} = ${ADDR6SPEC} static v6" >&2
+            else
+                echo "network: could not set ${ADDR6SPEC} on ${IFACE}" >&2
+            fi
+            ;;
+    esac
+
+    case "$GW6SPEC" in
+        none|'') : ;;
+        auto)
+            # From router advertisements -- which only arrive when
+            # accept_ra is on, i.e. not when an address was declared.
+            # Said out loud in that case, because "the address is up
+            # and nothing routes" is otherwise diagnosed from outside.
+            case "$ADDR6SPEC" in
+                auto|none|'') : ;;
+                *) echo "network: network.gateway6 = auto but a declared address6 turns router advertisements off -- no v6 default route" >&2 ;;
+            esac
+            ;;
+        *)
+            ip -6 route add default via "$GW6SPEC" dev "$IFACE" ||
+                echo "network: could not route v6 via ${GW6SPEC} on ${IFACE}" >&2
+            ;;
+    esac
+fi
 
 if [ "$ADDRSPEC" = "dhcp" ]; then
     # -f: foreground, so s6 supervises udhcpc itself.

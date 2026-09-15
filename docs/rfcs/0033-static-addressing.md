@@ -208,8 +208,93 @@ Two things worth recording from the run:
 
 ## Roadmap
 
-1. **IPv6.** `network.address6` / `network.gateway6`, or a single key
-   that takes both families. The validator is the interesting half.
+1. ~~**IPv6.**~~ **Done** — `network.address6` and `network.gateway6`.
+
+   **TWO KEYS, NOT ONE THAT TAKES BOTH FAMILIES**, and the item above
+   offered either. It is forced rather than chosen: dual-stack is the
+   ordinary case, so a machine has to declare a v4 address *and* a v6
+   address at once, and one key whose meaning depends on the shape of
+   its value could only ever express one of them.
+
+   **The vocabulary differs from v4 deliberately, and there is no
+   `dhcp`.** DHCPv6 is a different protocol on a different port and
+   the client this system ships does not speak it — offering the word
+   would be a key that reads as supported and does nothing. `auto`
+   means SLAAC, which the kernel does by itself from router
+   advertisements, so it is genuinely "leave it alone" rather than a
+   code path. A **declared** address turns advertisements off:
+   a machine told what its address is should not also take one from a
+   router, or `ip addr` has two answers and this document explains
+   one. That makes `network.gateway6 = auto` inert under a declared
+   address, which the service says on startup rather than leaving to
+   be diagnosed from outside.
+
+   **The v6 setup runs BEFORE the DHCP branch, and that placement is
+   the whole reason dual-stack works.** `exec udhcpc` never returns,
+   so anything after it runs only on a machine with a static v4
+   address — the v6 keys would have been silently ignored on every
+   DHCP machine, which is most of them. `./finish` has the same shape
+   from the other end: it checks the v6 half first and separately,
+   because a machine on DHCPv4 with a declared `address6` reaches it
+   with `ADDRSPEC=dhcp` and the v4 early-exit would have skipped the
+   v6 cleanup entirely.
+
+   **A sysctl outlives the process that set it**, so `auto` sets
+   `disable_ipv6=0` and `accept_ra=1` rather than doing nothing. That
+   is not belt and braces: without it a machine that went
+   `none` → `auto` would report converged with IPv6 still dead — the
+   same bug `./finish` exists to prevent on the v4 side. `none` is the
+   strong form (`disable_ipv6=1`), which takes the link-local off too,
+   because that is what "no IPv6 on this interface" honestly means;
+   `./finish` puts both knobs back.
+
+   Flushing is **by scope, and both global and site** — flushing every
+   v6 address would take the link-local with it, which the kernel
+   generated and neighbour discovery needs. `scope global` alone was
+   the first version and left a SLAAC address behind on a booted
+   machine: QEMU's slirp advertises `fec0::/64`, which is deprecated
+   site-local and which the kernel labels `scope site`, so it survived
+   and sat beside the declared address with a day-long lifetime. `ip
+   addr` with two answers is exactly what turning advertisements off
+   is meant to prevent, so the fix is the one the live run asked
+   for.
+
+   ### The validator, which the item correctly called the interesting half
+
+   It is a second function rather than a branch in the first, because
+   the sharp edges are not IPv4's:
+
+   - **`::` may appear at most once and cannot be found by
+     splitting.** Field splitting on `:` drops the empty fields it
+     produces, exactly as splitting on `.` drops the one `.1.2.3`
+     produces — the trap that made this file exist. Here it is
+     load-bearing in both directions, because the empty fields *are*
+     the syntax.
+   - **Leading zeros are fine.** `0001` is 1 to every reader, because
+     hex has no octal convention. The v4 rule that rejects `010` must
+     not be carried over, and a test provokes exactly that mistake.
+   - **The dotted-quad tail is a POSITION, not a shape.**
+     `::ffff:192.0.2.1` is an address; `::1.2.3.4:5` and `1.2.3.4::`
+     are not.
+   - A **zone id** (`fe80::1%eth0`) is refused: this key names an
+     address and `network.interface` names the interface.
+
+   **THE HAND-WRITTEN CASE LIST IS NOT THE VERIFICATION.** It holds
+   the cases somebody thought of, and IPv6's grammar has more corners
+   than that. `ip addr add` parses with `inet_pton`, so `inet_pton` is
+   the oracle — and comparing against it immediately found two real
+   bugs the list had missed, both of them over-permissive
+   (`1.2.3.4::` and `::1:`). The test generates its corpus rather than
+   listing it: every group count with a `::` inserted at every
+   position, dotted quads in every position, and colon torture. 3530
+   cases, zero disagreements.
+
+   **One guard was dead code.** Provoking every rule in the function
+   found that an explicit "a second `::` in the tail" check could not
+   be made to fire: `1::2::3` leaves `2::3`, which splits into `2`, an
+   empty field and `3`, and the empty-group rule already refuses it.
+   It was removed rather than left standing as a check that reads as
+   load-bearing and is not.
 2. **More than one address**, and more than one interface. Both wait
    on RFC 0009's per-interface work rather than growing a second
    answer beside it.

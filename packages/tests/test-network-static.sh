@@ -64,6 +64,8 @@ shift
 case "$1" in
     cidr)    valid_cidr "$2" && echo yes || echo no ;;
     gateway) valid_gateway "$2" && echo yes || echo no ;;
+    cidr6)   valid_cidr6 "$2" && echo yes || echo no ;;
+    gw6)     valid_gateway6 "$2" && echo yes || echo no ;;
 esac
 DRIVER
 chmod +x "${TMP}/validate"
@@ -101,6 +103,133 @@ done
 for bad in 192.168.1.256 1.2.3 "192.168.1.1/24" gateway; do
     did; [ "$(v gateway "$bad")" = "no" ] || note "network.gateway '${bad}' should be REFUSED"
 done
+
+# ── 1b. IPv6 (RFC 0033 roadmap 1) ────────────────────────────────────
+#
+# The sharp edges are NOT IPv4's, which is why there are two validators
+# rather than one with a branch:
+#
+#   * `::` may appear at most once and cannot be found by splitting --
+#     field splitting on `:` drops the empty fields it produces, the
+#     same trap that made `.1.2.3` pass a naive four-octet count;
+#   * LEADING ZEROS ARE FINE. `0001` is 1 to every reader because hex
+#     has no octal convention, so the v4 rule that rejects `010` must
+#     not be carried over;
+#   * the last 32 bits may be a dotted quad, and "last" is a POSITION:
+#     `::1.2.3.4:5` and `1.2.3.4::` are not addresses.
+for good in auto none "" "::1/128" "2001:db8::5/64" "fe80::1/64" \
+            "1:2:3:4:5:6:7:8/64" "::ffff:192.0.2.1/96" "2001:DB8::1/48" \
+            "0001:0002:0003:0004:0005:0006:0007:0008/128"; do
+    did; [ "$(v cidr6 "$good")" = "yes" ] || note "network.address6 '${good}' should be accepted"
+done
+
+for bad in \
+    "2001:db8::5"       `# no prefix -- the same rule as v4` \
+    "2001:db8::5/129"   `# prefix over 128` \
+    "2001:db8::5/0"     `# a host address is not /0` \
+    "1::2::3/64"        `# two ::` \
+    "12345::1/64"       `# five hex digits` \
+    ":1:2:3:4:5:6:7/64" `# a leading single colon` \
+    "1:2:3:4:5:6:7:/64" `# a trailing single colon` \
+    "::1:/64"           `# a trailing colon after the ::` \
+    "1:2:3:4:5:6:7/64"  `# seven groups and no ::` \
+    "1:2:3:4:5:6:7:8:9/64" `# nine groups` \
+    "fe80::1%eth0/64"   `# a zone id: the interface has its own key` \
+    "::1.2.3.4:5/64"    `# a group after the dotted quad` \
+    "1.2.3.4::/64"      `# a dotted quad that is not the last 32 bits` \
+    "gg::1/64"          `# not hex` \
+    "::ffff:192.0.2.256/96" `# the v4 tail is still a v4 address` \
+    "dhcp"              `# DHCPv6 is a protocol this system does not speak` \
+    ; do
+    did; [ "$(v cidr6 "$bad")" = "no" ] || note "network.address6 '${bad}' should be REFUSED"
+done
+
+for good in auto none "" "fe80::1" "2001:db8::1" "::1"; do
+    did; [ "$(v gw6 "$good")" = "yes" ] || note "network.gateway6 '${good}' should be accepted"
+done
+for bad in "2001:db8::1/64" "192.168.1.1" "1::2::3" gateway; do
+    did; [ "$(v gw6 "$bad")" = "no" ] || note "network.gateway6 '${bad}' should be REFUSED"
+done
+
+# ── 1c. the same validator, against inet_pton ────────────────────────
+#
+# THE HAND-WRITTEN LIST ABOVE IS NOT THE VERIFICATION, and cannot be:
+# it contains the cases somebody thought of, and IPv6's grammar has
+# more corners than that. `ip addr add` parses with inet_pton, so
+# inet_pton is the oracle -- and comparing against it found two real
+# bugs the list had missed (`1.2.3.4::` and `::1:`, both accepted).
+#
+# The corpus is GENERATED rather than listed: every group count with a
+# `::` inserted at every position, dotted quads in every position, and
+# colon torture. python3 is already required by scripts/lint.sh, so
+# this does not skip itself -- a test that skips where it would have
+# caught something skips exactly where it matters.
+if command -v python3 >/dev/null 2>&1; then
+    cat > "${TMP}/fuzz6.py" <<'FUZZ'
+import socket, subprocess, random, sys
+state, shell = sys.argv[1], sys.argv[2:]
+random.seed(20260915)
+groups = ["0","1","a","ff","abcd","0001","FFFF","00000","12345","g","1g","","0x1","-1"]
+cases = set()
+for n in range(1, 10):
+    for _ in range(60):
+        gs = [random.choice(groups) for _ in range(n)]
+        cases.add(":".join(gs))
+        for pos in range(n + 1):
+            cases.add(":".join(gs[:pos] + [""] + gs[pos:]).replace(":::", "::"))
+quads = ["1.2.3.4","192.0.2.1","256.0.0.1","1.2.3","1.2.3.4.5","0.0.0.0","255.255.255.255"]
+for n in range(0, 8):
+    for q in quads:
+        gs = ["1"] * n
+        cases.add(":".join(gs + [q]))
+        cases.add("::" + (":".join(gs + [q]) if gs else q))
+        cases.add(":".join([q] + gs))
+for c in ["", ":", "::", ":::", "::::"]:
+    for a in ["", "1", "1:2", "1:2:3:4:5:6:7:8"]:
+        for b in ["", "1", "8", "1:2:3"]:
+            cases.add(a + c + b)
+cases = sorted(x for x in cases if len(x) < 60)
+
+def oracle(a):
+    try:
+        socket.inet_pton(socket.AF_INET6, a); return True
+    except (OSError, ValueError, UnicodeEncodeError):
+        return False
+
+drv = "%s.sh" % sys.argv[1].rsplit("/", 1)[-1]
+import tempfile, os
+fd, drv = tempfile.mkstemp(suffix=".sh"); os.close(fd)
+with open(drv, "w") as fh:
+    fh.write("#!/bin/sh\nsed '/^observe_network() {/,$d' \"$1\" > $1.funcs.$$\n"
+             ". $1.funcs.$$\nrm -f $1.funcs.$$\n")
+    for a in cases:
+        fh.write("valid_ipv6 %s && echo yes || echo no\n"
+                 % ("'" + a.replace("'", "'\\''") + "'"))
+out = subprocess.run(shell + [drv, state], capture_output=True, text=True).stdout.split()
+os.unlink(drv)
+if len(out) != len(cases):
+    print("DRIVER: %d answers for %d cases" % (len(out), len(cases))); sys.exit(2)
+bad = [(a, g) for a, g in zip(cases, out) if g != ("yes" if oracle(a) else "no")]
+for a, g in bad[:20]:
+    print("  %r: novi-state=%s inet_pton=%s" % (a, g, "yes" if oracle(a) else "no"))
+print("CASES %d BAD %d" % (len(cases), len(bad)))
+sys.exit(1 if bad else 0)
+FUZZ
+    # The state file is copied so the driver's temp files land in TMP.
+    cp "${STATE}" "${TMP}/novi-state"
+    out="$(python3 "${TMP}/fuzz6.py" "${TMP}/novi-state" "${SH[@]}" 2>&1)"
+    rc=$?
+    did
+    if [ "${rc}" -ne 0 ]; then
+        note "valid_ipv6 disagrees with inet_pton:"
+        printf '%s\n' "${out}" >&2
+    else
+        echo ">>> $(printf '%s' "${out}" | sed -n 's/CASES \([0-9]*\) BAD.*/\1/p') generated IPv6 cases agree with inet_pton"
+    fi
+else
+    note "python3 is missing, so valid_ipv6 was not checked against inet_pton"
+    did
+fi
 
 # ── 2. the one resolver writer ───────────────────────────────────────
 #

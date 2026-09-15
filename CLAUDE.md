@@ -2703,6 +2703,48 @@ no DHCP server could not be given an address by the document at all.
   in this repository found to be wrong about what is already built**,
   after RFC 0002's `packages.*` and RFC 0030's "a re-render is not one
   function call". Check the code before believing an item.
+- **IPv6 IS TWO KEYS, NOT ONE THAT TAKES BOTH FAMILIES** (RFC 0033
+  roadmap 1). Forced rather than chosen: dual-stack is the ordinary
+  case, so a machine has to declare a v4 address AND a v6 address at
+  once, and one key whose meaning depends on the shape of its value
+  could only express one. The vocabulary differs deliberately --
+  **there is no `dhcp`**, because DHCPv6 is a different protocol the
+  shipped client does not speak, and a word that reads as supported
+  and does nothing is worse than its absence. `auto` is SLAAC, which
+  the kernel does unaided.
+- **THE v6 SETUP RUNS BEFORE THE DHCP BRANCH, and that placement is
+  the whole reason dual-stack works.** `exec udhcpc` never returns, so
+  anything after it runs only on a machine with a STATIC v4 address --
+  the v6 keys would have been silently ignored on every DHCP machine.
+  `./finish` has the same shape from the other end: it checks the v6
+  half first and separately, because a machine on DHCPv4 with a
+  declared `address6` reaches it with `ADDRSPEC=dhcp` and the v4
+  early-exit would have skipped the v6 cleanup.
+- **A SYSCTL OUTLIVES THE PROCESS THAT SET IT**, so `auto` sets
+  `disable_ipv6=0` and `accept_ra=1` rather than doing nothing. Without
+  it a machine that went `none` → `auto` reports converged with IPv6
+  still dead -- the bug `./finish` exists to prevent on the v4 side.
+  And the flush is BY SCOPE -- global AND site -- because flushing
+  every v6 address takes the LINK-LOCAL with it, which the kernel
+  generated and neighbour discovery needs. `scope global` alone was
+  the first version and left a SLAAC address behind on a booted
+  machine: slirp advertises `fec0::/64`, deprecated site-local, which
+  the kernel labels `scope site`. Two answers on the interface is the
+  thing turning advertisements off is meant to prevent.
+- **THE HAND-WRITTEN CASE LIST IS NOT THE VERIFICATION.** `ip addr
+  add` parses with `inet_pton`, so `inet_pton` is the oracle, and
+  comparing against it found two real bugs the list had missed
+  (`1.2.3.4::` and `::1:`, both accepted). The corpus is GENERATED --
+  every group count with a `::` at every position, dotted quads in
+  every position, colon torture -- 3530 cases, zero disagreements.
+  Provoking each rule then found ONE GUARD THAT COULD NOT FIRE: a
+  second `::` in the tail is already refused by the empty-group rule,
+  so that check was dead code reading as load-bearing, and was
+  removed.
+- **Leading zeros are FINE in v6 and not in v4.** `0001` is 1 to every
+  reader because hex has no octal convention, so `valid_ipv6` must not
+  inherit `valid_ipv4`'s rule -- which is why they are two functions
+  and not one with a branch. A test provokes exactly that mistake.
 - **`novi-state apply | tail -5` reports `tail`'s status.** A refusal
   test read `exit=0` from that pipeline and nearly concluded `apply`
   swallowed the failure; it exits 1. This file already records the
