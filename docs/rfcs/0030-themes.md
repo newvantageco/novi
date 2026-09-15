@@ -234,6 +234,23 @@ life of the file. It is a latent bug that predates this RFC by months
 and that no dark theme could ever have surfaced. That is the whole
 argument for shipping `paper`, made concrete on the first run.
 
+**Live reload across the whole desktop** (roadmap item 1), on a booted
+machine with nothing restarted. Switching `display.theme` from `axiom`
+to `paper` moved the window title bar from `(31, 32, 43)` to
+`(243, 245, 248)`, and `paper` to `nocturne` moved it to
+`(25, 26, 37)` — both directions, because a reload that only ever runs
+once looks identical to one that works. In the same frame: the panel
+at `bg.panel` (`#f6f7f9`), the wallpaper, an open Files window and an
+open editor, all following.
+
+**A screendump corrected a reading of a screendump.** The first
+downscaled PNG looked as though the panel had stayed dark while
+everything else changed; sampling the pixels said `(246, 247, 249)`,
+which is exactly `paper`'s `bg.panel`. The panel had followed a second
+later, on its own 1 Hz tick. Read the pixels, not the picture — the
+fifth time in this repository that looking at a GUI has been the
+method and the second time the *look* itself needed checking.
+
 ## Consequences
 
 - **Every client links `common/theme.c`** and calls `novi_theme_load()`

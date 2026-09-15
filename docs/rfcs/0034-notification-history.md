@@ -246,6 +246,16 @@ holds the newest entry's timestamp. Toggling Super+A twice afterwards
 (two more toasts) brought it back showing **1**, then **2**, which is
 the count following the machine rather than a flag that latches.
 
+**Clearing, on a booted machine** (roadmap item 2). Three
+notifications sent; the panel's bell reads `3`; Super+N lists them
+newest-first; **Ctrl+L** collapses the card to its empty state,
+`Cleared -- nothing new since`; both markers are written with the same
+timestamp; the bell is gone from the bar on its next tick. And the
+history file **still holds all three lines** — the daemon owns it and
+the reader never touches it, which is the two-files-one-writer-each
+rule doing its job where a "seen" column in the history would not
+have.
+
 ## Consequences
 
 - **A notification is no longer lost by not being seen.** That is most

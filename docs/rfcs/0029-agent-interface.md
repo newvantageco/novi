@@ -348,6 +348,16 @@ substitution was "verified working against the real busybox binary" on
 a host that has `/dev/fd`, and failed on the image that does not. 23
 checks, including a deliberate `", "evil": "yes` injection attempt.
 
+**`describe --text` on a booted live machine** (roadmap item 3). The
+whole table, correct on a machine with no compositor and no packages:
+`boot live`, `firmware uefi`, `interface eth0  link yes`, `address
+10.0.2.15`, and — the two rows most worth getting right — `idle`
+reading `compositor none -- no idle clock on this machine` rather than
+a row of zeros, and `agent` reading `writes disabled` with `allowed -
+(inert: agent.enabled is off)`. `state` and `health` show novi-state's
+own output, indented, because that is what running it produces rather
+than what a second renderer here would guess.
+
 ## Consequences
 
 - **Base image, not a package.** ~21 KB of shell. "What is this

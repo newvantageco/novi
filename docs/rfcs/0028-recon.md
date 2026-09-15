@@ -237,6 +237,21 @@ hashing and range parsing are unit-tested (including `sha1('password')`
 pinned to a value anyone can check by hand) and the whole command was
 run live on the build host.
 
+**`/etc/services`, on a booted machine, in both directions** (roadmap
+item 3). `netstat -lt` reports `:::ssh` and `:::kafka` where `-n`
+reports 22 and 9092 — and `kafka` is one of the entries the curation
+pass added, so the answer is coming from this file rather than from
+anything built into musl. Forward: `telnet 127.0.0.1 ssh` connects,
+and `telnet 127.0.0.1 nosuchservice` is refused with `bad port` — so
+the name lookup is the table too, not a fallback that would have made
+the first result meaningless.
+
+**The DNSSEC reporting** (roadmap item 2) was measured against
+8.8.8.8: `cloudflare.com` and `internic.net` come back AD set,
+`facebook.com` AD clear, and a query built with `RD` alone gets AD
+**clear** for a signed name — which is the measurement that made
+setting AD in the query the load-bearing half rather than a detail.
+
 ## Consequences
 
 - **48 KB**, one file, `depends=python`.

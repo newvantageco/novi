@@ -468,6 +468,17 @@ novi-state's own `ERROR:` line in the status bar instead of the word
 
 ---
 
+**The lock, on a booted machine** (roadmap item 4). Two concurrent
+`novi-state set` calls on different keys: both land. A lock directory
+carrying an earlier boot's time and a pid that is *currently alive*:
+cleared, with `WARN: clearing a stale lock ... (held by pid 674 of an
+earlier boot or a dead process)`, and the write goes through — which
+is the case a pid check alone cannot see, and the reason the boot time
+is in the owner file. A lock held by a live process of *this* boot:
+obeyed, `ERROR: timed out waiting for /etc/novi/system.conf.lock ...
+(pid 3035)`, and the document unchanged. A fix that cleared every lock
+it met would have passed the first two and failed the third.
+
 ## Roadmap
 
 **Landed (this RFC):** the engine, generations, `hostname`,
