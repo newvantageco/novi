@@ -1553,6 +1553,50 @@ applies it over the compiled table and BOTH binaries load it.
   the host test: every action in the table is named in the file, and
   every action the file names exists. It is also the only place a
   person learns what an action is called.
+- **THE KEYS PANEL IS THE FOURTH PANEL, and `keys.conf` is the one
+  file the System panel cannot reach** — it is not a `system.conf`
+  key, because nothing converges a shortcut. Unlike RFC 0033's
+  wired-network item, that made it a real gap rather than a second
+  path. `novi_keys_write()` lives in `common/keys.c` beside the
+  loader, and **a commented line is not a match**: the shipped file is
+  87 lines of which every one is a comment, so a matcher that skipped
+  the `#` would rewrite an example in place and uncomment it. Removal
+  deletes rather than comments out; a duplicate live line is dropped
+  (the loader is last-wins, so writing above a stale line leaves the
+  file and the desktop disagreeing); a refused write leaves the file
+  byte for byte as it was.
+- **The binding is TYPED, not captured, and that is forced.**
+  novi-shell grabs Super+<anything> before a client sees it, so a
+  "press the shortcut you want" prompt would have the compositor close
+  the Settings window when somebody pressed Super+Q at it.
+- **"Yours" comes from the FILE, not from a comparison.**
+  `novi_keys_is_set()` asks whether there is a live line, because
+  setting a shortcut to what it already was is a real thing somebody
+  does and only the file can say so.
+- **A SAVED FLAG SHADOWED EVERY LATER ANSWER.** `render_keys` built
+  its own footer and never drew `state->status`, so `keys_report`'s
+  sentences went nowhere -- and the chain reached `keys_written`
+  first, which meant that once you had saved once, a REFUSED write
+  reported nothing at all: the file was correctly untouched and the
+  panel said "Saved". Found by typing `Ctrl+Q` at a booted machine and
+  screenshotting it, for the fifth time in this file. Two lines now: a
+  STANDING one (a line the loader threw away, a shadowed shortcut, or
+  the restart reminder) and an ANSWER to what you just did. A fact
+  about the file and a reply to a keystroke cannot share a line.
+- **A read in the DRAW is a read per row per frame.**
+  `render_keys` asked `novi_keys_is_set()` for each visible row, which
+  is a file open and a full parse fourteen times a frame at whatever
+  rate a held arrow key repeats. `keys_refresh()` fills a `keys_mine[]`
+  once instead. Same mistake as novi-panel reading the volume file
+  inside `layout_taskbar()`: a read belongs where state is gathered,
+  not where it is drawn.
+- **Two of the writer's tests could not fail on the guard they
+  name.** A spec carrying a newline or a `#` is refused by
+  `novi_keys_parse()` before the writer's own check sees it — found
+  by deleting that check and watching both still pass. They assert
+  the behaviour, which is what matters; the guard stays because what
+  may appear in a binding and what may appear on a line of this file
+  are different questions. Both the code and the test say so.
 - **CI installs `libxkbcommon-dev` for the host test.** The parser
   turns "Return" into a keysym with `xkb_keysym_from_name()`; the
   alternative is a hand-copied table of xkbcommon's, and a test that

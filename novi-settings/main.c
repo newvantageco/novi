@@ -57,6 +57,7 @@
 
 #include "xdg-shell-client-protocol.h"
 #include "../common/text.h"
+#include "../common/keys.h"
 #include "../common/theme.h"
 
 #define WINDOW_WIDTH 640
@@ -127,10 +128,11 @@ enum novi_panel {
 	PANEL_ACCOUNT = 0,
 	PANEL_NETWORK,
 	PANEL_SYSTEM,
+	PANEL_KEYS,
 	PANEL_COUNT,
 };
 
-static const char *PANEL_NAMES[PANEL_COUNT] = { "Account", "Network", "System" };
+static const char *PANEL_NAMES[PANEL_COUNT] = { "Account", "Network", "System", "Keys" };
 
 /* ── The Network panel: WiFi without a terminal ─────────────────────
  *
@@ -245,6 +247,46 @@ struct novi_settings {
 	bool editing;
 	char edit_buf[STATE_VAL_MAX + 1];
 	size_t edit_len;
+
+	/* ── Keys panel (RFC 0037 roadmap 1) ──
+	 *
+	 * /etc/novi/keys.conf is the one configuration file on this
+	 * machine the System panel cannot reach, and deliberately so: it
+	 * is not a `system.conf` key, because nothing CONVERGES a keyboard
+	 * shortcut. So a text editor was the only way to change a
+	 * shortcut, which is the same gap RFC 0001 promised was closed and
+	 * RFC 0037 actually closed -- half of it. This is the other half.
+	 *
+	 * The table is the loader's, not a second parse: `novi_keys_load`
+	 * fills it and `novi_keys_format` writes every row's text, so what
+	 * this panel shows is what novi-shell will dispatch and what
+	 * `novi-launcher --keys` will list. */
+	struct novi_keys keys;
+	int keys_selected;
+	int keys_top;
+	/* Typed, not CAPTURED, and that is forced rather than chosen:
+	 * novi-shell grabs Super+<anything> before a client sees it, so a
+	 * "press the shortcut you want" prompt would have the compositor
+	 * close this window when somebody pressed Super+Q at it. Typing
+	 * the binding is what the parser already reads and the formatter
+	 * already writes. */
+	bool keys_editing;
+	char keys_buf[NOVI_KEYS_TEXT_MAX + 1];
+	size_t keys_len;
+	/* Something was written this session, so the panel can say that
+	 * novi-shell is still dispatching the old table -- it reads the
+	 * file once at startup (RFC 0037), which is a decision rather than
+	 * an omission: rebinding live could hand somebody a conflicting
+	 * table with no restart left to recover through. */
+	bool keys_written;
+	/* Which rows this machine's keys.conf actually sets, filled once by
+	 * keys_refresh(). Asking novi_keys_is_set() from the draw looks
+	 * harmless and is a file open and a full parse PER VISIBLE ROW PER
+	 * FRAME -- fourteen of them, at whatever rate a held-down arrow key
+	 * repeats. Same mistake as novi-panel reading the volume file
+	 * inside layout_taskbar(): a read belongs where the state is
+	 * gathered, not where it is drawn. */
+	bool keys_mine[NOVI_BINDINGS_COUNT];
 
 	/* ── Network panel ── */
 	char wifi_iface[32];             /* "" = no wireless device */
@@ -1522,6 +1564,268 @@ static void render_network(struct novi_settings *state, uint32_t *px,
 	}
 }
 
+/* ── Keys panel ───────────────────────────────────────────────────────
+ *
+ * RFC 0037 roadmap 1. See the state struct for why the binding is
+ * typed rather than captured, and `common/keys.h` for why the write is
+ * a surgical edit of a file full of comments rather than a rewrite.
+ */
+
+static void keys_refresh(struct novi_settings *state) {
+	/* Straight through the loader every time, never an incremental
+	 * update of the table in hand. The file may have been edited in a
+	 * terminal since this panel was last shown, and a panel showing a
+	 * stale view recreates exactly the two-sources-of-truth problem
+	 * the System panel's own refresh exists to prevent. */
+	novi_keys_defaults(&state->keys);
+	novi_keys_load(&state->keys, NOVI_KEYS_PATH);
+	for (size_t i = 0; i < NOVI_BINDINGS_COUNT; i++) {
+		state->keys_mine[i] =
+			novi_keys_is_set(NOVI_KEYS_PATH, state->keys.v[i].name);
+	}
+	if (state->keys_selected >= (int)NOVI_BINDINGS_COUNT) {
+		state->keys_selected = (int)NOVI_BINDINGS_COUNT - 1;
+	}
+	if (state->keys_selected < 0) {
+		state->keys_selected = 0;
+	}
+}
+
+static void keys_cancel_edit(struct novi_settings *state) {
+	state->keys_editing = false;
+	state->keys_buf[0] = '\0';
+	state->keys_len = 0;
+}
+
+static void keys_begin_edit(struct novi_settings *state) {
+	if (state->keys_selected < 0 ||
+			state->keys_selected >= (int)NOVI_BINDINGS_COUNT) {
+		return;
+	}
+	/* Pre-filled with what the row reads NOW, so the common edit is
+	 * adding Shift to something rather than retyping it -- and so that
+	 * the accepted spelling is visible rather than guessed at. */
+	snprintf(state->keys_buf, sizeof(state->keys_buf), "%s",
+		state->keys.text[state->keys_selected]);
+	state->keys_len = strlen(state->keys_buf);
+	state->keys_editing = true;
+}
+
+/* One place turns an errno from the writer into a sentence, because
+ * EACCES is the ordinary answer here -- keys.conf is root-owned -- and
+ * "failed" would send somebody looking for a bug instead of a
+ * password. */
+static void keys_report(struct novi_settings *state, int rc, const char *did) {
+	char buf[128];
+	if (rc == 0) {
+		/* "restart the desktop" belongs on the STANDING line, which is
+		 * where it stays true after this message is cleared by the
+		 * next keystroke. Repeating it here would put the same
+		 * sentence on the screen twice. */
+		state->keys_written = true;
+		set_status(state, did, false);
+		return;
+	}
+	if (rc == EINVAL) {
+		set_status(state, "Not a binding this desktop can use", true);
+	} else if (rc == EACCES || rc == EPERM) {
+		snprintf(buf, sizeof(buf), "Cannot write %s -- needs root",
+			NOVI_KEYS_PATH);
+		set_status(state, buf, true);
+	} else {
+		snprintf(buf, sizeof(buf), "Could not write %s: %s",
+			NOVI_KEYS_PATH, strerror(rc));
+		set_status(state, buf, true);
+	}
+}
+
+static void keys_commit_edit(struct novi_settings *state) {
+	if (!state->keys_editing) {
+		return;
+	}
+	const char *action = state->keys.v[state->keys_selected].name;
+	/* Trim, because the buffer is pre-filled from a formatted string
+	 * ("Super + Return") and a person editing it leaves spaces around
+	 * the separators. The parser handles them; leading and trailing
+	 * ones would still be written into the file. */
+	char spec[NOVI_KEYS_TEXT_MAX + 1];
+	snprintf(spec, sizeof(spec), "%s", state->keys_buf);
+	char *b = spec;
+	while (*b == ' ' || *b == '\t') {
+		b++;
+	}
+	size_t n = strlen(b);
+	while (n > 0 && (b[n - 1] == ' ' || b[n - 1] == '\t')) {
+		b[--n] = '\0';
+	}
+	if (*b == '\0') {
+		/* An empty box means "leave it alone", not "unbind it" --
+		 * unbinding is `off`, and clearing a field by accident is far
+		 * more likely than meaning it. */
+		keys_cancel_edit(state);
+		set_status(state, NULL, false);
+		return;
+	}
+	int rc = novi_keys_write(NOVI_KEYS_PATH, action, b);
+	keys_cancel_edit(state);
+	keys_refresh(state);
+	keys_report(state, rc, "Saved");
+}
+
+static void keys_reset_selected(struct novi_settings *state) {
+	if (state->keys_selected < 0 ||
+			state->keys_selected >= (int)NOVI_BINDINGS_COUNT) {
+		return;
+	}
+	const char *action = state->keys.v[state->keys_selected].name;
+	if (!novi_keys_is_set(NOVI_KEYS_PATH, action)) {
+		/* Nothing to undo. Said rather than silently succeeding: a key
+		 * that appears to do nothing is how somebody concludes the
+		 * panel is broken. */
+		set_status(state, "That shortcut is already the default", false);
+		return;
+	}
+	int rc = novi_keys_write(NOVI_KEYS_PATH, action, NULL);
+	keys_refresh(state);
+	keys_report(state, rc, "Back to the default");
+}
+
+static void render_keys(struct novi_settings *state, uint32_t *px,
+		uint32_t stride_px, pixman_image_t *dest) {
+	uint32_t w = state->width, h = state->height;
+
+	novi_text_draw(dest, state->font, CONTENT_X, 24 + state->font->ascent,
+		"Keys", TEXT_PIX);
+	/* The file is named on screen for the same reason the System panel
+	 * names system.conf: the claim is that this panel and $EDITOR are
+	 * aimed at one document, and the way to make that credible is to
+	 * say which one. */
+	novi_text_draw(dest, state->font_small, CONTENT_X,
+		52 + state->font_small->ascent, NOVI_KEYS_PATH, LABEL_PIX);
+
+	int list_y = 84;
+	int count = (int)NOVI_BINDINGS_COUNT;
+	int rows = ((int)h - 46 - list_y) / ROW_HEIGHT;
+	if (rows < 1) {
+		rows = 1;
+	}
+	/* Clamped in the draw, where the height is known -- the System
+	 * panel's rule, and for the same reason: a resize must not leave
+	 * `top` pointing at a row that is no longer there. */
+	if (state->keys_selected < state->keys_top) {
+		state->keys_top = state->keys_selected;
+	}
+	if (state->keys_selected >= state->keys_top + rows) {
+		state->keys_top = state->keys_selected - rows + 1;
+	}
+	if (state->keys_top > count - rows) {
+		state->keys_top = count - rows;
+	}
+	if (state->keys_top < 0) {
+		state->keys_top = 0;
+	}
+
+	for (int i = state->keys_top; i < count && i < state->keys_top + rows; i++) {
+		int y = list_y + (i - state->keys_top) * ROW_HEIGHT;
+		bool sel = (i == state->keys_selected);
+		if (sel) {
+			draw_rect(px, stride_px, w, h, CONTENT_X - 8, y - 3,
+				FIELD_WIDTH + 16, ROW_HEIGHT, ROW_SELECTED_COLOR);
+		}
+		/* The DESCRIPTION, not the action name. `window.close` is what
+		 * you write in the file and "Close the focused window" is what
+		 * you are looking for; the sheet has always grouped by the
+		 * second. The action name is in the footer for the row you are
+		 * on, which is where somebody about to edit the file needs
+		 * it. */
+		novi_text_draw(dest, state->font_small, CONTENT_X,
+			y + state->font_small->ascent, state->keys.v[i].what,
+			sel ? TEXT_PIX : LABEL_PIX);
+
+		if (state->keys_editing && sel) {
+			int box_x = CONTENT_X + FIELD_WIDTH / 2;
+			draw_rect(px, stride_px, w, h, box_x - 6, y - 3,
+				FIELD_WIDTH / 2 + 14, ROW_HEIGHT, FIELD_BG_COLOR);
+			int end_x = novi_text_draw(dest, state->font_small, box_x,
+				y + state->font_small->ascent, state->keys_buf, TEXT_PIX);
+			draw_rect(px, stride_px, w, h, end_x + 1, y - 1, 2,
+				ROW_HEIGHT - 4, ACCENT_COLOR);
+			continue;
+		}
+
+		const char *text = state->keys.text[i];
+		int val_w = novi_text_width(state->font_small, text);
+		int val_x = CONTENT_X + FIELD_WIDTH - val_w - 8;
+		/* A row somebody CHANGED is drawn in the accent, the way a
+		 * drifted key is in the System panel -- "this one is yours"
+		 * is the question a person opening this panel is asking, and
+		 * it cannot be answered by comparing against the compiled
+		 * table: setting a shortcut to what it already was is a real
+		 * thing somebody does, and the file is what says so. */
+		bool mine = state->keys_mine[i];
+		novi_text_draw(dest, state->font_small, val_x,
+			y + state->font_small->ascent, text,
+			mine ? ACCENT_PIX : (sel ? TEXT_PIX : LABEL_PIX));
+		if (mine) {
+			novi_text_draw(dest, state->font_small, val_x - 18,
+				y + state->font_small->ascent, "*", ACCENT_PIX);
+		}
+	}
+
+	/* TWO footer lines, and the split is what makes a refusal visible.
+	 * The first draft had one, chosen by a chain that reached
+	 * `keys_written` before anything else -- so once you had saved
+	 * once, every later answer was shadowed by the standing "Saved"
+	 * and a REFUSED write reported nothing at all. Found by typing
+	 * `Ctrl+Q` at a booted machine and screenshotting the result: the
+	 * file was correctly untouched and the panel said "Saved". A
+	 * standing fact about the file and an answer to what you just did
+	 * are different things and cannot share a line. */
+	int footer_y = (int)h - 34;
+	int standing_y = footer_y - 20;
+	char buf[192];
+
+	/* Standing: true of the file until something changes it. */
+	if (state->keys.unreadable > 0) {
+		/* First, because a line the loader threw away is a shortcut
+		 * somebody thinks they set. */
+		snprintf(buf, sizeof(buf),
+			"%d line(s) in %s could not be understood",
+			state->keys.unreadable, NOVI_KEYS_PATH);
+		novi_text_draw(dest, state->font_small, CONTENT_X,
+			standing_y + state->font_small->ascent, buf, ERROR_PIX);
+	} else if (state->keys.conflicts > 0) {
+		snprintf(buf, sizeof(buf),
+			"%d shortcut(s) unbound for clashing with an earlier one",
+			state->keys.conflicts);
+		novi_text_draw(dest, state->font_small, CONTENT_X,
+			standing_y + state->font_small->ascent, buf, ERROR_PIX);
+	} else if (state->keys_written) {
+		novi_text_draw(dest, state->font_small, CONTENT_X,
+			standing_y + state->font_small->ascent,
+			"novi-shell reads this file when it starts, "
+			"so restart the desktop", ACCENT_PIX);
+	}
+
+	/* Answer: what the last thing you did produced. */
+	if (state->keys_editing) {
+		snprintf(buf, sizeof(buf),
+			"%s -- Super+Shift+T, Print, off; Enter saves, Esc cancels",
+			state->keys.v[state->keys_selected].name);
+		novi_text_draw(dest, state->font_small, CONTENT_X,
+			footer_y + state->font_small->ascent, buf, ACCENT_PIX);
+	} else if (state->status != NULL) {
+		novi_text_draw(dest, state->font_small, CONTENT_X,
+			footer_y + state->font_small->ascent, state->status,
+			state->status_is_error ? ERROR_PIX : SUCCESS_PIX);
+	} else {
+		snprintf(buf, sizeof(buf), "%s -- e edits, d restores the default",
+			state->keys.v[state->keys_selected].name);
+		novi_text_draw(dest, state->font_small, CONTENT_X,
+			footer_y + state->font_small->ascent, buf, LABEL_PIX);
+	}
+}
+
 static void render_system(struct novi_settings *state, uint32_t *px,
 		uint32_t stride_px, pixman_image_t *dest) {
 	uint32_t w = state->width, h = state->height;
@@ -1652,6 +1956,7 @@ static void render(struct novi_settings *state, uint32_t *px, uint32_t stride_px
 	switch (state->panel) {
 	case PANEL_NETWORK: render_network(state, px, stride_px, dest); break;
 	case PANEL_SYSTEM:  render_system(state, px, stride_px, dest);  break;
+	case PANEL_KEYS:    render_keys(state, px, stride_px, dest);    break;
 	default:            render_account(state, px, stride_px, dest); break;
 	}
 
@@ -1779,6 +2084,11 @@ static void keyboard_enter(void *data, struct wl_keyboard *kb, uint32_t serial,
 	} else if (state->panel == PANEL_NETWORK) {
 		refresh_network(state);
 		surface_draw_frame(state);
+	} else if (state->panel == PANEL_KEYS) {
+		/* Same reason: somebody may have just edited keys.conf in a
+		 * terminal and come back. */
+		keys_refresh(state);
+		surface_draw_frame(state);
 	}
 }
 
@@ -1829,6 +2139,13 @@ static void keyboard_key(void *data, struct wl_keyboard *kb, uint32_t serial,
 		} else if (state->panel == PANEL_NETWORK) {
 			pass_clear(state);
 			refresh_network(state);
+		} else if (state->panel == PANEL_KEYS) {
+			/* cancel_edit() above clears the System panel's editor;
+			 * this one has its own, and leaving a panel mid-edit has
+			 * to abandon it here too or the mode survives the switch
+			 * -- the trap the System panel's comment records. */
+			keys_cancel_edit(state);
+			keys_refresh(state);
 		}
 		surface_draw_frame(state);
 		return;
@@ -1891,6 +2208,64 @@ static void keyboard_key(void *data, struct wl_keyboard *kb, uint32_t serial,
 		case XKB_KEY_Return:
 		case XKB_KEY_KP_Enter:
 			net_activate(state);
+			break;
+		default:
+			break;
+		}
+		surface_draw_frame(state);
+		return;
+	}
+
+	if (state->panel == PANEL_KEYS && state->keys_editing) {
+		/* Modal, and FIRST for the reason the System panel's editor is
+		 * first: `d` must type a d rather than reset the row being
+		 * edited, and Escape must cancel the edit rather than do
+		 * whatever Escape does below. */
+		if (sym == XKB_KEY_Escape) {
+			keys_cancel_edit(state);
+			set_status(state, NULL, false);
+		} else if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter) {
+			keys_commit_edit(state);
+		} else if (sym == XKB_KEY_BackSpace) {
+			if (state->keys_len > 0) {
+				state->keys_buf[--state->keys_len] = '\0';
+			}
+		} else if (sym >= 32 && sym < 127) {
+			if (state->keys_len < NOVI_KEYS_TEXT_MAX) {
+				state->keys_buf[state->keys_len++] = (char)sym;
+				state->keys_buf[state->keys_len] = '\0';
+			}
+		}
+		surface_draw_frame(state);
+		return;
+	}
+
+	if (state->panel == PANEL_KEYS) {
+		switch (sym) {
+		case XKB_KEY_e:
+		case XKB_KEY_E:
+			keys_begin_edit(state);
+			break;
+		case XKB_KEY_d:
+		case XKB_KEY_D:
+			keys_reset_selected(state);
+			break;
+		case XKB_KEY_Up:
+			if (state->keys_selected > 0) {
+				state->keys_selected--;
+			}
+			set_status(state, NULL, false);
+			break;
+		case XKB_KEY_Down:
+			if (state->keys_selected + 1 < (int)NOVI_BINDINGS_COUNT) {
+				state->keys_selected++;
+			}
+			set_status(state, NULL, false);
+			break;
+		case XKB_KEY_r:
+		case XKB_KEY_R:
+			keys_refresh(state);
+			set_status(state, "Reloaded from disk", false);
 			break;
 		default:
 			break;
@@ -2180,6 +2555,10 @@ int main(void) {
 	/* Load the document up front so the System panel is correct the
 	 * first time it's shown, not one keystroke later. */
 	refresh_system(&state);
+	/* Loaded once at startup like the state file, so the panel draws
+	 * its real contents the first time it is shown rather than after
+	 * the first keystroke. */
+	keys_refresh(&state);
 	state.height = WINDOW_HEIGHT;
 
 	state.display = wl_display_connect(NULL);

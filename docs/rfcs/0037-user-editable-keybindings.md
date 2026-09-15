@@ -229,11 +229,84 @@ is the same `linux ...` line a person edits for `novi.state=off`.
 
 ## Roadmap
 
-1. **A GUI for it.** `novi-settings` has the panel shape for this
-   already, and the loader it would read is now shared code. The write
-   path is the open question: this file is hand-edited prose with
-   comments, so the System panel's `state_set`-style surgical edit is
-   the model, not a rewrite.
+1. ~~**A GUI for it.**~~ **Done** — a fourth panel in `novi-settings`,
+   beside Account, Network and System.
+
+   **This is the one configuration file the System panel cannot
+   reach**, and deliberately so: `keys.conf` is not a `system.conf`
+   key, because nothing converges a keyboard shortcut (decision 3). So
+   unlike RFC 0033's wired-network item — which turned out to be a
+   second path to keys the GUI already had — this was a real gap, and
+   a text editor was the only way to change a shortcut.
+
+   **The write path was the open question and the answer is
+   `novi_keys_write()` in `common/keys.c`**, beside the loader,
+   because a writer that does not agree with the reader about what a
+   line means is exactly the drift that file exists to end. It is
+   `state_set`'s surgical edit rather than a rewrite: a settings panel
+   that rewrites this file turns it into a machine-owned blob the
+   first time somebody uses the panel, and this RFC's whole claim is
+   that the GUI and a text editor write the same document.
+
+   **A COMMENTED LINE IS NOT A MATCH**, and that is the load-bearing
+   rule rather than a nicety. The shipped `keys.conf` is 87 lines and
+   *every one of them is a comment* — it is the documentation as well
+   as the file — so a matcher that skipped the `#` would find
+   `# session.lock = Super+L` in the middle of a prose block and
+   rewrite it in place, uncommenting a line of documentation into a
+   setting without being asked. Same trap CLAUDE.md records about
+   editing `system.conf` by hand, from the writing side. An action
+   with no live line is appended.
+
+   Four more decisions in the writer: leading whitespace is preserved
+   (a file somebody formatted stays formatted); removing is a **delete
+   and not a comment-out**, because a commented line is documentation
+   and inventing documentation on somebody's behalf is not its job; a
+   **duplicate live line is dropped** rather than left, since the
+   loader resolves duplicates last-wins and writing above a stale line
+   that still overrides would leave the file saying one thing and the
+   desktop doing another; and an unknown action or unparseable spec is
+   **refused**, leaving the file byte for byte as it was.
+
+   **The binding is TYPED, not captured**, and that is forced rather
+   than chosen: novi-shell grabs Super+&lt;anything&gt; before a client
+   sees it, so a "press the shortcut you want" prompt would have the
+   compositor close the Settings window when somebody pressed Super+Q
+   at it. The box is pre-filled with the row's current text, so the
+   common edit is adding Shift to something rather than retyping it,
+   and the accepted spelling is visible rather than guessed at.
+
+   The panel shows the **description**, not the action name —
+   "Close the focused window" is what you are looking for and
+   `window.close` is what you write in the file, so the action name is
+   in the footer for the row you are on, which is where somebody about
+   to edit the file by hand needs it. A row you changed is drawn in
+   the accent with a `*`, the way the System panel marks drift, and
+   that comes from `novi_keys_is_set()` reading the **file** rather
+   than from comparing against the compiled table: setting a shortcut
+   to what it already was is a real thing somebody does, and only the
+   file can say so.
+
+   **The footer is two lines, and that is a bug fix rather than a
+   layout.** The first draft had one, chosen by a chain that reached
+   "something was saved this session" before anything else — so after
+   one successful save every later answer was shadowed by a standing
+   *"Saved"*, and a **refused** write reported nothing at all. Typing
+   `Ctrl+Q` at a booted machine produced exactly the worst reading:
+   the file correctly untouched, the panel saying "Saved". A standing
+   fact about the file (a line the loader threw away, a shortcut
+   shadowed by an earlier one, the restart reminder) and an answer to
+   the keystroke you just pressed are different things and cannot
+   share a line. Found by screenshotting it, which is this
+   repository's standing advice about GUI changes that read correctly
+   in the diff.
+
+   It says what it cannot do. novi-shell reads `keys.conf` once when
+   it starts (decision 3 again), so the footer after a save reads
+   *"restart the desktop"*. Making the compositor watch the file was
+   considered and rejected here: rebinding live could hand somebody a
+   conflicting table with no restart left to recover through, which is
+   the failure `novi.keys=off` exists for.
 2. **More actions than the compositor has.** A binding that runs an
    arbitrary command is the obvious next request and is deliberately
    not here: it is RFC 0029's `exec` verb in a different costume, and
