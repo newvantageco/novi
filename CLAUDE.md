@@ -167,6 +167,27 @@ Two invariants worth not breaking:
   `power.governor = schedutil` — documented right there as *"not set by
   default"* — became live on every image. Read a `system.conf` diff for
   what it **uncomments**, not only for what it adds.
+- **There is ONE WRITER AT A TIME now, and there was not before.**
+  `state_set` is a read-modify-write of the whole document; the `mv`
+  is atomic, so the file is never half-written, and that was the whole
+  of the protection. Two overlapping writers produced a well-formed
+  document with one of the two changes in it and **no error from
+  either** — the losing caller was told `declared: hostname = one`
+  while the document still said `start`. `apply` had it one level up:
+  `next_generation()` reads the highest number and adds one, so two
+  applies pick the same one and a snapshot a rollback would restore is
+  silently replaced. `mkdir(2)` is the lock (no `flock` in BusyBox —
+  novi-mount's mechanism), reentrant within one process (rollback →
+  apply → set would otherwise deadlock on its own correctness), and
+  **stale is a fact rather than a timeout**: the owner file records
+  the boot time as well as the pid, because a lock that survived a
+  crash would otherwise be held forever by an innocent process that
+  inherited the number. The test runs the same race against a copy
+  with the locking removed and fails if that copy stops losing a
+  write — a green test over a race that no longer reproduces has
+  stopped watching. What is still unprotected, and cannot be from
+  here: an editor saving a whole buffer over changes made since it
+  opened the file.
 - **Generations snapshot *observed* state, not the state file.** By the
   time `apply` runs, the file already holds the new values, so copying
   it would save the change instead of what the change replaced, and

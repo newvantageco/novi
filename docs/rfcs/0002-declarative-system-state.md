@@ -492,10 +492,66 @@ hatch.
    list`. Neither can grow slow without something else changing first,
    and an apply is where the slow thing lives.
 3. **`novi-state diff` in CI**, and a `--json` projection for tooling.
-4. **Concurrent-edit safety.** Two writers racing on `system.conf`
-   (the GUI and an editor) can currently lose one side's change; the
-   atomic `mv` keeps the file well-formed but does not detect a
-   conflict. A generation counter or mtime check on write would.
+4. ~~**Concurrent-edit safety.**~~ **Done for the writers this engine
+   owns, and honestly scoped for the one it does not.**
+
+   The bug was real and reproducible: `state_set` is a read-modify-
+   write of the whole document, the `mv` is atomic so the file is
+   never half-written, and that was the *whole* of the protection — so
+   two overlapping writers produced a well-formed document containing
+   one of the two changes, **with no error from either side**. The
+   losing caller was told `declared: hostname = one` and the document
+   still said `start`. That is the exact failure this engine exists to
+   abolish, committed by the engine itself, and it is invisible in any
+   single run.
+
+   `apply` had the same problem one level up. `next_generation()`
+   takes the highest existing number and adds one, so two applies
+   racing choose the same number and one snapshot overwrites the other
+   — the record a rollback would restore, replaced by a different
+   machine's idea of the past.
+
+   **`mkdir(2)` is the lock**, because BusyBox has no `flock(1)`:
+   creating a directory that exists fails, atomically, on every
+   filesystem this system can keep `/etc` on. Same mechanism
+   `novi-mount` uses (RFC 0023). `state_set` holds it across its
+   read-modify-write; `apply` holds it for its whole run, so a `set`
+   arriving mid-apply waits rather than changing the document an apply
+   is in the middle of reading; `rollback` holds it across the `cp`
+   *and* the apply, because that `cp` is the one write in this program
+   that does not go through `state_set`. It is **reentrant within one
+   process** — without that, rollback → apply → set is a program that
+   hangs on its own correctness, and the symptom would be a boot that
+   never finishes.
+
+   **A stale lock is a fact, not a timeout.** The owner file records
+   the boot time as well as the pid. A different boot time means the
+   machine restarted and whatever held this is gone *whether or not
+   something now has that pid* — without which a lock that survived a
+   crash could be held permanently by an innocent process that
+   inherited the number. Same boot and no `/proc/<pid>` means the
+   holder died. A timeout would be a guess about how long the work
+   takes, and this work takes milliseconds except when the machine is
+   busy, which is exactly when the guess is wrong.
+
+   **The test has to prove the race before it can prove the fix**, so
+   it runs the same scenario against a doctored copy with the locking
+   removed and fails if that copy ever stops losing a write. A green
+   test over a race that no longer reproduces is a test that has
+   stopped watching. The window is widened deliberately with a spliced
+   `sleep` rather than hoped for: a race you must run a thousand times
+   to see is one a test cannot depend on, and widening changes the
+   timing, not the two orderings.
+
+   **What is still not protected, and cannot be from here:** a person
+   with `system.conf` open in an editor who saves the whole buffer
+   clobbers anything written since they opened it. No lock novi-state
+   takes can see that, because the editor's read happened before
+   novi-state was involved. What *is* now safe is every writer that
+   goes through this tool — which is the GUI, the installer, the
+   agent, boot convergence and `rollback` — and the editor case is one
+   `novi-edit` would have to answer with a "changed on disk" check of
+   its own.
 
 **Deliberately out of scope for now:** atomic rootfs A/B switching (§3)
 — this RFC gives that a spine to hang from (generations are already the

@@ -114,10 +114,132 @@ key_regex() {
 # two-way: a GUI writing a key must not destroy the comments a person
 # wrote around it, or the file stops being something anyone wants to
 # hand-edit and the whole single-source-of-truth claim collapses.
+# ---------------------------------------------------------------------------
+# One writer at a time
+# ---------------------------------------------------------------------------
+#
+# RFC 0002 roadmap 4. THE STATE FILE HAS MORE THAN ONE WRITER and
+# always has: `novi-state set` at a shell, novi-settings' System panel
+# (which shells out to exactly that), `novi-install`, and `rollback`
+# restoring a generation. Each write is a read-modify-write of the
+# WHOLE document -- awk reads it, the result goes to a temp file, the
+# temp file is renamed over it.
+#
+# The rename is atomic, so the file is never half-written, and that
+# was the whole of the protection. Which means two writers that
+# overlap produce a document containing one of the two changes, with
+# no error from either side: the losing caller is told it succeeded,
+# and the setting it declared is simply not there. Exactly the failure
+# mode this whole engine exists to abolish -- a machine that does not
+# match what somebody declared, and nothing saying so.
+#
+# `apply` has the same problem one level up. next_generation() picks
+# the highest existing number and adds one, so two applies racing
+# choose the SAME number and one snapshot overwrites the other -- the
+# generation a rollback would restore, quietly replaced by a different
+# machine's idea of the past. And two s6-rc transitions running at
+# once is its own kind of wrong. So apply holds the lock for its whole
+# run, and a `set` that arrives mid-apply waits rather than changing
+# the document an apply is in the middle of reading.
+#
+# mkdir(2) IS THE LOCK, because BusyBox has no flock(1): creating a
+# directory that already exists fails, atomically, on every filesystem
+# this system can keep /etc on. Same mechanism novi-mount uses for the
+# same reason (RFC 0023).
+#
+# A HOLDER THAT DIED leaves the directory behind, and a lock nobody
+# holds that nobody can clear is worse than no lock: it wedges every
+# future write until somebody deletes a directory they have no reason
+# to know about. So the owner file records the boot time as well as
+# the pid, and staleness is a fact rather than a timeout:
+#
+#   * a different boot time means the machine restarted, so whatever
+#     held this is gone whether or not something now has that pid --
+#     without it, a lock that survived a crash could be permanently
+#     held by an innocent process that happened to inherit the number;
+#   * the same boot and no /proc/<pid> means the holder died.
+#
+# A timeout would be a guess about how long the work takes, and this
+# work takes milliseconds except when the machine is busy, which is
+# exactly when the guess is wrong.
+STATE_LOCK_HELD=0
+
+boot_time() {
+    # btime is the wall clock at boot, in /proc/stat. Constant for the
+    # life of a boot and different across one, which is all this needs.
+    sed -n 's/^btime //p' /proc/stat 2>/dev/null | head -1
+}
+
+state_lock_release() {
+    [ "$STATE_LOCK_HELD" -eq 1 ] || return 0
+    STATE_LOCK_HELD=0
+    rm -rf "${STATE_FILE}.lock"
+}
+
+# The wait is bounded because a bug that never releases should say so
+# rather than hang a boot. It is bounded GENEROUSLY -- an apply holds
+# this across s6-rc transitions and, since the packages domain, across
+# a package install, so anything shorter would turn a slow convergence
+# into a failed `set` in the GUI.
+STATE_LOCK_TIMEOUT="${NOVI_STATE_LOCK_TIMEOUT:-300}"
+
+state_lock() {
+    local dir="${STATE_FILE}.lock" owner obt opid now waited=0
+    # Reentrant within one process. `rollback` takes the lock, then
+    # calls `apply`, which takes it again; and every `set` inside an
+    # apply's convergers would deadlock against the apply that is
+    # holding it. A recursive mkdir lock without this is a program
+    # that hangs on its own correctness.
+    [ "$STATE_LOCK_HELD" -eq 1 ] && return 0
+    mkdir -p "$(dirname "$STATE_FILE")"
+    now="$(boot_time)"
+    while ! mkdir "$dir" 2>/dev/null; do
+        # The owner file is written AFTER the directory, so there is a
+        # window where the lock exists and says nothing. Treat that as
+        # held -- it is, by somebody two instructions from recording
+        # it -- and come back.
+        owner="$(cat "$dir/owner" 2>/dev/null || printf '')"
+        if [ -n "$owner" ]; then
+            # shellcheck disable=SC2086
+            set -- $owner
+            obt="${1:-}"; opid="${2:-}"
+            if [ "$obt" != "$now" ] || { [ -n "$opid" ] && [ ! -d "/proc/$opid" ]; }; then
+                warn "clearing a stale lock at $dir (held by pid ${opid:-?} of an earlier boot or a dead process)"
+                rm -rf "$dir"
+                continue
+            fi
+        fi
+        waited=$(( waited + 1 ))
+        if [ "$waited" -gt $(( STATE_LOCK_TIMEOUT * 10 )) ]; then
+            die "timed out waiting for $dir -- another novi-state is holding it (pid ${opid:-unknown}); remove the directory if you are sure it is not"
+        fi
+        # Fractional sleep: busybox ash's own `sleep` takes it (checked
+        # against the shipped binary, not assumed -- it is a compile-
+        # time option upstream).
+        sleep 0.1
+    done
+    printf '%s %s\n' "$now" "$$" > "$dir/owner"
+    STATE_LOCK_HELD=1
+    # Every path out of the script, including die(). A lock left behind
+    # by an error is the stale lock above, and the check above is a
+    # backstop rather than an excuse not to clean up.
+    # INT and TERM release and then DIE, rather than release and carry
+    # on: a handler that swallows Ctrl-C is a program you cannot stop.
+    trap 'state_lock_release' EXIT
+    trap 'state_lock_release; exit 130' INT
+    trap 'state_lock_release; exit 143' TERM
+}
+
 state_set() {
     local key="$1" value="$2"
-    local key_re tmp
+    local key_re tmp held
     key_re="$(key_regex "$key")"
+    # Taken around the whole read-modify-write, and released only if
+    # THIS call took it: inside an apply the lock is already held and
+    # releasing it here would hand the document to another writer
+    # halfway through a convergence.
+    held="$STATE_LOCK_HELD"
+    state_lock
     mkdir -p "$(dirname "$STATE_FILE")"
     [ -f "$STATE_FILE" ] || : > "$STATE_FILE"
     tmp="${STATE_FILE}.tmp.$$"
@@ -137,8 +259,10 @@ state_set() {
     ' "$STATE_FILE" > "$tmp"
 
     # Atomic replace: a crash mid-write can never leave the system's
-    # single source of truth half-written.
+    # single source of truth half-written. The lock above is what stops
+    # a well-formed document from being the wrong one.
     mv "$tmp" "$STATE_FILE"
+    [ "$held" -eq 1 ] || state_lock_release
 }
 
 # ---------------------------------------------------------------------------
@@ -1503,9 +1627,19 @@ diff_health_note() {
 }
 
 cmd_apply() {
-    local dry=0 key want have gen changed=0
+    local dry=0 key want have gen changed=0 held
     [ "${1:-}" = "--dry-run" ] && dry=1
     [ -f "$STATE_FILE" ] || die "no state file at $STATE_FILE"
+
+    # Held for the WHOLE run, not just around the snapshot. Two applies
+    # at once pick the same generation number (next_generation() reads
+    # the highest and adds one), so one snapshot silently overwrites
+    # the other -- and the thing overwritten is the record a rollback
+    # would restore. It also stops a `set` from changing the document
+    # halfway through the passes that are converging it. `rollback`
+    # already holds it when it calls this, hence `held`.
+    held="$STATE_LOCK_HELD"
+    state_lock
 
     # Nothing to do is worth saying plainly, and worth NOT burning a
     # generation on -- generations should mean "the system actually
@@ -1513,12 +1647,14 @@ cmd_apply() {
     if cmd_diff >/dev/null 2>&1; then
         msg "already converged -- nothing to apply"
         firewall_hole_note
+        [ "$held" -eq 1 ] || state_lock_release
         return 0
     fi
 
     if [ "$dry" -eq 1 ]; then
         msg "would apply (dry run):"
         cmd_diff || true
+        [ "$held" -eq 1 ] || state_lock_release
         return 0
     fi
 
@@ -1623,6 +1759,7 @@ cmd_apply() {
     # looking at. Non-zero exit: the document was not reached in full,
     # and a caller that checks (boot convergence does not -- it must
     # always exit 0) should hear about it.
+    [ "$held" -eq 1 ] || state_lock_release
     if [ "$failed_n" -ne 0 ]; then
         warn "$failed_n key(s) could not be applied:$failed"
         return 1
@@ -1773,9 +1910,24 @@ cmd_rollback() {
     src="$GEN_DIR/${gen}.conf"
     [ -f "$src" ] || die "no such generation: $gen"
     need_root
+    # Held across the COPY and the apply together, which is the part
+    # that needs it: `cp` over the state file is the one write in this
+    # program that does not go through state_set, and a `set` landing
+    # between the copy and the apply would be applied and then not be
+    # in the document -- drift created by the command whose whole job
+    # is removing it.
+    state_lock
     msg "rolling back to generation $gen"
     cp "$src" "$STATE_FILE"
-    cmd_apply
+    # `|| rc=$?` and not a bare call: this script is `set -e`, apply
+    # returns 1 when a key could not be converged, and that would end
+    # the script here with the lock released only by the EXIT trap and
+    # the caller told nothing. The same trap cmd_diff's own comment
+    # records, two functions up.
+    local rc=0
+    cmd_apply || rc=$?
+    state_lock_release
+    return "$rc"
 }
 
 usage() {

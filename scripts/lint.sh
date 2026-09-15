@@ -147,6 +147,11 @@ fi
 # `wifi.join <ssid> <passphrase>` with "$args" would write that
 # passphrase into a 0600 log permanently, by the very refusal meant to
 # protect it.
+# test-state-lock.sh is the seventh, and it is the only one here that
+# has to PROVE ITS OWN BUG before it can prove the fix: it runs the
+# same two-writer race against a copy with the locking removed and
+# fails if that copy stops losing a write. A green test over a race
+# that no longer reproduces is a test that has stopped watching.
 # test-agent-text.sh is the sixth, and it guards a kind of drift the
 # others do not: `describe` emits the same facts twice, as JSON and as
 # a table, and a field added to one branch and forgotten in the other
@@ -174,7 +179,8 @@ for t in packages/tests/test-lib-json.sh packages/tests/test-agent-verbs.sh \
          packages/tests/test-agent-idle.sh \
          packages/tests/test-state-packages.sh \
          packages/tests/test-services.sh \
-         packages/tests/test-agent-text.sh; do
+         packages/tests/test-agent-text.sh \
+         packages/tests/test-state-lock.sh; do
     echo ">>> ${t##*/}"
     if ! bash "$t"; then
         echo ">>> ${t} failed" >&2
