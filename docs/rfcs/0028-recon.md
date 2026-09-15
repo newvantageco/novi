@@ -263,9 +263,48 @@ run live on the build host.
 1. **A subcommand that reads a target list and writes a report.** Right
    now each command answers one question about one target; the original
    tool's actual shape is "run everything against this domain".
-2. **DNSSEC validation**, or an explicit statement that there is none.
-   At the moment there is none and the README should say so before
-   somebody assumes otherwise.
+2. ~~**DNSSEC validation**, or an explicit statement that there is
+   none.~~ **Done — the second one, plus one real fact.**
+
+   There is no validation here and there is not going to be: it needs
+   a trust anchor, a clock you believe and a chain walk, none of which
+   belong in a recon tool's DNS client. So `dns` says so **in its own
+   output, on every run** rather than in a README somebody read once:
+
+   ```
+   dnssec   AD set -- the resolver says it validated; this tool did not
+   ```
+
+   What it can honestly report is the resolver's own claim, and that
+   is one bit in each direction. **The bit in the QUERY is the
+   load-bearing half**, and this was measured against 8.8.8.8 rather
+   than assumed: with `RD` alone, the response for a signed name comes
+   back with **AD clear** — so without setting AD in the query (RFC
+   6840 §5.7: a client sets it to say it understands the bit) the tool
+   would have reported "not validated" about every domain on earth.
+   `CD` is deliberately never set: it tells the resolver to skip
+   validation, which is the opposite of the question.
+
+   The verdict is **three-valued** for the same reason the
+   clickjacking verdict is: "nothing came back, so nobody said
+   anything about it" is a real answer a boolean cannot carry, and
+   reporting `false` for it would be the tool saying something untrue
+   about a domain. A mixture (some types AD, some not — a signed zone
+   with an unsigned delegation under it) gets its own wording rather
+   than being folded into "unsigned zone". Only a response that
+   actually **carried an answer** votes: a NODATA reply for AAAA has
+   nothing to validate, and counting its clear AD bit would turn one
+   absent record type into "not validated" for a domain that is signed.
+
+   Discriminates in practice: `cloudflare.com` and `internic.net`
+   report AD set, `facebook.com` AD clear.
+
+   **AD is only worth the path to the resolver** — it is a claim made
+   by a machine over an unauthenticated UDP hop, and anyone who can
+   spoof the answer can spoof the bit. Every verdict says who made the
+   claim, and a host check asserts that it does: a reader who takes
+   "validated" for "validated by novi-recon" has been told something
+   false by a tool whose job is not lying to them.
 3. ~~**`/etc/services`**, so `ports` can name what it finds.~~
    **Done.** `rootfs/etc/services` is base content, installed by
    `03-base.sh`, 77 entries. Curated rather than IANA's ~14,000-line

@@ -101,6 +101,30 @@ def kv(key, value, width=22):
 #     any host on the path can answer first. This is not a secure
 #     resolver -- there is no DNSSEC here -- but an unchecked ID is
 #     free to exploit and free to prevent.
+#
+#   * DNSSEC IS NOT VALIDATED HERE, and the honest thing is to say so
+#     in the output rather than only in a comment. This client does no
+#     signature checking whatsoever: it cannot, without a trust anchor,
+#     a clock it believes, and a chain walk, none of which belong in a
+#     recon tool's DNS client. What it CAN do is ask the resolver
+#     whether IT validated, which is one bit in each direction:
+#
+#       - the query sets AD (0x0020) as well as RD. RFC 6840 §5.7: a
+#         client sets AD to say it understands the bit and would like
+#         an answer about it. Without it many validating resolvers
+#         leave AD clear in the response and the tool would report
+#         "not validated" about a validated answer;
+#       - the response's AD says the resolver validated the chain.
+#
+#     CD (0x0010) is deliberately NOT set: setting it tells the
+#     resolver to skip validation, which is the opposite of the
+#     question being asked.
+#
+#     AD IS ONLY WORTH THE PATH TO THE RESOLVER. It is a claim made by
+#     a machine over an unauthenticated UDP hop -- anyone who can spoof
+#     the answer can spoof the bit. `dns` says that in its own output
+#     rather than leaving a reader to infer that "validated" means
+#     validated here.
 # ─────────────────────────────────────────────────────────────────────
 
 QTYPES = {
@@ -165,8 +189,18 @@ def dns_read_name(msg, off):
     return ".".join(labels) if labels else ".", end
 
 
+# RD (0x0100) recursion desired, plus AD (0x0020) -- see the header
+# comment. CD (0x0010) stays clear on purpose: it would tell the
+# resolver not to validate.
+DNS_FLAG_RD = 0x0100
+DNS_FLAG_AD = 0x0020
+DNS_FLAG_CD = 0x0010
+DNS_FLAG_TC = 0x0200
+DNS_FLAG_AA = 0x0400
+
+
 def dns_build_query(name, qtype, qid):
-    header = struct.pack(">HHHHHH", qid, 0x0100, 1, 0, 0, 0)  # RD set
+    header = struct.pack(">HHHHHH", qid, DNS_FLAG_RD | DNS_FLAG_AD, 1, 0, 0, 0)
     return header + dns_encode_name(name) + struct.pack(">HH", qtype, 1)
 
 
@@ -233,8 +267,11 @@ def dns_parse(msg, qid):
         off += rdlen
     return {
         "rcode": RCODES.get(rcode, str(rcode)),
-        "truncated": bool(flags & 0x0200),
-        "authoritative": bool(flags & 0x0400),
+        "truncated": bool(flags & DNS_FLAG_TC),
+        "authoritative": bool(flags & DNS_FLAG_AA),
+        # What the RESOLVER says about the chain. Not a verdict this
+        # tool reached, and reported as such everywhere it appears.
+        "authentic_data": bool(flags & DNS_FLAG_AD),
         "answers": answers,
     }
 
@@ -315,7 +352,9 @@ def cmd_dns(args):
     if not servers:
         raise Fail("no resolver: /etc/resolv.conf names none and --server was not given")
     types = args.type.upper().split(",") if args.type else ["A", "AAAA", "MX", "NS", "TXT", "SOA"]
-    result = {"name": args.name, "resolver": servers[0], "records": [], "errors": []}
+    result = {"name": args.name, "resolver": servers[0], "records": [], "errors": [],
+              "dnssec": dnssec_verdict([])}
+    ad = []
     for t in types:
         if t not in QTYPES:
             raise Fail(f"unknown record type {t}; known: {', '.join(sorted(QTYPES))}")
@@ -327,13 +366,52 @@ def cmd_dns(args):
         if r["rcode"] != "NOERROR" and not r["answers"]:
             result["errors"].append({"type": t, "error": r["rcode"]})
             continue
+        # Only a response that CARRIED an answer votes. A NODATA reply
+        # for AAAA has nothing to validate, and a resolver that leaves
+        # AD clear on it is not telling you the zone is unsigned --
+        # counting it would turn one absent record type into "not
+        # validated" for a domain that is.
+        ad.append(r["authentic_data"])
         result["records"].extend(r["answers"])
+    result["dnssec"] = dnssec_verdict(ad)
     return result
+
+
+# THREE ANSWERS, not two, and the third is the one a boolean cannot
+# carry: "nothing came back, so nobody said anything about it". Same
+# shape as the clickjacking verdict, and for the same reason -- a
+# tool that reports `false` for "we did not find out" is a tool that
+# tells you something untrue about a machine.
+def dnssec_verdict(flags):
+    if not flags:
+        return {"validated": None, "note": "no answer to validate"}
+    if all(flags):
+        return {"validated": True,
+                "note": "the resolver says it validated; this tool did not"}
+    if any(flags):
+        # Some types validated and some did not, which is a real state:
+        # a signed zone with an unsigned delegation under it, or a
+        # resolver that validated one and fell back on another.
+        return {"validated": False,
+                "note": "some answers carried AD and some did not"}
+    return {"validated": False,
+            "note": "the resolver did not claim validation (unsigned zone, or it does not validate)"}
 
 
 def render_dns(r):
     kv("name", r["name"])
     kv("resolver", r["resolver"])
+    # Said on every run, not only when it is interesting. A caveat
+    # printed only sometimes is a caveat a reader learns to expect and
+    # then stops seeing -- and the whole point of this line is that
+    # "validated" here never means validated BY THIS TOOL.
+    d = r["dnssec"]
+    if d["validated"] is None:
+        kv("dnssec", f"unknown -- {d['note']}")
+    elif d["validated"]:
+        kv("dnssec", f"AD set -- {d['note']}")
+    else:
+        kv("dnssec", f"AD clear -- {d['note']}")
     if not r["records"]:
         print("\nno records")
     else:

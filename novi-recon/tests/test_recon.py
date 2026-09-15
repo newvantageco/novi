@@ -333,6 +333,66 @@ chain, _ = R.whois_chain("example.com", "quiet.example", fake_ask)
 check("no referral means one hop", chain, ["quiet.example"])
 
 
+# ── DNSSEC: what the resolver claims, and what this tool does not ────
+#
+# There is no validation here and there is not going to be: it needs a
+# trust anchor, a clock you believe and a chain walk. What the tool
+# does is ask the resolver whether IT validated, which is one bit each
+# way -- and the QUERY bit is the load-bearing half. Measured against
+# 8.8.8.8 rather than assumed: with RD alone the response for a signed
+# name comes back with AD CLEAR, and the tool would have reported
+# "not validated" about every domain on earth.
+
+qid = 0x4321
+q = R.dns_build_query("example.com", 1, qid)
+qflags = struct.unpack(">HHHHHH", q[:12])[1]
+check("the query asks for recursion", bool(qflags & R.DNS_FLAG_RD), True)
+check("the query sets AD, or a validating resolver will not answer about it",
+      bool(qflags & R.DNS_FLAG_AD), True)
+check("the query never sets CD -- that would ask the resolver NOT to validate",
+      bool(qflags & R.DNS_FLAG_CD), False)
+
+
+def response(flags, with_answer=True):
+    """A minimal well-formed response carrying the given header flags."""
+    an = 1 if with_answer else 0
+    msg = struct.pack(">HHHHHH", qid, flags, 1, an, 0, 0)
+    msg += R.dns_encode_name("example.com") + struct.pack(">HH", 1, 1)
+    if with_answer:
+        msg += R.dns_encode_name("example.com")
+        msg += struct.pack(">HHIH", 1, 1, 300, 4) + bytes([93, 184, 216, 34])
+    return msg
+
+
+check("AD in the response is reported",
+      R.dns_parse(response(0x8180 | R.DNS_FLAG_AD), qid)["authentic_data"], True)
+check("AD absent is reported as absent",
+      R.dns_parse(response(0x8180), qid)["authentic_data"], False)
+
+# The verdict is THREE-VALUED, and the third value is the one a boolean
+# cannot carry. `false` for "nothing came back" is the tool saying
+# something untrue about a domain -- the same argument the clickjacking
+# table makes about X-Frame-Options.
+check("no answers at all is not 'unvalidated'",
+      R.dnssec_verdict([])["validated"], None)
+check("every answer carrying AD is validated",
+      R.dnssec_verdict([True, True])["validated"], True)
+check("no answer carrying AD is not validated",
+      R.dnssec_verdict([False, False])["validated"], False)
+check("a mixture is not validated", R.dnssec_verdict([True, False])["validated"], False)
+check("a mixture says so, rather than reusing the unsigned-zone wording",
+      "some" in R.dnssec_verdict([True, False])["note"], True)
+
+# Every verdict has to say that the claim is the RESOLVER's. A reader
+# who takes "validated" for "validated by novi-recon" has been told
+# something false by a tool whose job is not lying to them.
+for flags in ([], [True], [False], [True, False]):
+    v = R.dnssec_verdict(flags)
+    check(f"the {flags} verdict explains itself", bool(v["note"].strip()), True)
+check("the validated verdict names who validated",
+      "this tool did not" in R.dnssec_verdict([True])["note"], True)
+
+
 # ─────────────────────────────────────────────────────────────────────
 
 if FAILURES:

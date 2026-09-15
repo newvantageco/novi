@@ -678,7 +678,10 @@ BUG_REPORT_URL="https://github.com/newvantageco/novi/issues"
       TLS-free and the package trust root still static (RFC 0027)
 - [x] `novi-recon` — DNS, WHOIS, TLS certificates, HTTP security headers,
       robots.txt, breached passwords, a connect scan. Standard library
-      only, and the first Python program in this OS (RFC 0028)
+      only, and the first Python program in this OS (RFC 0028). It does
+      **no DNSSEC validation** and says so on every `dns` run — what it
+      reports is the resolver's own AD bit, which is worth exactly the
+      path to the resolver
 - [x] `/etc/services` — 77 curated entries, so `getservbyport(3)` finally
       answers and a scan names what it finds. The firewall still names
       ports as **numbers**: a rule that resolves through a name table

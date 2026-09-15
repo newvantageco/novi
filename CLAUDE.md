@@ -906,6 +906,18 @@ breached-password check and a TCP connect scan.
   silently truncates SPF and DKIM, and **the root name renders as `.`,
   not the empty string** — a null MX is literally `0 .` and `0 ` reads
   as a parse failure.
+- **There is no DNSSEC validation, and `dns` says so on every run.**
+  Validation needs a trust anchor, a clock you believe and a chain
+  walk. What the tool reports is the RESOLVER's claim, and **the AD
+  bit in the QUERY is the load-bearing half** — measured against
+  8.8.8.8, not assumed: with `RD` alone the response for a signed name
+  comes back with AD clear, so without it the tool would have reported
+  "not validated" about every domain on earth (RFC 6840 §5.7). `CD` is
+  never set — it asks the resolver to skip validation. The verdict is
+  three-valued (no answer is not "unvalidated"), only responses that
+  carried an answer vote (a NODATA AAAA has nothing to validate), and
+  every verdict names who made the claim, because AD is worth exactly
+  the path to the resolver.
 - **CSP `frame-ancestors` OVERRIDES `X-Frame-Options`.** A clickjacking
   check that reads only XFO gets both interesting cases backwards. The
   verdict is three-valued, because "framable by these specific origins"
