@@ -242,12 +242,63 @@ repository:
    compiler in the `python` package, so no source wheels; the
    `x86_64-linux-gnu` SOABI mislabel, so no binary wheels) are real and
    belong in their own RFC.
-4. **Trim the OpenSSL build.** The successor to item 2, and a better
-   item than it was, because it helps **every** machine that has
-   OpenSSL rather than only the ones a collapse would have touched.
-   The build is near-stock — `no-tests`, `no-docs`, `enable-ktls` and
-   nothing else — so the legacy provider, the deprecated API surface
-   and every algorithm ship in that 8.0 MB. Not free: CPython uses
-   some of the deprecated surface, so it needs a CPython rebuild and
-   RFC 0020's HTTPS verification triple, and `no-legacy` changes what
-   `ssl` can negotiate. **Unmeasured — do not assume a number.**
+4. ~~**Trim the OpenSSL build.**~~ **Done, and the number is smaller
+   than the item implied.** Measured, stripped, like for like:
+
+   | | before | after |
+   |---|---|---|
+   | `libcrypto.so.3` | 6,137,328 | 5,915,568 |
+   | `libssl.so.3` | 1,061,376 | 728,960 |
+   | `openssl` | 957,192 | 913,704 |
+   | `ossl-modules/legacy.so` | 142,120 | — |
+   | **total** | **8,298,016** | **7,558,232** |
+
+   **739 KB, 8.9%** — and the package on disk goes 8.0M → 7.3M. The
+   item said this "helps every machine that has OpenSSL", which is
+   true and is nine percent. **libcrypto barely moves (3.6%)**: its
+   weight is bignum, elliptic curve and provider machinery, not the
+   algorithm tables, so removing ciphers takes hundreds of kilobytes
+   off the thing that was already small. A third of `libssl` goes,
+   which is DTLS, QUIC and the PSK/SRP suites.
+
+   **WHAT IT COSTS IS EXACTLY THE PSK AND SRP SUITES, and that was
+   enumerated rather than reasoned about.** `openssl ciphers -v` goes
+   from **60 suites to 30** on a booted machine, which sounds alarming
+   until the two lists are diffed: all thirty removed are `*-PSK-*` or
+   `SRP-*`, which need an out-of-band shared secret and appear nowhere
+   on the public web. The thirty that remain are the ECDHE/DHE/RSA set
+   with AES-GCM, AES-CBC and ChaCha20, including all three TLS 1.3
+   suites.
+
+   **`hashlib` is unchanged at 19 algorithms**, `ripemd160` included —
+   it moved back into the default provider in 3.0.7, so `no-legacy`
+   does not cost it. And the legacy provider was **unreachable
+   anyway**: the shipped `openssl.cnf` activates `default` and nothing
+   else, so 142 KB shipped that could not be used without editing a
+   config file nobody edits. RFC 0007's rule about dead weight, in the
+   TLS stack.
+
+   **`no-deprecated` was NOT taken.** It is the one entry that could
+   break CPython's `_ssl` and `_hashlib`, and folding it into a size
+   trim would make a build failure look like a packaging change. It is
+   its own question.
+
+   **The first probe could not tell the two builds apart.** `openssl
+   s_client -ssl3` answers "Unknown option" in BOTH, because upstream
+   already builds without the SSLv3 method — so the check that looked
+   like it proved `no-ssl3` proved nothing. The cipher-list diff is
+   what distinguishes them. Same shape as every other unfalsifiable
+   probe this project has caught itself writing.
+
+   **NetSurf needed no rebuild**, established by comparing its 57
+   undefined OpenSSL symbols against what the trimmed libraries still
+   export — all present. That comparison was itself wrong twice
+   before it was right: `nm -D` prints `SYMBOL@VERSION` on the
+   undefined side and `SYMBOL@@VERSION` on the defined side, so the
+   first two runs reported every symbol missing.
+
+   Verified on a booted machine: `openssl version`, the 143-certificate
+   store intact, and **RFC 0020's verification triple from Python** —
+   an untrusted self-signed certificate refused, the same certificate
+   accepted once its CA is trusted (TLSv1.3, `TLS_AES_256_GCM_SHA384`),
+   and the right CA with the wrong hostname refused again.

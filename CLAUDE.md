@@ -962,6 +962,44 @@ package — the first scripting language this system has ever had.
   (curl, git), wolfSSL (wpa_supplicant), OpenSSL (Python) — each
   because its consumer accepts only it. All three are packages; the
   base image has none.
+- **THE OpenSSL BUILD IS TRIMMED, AND IT IS NINE PERCENT** (RFC 0027
+  roadmap 4). Stripped, like for like: libcrypto 6,137,328 →
+  5,915,568, libssl 1,061,376 → **728,960**, the CLI 957,192 →
+  913,704, and legacy.so's 142,120 gone — 739 KB, 8.9%, package 8.0M
+  → 7.3M. **libcrypto barely moves (3.6%)**, because its weight is
+  bignum, elliptic-curve and provider machinery rather than the
+  algorithm tables; a third of libssl goes, which is DTLS, QUIC and
+  the PSK/SRP suites. Expect single-digit percentages from an
+  algorithm trim, not a different library.
+- **WHAT THAT COSTS WAS ENUMERATED, NOT REASONED ABOUT.** `openssl
+  ciphers -v` drops from **60 suites to 30**, which reads alarming
+  until the two lists are diffed on a booted machine: **all thirty
+  removed are `*-PSK-*` or `SRP-*`**, which need an out-of-band shared
+  secret and appear nowhere on the public web. `hashlib` is unchanged
+  at 19 algorithms, `ripemd160` included — it moved back into the
+  default provider in 3.0.7, so `no-legacy` does not cost it.
+- **The legacy provider was UNREACHABLE and shipped anyway.** The
+  shipped `openssl.cnf` activates `default` and nothing else, so its
+  142 KB could not be used without editing a config file nobody
+  edits. And with it gone `make install` still creates an EMPTY
+  `ossl-modules` directory, so the package's test had to become "is
+  there anything in it", not `[ -d ]`.
+- **`no-deprecated` is NOT in the list**, deliberately: it is the one
+  entry that can break CPython's `_ssl` and `_hashlib`, and folding it
+  into a size trim would make a build failure look like a packaging
+  change.
+- **THE FIRST PROBE COULD NOT TELL THE TWO BUILDS APART.** `openssl
+  s_client -ssl3` answers "Unknown option" in BOTH — upstream already
+  builds without the SSLv3 method — so the check that looked like it
+  proved `no-ssl3` proved nothing. Diff the cipher list instead.
+- **A SYMBOL COMPARISON ACROSS A VERSIONED ELF MUST STRIP `@VER` FROM
+  BOTH SIDES.** Checking that NetSurf still resolves against the
+  trimmed libraries (57 undefined OpenSSL symbols, all still
+  exported, so no rebuild) took three attempts: `nm -D` prints
+  `SYMBOL@VERSION` for an undefined symbol and `SYMBOL@@VERSION` for a
+  defined one, so the first two runs reported every symbol missing.
+  The probe was wrong, not the library — for the fourth or fifth time
+  in this file.
 - **COLLAPSING mbedTLS INTO OpenSSL WAS MEASURED AND REFUSED** (RFC
   0031 roadmap 3, RFC 0027 roadmap 2). Both items asserted it was
   worth doing; the numbers say the opposite, which is the whole reason
