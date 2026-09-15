@@ -679,6 +679,10 @@ BUG_REPORT_URL="https://github.com/newvantageco/novi/issues"
 - [x] `novi-recon` — DNS, WHOIS, TLS certificates, HTTP security headers,
       robots.txt, breached passwords, a connect scan. Standard library
       only, and the first Python program in this OS (RFC 0028)
+- [x] `/etc/services` — 77 curated entries, so `getservbyport(3)` finally
+      answers and a scan names what it finds. The firewall still names
+      ports as **numbers**: a rule that resolves through a name table
+      means something different on a machine whose table differs
 - [x] Themes — Super+T picks one, the panel follows live and everything
       else at its next start. Four palettes, one of them light, which
       found two real bugs no dark theme could have (RFC 0030)

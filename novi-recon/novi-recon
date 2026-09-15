@@ -838,8 +838,10 @@ def render_ports(r):
         try:
             name = socket.getservbyport(p, "tcp")
         except OSError:
-            # BusyBox ships no /etc/services, so this fails for every
-            # port on a stock Novi. A number is a fine answer.
+            # /etc/services is curated (RFC 0028 roadmap 3), so this
+            # answers for the ports people meet and not for the rest.
+            # A number is a fine answer for the rest: inventing a name
+            # for a port nobody registered would be the tool guessing.
             name = "-"
         print(f"{p:>6}  {name}")
 

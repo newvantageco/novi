@@ -905,8 +905,36 @@ breached-password check and a TCP connect scan.
   that finds a different python3 first makes a system tool behave
   differently for different users. The repo copy keeps `env` so it runs
   out of a checkout.
-- `getservbyport` returns nothing here — BusyBox ships no
-  `/etc/services` — so `ports` prints numbers rather than pretending.
+- **`/etc/services` exists now, and the interesting part is not the
+  naming.** BusyBox ships no such file, so `getservbyport(3)` answered
+  nothing for the life of the project and `ports` printed bare
+  numbers. 77 curated entries, base content, installed by
+  `03-base.sh`. Three things to know before touching it:
+  - **A PORT NAME IS NOT A POLICY.** Shipping the table is the moment
+    `tcp dport ssh` starts working in `nft`, and RFC 0022's rule is
+    that `/etc/novi/firewall.nft` names ports as NUMBERS — a rule
+    resolved through a name table means something different on a
+    machine whose table differs. That rule could not be written wrong
+    before, because there was no table; `test-services.sh` enforces it
+    now.
+  - **musl's parser has two silent limits**, read out of
+    `lookup_serv.c` and `getnameinfo.c` rather than assumed. Both
+    readers use `fgets(line, 128, f)`, so a line of 128 bytes or more
+    is SPLIT and its tail parsed as a record of its own; and
+    `reverse_services()` skips a name of 32 bytes or more, so an
+    over-long name resolves by NAME and stops resolving by PORT —
+    half-working, in the direction nobody would test.
+  - **Every failure mode is silent and looks like the feature
+    working.** musl reports no malformed line, no duplicate, no
+    over-long name: it skips and hands back a number, which is exactly
+    what `ports` prints for a port that genuinely has none. That is
+    why a data file with no code in it has 823 checks, each provoked
+    by breaking the file and watching it fire.
+  Aliases resolve ONE WAY — the forward lookup searches the whole
+  line, the reverse copies the first field only, so `getservbyport(80)`
+  is always `http` however many aliases follow. A port not in the
+  table still prints as a number, which is the right answer: inventing
+  a name for a port nobody registered would be the tool guessing.
 
 ## Architecture: the interface an automated actor uses
 

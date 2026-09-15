@@ -147,6 +147,14 @@ fi
 # `wifi.join <ssid> <passphrase>` with "$args" would write that
 # passphrase into a 0600 log permanently, by the very refusal meant to
 # protect it.
+# test-services.sh is the fifth, and the only one whose subject is a
+# DATA file: /etc/services is parsed by musl rather than by anything
+# in this repository, and every way to get it wrong -- a line past
+# musl's 128-byte fgets buffer, a name past the 32 bytes
+# reverse_services() will copy, a duplicated port -- is skipped
+# silently and comes back as a bare number, which is exactly what a
+# port with no name looks like. A typo in it is indistinguishable from
+# the feature working.
 # test-network-static.sh is the fourth of this shape: `network.address`
 # is the first value in system.conf that becomes an argument to `ip
 # addr add`, and every interesting way to get it wrong is textual --
@@ -158,7 +166,8 @@ for t in packages/tests/test-lib-json.sh packages/tests/test-agent-verbs.sh \
          packages/tests/test-agent-socket.sh packages/tests/test-network-static.sh \
          packages/tests/test-power-idle.sh \
          packages/tests/test-agent-idle.sh \
-         packages/tests/test-state-packages.sh; do
+         packages/tests/test-state-packages.sh \
+         packages/tests/test-services.sh; do
     echo ">>> ${t##*/}"
     if ! bash "$t"; then
         echo ">>> ${t} failed" >&2

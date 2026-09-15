@@ -242,10 +242,14 @@ run live on the build host.
 - **48 KB**, one file, `depends=python`.
 - **The first Python program in this operating system**, which is the
   half of RFC 0026 that was still a claim.
-- **`getservbyport` returns nothing on this system**, because BusyBox
-  ships no `/etc/services`. `ports` prints the number and a dash rather
-  than pretending; a services file is a package-sized decision that
-  belongs with whoever wants named ports.
+- **`getservbyport` returned nothing on this system** for the life of
+  the project, because BusyBox ships no `/etc/services`. `ports`
+  printed the number and a dash rather than pretending. This RFC
+  called a services file "a package-sized decision that belongs with
+  whoever wants named ports", and that was wrong twice over: it is 77
+  lines of text, and it is not the recon tool's file — `getservbyname`
+  and `getservbyport` are libc, so the answer belongs to the machine.
+  Roadmap item 3 below has the shipped version.
 - **`--json` on every subcommand**, and it is the same dict the human
   renderer draws from — one place decides the shape. Two independent
   paths is how the JSON ends up missing a field the table shows, which
@@ -262,6 +266,46 @@ run live on the build host.
 2. **DNSSEC validation**, or an explicit statement that there is none.
    At the moment there is none and the README should say so before
    somebody assumes otherwise.
-3. **`/etc/services`**, so `ports` can name what it finds.
+3. ~~**`/etc/services`**, so `ports` can name what it finds.~~
+   **Done.** `rootfs/etc/services` is base content, installed by
+   `03-base.sh`, 77 entries. Curated rather than IANA's ~14,000-line
+   registry, on the same argument `kernel/config-x86_64` makes about
+   Kconfig: a list somebody chose beats a list nobody has read.
+   Three things it turned out to be about, none of which are the
+   naming:
+
+   - **A PORT NAME IS NOT A POLICY.** Shipping the table is the moment
+     `tcp dport ssh` starts working in `nft`, and RFC 0022's rule is
+     that `/etc/novi/firewall.nft` names ports as NUMBERS — a rule
+     that resolves through a name table means something different on
+     a machine whose table differs. The rule could not be written
+     wrong before because there was no table;
+     `packages/tests/test-services.sh` enforces it now.
+   - **musl's parser has two silent limits**, read out of
+     `src/network/lookup_serv.c` and `src/network/getnameinfo.c`
+     rather than assumed. Both readers use `fgets(line, 128, f)`, so a
+     line of 128 bytes or more is split and its tail parsed as a
+     record of its own; and `reverse_services()` skips any entry whose
+     name is 32 bytes or longer, so an over-long name resolves by NAME
+     and stops resolving by PORT — half-working, in the direction
+     nobody would test. The host test asserts both against the shipped
+     file.
+   - **Every failure here looks like the feature working.** musl does
+     not report a malformed line, a duplicate or an over-long name; it
+     skips and hands back a number, which is exactly what `ports`
+     prints for the hundreds of ports that genuinely have no name.
+     That is why a data file with no code in it got a test with 823
+     checks, and why each of them was provoked by breaking the file on
+     purpose and watching it fire.
+
+   **Aliases resolve one way**, which is worth knowing before adding
+   an entry: the forward lookup searches the whole line, so
+   `getservbyname("www")` finds `http`; the reverse copies the first
+   field only, so `getservbyport(80)` is always `http`. Put the name
+   you want printed first.
+
+   A port that is not in the table still prints as a number, and that
+   is the right answer rather than a gap — inventing a name for a port
+   nobody registered would be the tool guessing.
 4. **Certificate transparency and chain listing** in `tls` — the leaf is
    there, the intermediates are not.
