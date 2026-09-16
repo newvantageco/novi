@@ -3581,7 +3581,43 @@ static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
 		reset_cursor_mode(toplevel->server);
 	}
 
+	/* CLOSING A WINDOW LEFT NOTHING FOCUSED, for the life of this
+	 * compositor. wlroots clears seat focus when the focused surface
+	 * dies, and nothing here ever handed it on -- so after closing a
+	 * window with Super+Q, every binding that acts on "the focused
+	 * window" silently did nothing until the next Alt+Tab or click.
+	 * Found while testing RFC 0038's force-quit, where it looked like
+	 * the new key was broken.
+	 *
+	 * minimize_toplevel() and switch_workspace() have both always
+	 * done this; this is the same MRU-first pick, restricted to the
+	 * ACTIVE workspace -- closing a window must not carry somebody to
+	 * another workspace, which is what focus_toplevel() would do if
+	 * handed a candidate living on one. */
+	struct novi_server *server = toplevel->server;
+	bool had_focus = server->seat->keyboard_state.focused_surface ==
+		toplevel->xdg_toplevel->base->surface;
+
 	wl_list_remove(&toplevel->link);
+
+	if (had_focus) {
+		/* Deliberately no wlr_xdg_toplevel_set_activated(false) on the
+		 * way out, where minimize_toplevel() does send one: that
+		 * window is staying and needs to stop looking focused, this
+		 * one is going away and there is nobody to tell. */
+		struct novi_toplevel *next = NULL, *t;
+		wl_list_for_each(t, &server->toplevels, link) {
+			if (!t->minimized && t->workspace == server->active_workspace) {
+				next = t;
+				break;
+			}
+		}
+		if (next != NULL) {
+			focus_toplevel(next, next->xdg_toplevel->base->surface);
+		} else {
+			wlr_seat_keyboard_notify_clear_focus(server->seat);
+		}
+	}
 
 	if (toplevel->foreign_handle != NULL) {
 		wl_list_remove(&toplevel->foreign_request_maximize.link);

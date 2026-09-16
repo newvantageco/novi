@@ -313,10 +313,13 @@ rule: sampling continues so that the first tick after the screen comes
 back has a real delta rather than one spanning the whole dark period.
 
 **One thing this feature did not cause and ran into anyway:** closing
-the focused window leaves nothing focused, so the very next
-`Super+Shift+Q` does nothing at all. That is novi-shell's unmap path
-having no refocus, it predates all of this, and it is worth fixing
-somewhere that is not here.
+the focused window left nothing focused, so the very next
+`Super+Shift+Q` did nothing at all — which presented as the new key
+being broken, and was novi-shell's unmap path never handing focus on.
+It predates all of this by the life of the compositor;
+`minimize_toplevel()` and `switch_workspace()` have both always done
+it, which is what made the omission look deliberate. Fixed separately
+with the same MRU-first pick, restricted to the active workspace.
 
 ## What this is not
 

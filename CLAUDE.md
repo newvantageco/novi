@@ -1744,11 +1744,18 @@ least half a processor" for ten seconds running.
   argued: it was slow, not stuck, and this said the wrong thing about
   it for four seconds. The cost was one notification, which is the
   whole reason nothing here kills anything.
-- **CLOSING THE FOCUSED WINDOW LEAVES NOTHING FOCUSED**, so the next
-  keybinding that acts on the focused window does nothing at all.
-  `xdg_toplevel_unmap()` has no refocus. It predates RFC 0038 and cost
-  a confused test round there; it is worth fixing somewhere that is
-  not RFC 0038.
+- **CLOSING THE FOCUSED WINDOW LEFT NOTHING FOCUSED**, for the life of
+  this compositor, so the next binding that acts on "the focused
+  window" silently did nothing until an Alt+Tab or a click. wlroots
+  clears seat focus when the focused surface dies and
+  `xdg_toplevel_unmap()` never handed it on --
+  `minimize_toplevel()` and `switch_workspace()` had both always done
+  so, which is what made it look deliberate. Found while testing RFC
+  0038's force-quit, where it presented as the NEW key being broken.
+  Fixed with the same MRU-first pick those two use, restricted to the
+  ACTIVE workspace: closing a window must not carry somebody to
+  another one, which is what `focus_toplevel()` does when handed a
+  candidate living there.
 - **THE SHORTCUT SHEET'S `_Static_assert` FIRED ON THE FIRST ROW ADDED
   SINCE IT WAS WRITTEN.** Twenty bindings at 32px rows is a 769px
   buffer against a 768px limit -- over by one pixel, on a 1366x768
