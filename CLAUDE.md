@@ -1846,6 +1846,88 @@ least half a processor" for ten seconds running.
   now (729px): one more row of headroom and no more, after which the
   answer is two columns or a scroll rather than another pixel.
 
+## Architecture: a process that cannot reach the machine
+
+RFC 0039 (`docs/rfcs/0039-process-isolation.md`). `novi-sandbox` runs a
+program with a root filesystem containing only the paths named on its
+command line, its own process table, and a seccomp filter. `pkg install
+netsurf` puts the browser behind it.
+
+- **RFC 0031 SAID THIS THREE TIMES AND NEVER SCHEDULED IT**, and what
+  it was waiting for was nothing. The kernel has carried `USER_NS`,
+  `PID_NS`, `UTS_NS`, `NET_NS`, `SECCOMP` and `SECCOMP_FILTER` since
+  its config was written; the seccomp and BPF headers are in the
+  sysroot; busybox already ships `unshare`, `nsenter` and `setpriv`.
+  **No new dependency at all** -- the same finding RFC 0031 made about
+  the browser itself, one layer down, and the third time a blocking
+  claim in this repository turned out to be a true statement about
+  something else.
+- **DEFAULT DENY, NAMED ON THE COMMAND LINE.** The new root is an
+  empty tmpfs; a path nobody named is not there. The alternative --
+  mount the real root and over-mount the sensitive parts -- is a
+  denylist of DIRECTORIES, so every future package that puts something
+  private somewhere new is a hole nobody opens a file to notice.
+- **`CLONE_NEWUSER` IN THE SAME CALL AS THE REST.** An unprivileged
+  process may create the other namespaces only as a side effect of
+  creating a user namespace it owns; two separate `unshare()` calls
+  fail with EPERM on the second. That is what keeps this out of the
+  setuid business entirely.
+- **THE NAMESPACE SET IS ASKED FOR, NOT ASSUMED, AND ONLY A BOOTED
+  MACHINE SAID SO.** The first run on Novi's own kernel answered
+  `EINVAL` -- not EPERM, which is the clue: a flag the kernel does not
+  know. `/proc/self/ns/` had no `ipc`, because `CONFIG_IPC_NS` depends
+  on `CONFIG_SYSVIPC` and this kernel deliberately omits it (RFC 0004
+  found the same absence from the other end, in syslogd's `-C`).
+  **`kernel/config-x86_64` had stated `CONFIG_IPC_NS=y` for a kernel
+  that never had it** -- olddefconfig drops a symbol whose dependency
+  is unmet, silently. A symbol this config states and the build
+  discards is the same defect as one the build has to repair.
+- **`MS_NODEV` MADE THE SANDBOX'S OWN `/dev` UNOPENABLE, and the
+  evidence was three layers away.** Every bind got
+  `MS_NOSUID|MS_NODEV`, including the six device nodes the program
+  mounts itself -- and `MS_NODEV` means a node on that mount cannot be
+  OPENED. `/dev/urandom` was present, correct and unreadable; what it
+  looked like from outside was `NetSurf failed to initialise`, and one
+  layer in, `curl_global_init failed`, because mbedTLS could not seed
+  its DRBG. A hardening flag applied uniformly, disabling the one case
+  that needed the exception. The flag is per-bind now.
+- **A BIND MOUNT IS TWO OPERATIONS.** `MS_BIND|MS_RDONLY` in one call
+  does NOT produce a read-only mount: the kernel takes the flags from
+  the source and ignores the rest, so what you get reads as confined
+  and is writable. The remount is what makes it true, and it must
+  repeat `MS_BIND`. This is the classic mistake in every hand-written
+  container and it is silent.
+- **`pivot_root`, NOT `chroot`.** chroot leaves the old root reachable
+  through any directory descriptor that survives it and through `..`
+  from a directory outside the new tree.
+- **THE MOUNTS HAPPEN AFTER A FORK because `CLONE_NEWPID` takes effect
+  for CHILDREN.** The setup runs in a child that is PID 1 of the new
+  namespace, which is also what makes the freshly mounted `/proc` show
+  only the sandbox.
+- **THE FILTER IS A DENYLIST AND THE FILE SAYS SO.** An allowlist is
+  stronger and has to know every syscall the program and its libc will
+  ever make; being wrong turns a working browser into a crash on a
+  page nobody tested. Calling this "seccomp" and letting a reader
+  supply the stronger meaning is the overclaim RFC 0025 warns about
+  with the word "Mesa". `SECCOMP_RET_ERRNO(EPERM)` rather than
+  `KILL_PROCESS`, because a killed process tells the person nothing.
+- **THE ARCHITECTURE CHECK IN FRONT OF THE SYSCALL NUMBERS IS NOT
+  DECORATION.** A syscall number is meaningless without knowing whose
+  table it indexes, and a process entering through the 32-bit compat
+  layer would be filtered against a table that is not its own.
+- **NOT A NETWORK NAMESPACE by default**, and it says which of the two
+  you got. A browser's job is the network; `--no-net` exists for
+  programs with no such excuse.
+- **BASE CONTENT, not part of the browser package**, on RFC 0031
+  roadmap 5's argument for `s6-softlimit`: a confinement tool that
+  arrives only with the browser is one nothing else can be put behind.
+- **THE PROOF THAT THE DENIAL IS THE FILTER is `CapEff` beside
+  `Seccomp`.** Inside, `/proc/self/status` reports
+  `CapEff: 000001ffffffffff` -- every capability -- and `Seccomp: 2`,
+  while `mount` returns permission denied and `mkdir` succeeds. A
+  process holding CAP_SYS_ADMIN in its namespace refused `mount(2)` is
+  refused by the filter and by nothing else.
+
 ## Architecture: two ways to say "not now"
 
 RFC 0036 (`docs/rfcs/0036-idle-inhibitors.md`).

@@ -796,6 +796,45 @@ esac
 # Built up rather than nested four ways, so each `off` really removes
 # its own step instead of selecting one of four spellings of the line.
 set -- "${REAL}" "$@"
+
+# THE SANDBOX (RFC 0039, and roadmap 7 of the RFC the two numbers
+# above came from). Everything before this line changes what a hostile
+# page can do to the MACHINE and nothing about what it can do inside
+# the process that parsed it. novi-sandbox gives that process a root
+# filesystem containing only what is listed here, its own process
+# table, and a seccomp filter.
+#
+# The list is what a browser needs and nothing else, which is the
+# whole point: /root, /home, /etc/novi, /var and every other package's
+# files are simply not there. Read-only except the three that cannot
+# be -- the Wayland socket it draws through, its own profile, and the
+# directory downloads land in.
+#
+# NOT --no-net: a browser's job is the network, and the sandbox says
+# which of the two kinds it gave you rather than letting the word
+# imply both. NOVI_BROWSER_SANDBOX=off for somebody debugging the
+# difference between a page failing and a bind being missing.
+SANDBOX="${NOVI_BROWSER_SANDBOX:-on}"
+case "${SANDBOX}" in
+    off|none|0) SANDBOX="" ;;
+    on|1) SANDBOX=novi-sandbox ;;
+    *)
+        echo "netsurf-fb: NOVI_BROWSER_SANDBOX must be 'on' or 'off'" >&2
+        exit 2 ;;
+esac
+if [ -n "${SANDBOX}" ] && command -v novi-sandbox >/dev/null 2>&1; then
+    RUNTIME="${XDG_RUNTIME_DIR:-/run/user/0}"
+    set -- novi-sandbox \
+        --ro /usr/libexec --ro /usr/lib --ro /usr/share \
+        --ro /etc/ssl --ro /etc/resolv.conf --ro /etc/hosts \
+        --ro /etc/services --ro /etc/nsswitch.conf \
+        --ro /lib \
+        --rw "${RUNTIME}" \
+        --rw "${HOME:-/root}/.netsurf" \
+        --rw "${HOME:-/root}/Downloads" \
+        -- "$@"
+fi
+
 if [ -n "${LIMIT}" ]; then set -- s6-softlimit -a "${LIMIT}" "$@"; fi
 if [ -n "${NICE}" ];  then set -- nice -n "${NICE}" "$@"; fi
 exec "$@"

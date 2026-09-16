@@ -100,7 +100,14 @@ CONFIG_WQ_WATCHDOG=y
 # ─────────────────────────────────────────────
 CONFIG_NAMESPACES=y
 CONFIG_UTS_NS=y
-CONFIG_IPC_NS=y
+# CONFIG_IPC_NS is deliberately absent, and saying so is worth a line:
+# it depends on CONFIG_SYSVIPC, which this kernel does not set, so
+# stating it here achieves nothing -- olddefconfig drops it and the
+# symbol does not reach the built .config. It WAS stated here, inertly,
+# until RFC 0039's sandbox asked for an IPC namespace and `unshare()`
+# answered EINVAL on a machine whose config claimed to have one.
+# A symbol this config states and the build discards is the same defect
+# as one the build has to repair.
 CONFIG_USER_NS=y
 CONFIG_PID_NS=y
 CONFIG_NET_NS=y
