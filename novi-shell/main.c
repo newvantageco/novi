@@ -267,6 +267,10 @@
  * modeset need not touch. Two observables that both look like the
  * feature is broken when it is fine are worse than none. */
 #define NOVI_IDLE_FILE "/run/novi/idle"
+/* Where this compositor can be reached, for the one base tool that
+ * has to start a client on a machine it cannot assume has one. See
+ * display_publish(). */
+#define NOVI_DISPLAY_FILE "/run/novi/display"
 #define NOVI_DEFAULT_POWER_MENU "novi-launcher --power"
 #define NOVI_DEFAULT_THEMES "novi-launcher --themes"
 /* RFC 0034. The history lives in a file novi-notifyd publishes, so
@@ -911,6 +915,37 @@ static int idle_inhibit_active(struct novi_server *server,
 		n++;
 	}
 	return n;
+}
+
+/* WHERE THIS COMPOSITOR IS, published once at startup (RFC 0035
+ * roadmap 1). Nothing here needed it until a base tool did: `novi-power
+ * event lid` runs from acpid on a machine that may have no compositor
+ * at all, and to lock before suspending it has to start a Wayland
+ * client -- which means knowing the socket name and the runtime
+ * directory. Guessing `wayland-0` would be a second opinion about a
+ * fact this process is the only authority on, which is the split-brain
+ * RFC 0035's own roadmap item warned the design had to avoid.
+ *
+ * So: the same published-state arrangement as /run/novi/idle,
+ * /run/novi/theme and /run/novi/network.device. One writer, temp file
+ * and rename, and removed on a clean exit -- a stale file after a
+ * crash points at a dead socket, which the reader finds out about by
+ * failing to lock rather than by being misled about anything else. */
+static void display_publish(const char *socket) {
+	char tmp[] = NOVI_DISPLAY_FILE ".tmp";
+	FILE *f = fopen(tmp, "w");
+	if (f == NULL) {
+		return;
+	}
+	fprintf(f, "WAYLAND_DISPLAY %s\n", socket);
+	const char *rundir = getenv("XDG_RUNTIME_DIR");
+	if (rundir != NULL && rundir[0] != '\0') {
+		fprintf(f, "XDG_RUNTIME_DIR %s\n", rundir);
+	}
+	fclose(f);
+	if (rename(tmp, NOVI_DISPLAY_FILE) != 0) {
+		unlink(tmp);
+	}
 }
 
 /* One `key value` line per fact, rewritten each tick, to a temp name
@@ -4017,6 +4052,7 @@ int main(int argc, char *argv[]) {
 	/* Set the WAYLAND_DISPLAY environment variable to our socket and run the
 	 * startup command if requested. */
 	setenv("WAYLAND_DISPLAY", socket, true);
+	display_publish(socket);
 	if (startup_cmd) {
 		if (fork() == 0) {
 			execl("/bin/sh", "/bin/sh", "-c", startup_cmd, (void *)NULL);
@@ -4079,6 +4115,11 @@ int main(int argc, char *argv[]) {
 	/* Once wl_display_run returns, we destroy all clients then shut down the
 	 * server. */
 	novi_decor_finish();
+	/* Nothing can be reached here any more, so stop saying where it
+	 * is. A file left behind would send `novi-power event lid`'s lock
+	 * attempt at a socket that is gone -- recoverable (it times out
+	 * and suspends anyway) but a lie while it lasts. */
+	unlink(NOVI_DISPLAY_FILE);
 	wl_display_destroy_clients(server.wl_display);
 	wlr_scene_node_destroy(&server.scene->tree.node);
 	wlr_xcursor_manager_destroy(server.cursor_mgr);

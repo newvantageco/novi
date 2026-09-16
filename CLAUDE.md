@@ -2649,9 +2649,28 @@ already had for `power.blank`, spawning `novi-power suspend`.
   to it; one that suspended unlocked is not. The retry is a full
   timeout away, or a broken lock screen writes a log line every five
   seconds forever.
-- **A lid-close suspend still does not lock.** Somebody closing a lid
-  is present, and that path is novi-power's — a base tool that runs on
-  machines with no compositor to ask.
+- **A LID-CLOSE SUSPEND LOCKS NOW** (RFC 0035 roadmap 1), and what
+  unblocked it was publishing rather than guessing. novi-power runs
+  from acpid on a machine that may have no compositor, and locking
+  means starting a Wayland client — so **novi-shell publishes
+  `/run/novi/display`** (`WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR`,
+  temp-and-rename, unlinked on a clean exit). A base tool assuming
+  `wayland-0` is the split-brain that item was left open for; the file
+  is either there and authoritative or absent, and absent means there
+  is nothing to lock.
+- **`power.lid.lock` SUSPENDS EITHER WAY, and `power.suspend.lock`
+  does not. That is why they are two keys.** An idle suspend fires
+  with nobody there, so refusing without the lock costs a machine left
+  awake on a desk, which anyone walking up to it can fix. A closed lid
+  is a machine in a BAG: refusing there trades a shoulder-surfing risk
+  for a thermal one on hardware nobody can see, which is the failure
+  RFC 0013 handled the lid for in the first place. It waits ~6 s and
+  then sleeps regardless, saying in the log which happened.
+- **It waits for the COMPOSITOR's `locked 1`, not for the process to
+  exist.** novi-lockscreen refuses to run at all without a password,
+  and a running-but-unmapped client is the same race novi-shell's own
+  suspend path waits out. Only the lid path locks — a power button is
+  pressed by somebody standing there.
 - **A machine with NO PASSWORD never idle-suspends** with the lock on,
   and that is two correct behaviours composing into a surprising one:
   novi-lockscreen refuses to run without a password (a lock nobody can
@@ -2682,6 +2701,30 @@ already had for `power.blank`, spawning `novi-power suspend`.
   like proof of the reset above and was worthless: a wedged guest also
   does not re-suspend. That claim is reasoning from the mechanism now,
   and says so.
+
+## Architecture: two ways a check can lie about a build
+
+Both of these cost real time in one session, and both produced output
+that read as success.
+
+- **`bash build/NN-foo.sh` FOR A STAGE NUMBER THAT DOES NOT EXIST
+  PRINTS ONE LINE, AND A PIPED GREP EATS IT.** novi-shell is
+  `07-novi-shell.sh`; `12` is novi-screenshot. Running
+  `bash build/12-novi-shell.sh 2>&1 | grep -E 'error|warning|installed'`
+  produces NOTHING — the shell's own "No such file or directory" does
+  not match the pattern — which is exactly what a clean build looks
+  like. The stale binary beside it then had the right size and an
+  old timestamp nobody read. **Check the artifact for the thing you
+  changed** (`strings … | grep -c` for a new literal), not the
+  command's silence: the same rule this file already states about
+  hardening flags, one level out.
+- **`pkill -f <pattern>` MATCHES THE SHELL RUNNING IT.** A compound
+  command that mentions the pattern anywhere — even in a later
+  argument — kills itself, and the harness reports exit 144 with the
+  rest of the command silently not run. It also makes `pgrep -f qemu`
+  answer "alive" about a VM that died hours ago, because the match is
+  the grep's own command line. Use `pkill -x` on the binary name, or
+  check `ps -p` on a pid you captured.
 
 ## Architecture: "up" is not "working"
 

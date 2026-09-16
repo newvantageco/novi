@@ -1097,6 +1097,20 @@ observe_key() {
                 *) printf 'unsupported' ;;
             esac
             ;;
+        # Whether a LID-CLOSE suspend locks first (RFC 0035 roadmap 1).
+        # Same shape and the same default as the key above, and a
+        # different key because the two answer different questions: an
+        # idle suspend happens with nobody there and REFUSES to run
+        # without the lock, while a closed lid suspends either way --
+        # a laptop in a bag that does not sleep is the failure RFC
+        # 0013 handled the lid for in the first place.
+        power.lid.lock)
+            case "$(state_get "$key")" in
+                ''|on) printf 'on' ;;
+                off) printf 'off' ;;
+                *) printf 'unsupported' ;;
+            esac
+            ;;
         # storage.automount is the same shape as power.lid, for the
         # same reason: novi-mount reads it when a device arrives, so
         # there is no daemon holding it, it cannot drift, and `apply`
@@ -1541,6 +1555,13 @@ converge_key() {
         # Read on novi-shell's idle tick, like power.blank. Nothing to
         # converge; `apply` is where the typo is reported.
         power.suspend.lock)
+            case "$want" in
+                on|off) : ;;
+                *) die "$key: must be 'on' or 'off', got '$want'" ;;
+            esac
+            ;;
+        # Read at event time by novi-power, like power.lid itself.
+        power.lid.lock)
             case "$want" in
                 on|off) : ;;
                 *) die "$key: must be 'on' or 'off', got '$want'" ;;
@@ -2136,6 +2157,7 @@ Keys:
   power.blank                     <seconds> | off  (idle screen blank)
   power.suspend                   <seconds> | off  (idle suspend; off by default)
   power.suspend.lock              on | off  (lock before an idle suspend)
+  power.lid.lock                  on | off  (lock before a lid-close suspend)
   power.governor                  performance | powersave | schedutil | ...
   power.lid                       suspend | poweroff | ignore  (lid switch)
   power.button                    suspend | poweroff | ignore  (power button)

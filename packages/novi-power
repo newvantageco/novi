@@ -116,6 +116,119 @@ cmd_status() {
     return 0
 }
 
+# ---------------------------------------------------------------------------
+# Locking before a LID-CLOSE suspend (RFC 0035 roadmap 1)
+# ---------------------------------------------------------------------------
+#
+# RFC 0035 left this open with a reason rather than a shrug: novi-power
+# runs on machines with no compositor, so it cannot assume one is there
+# to ask, and a base tool that guesses `wayland-0` is the split-brain
+# this project keeps refusing. What changed is that novi-shell PUBLISHES
+# where it is (/run/novi/display), so there is nothing to guess: either
+# the file is there and says how to reach a compositor, or there is no
+# compositor and there is nothing to lock.
+#
+# THE ASYMMETRY WITH AN IDLE SUSPEND IS DELIBERATE AND IS THE WHOLE
+# DESIGN. novi-shell refuses to idle-suspend at all if the lock screen
+# does not appear, because a machine left awake on a desk is
+# recoverable by whoever walks up to it and one that suspended unlocked
+# is not. A CLOSED LID IS NOT THAT SITUATION: the machine is in a bag.
+# RFC 0013's own opening argument for handling the lid is that it "goes
+# in a bag at 80% and comes out flat, having run at full tilt in an
+# enclosed space" -- so refusing to suspend here would trade a
+# shoulder-surfing risk for a thermal one, on a machine nobody can see.
+# So this waits, briefly, and then suspends either way, saying which
+# happened. Every other desktop makes the same call.
+NOVI_DISPLAY_FILE=/run/novi/display
+NOVI_IDLE_FILE=/run/novi/idle
+# Long enough for novi-lockscreen to map on a slow machine, short
+# enough that a closed lid is not sitting there running. Each step is
+# a second, and the loop stops the moment the compositor says `locked`.
+LID_LOCK_WAIT=6
+
+# Is the screen locked right now, according to the one process that
+# knows? Absent file or absent key is "no", not an error: this is only
+# ever asked on a machine that has already been found to have a
+# compositor.
+compositor_locked() {
+    [ -r "$NOVI_IDLE_FILE" ] || return 1
+    local key value
+    while read -r key value; do
+        case "$key" in
+            locked) [ "$value" = "1" ] && return 0 ;;
+        esac
+    done < "$NOVI_IDLE_FILE"
+    return 1
+}
+
+# Lock the screen before a lid-close suspend, if there is a compositor
+# and the document asks for it. Always returns 0: the caller suspends
+# regardless, and this function's job is to say what happened, not to
+# decide whether the machine sleeps.
+lock_for_lid() {
+    case "$(policy power.lid.lock on)" in
+        on) : ;;
+        off) return 0 ;;
+        *)  warn "power.lid.lock is not 'on' or 'off' -- not locking"
+            return 0 ;;
+    esac
+
+    if [ ! -r "$NOVI_DISPLAY_FILE" ]; then
+        # No compositor: a console machine, or a desktop that is not
+        # running. Not a failure and not worth a warning -- there is
+        # no screen to lock.
+        return 0
+    fi
+    if compositor_locked; then
+        return 0
+    fi
+
+    local key value wl_display='' runtime_dir=''
+    while read -r key value; do
+        case "$key" in
+            WAYLAND_DISPLAY)  wl_display="$value" ;;
+            XDG_RUNTIME_DIR)  runtime_dir="$value" ;;
+        esac
+    done < "$NOVI_DISPLAY_FILE"
+    if [ -z "$wl_display" ]; then
+        warn "${NOVI_DISPLAY_FILE} names no WAYLAND_DISPLAY -- suspending unlocked"
+        return 0
+    fi
+    if ! command -v novi-lockscreen >/dev/null 2>&1; then
+        warn "novi-lockscreen is not installed -- suspending unlocked"
+        return 0
+    fi
+
+    logger -t novi-power -p daemon.info "lid: locking before suspend" 2>/dev/null || true
+    WAYLAND_DISPLAY="$wl_display" \
+    XDG_RUNTIME_DIR="${runtime_dir:-/run/user/0}" \
+        novi-lockscreen >/dev/null 2>&1 &
+
+    # Wait for the COMPOSITOR to say the lock surface is up, not for
+    # the process to exist. novi-lockscreen refuses to run at all on a
+    # machine with no password (RFC 0035: a lock nobody can open is an
+    # unusable machine), and a running-but-unmapped client is exactly
+    # the race novi-shell's own suspend path waits out.
+    local waited=0
+    while [ "$waited" -lt "$LID_LOCK_WAIT" ]; do
+        if compositor_locked; then
+            return 0
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+
+    # Said out loud, every time, because it is the one case where this
+    # machine goes to sleep showing whatever was on screen. A silent
+    # version of this is how somebody finds out by opening the lid.
+    warn "the screen did not lock within ${LID_LOCK_WAIT}s -- suspending anyway"
+    warn "a closed lid that does not sleep is worse than one that sleeps unlocked;"
+    warn "set power.lid.lock = off to stop trying, or check that a password is set"
+    logger -t novi-power -p daemon.warn \
+        "lid: lock did not come up in ${LID_LOCK_WAIT}s, suspended unlocked" 2>/dev/null || true
+    return 0
+}
+
 cmd_suspend() {
     [ "$(id -u)" -eq 0 ] || die "suspending requires root."
     [ -w /sys/power/state ] || die "this kernel has no suspend support"
@@ -283,6 +396,14 @@ cmd_event() {
         ignore)
             ;;
         suspend)
+            # Only the LID path locks. A power button pressed by
+            # somebody standing at the machine is the case RFC 0035
+            # already reasoned about -- they are present -- and it is
+            # `power.button = suspend`, a different key with a
+            # different default.
+            if [ "$what" = lid ]; then
+                lock_for_lid
+            fi
             cmd_suspend
             ;;
         poweroff)

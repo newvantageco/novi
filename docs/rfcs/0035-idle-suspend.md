@@ -195,9 +195,54 @@ the mechanism, and it wants a KVM-capable host to become a fact.
 
 ## Roadmap
 
-1. **Locking a lid-close suspend too**, which needs novi-power to be
-   able to ask a compositor that may not exist — the split-brain this
-   project avoids, so it wants a design rather than a flag.
+1. ~~**Locking a lid-close suspend too**~~ — **done**, and the design
+   the item asked for turned out to be one published file.
+   `power.lid.lock`, on by default.
+
+   **The obstacle was real and it was solved by publishing, not by
+   guessing.** novi-power runs from acpid on a machine that may have
+   no compositor at all, and to lock it has to start a Wayland client
+   — which needs a socket name. A base tool that assumes `wayland-0`
+   is exactly the split-brain this item was left open for. So
+   **novi-shell publishes `/run/novi/display`** (`WAYLAND_DISPLAY` and
+   `XDG_RUNTIME_DIR`, temp-and-rename, removed on a clean exit), the
+   same arrangement as `/run/novi/idle`, `/run/novi/theme` and
+   `/run/novi/network.device`. Either the file is there and says how
+   to reach a compositor, or there is none and there is nothing to
+   lock.
+
+   **IT SUSPENDS EITHER WAY, which is the opposite of
+   `power.suspend.lock` and is the whole reason these are two keys.**
+   An idle suspend fires with nobody there, so refusing to run without
+   the lock costs a machine left awake on a desk — recoverable by
+   whoever walks up to it. A closed lid is a machine in a BAG, and
+   refusing there trades a shoulder-surfing risk for a thermal one on
+   hardware nobody can see. RFC 0013 handled the lid in the first
+   place because a laptop that keeps running in a bag "comes out flat,
+   having run at full tilt in an enclosed space". So novi-power tries,
+   waits ~6 s for the compositor's own `locked 1` — **the compositor's
+   published state, not the existence of the process**, because
+   novi-lockscreen refuses to run at all without a password and a
+   running-but-unmapped client is the race novi-shell's own suspend
+   path waits out — and then sleeps regardless, saying in the log
+   which of the two happened.
+
+   **Only the lid path locks**, not `power.button = suspend`: somebody
+   pressing the button is standing at the machine, which is the case
+   this RFC already reasoned about.
+
+   Verified on a booted machine, all four branches:
+   - `power.lid.lock = off` → straight to suspend, no attempt;
+   - no `/run/novi/display` → straight to suspend, **and no warning**,
+     because a console machine has no screen to lock;
+   - lock on, no password → 5.3 s, two warnings naming both remedies,
+     then suspend;
+   - lock on, password set → **the lock screen on screen four seconds
+     after the event**, then a genuine suspend: QMP reports
+     `"status": "suspended", "running": false`, and the last frame the
+     display holds is the lock screen. That status is a better answer
+     than this RFC could get for the idle path, where QEMU reported
+     the VM "running" on a guest that never resumed.
 2. **Low battery.** The other half of RFC 0013's power story: QEMU
    emulates no battery, so it could be written and not verified.
 3. ~~**Inhibitors.**~~ Done — **RFC 0036**. The compositor implements
