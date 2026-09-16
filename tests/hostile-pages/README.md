@@ -10,6 +10,10 @@ around that**.
     sh run.sh 10                    # load each page, 10s each
     sh memcheck.sh <page> 40        # VmPeak/VmHWM for ONE page
 
+`NOVI_BROWSER_SANDBOX=off` in the environment takes RFC 0039's sandbox
+out of the wrapper; that is how both columns of the table below were
+taken.
+
 `run.sh` and `memcheck.sh` run **on a booted Novi with the desktop
 up**. They serve the corpus from the machine itself with busybox
 `httpd` on 127.0.0.1, so a failure is the browser's and not a
@@ -92,13 +96,87 @@ considered and rejected: it is cumulative over the process's whole
 life, so it cannot say "this layout is taking too long" without also
 killing a long browsing session that has done nothing wrong.
 
+## What roadmap 1 of RFC 0039 changed: nothing, and that is the finding
+
+The browser runs under `novi-sandbox` now. The obvious question was
+whether a private `/tmp` and a root filesystem holding eight
+directories change what a hostile page does. Both tables were taken on
+one booted machine, ten seconds a page, minutes apart:
+
+| page | CPU, no sandbox | CPU, sandboxed | VmPeak @40s, no sandbox | VmPeak @40s, sandboxed |
+|---|---|---|---|---|
+| `bad-encoding.html` (control) | 2% | 3% | 21,660 kB | 21,660 kB |
+| `css-pathological.html` | 14% | 16% | | |
+| `deep-tables.html` | 56% | 60% | | |
+| `refresh-loop.html` | 23% | 24% | | |
+| `deep-nesting.html` | **100%** | **100%** | 28,864 kB | 27,784 kB |
+| `long-line.html` | **100%** | **100%** | 42,996 kB | 42,996 kB |
+| `huge-table.html` | **98%** | **97%** | 518,144 kB | 518,144 kB |
+| `many-siblings.html` | **98%** | **99%** | 516,384 kB | 516,384 kB |
+| `unclosed-tags.html` | **100%** | **100%** | 216,412 kB | 211,980 kB |
+
+Both runs: **survived 11, spinning 5, died 0, unmeasured 0**, the same
+five pages spinning, and no leftover browsers either time.
+
+Three of the six memory figures are identical to the byte. The two
+that differ are the two pages still *growing* when they were sampled,
+so the difference is where each happened to be at 40 seconds and not a
+property of the sandbox — `unclosed-tags.html` passes 211,980 kB on
+its way to 615,096 kB at 200 seconds and does not stop.
+
+**That is the honest answer: the sandbox does not change whether a
+page fails, what it costs in CPU, or what it costs in memory.** What a
+layout engine allocates is its own heap, and no mount list touches it.
+The sandbox bounds what a page that fails can *reach* — which is a
+different property, and not one this corpus can measure.
+
+**Roadmap 5's ceiling is still there underneath it**, which was worth
+checking rather than assuming, because the wrapper gained a process
+between `s6-softlimit` and the browser. `RLIMIT_AS` is inherited
+across the sandbox's `fork()` and `execve()` into the new namespace:
+`unclosed-tags.html` sandboxed reads **1,048,576 kB at 700 seconds,
+AT THE CEILING**, the same number and the same held plateau it
+reached without one.
+
+### What the attempt found instead
+
+Pointing this harness at a sandboxed browser turned up three defects,
+none of them in the corpus:
+
+- **The harness was measuring the wrong process.** The wrapper's job
+  pid is `novi-sandbox`, which forks and waits: **0% CPU and 848 kB**
+  of address space, on a page burning 98% of a core three lines down
+  in the same probe. Unchanged, `run.sh` would have reported this
+  entire corpus as harmless the day the sandbox shipped — the
+  strongest possible result, and false. It resolves the browser under
+  the job pid now, and prints `UNMEASURED` rather than a number about
+  something else.
+- **`kill` on the job left a runaway behind.** novi-sandbox forwarded
+  nothing, so the supervisor died and the browser did not. Sixteen
+  pages, sixteen orphans, on the corpus that took this machine down
+  twice. Fixed in novi-sandbox (RFC 0039 decision 12), and this script
+  checks for leftovers at the end of every run.
+- **A sandboxed process cannot be SIGTERMed from outside.** It is pid 1
+  of its own PID namespace, and the kernel discards a signal still at
+  `SIG_DFL` that comes from beyond it — while `kill(2)` returns 0. So
+  both scripts use `kill -9`, and RFC 0038's force-quit key skips its
+  polite stage for such a window.
+
+And one measurement corrected another: a single sample taken 13
+seconds in showed `many-siblings.html` at 312,948 kB unsandboxed
+against 273,928 kB sandboxed, which reads as a 39 MB saving. At 40
+seconds both are 516,384 kB. **A sample taken while the number is
+still moving is not a comparison.**
+
 ## What is NOT established
 
 **Safety.** Surviving a corpus is not a safety property. This finds
 crashes and hangs on shapes somebody thought of. It says nothing about
-memory disclosure, nothing about the shapes nobody thought of, and
-nothing about the absence of a sandbox — which remains true whatever
-these scripts print.
+memory disclosure and nothing about the shapes nobody thought of.
+There is a sandbox now (RFC 0039), and it does not change that
+sentence: it is a denylist filter and a mount namespace, not an
+allowlist and not a defence against a kernel bug, and nothing here
+tests it.
 
 **A green `run.sh` means "did not fall over".** It has never meant
 safe, and the script says so on every run.

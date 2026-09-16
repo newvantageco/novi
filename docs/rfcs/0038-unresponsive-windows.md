@@ -148,6 +148,29 @@ one wedged window of a program with several takes them all. There is no
 third option — **a client that cannot read its socket cannot act on a
 per-window request at all**, and the process is the only lever left.
 
+**A SANDBOXED WINDOW HAS NO SIGTERM STAGE, and the kernel is what
+removed it.** A client under `novi-sandbox` (RFC 0039 — the browser, on
+this machine) is pid 1 of its own PID namespace, and the kernel gives
+such a process the protection it gives the machine's own init: a signal
+whose disposition is still `SIG_DFL` is *discarded* when it is sent
+from outside the namespace, and `kill(2)` returns 0 for it. Measured on
+a booted machine, against a process under the sandbox: `kill` reported
+success, the process was still there two seconds later, `kill -9` ended
+it.
+
+So on those windows the polite stage was not merely unlikely to work —
+it could not work, it cost a keypress, and this compositor logged that
+it had signalled the window. `novi_procstat_is_ns_init()` reads
+`NSpid:` out of `/proc/<pid>/status` and the stage is skipped, with the
+log saying why. It answers *false* when it cannot tell, so a failed
+read leaves the ordinary two-stage path rather than escalating: an
+instrument failing must not be what turns a SIGTERM into a SIGKILL.
+
+That decision is narrower than it looks. It applies only where the
+watchdog has *already* established the window cannot hear a request —
+everything above about a healthy window still holds, and there `Super+
+Shift+Q` is still `window.close`, sandbox or no sandbox.
+
 ### 6. The pid is checked before it is signalled.
 
 A pid is a number the kernel reuses, and this is the only place in this

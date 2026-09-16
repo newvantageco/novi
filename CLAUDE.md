@@ -1927,6 +1927,58 @@ netsurf` puts the browser behind it.
   while `mount` returns permission denied and `mkdir` succeeds. A
   process holding CAP_SYS_ADMIN in its namespace refused `mount(2)` is
   refused by the filter and by nothing else.
+- **A SANDBOXED PROCESS CANNOT BE SIGTERMed FROM OUTSIDE, AND `kill`
+  RETURNS 0.** It is pid 1 of its own PID namespace, and the kernel
+  gives such a process the protection it gives the machine's own init:
+  a signal still at `SIG_DFL` coming from beyond the namespace is
+  DISCARDED. Measured -- `kill` succeeded, the process was still there
+  two seconds later, `kill -9` ended it. Three things follow, and none
+  of them were obvious: the supervisor FORWARDS signals and makes the
+  SECOND one SIGKILL (a first forward may be thrown away and from
+  outside that is indistinguishable from a clean shutdown);
+  `PR_SET_PDEATHSIG` is SIGKILL for the same reason; and RFC 0038's
+  force-quit SKIPS its polite stage for such a window
+  (`novi_procstat_is_ns_init()` reads `NSpid:`), because a stage that
+  cannot fire and logs that it did is worse than no stage.
+- **WITHOUT THAT FORWARDING IT LEAKED A RUNAWAY PER INVOCATION.**
+  novi-sandbox forks and waits, so `kill <novi-sandbox>` ended the
+  supervisor and left the child running with nobody waiting on it --
+  watched live with a `sleep 300`, and the first real caller is a
+  corpus of hostile pages run sixteen times in a row. A shell's Ctrl+C
+  hid it: that signals the whole foreground process group, so both got
+  it, and only a `kill` aimed at a pid exposed it.
+- **`getppid()` IS 0 IN A NEW PID NAMESPACE**, so the standard
+  `PR_SET_PDEATHSIG` race check -- compare `getppid()` against the pid
+  captured before the fork -- can never pass and exits the child every
+  time. The first build did exactly that, presenting as a supervisor
+  exiting 125 with nothing on stderr. A pipe (child closes its write
+  end, then tests for EOF) says the same thing without needing a shared
+  namespace.
+- **THE CORPUS UNDER IT IS THE SAME TABLE** (RFC 0039 roadmap 1,
+  `tests/hostile-pages/README.md`): eleven survived, five spinning,
+  zero died, CPU within a few points, and peak memory identical to the
+  byte on every page that had stopped growing when it was sampled.
+  **The sandbox does not change whether a page fails or what failing
+  costs** -- what a layout engine allocates is its own heap and no
+  mount list touches it. It changes what a page that fails can REACH,
+  which that corpus cannot measure. A negative result, and the item
+  had guessed otherwise.
+- **THE HARNESS WOULD HAVE REPORTED THE WHOLE CORPUS HARMLESS.** The
+  wrapper's job pid is `novi-sandbox`, blocked in `waitpid`: 0% CPU and
+  848 kB of address space, on a page burning 98% of a core. An
+  instrument that answers about the wrong process is worse than one
+  that refuses to answer -- `run.sh` resolves the browser under the job
+  pid now and prints `UNMEASURED` when it cannot find it.
+- **A SAMPLE TAKEN WHILE THE NUMBER IS STILL MOVING IS NOT A
+  COMPARISON.** One probe 13 seconds in showed `many-siblings.html` at
+  312,948 kB unsandboxed against 273,928 kB sandboxed -- a 39 MB
+  saving that does not exist. At 40 seconds both are 516,384 kB.
+- **A BUSYBOX APPLET RUN AS `busybox httpd` HAS `busybox` AS ITS
+  COMM**, so `pgrep httpd` and `pkill -x httpd` both miss it. Both
+  harness scripts matched their own HTTP server by name and neither
+  could find it; the symptom was `httpd: bind: Address in use` from a
+  run whose previous line had just tried to clear the port. Match the
+  command line.
 
 ## Architecture: two ways to say "not now"
 

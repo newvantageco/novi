@@ -1936,7 +1936,26 @@ static void force_quit_focused(struct novi_server *server) {
 		return;
 	}
 
-	int sig = toplevel->kill_stage == 0 ? SIGTERM : SIGKILL;
+	/* THE POLITE STAGE DOES NOT EXIST FOR A SANDBOXED WINDOW, and
+	 * that is a kernel rule rather than a preference. A client under
+	 * novi-sandbox (RFC 0039) is pid 1 of its own PID namespace, and a
+	 * signal still at SIG_DFL is DISCARDED when it is sent to such a
+	 * process from outside -- with kill(2) returning 0, so nothing
+	 * here would notice. Measured on a booted machine: `kill`
+	 * succeeded and the process was still there; `kill -9` ended it.
+	 *
+	 * Keeping the SIGTERM stage anyway would spend a keypress on
+	 * nothing and log that it had signalled the window. So the stage
+	 * is skipped for these, and the log says why -- the person pressed
+	 * a key called force-quit on a window the watchdog has already
+	 * established cannot hear a request, and RFC 0038's reason for
+	 * asking first (the program may still save something) is exactly
+	 * what the kernel has ruled out here.
+	 *
+	 * False when it cannot tell, so a failed read leaves the ordinary
+	 * two-stage path rather than escalating. */
+	bool ns_init = novi_procstat_is_ns_init((int)toplevel->client_pid);
+	int sig = (toplevel->kill_stage == 0 && !ns_init) ? SIGTERM : SIGKILL;
 	if (kill(toplevel->client_pid, sig) != 0) {
 		wlr_log_errno(WLR_ERROR, "force-quit: could not signal pid %d",
 			(int)toplevel->client_pid);
@@ -1946,7 +1965,10 @@ static void force_quit_focused(struct novi_server *server) {
 		sig == SIGTERM ? "SIGTERM" : "SIGKILL",
 		xdg_toplevel->title != NULL ? xdg_toplevel->title : "(untitled)",
 		(int)toplevel->client_pid,
-		sig == SIGTERM ? " -- press the key again if it is still there" : "");
+		sig == SIGTERM ? " -- press the key again if it is still there" :
+			(ns_init && toplevel->kill_stage == 0 ?
+				" -- it is pid 1 of its own namespace, where SIGTERM "
+				"would have been discarded" : ""));
 	toplevel->kill_stage = 1;
 }
 

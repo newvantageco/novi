@@ -66,4 +66,29 @@ bool novi_procstat_read(int pid, unsigned long long *cpu,
 int novi_procstat_cpu_percent(unsigned long long delta, int window_ms,
 	long clk_tck);
 
+/* Is this process the init of a PID namespace nested inside ours?
+ *
+ * IT MATTERS BECAUSE SIGTERM DOES NOT REACH ONE. The kernel gives the
+ * init of a PID namespace the same protection it gives the machine's
+ * own init: a signal whose disposition is still SIG_DFL is DISCARDED
+ * when it is sent from outside that namespace, and kill(2) returns 0
+ * for it. Measured on a booted Novi against a process under
+ * novi-sandbox (RFC 0039): `kill` succeeded, the process was still
+ * there, `kill -9` ended it. SIGKILL and SIGSTOP are the exception the
+ * kernel makes.
+ *
+ * So the polite stage of a force-quit is not merely unlikely to work
+ * on a sandboxed window -- it cannot work, and it reports success. The
+ * answer comes from `NSpid:` in /proc/<pid>/status, which lists the
+ * process's pid at each namespace level outermost-first: two or more
+ * fields with 1 last means it is pid 1 somewhere below us.
+ *
+ * Takes the file's text so the parse is host-testable; the _pid form
+ * reads the file. Both answer FALSE when they cannot tell -- an
+ * unreadable file or a kernel with no NSpid line leaves the caller on
+ * its ordinary path, because the failure of an instrument must not be
+ * what escalates a signal. */
+bool novi_procstat_status_is_ns_init(const char *status_text);
+bool novi_procstat_is_ns_init(int pid);
+
 #endif /* NOVI_PROCSTAT_H */

@@ -149,6 +149,60 @@ int main(void) {
 	ok(novi_procstat_cpu_percent(200, -5, 100) == -1,
 		"a negative window says \"cannot tell\"");
 
+	/* ---- NSpid, and what a pid namespace does to SIGTERM ---------
+	 *
+	 * The interesting cases are the ones a build host cannot produce:
+	 * this machine's own processes all have a one-field NSpid, so the
+	 * nesting this function exists to detect never appears in a live
+	 * sample. Same argument as the comm cases above. */
+	ok(!novi_procstat_status_is_ns_init("NSpid:\t4321\n"),
+		"one field is a process in our own namespace, not an init");
+	ok(novi_procstat_status_is_ns_init("NSpid:\t4321\t1\n"),
+		"two fields ending in 1 is the init of a nested namespace");
+	ok(novi_procstat_status_is_ns_init("NSpid:\t4321\t77\t1\n"),
+		"three fields ending in 1 is an init two levels down");
+	ok(!novi_procstat_status_is_ns_init("NSpid:\t4321\t77\n"),
+		"a nested process that is not its namespace's init");
+	ok(!novi_procstat_status_is_ns_init("NSpid:\t1\n"),
+		"pid 1 of THIS namespace is not something below us");
+
+	/* A kernel with no NSpid line, and a caller with nothing to read,
+	 * both have to answer "no" -- the escalation this drives must not
+	 * be reached by an instrument failing. */
+	ok(!novi_procstat_status_is_ns_init("Name:\tfoo\nPid:\t9\n"),
+		"a status with no NSpid line says no");
+	ok(!novi_procstat_status_is_ns_init(""), "empty text says no");
+	ok(!novi_procstat_status_is_ns_init(NULL), "NULL says no");
+	ok(!novi_procstat_is_ns_init(-1), "a pid that cannot exist says no");
+	ok(!novi_procstat_is_ns_init(0), "pid 0 says no");
+
+	/* Anchored at the start of a line. Every other field in this file
+	 * holds a value, and one of them is `Name:`, which is the process's
+	 * own comm -- so "NSpid: 1 1" is text a process can put there
+	 * itself. Finding it anywhere would be answering a question about
+	 * a string somebody else chose. */
+	ok(!novi_procstat_status_is_ns_init("Name:\tNSpid:\t9\t1\nPid:\t9\n"),
+		"NSpid inside another field's value is not the NSpid line");
+	ok(novi_procstat_status_is_ns_init(
+			"Name:\tsh\nState:\tS\nNSpid:\t9\t1\nVmPeak:\t12 kB\n"),
+		"the real line is found among the others");
+
+	/* Junk in the list is not a nesting claim. A line that has been
+	 * truncated mid-number, or that holds something other than
+	 * numbers, must not be read as "this is an init" -- that is the
+	 * direction where a wrong answer costs a SIGKILL. */
+	ok(!novi_procstat_status_is_ns_init("NSpid:\t4321\tx1\n"),
+		"a non-numeric field is not a pid list");
+	ok(!novi_procstat_status_is_ns_init("NSpid:\t4321\t1x\n"),
+		"a number with a tail is not a pid");
+	ok(!novi_procstat_status_is_ns_init("NSpid:\n"),
+		"an empty list is not a nesting");
+	/* No trailing newline: /proc always supplies one, and a parser
+	 * that needs it would be depending on the file rather than on the
+	 * text it was handed. */
+	ok(novi_procstat_status_is_ns_init("NSpid:\t4321\t1"),
+		"the last line needs no newline");
+
 	if (failures > 0) {
 		fprintf(stderr, "procstat: %d of %d checks FAILED\n", failures, checks);
 		return 1;

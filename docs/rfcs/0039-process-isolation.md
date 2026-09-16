@@ -167,6 +167,67 @@ directory should still get a browser that starts and complains about
 fonts itself, rather than a sandbox that refuses to run and reports a
 path.
 
+### 12. The supervisor forwards signals, and a second one is SIGKILL.
+
+`novi-sandbox` forks and waits — decision 4 — so there are two
+processes where a caller expects one, and a signal aimed at the pid the
+caller holds reaches the wrong one. Watched live before this was
+fixed: `kill <novi-sandbox>` ended the supervisor and left `sleep 300`
+running with nobody waiting on it. One leaked process per invocation,
+in a program whose first caller is the thing this corpus exists to run
+sixteen times in a row.
+
+Two mechanisms, because they answer different failures. The supervisor
+**forwards** SIGTERM, SIGINT, SIGHUP and SIGQUIT; and the child sets
+**`PR_SET_PDEATHSIG`**, which is the only thing that can act when the
+supervisor is SIGKILLed and has no chance to forward anything.
+
+**Both of them have to be SIGKILL eventually, because of what a PID
+namespace does to a signal.** The kernel gives the init of a PID
+namespace the protection it gives the machine's own init: a signal
+whose disposition is still `SIG_DFL` is *discarded* when it comes from
+outside the namespace — and `kill(2)` returns 0 for it. Measured, not
+read off a man page:
+
+```
+== B. SIGTERM the CHILD directly ==
+  kill rc=0
+  child after SIGTERM: ALIVE
+  child after SIGKILL: gone
+```
+
+So a forwarded SIGTERM is a no-op for a program that installed no
+handler, and from outside there is no way to tell that apart from a
+program shutting down cleanly. The **second** signal is therefore
+SIGKILL. Escalation is the sender doing it again, never a timer, which
+is the rule RFC 0038 argues for the force-quit key and it is the same
+argument. A child that *does* handle the signal gets the real one:
+verified with a `trap ... TERM` that printed and exited 7, and the
+supervisor returned 7.
+
+`PR_SET_PDEATHSIG` is set to SIGKILL for the same reason — a death
+switch the kernel throws away is a death switch that reads as
+load-bearing and cannot fire.
+
+### 13. The fork/prctl race cannot be closed with `getppid()`.
+
+`PR_SET_PDEATHSIG` has a window: if the supervisor dies between
+`fork()` and the `prctl()`, the signal has already been sent and
+nothing will send another. Everywhere else in Unix that is closed by
+comparing `getppid()` against the pid captured before the fork.
+
+**In a new PID namespace `getppid()` is 0, always** — the parent is
+outside the namespace and has no pid in it to report. So the check
+reads as load-bearing, can never pass, and exits the child
+immediately. The first build of this did exactly that, and it
+presented as a supervisor exiting 125 with nothing on stderr, which is
+the failure shape this repository keeps writing down: a guard that
+cannot fire, and its cousin, a guard that always fires.
+
+A pipe says the same thing without needing a shared namespace. The
+child closes its write end and asks whether the pipe is already at
+EOF; it can only be if the supervisor's end is closed too.
+
 ## What was verified
 
 **On the build host, which is where the interesting cases are** — the
@@ -249,8 +310,48 @@ The flag is per-bind now. A path the caller named still gets
   Wayland socket and the filter were not the browser's problem while
   the browser still was.
 
-The corpus at `tests/hostile-pages/` under the sandbox is the obvious
-next measurement and has not been taken.
+**The corpus at `tests/hostile-pages/` has now been run under it**, in
+both modes on one booted machine — roadmap 1, and the tables are in
+that directory's README. The short version is that **the sandbox
+changes nothing about the corpus at all**: same eleven survived, same
+five spinning, same pages, CPU within a few points, and peak memory
+identical to the byte on every page that had stopped growing by the
+time it was sampled. That is the honest answer to the question the
+item asked, and it is a negative result worth having — the item
+guessed that a private `/tmp` and a smaller filesystem might change
+what failing costs, and they do not, because what a layout engine
+allocates is its own heap and no mount list touches it.
+
+What the attempt did find were three defects, none of them in the
+corpus:
+
+- **The harness was measuring the supervisor.** The wrapper's job pid
+  is `novi-sandbox`, which forks and waits: 0% CPU and 848 kB of
+  address space, on a page burning 98% of a core. Unchanged, `run.sh`
+  would have reported the entire corpus as harmless the day the
+  sandbox shipped — the strongest possible result, and false. An
+  instrument that answers about the wrong process is worse than one
+  that refuses to answer, so it resolves the browser now and prints
+  `UNMEASURED` when it cannot find it.
+- **The signal handling above**, which was found by the harness's own
+  `kill` leaving a runaway behind.
+- **RFC 0038's force-quit had lost its first stage** for a sandboxed
+  window, silently, for the same namespace-init reason. novi-shell
+  reads `NSpid:` and skips the stage rather than spending a keypress
+  on a signal the kernel will discard.
+
+**RFC 0031 roadmap 5's address-space bound still reaches the browser
+through this**, which was checked rather than assumed: the wrapper now
+puts a process between `s6-softlimit` and the program, and `RLIMIT_AS`
+is inherited across the fork and the exec into the namespace.
+`unclosed-tags.html` sandboxed reads 1,048,576 kB at 700 seconds and
+holds — the same ceiling, the same plateau.
+
+One measurement corrected another, too. A single sample taken 13
+seconds in showed `many-siblings.html` at 312,948 kB unsandboxed
+against 273,928 kB sandboxed, which reads as a 39 MB saving; at 40
+seconds both are 516,384 kB. **A sample taken while the number is
+still moving is not a comparison.**
 
 ## What this is not
 
@@ -279,11 +380,12 @@ different and much larger change.
 
 ## Roadmap
 
-1. **The hostile corpus under the sandbox.** RFC 0031 roadmap 4's
-   sixteen pages, measured inside this, against the numbers taken
-   outside it. The interesting question is not whether they still
-   fail — they will — but whether the private `/tmp` and the smaller
-   filesystem change what failing costs.
+1. ~~**The hostile corpus under the sandbox.**~~ **Done** — see *What
+   was verified*. Both tables are in `tests/hostile-pages/README.md`.
+   They are the same table: the sandbox does not change whether a page
+   fails, what it costs in CPU, or what it costs in memory. It changes
+   what a page that fails can reach, which this corpus does not
+   measure and never could.
 2. **Landlock**, which is one kernel symbol and a second policy layer
    that does not depend on the mount list being complete.
 3. **An allowlist filter for programs whose syscall set is knowable.**

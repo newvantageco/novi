@@ -59,6 +59,7 @@
 #include <limits.h>
 #include <stddef.h>
 #include <sched.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -321,6 +322,65 @@ static void install_filter(void) {
 	}
 }
 
+/* THE SUPERVISOR'S SIGNALS, and a kernel rule that makes both halves
+ * of this necessary rather than tidy.
+ *
+ * The child is pid 1 of its own PID namespace, and the kernel gives
+ * such a process the same protection it gives the machine's init: a
+ * signal whose disposition is SIG_DFL is DISCARDED when it comes from
+ * outside the namespace, and `kill(2)` returns 0 for it. Measured on a
+ * booted machine, not read off a man page -- `kill <child>` reported
+ * success and the process was still there two seconds later; `kill -9`
+ * ended it. SIGKILL and SIGSTOP are the exception the kernel makes,
+ * and only from an ancestor namespace.
+ *
+ * So there are two ways for this program to leave a runaway behind,
+ * and they need different answers:
+ *
+ *   - THE SUPERVISOR IS SIGNALLED. Without a handler it dies on
+ *     SIGTERM and the child, being nobody's child now, carries on
+ *     forever. Watched live: `kill <novi-sandbox>` left a `sleep 300`
+ *     running with its supervisor gone. So the signal is FORWARDED --
+ *     and because a default-action forward is discarded by the rule
+ *     above, a SECOND signal of any of these is SIGKILL. Escalation is
+ *     the sender doing it again, never a timer: RFC 0038 argues that
+ *     for the force-quit key and the argument is the same here, since
+ *     from out here "handled it and is shutting down" and "the kernel
+ *     threw it away" look identical.
+ *   - THE SUPERVISOR IS SIGKILLED, which no handler can forward. That
+ *     is PR_SET_PDEATHSIG's case, set in the child below.
+ *
+ * A shell's Ctrl+C is fine either way -- it signals the whole
+ * foreground process group, so both get it -- which is most of why
+ * this went unnoticed until something used `kill` on a pid. */
+static volatile sig_atomic_t child_pid;
+static volatile sig_atomic_t already_forwarded;
+
+static void forward_signal(int sig) {
+	int saved = errno;
+	if (child_pid > 0) {
+		kill((pid_t)child_pid, already_forwarded ? SIGKILL : sig);
+		already_forwarded = 1;
+	}
+	errno = saved;
+}
+
+static void forward_signals_to_child(void) {
+	static const int fwd[] = { SIGTERM, SIGINT, SIGHUP, SIGQUIT };
+	struct sigaction sa;
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = forward_signal;
+	sigemptyset(&sa.sa_mask);
+	/* No SA_RESTART: the waitpid() below already retries on EINTR, and
+	 * an interrupted wait is how the parent notices a child that the
+	 * forwarded signal actually ended. */
+	for (size_t i = 0; i < sizeof(fwd) / sizeof(fwd[0]); i++) {
+		if (sigaction(fwd[i], &sa, NULL) != 0) {
+			die("sigaction");
+		}
+	}
+}
+
 static void usage(void) {
 	fprintf(stderr,
 		"Usage: novi-sandbox [--ro PATH]... [--rw PATH]... [--no-net]\n"
@@ -422,17 +482,46 @@ int main(int argc, char **argv) {
 	 * asked. So everything below happens after a fork, in a process
 	 * that is pid 1 of the new namespace -- which is also what makes
 	 * the fresh /proc show only the sandbox. */
+	/* A LIFELINE, because the obvious race check cannot work here.
+	 * PR_SET_PDEATHSIG has a window: if the supervisor dies between
+	 * fork() and the prctl(), the signal has already been sent and
+	 * nothing will send another. Everywhere else in Unix that is
+	 * closed by comparing getppid() against the pid captured before
+	 * the fork -- and in a NEW PID NAMESPACE getppid() is 0, always,
+	 * because the parent has no pid in the namespace to report. So
+	 * the check reads as load-bearing, can never pass, and exits the
+	 * child immediately: the first build of this did exactly that,
+	 * and reported it as a supervisor exiting 125 with nothing on
+	 * stderr.
+	 *
+	 * A pipe says the same thing without needing a shared namespace.
+	 * The child closes its write end and then asks whether the pipe
+	 * is already at EOF; it can only be if the supervisor's end is
+	 * closed too, which means the supervisor is gone. O_CLOEXEC so
+	 * neither descriptor reaches the program being sandboxed. */
+	int lifeline[2];
+	if (pipe2(lifeline, O_CLOEXEC) != 0) {
+		die("pipe");
+	}
 	pid_t pid = fork();
 	if (pid < 0) {
 		die("fork");
 	}
 	if (pid > 0) {
 		int status = 0;
+		close(lifeline[0]);
+		child_pid = (sig_atomic_t)pid;
+		forward_signals_to_child();
 		while (waitpid(pid, &status, 0) < 0) {
 			if (errno != EINTR) {
 				die("waitpid");
 			}
 		}
+		/* A pid is a number the kernel reuses, and this is the only
+		 * place this program acts on one. Past the wait it names
+		 * nothing, so a signal arriving now must not be forwarded to
+		 * whoever inherits the number. */
+		child_pid = 0;
 		if (WIFEXITED(status)) {
 			return WEXITSTATUS(status);
 		}
@@ -441,6 +530,24 @@ int main(int argc, char **argv) {
 		}
 		return 1;
 	}
+
+	/* SIGKILL, and it has to be SIGKILL: this process is pid 1 of the
+	 * namespace it was just created in, so a default-action SIGTERM
+	 * from the outside is discarded by the rule described above the
+	 * forwarder. A PDEATHSIG the kernel throws away is a death switch
+	 * that reads as load-bearing and cannot fire.
+ */
+	if (prctl(PR_SET_PDEATHSIG, SIGKILL, 0, 0, 0) != 0) {
+		die("prctl PR_SET_PDEATHSIG");
+	}
+	close(lifeline[1]);
+	if (fcntl(lifeline[0], F_SETFL, O_NONBLOCK) == 0) {
+		char probe;
+		if (read(lifeline[0], &probe, 1) == 0) {
+			_exit(125);   /* the supervisor is already gone */
+		}
+	}
+	close(lifeline[0]);
 
 	/* Nothing this process mounts may propagate back to the machine.
 	 * Without this the new root's binds appear on the real filesystem,
