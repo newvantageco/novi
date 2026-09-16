@@ -242,6 +242,50 @@ export LDFLAGS="-L${ROOTFS}/usr/lib -L${OPENSSL_PREFIX}/lib \
 # to resolve symbols back into the interpreter.
 LINKFORSHARED="-Xlinker -export-dynamic -pie"
 
+# ── One narrow source patch, and it decides whether binary wheels work ─
+#
+# CPython computes PLATFORM_TRIPLET by preprocessing a file full of
+# `#if defined(__GLIBC__)` tests, which on any Linux answers
+# `x86_64-linux-gnu`, and then corrects it for musl with:
+#
+#     case "$build_os" in
+#     linux-musl*) ... sed 's/linux-gnu/linux-musl/' ;;
+#
+# `build_os` is the BUILD machine's -- this Debian host. In a NATIVE
+# musl build it is musl and the fix-up runs; in a CROSS build to musl
+# it is glibc and the fix-up never runs, so the triplet stays
+# `x86_64-linux-gnu` on a libc that is nothing of the kind. It should
+# read `host_os`.
+#
+# THAT IS NOT COSMETIC, AND THIS REPOSITORY HAS ALREADY WRITTEN DOWN
+# THAT IT WAS. PLATFORM_TRIPLET becomes SOABI, and SOABI becomes
+# EXT_SUFFIX -- the ONLY extension-module filename this interpreter
+# will import. A musllinux wheel from PyPI ships
+# `_speedups.cpython-311-x86_64-linux-musl.so`; an interpreter whose
+# EXT_SUFFIX says `-linux-gnu.so` cannot see that file at all. Measured
+# on a booted machine before this line existed: `pip install
+# MarkupSafe` fetched the correct musllinux wheel, installed the
+# correct .so, and the package silently used its pure-Python fallback
+# because nothing could import it. A package with no fallback fails
+# with ImportError instead, after installing successfully.
+#
+# One word, in the generated `configure` (which is what runs) and in
+# `configure.ac` beside it (which is where it came from, and a derived
+# file fixed without its source is a fix that evaporates the next time
+# anybody regenerates).
+# `  case "$build_os" in` appears exactly once in each file -- checked,
+# not assumed, which is why the sed is anchored to the whole line and
+# the result is verified rather than the exit status of sed believed.
+for f in configure configure.ac; do
+    sed -i 's/^  case "\$build_os" in$/  case "$host_os" in/' "${SRC}/${f}"
+    if grep -q '^  case "\$build_os" in$' "${SRC}/${f}" ||
+            ! grep -q '^  case "\$host_os" in$' "${SRC}/${f}"; then
+        echo "ERROR: the cross-musl triplet patch did not apply to ${f} --" >&2
+        echo "       upstream changed. Binary wheels would silently not load." >&2
+        exit 1
+    fi
+done
+
 echo ">>> Configuring ..."
 (
     cd "${SRC}"
@@ -262,10 +306,24 @@ echo ">>> Configuring ..."
     #                         the socket module's getaddrinfo entirely.
     #
     # --disable-test-modules drops Lib/test, ~25 MB of the standard
-    # library that exists to test CPython itself. --without-ensurepip
-    # because there is no pip: pip fetches over https, which this build
-    # has none of (see the header), so shipping it would be shipping a
-    # tool that cannot do its one job.
+    # library that exists to test CPython itself.
+    #
+    # --with-ensurepip=no, AND THE REASON IT ONCE HAD IS DEAD. It used
+    # to read "there is no pip: pip fetches over https, which this
+    # build has none of" -- true when it was written and false since
+    # RFC 0027 put OpenSSL under CPython's `ssl`. pip works here; it is
+    # measured, against PyPI, in RFC 0026 roadmap 4.
+    #
+    # What the flag does NOT do is withhold pip. ensurepip is part of
+    # the standard library and its bundled wheels ship with it -- pip
+    # 24.0 and setuptools 79.0.1, 3.3 MB -- so `python3 -m ensurepip
+    # --default-pip` installs pip on the target, offline, in one
+    # command. What the flag decides is whether that happens WITHOUT
+    # ANYBODY ASKING, and the answer is no: pip writes into
+    # /usr/lib/python3.11/site-packages, which is a directory the
+    # `python` package owns, so a second package manager arrives in
+    # pkg'"'"'s territory the moment somebody installs an interpreter.
+    # That is a decision a person should take on purpose.
     ./configure \
         --build="$(gcc -dumpmachine)" \
         --host="${TARGET_TRIPLE}" \
@@ -284,6 +342,21 @@ echo ">>> Configuring ..."
         ac_cv_buggy_getaddrinfo=no >"${WORK}/configure.log" 2>&1 \
         || { tail -40 "${WORK}/configure.log" >&2; exit 1; }
 )
+
+# The patch above is an INTENT; this is the result. configure prints
+# what it decided, and what it decided is what every extension module
+# on this system will be named -- so it is asserted rather than hoped
+# for. The same rule 41-sqlite.sh follows about asking the binary for
+# its SONAME instead of reading the log for a flag.
+TRIPLET="$(sed -n 's/^checking for the platform triplet.*\.\.\. //p' \
+    "${WORK}/configure.log" | tail -1)"
+if [ "${TRIPLET}" != "x86_64-linux-musl" ]; then
+    echo "ERROR: configure decided the platform triplet is '${TRIPLET}'," >&2
+    echo "       not x86_64-linux-musl. Every musllinux wheel from PyPI" >&2
+    echo "       would install correctly and fail to import." >&2
+    exit 1
+fi
+echo ">>> platform triplet: ${TRIPLET}"
 
 echo ">>> Building (this takes a few minutes) ..."
 make -C "${SRC}" -j"${JOBS}" LINKFORSHARED="${LINKFORSHARED}" \
@@ -382,11 +455,45 @@ rm -rf "${D}/files/usr/lib/python${PY_XY}/test" \
        "${D}/files/usr/lib/python${PY_XY}/tkinter" \
        "${D}/files/usr/lib/python${PY_XY}/turtledemo"
 
+# ── Where pip looks for certificate authorities ───────────────────────
+#
+# pip DOES NOT USE THE SYSTEM TRUST STORE. It carries a vendored copy
+# of certifi's Mozilla bundle and verifies against that, so on a
+# machine whose operator has added a CA -- a corporate proxy, a local
+# one -- `pip install` fails with a certificate error while `python3 -c
+# "urllib.request.urlopen(...)"` succeeds against the same host.
+# Measured here, not read about: every fetch failed with
+# "self-signed certificate in certificate chain" until `--cert` named
+# the system bundle, on a machine where Python's own ssl module was
+# perfectly happy.
+#
+# Two stores that disagree is the same defect RFC 0027 found in
+# reverse, where Python verified against NOTHING because
+# /etc/ssl/cert.pem was missing while curl was fine. One store, and it
+# is the machine's. Every distribution makes this change; pip reads
+# this file before ~/.config/pip/pip.conf, so a person can still
+# override it per-user without editing a file a package upgrade
+# replaces.
+install -d "${D}/files/etc"
+cat > "${D}/files/etc/pip.conf" <<'PIPCONF'
+# Novi's pip defaults.
+#
+# pip ships its own copy of Mozilla's CA list and would otherwise
+# ignore the machine's. This points it at the store everything else
+# here uses, so a CA you add in one place is trusted in one place.
+#
+# This file belongs to the `python` package and a package upgrade
+# replaces it. Yours is ~/.config/pip/pip.conf, which pip reads after
+# this one and which therefore wins.
+[global]
+cert = /etc/ssl/certs/ca-certificates.crt
+PIPCONF
+
 {
     echo "name=python"
     echo "version=${PYTHON_VERSION}"
     echo "arch=${TARGET_ARCH}"
-    echo "depends=zlib,libffi,expat,openssl,ncurses,readline,sqlite"
+    echo "depends=zlib,libffi,expat,openssl,ncurses,readline,sqlite,ca-certificates"
     echo "description=CPython ${PYTHON_VERSION} -- the interpreter and the standard library"
 } > "${D}/MANIFEST"
 

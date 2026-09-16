@@ -1071,11 +1071,60 @@ package — the first scripting language this system has ever had.
   reported twelve words of English as missing modules: the block ends
   with the sentence "To find the necessary bits, look in setup.py...",
   not a blank line, so a `sed` range to `/^$/` swallowed it.
-- **`sys.implementation._multiarch` says `x86_64-linux-gnu`** on musl,
-  so extension modules are named `*.cpython-311-x86_64-linux-gnu.so`.
-  Cosmetically wrong, functionally harmless (the interpreter computes
-  the same suffix it built with). Do not "fix" it as a rename; it
-  matters only when binary wheels become possible, and there is no pip.
+- **`sys.implementation._multiarch` SAID `x86_64-linux-gnu` ON MUSL,
+  AND THIS FILE SAID THAT WAS HARMLESS.** It said "it matters only
+  when binary wheels become possible, and there is no pip". Binary
+  wheels became possible -- pip shipped in the package the whole time
+  (RFC 0026 roadmap 4) -- and the note stopped being true without
+  anything announcing it. **Read a "harmless until X" note again when
+  X arrives.**
+
+  The cause is a bug in CPython's own configure: `PLATFORM_TRIPLET` is
+  preprocessed out of `#if defined(__GLIBC__)` tests, which answer
+  `x86_64-linux-gnu` on any Linux, and then corrected for musl by
+  `case "$build_os" in linux-musl*)`. **`build_os` is the BUILD
+  machine**, so a native musl build is corrected and a CROSS build to
+  musl is not. It should read `host_os`; `43-python.sh` changes that
+  one word in `configure` and in `configure.ac` beside it.
+
+  What it costs: PLATFORM_TRIPLET becomes SOABI becomes `EXT_SUFFIX`,
+  the only extension-module filename the import system looks for. A
+  musllinux wheel ships `_speedups.cpython-311-x86_64-linux-musl.so`,
+  and an interpreter claiming `-linux-gnu.so` **cannot see it at
+  all** -- watched live: MarkupSafe installed its compiled module and
+  silently ran the pure-Python fallback. A package with no fallback
+  fails with ImportError after installing successfully. The stage
+  asserts configure's own printed triplet, not the sed's exit status.
+  After the fix: the same wheel's module imports and
+  `markupsafe._escape_inner` is a `builtin_function_or_method` from
+  `markupsafe._speedups`. **The first probe for that was the broken
+  thing** -- `type(escape).__name__` reports `function` on a correct
+  installation too, because MarkupSafe 3.x's `escape` is a Python
+  wrapper around the C `_escape_inner`.
+- **`python3 -m venv` WORKS, with pip inside it**, and it is the
+  answer to "pip writes into a directory pkg owns". The venv's pip
+  installs from PyPI and the global `/etc/pip.conf` applies there too.
+- **pip SHIPPED ALL ALONG.** `--with-ensurepip=no` decides whether pip
+  is installed, not whether it is present: `ensurepip`'s bundled
+  wheels (pip 24.0, setuptools 79.0.1, 3.3 MB) are part of the
+  standard library, so `python3 -m ensurepip --default-pip` installs
+  it offline in one command. The flag stays because pip writes into
+  `/usr/lib/python3.11/site-packages`, which the `python` package
+  owns -- a second package manager in pkg's territory is a decision
+  somebody should take on purpose.
+- **pip DOES NOT USE THE SYSTEM TRUST STORE.** It verifies against a
+  vendored copy of certifi's bundle, so on a machine whose operator
+  added a CA, `pip install` fails with a certificate error while
+  `urllib.request.urlopen()` succeeds against the same host --
+  measured, on a machine whose `ssl` module was perfectly happy. The
+  same two-stores-disagreeing shape RFC 0027 found in reverse.
+  `/etc/pip.conf` (shipped by the `python` package) points it at
+  `/etc/ssl/certs/ca-certificates.crt`; `~/.config/pip/pip.conf` is
+  read after it and therefore wins.
+- **pip's TAG DETECTION WAS NEVER THE PROBLEM.** It reports
+  `cp311-cp311-musllinux_1_2_x86_64` and no manylinux tag at all, so
+  it will not select a glibc wheel. The interpreter was the thing
+  lying about its libc, not the installer.
 - **`idle3` is deleted from the staged tree, not merely unbuilt.**
   `make install` writes the launcher whether or not tkinter exists, and
   a command that cannot start is worse than a command that is absent.

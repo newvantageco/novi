@@ -385,7 +385,106 @@ running the artifact you think it is.
    2.6.0 against library 3.53.4 from Python doing the same; and **the
    up-arrow recalling the previous statement** in the interactive
    shell over a vt100 serial console.
-4. **A way to install Python code.** `pkg` handles Novi's own packages;
-   there is no story at all for third-party Python, and pip cannot be
-   the answer until item 1 is. Vendoring a program's dependencies into
-   a Novi package is the option that needs no https.
+4. ~~**A way to install Python code.**~~ **pip works, and it already
+   shipped.** This item said "pip cannot be the answer until item 1
+   is", and item 1 — `ssl`, via RFC 0027 — was done four items ago.
+   Nobody went back and re-read this one. **Sixth roadmap item in this
+   repository found to be wrong about what is already available**, and
+   the second whose stated blocker had been removed by a later item in
+   the same RFC.
+
+   **The wheels were on the machine the whole time.** `--with-ensurepip
+   =no` decides whether pip is *installed*, not whether it is
+   *present*: `ensurepip` is part of the standard library and its
+   bundled wheels ship with it — pip 24.0 and setuptools 79.0.1, 3.3 MB
+   of the package. `python3 -m ensurepip --default-pip` installs pip on
+   the target, offline, in one command, and did.
+
+   **Then it fetched from PyPI and installed `six` 1.17.0.** Over
+   HTTPS, verified, from the shipped image.
+
+   **`--with-ensurepip=no` STAYS, with a different reason.** The old
+   comment ("pip fetches over https, which this build has none of") is
+   dead and has been corrected in place. The reason to keep the flag is
+   that pip writes into `/usr/lib/python3.11/site-packages`, a
+   directory the `python` package owns — so installing it by default
+   puts a second package manager into `pkg`'s territory on every
+   machine that installs an interpreter. One command is the right
+   amount of friction for that decision.
+
+   **pip does not use the system trust store, and that is a real
+   defect on a distribution.** It verifies against a vendored copy of
+   certifi's bundle, so on a machine whose operator has added a CA,
+   `pip install` fails with a certificate error while
+   `urllib.request.urlopen()` succeeds against the same host — measured
+   here, on a machine where Python's own `ssl` was perfectly happy, and
+   the same two-stores-disagreeing shape RFC 0027 found in reverse.
+   `/etc/pip.conf` now points it at `/etc/ssl/certs/ca-certificates.crt`.
+   pip reads `~/.config/pip/pip.conf` after it, so a person can still
+   override it without editing a file a package upgrade replaces.
+
+   **AND A CROSS-COMPILED CPython GETS ITS OWN PLATFORM TRIPLET
+   WRONG.** This is the finding, and nothing short of installing a
+   binary wheel would have surfaced it. CPython computes
+   `PLATFORM_TRIPLET` by preprocessing `#if defined(__GLIBC__)` tests
+   — which say `x86_64-linux-gnu` on any Linux — and then corrects it
+   for musl with `case "$build_os" in linux-musl*)`. **`build_os` is
+   the build machine.** A native musl build is corrected; a cross build
+   to musl is not, so the triplet stays `x86_64-linux-gnu` on a libc
+   that is nothing of the kind. It should read `host_os`.
+
+   That is not cosmetic, and **this RFC previously recorded that it
+   was** — "functionally harmless... it matters only when binary wheels
+   become possible, and there is no pip". Binary wheels became
+   possible. `PLATFORM_TRIPLET` becomes `SOABI` becomes `EXT_SUFFIX`,
+   which is the only extension-module filename the import system will
+   look for. Watched live before the fix: `pip install MarkupSafe`
+   selected the correct wheel
+   (`markupsafe-3.0.3-cp311-cp311-musllinux_1_2_x86_64.whl`),
+   installed the correct `_speedups.cpython-311-x86_64-linux-musl.so`,
+   and **`import markupsafe._speedups` then failed** — an interpreter
+   whose `EXT_SUFFIX` says `-linux-gnu.so` cannot see that file — so
+   the package fell back to its pure-Python path with nothing said. A
+   package with no fallback fails with `ImportError` instead, having
+   installed successfully.
+
+   After the fix, on a rebuilt image: `EXT_SUFFIX` is
+   `.cpython-311-x86_64-linux-musl.so`, the same wheel's module
+   imports, and `markupsafe._escape_inner` is a
+   `builtin_function_or_method` from `markupsafe._speedups` — the C
+   implementation, in use. **The first probe for that was the broken
+   thing, for the umpteenth time here**: `type(escape).__name__`
+   reports `function` on a correct installation too, because
+   MarkupSafe 3.x's `escape` is a Python wrapper around the C
+   `_escape_inner`. Ask the layer where a wrong answer is a wrong
+   answer.
+
+   `pip`'s own tag detection was right all along and is worth saying so
+   plainly: it reports `cp311-cp311-musllinux_1_2_x86_64` and never a
+   manylinux tag, so it will not select a glibc wheel. The fix is one
+   word in `configure` and `configure.ac`, with the stage asserting the
+   RESULT — configure's own printed triplet — rather than the sed's
+   exit status.
+
+   **`python3 -m venv` works, and it is the answer to the
+   site-packages question.** Measured rather than assumed, which is the
+   lesson of this whole item: `python3 -m venv /tmp/v` builds an
+   environment with pip 24.0 inside it, `pip install six` lands in the
+   venv, and the venv's interpreter imports it. The global
+   `/etc/pip.conf` applies there too — the install succeeded against
+   this machine's own trust store with no `--cert`. So the answer to
+   "pip writes into a directory `pkg` owns" is the ordinary one, and it
+   is available out of the box.
+
+   **What still needs a compiler** is any package with no musllinux
+   wheel: pip falls back to the sdist, which needs `novi-devel` (RFC
+   0015) and the Python headers, both of which exist. Untested, and
+   said so.
+5. **A package with no musllinux wheel, built from its sdist.**
+   Everything above stops at the wheel. The pieces for the other path
+   are all present — `novi-devel` has gcc and make (RFC 0015), the
+   `python` package ships 192 headers and `python3-config` — and
+   nothing has put them together. The interesting questions are
+   whether `setuptools` finds the cross-built interpreter's own
+   sysconfig, and what `pip install` does with a package whose build
+   backend wants network access of its own.
