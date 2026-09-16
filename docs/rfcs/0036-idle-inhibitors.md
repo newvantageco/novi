@@ -325,7 +325,61 @@ protocol are different claims.
    same one path it always was, not three.
 3. ~~**`novi-state` reporting it.**~~ **Done** — see decision 9.
    `novi-agent describe` carries an `idle` object.
-4. **Somewhere for the cup to lead.** The health glyph has the same
-   gap and the same reason: there is no session UI to open, and a panel
-   item that opens a terminal is not a thing this desktop does. When
-   `novi-settings` grows a Session panel, both should point at it.
+4. ~~**Somewhere for the cup to lead.**~~ **Done** —
+   `novi-settings --panel session`, and both glyphs open it.
+
+   **READ-ONLY, and that is the decision rather than a first pass.**
+   Everything on the panel is either a `system.conf` key the System
+   panel already edits (`power.blank`, `power.suspend`) or a thing a
+   keystroke owns (Super+A). A second write path to a key the GUI
+   already reaches is exactly what decision 10 of RFC 0029 refused for
+   `firewall.allow`, and what RFC 0033's roadmap got wrong about the
+   wired network. So the panel SHOWS, and every row names where its
+   thing is changed.
+
+   It reads `/run/novi/idle` and `/run/novi/health` and nothing else —
+   no forks, the arrangement RFC 0009 established for the network
+   interface — and it skips keys it does not know rather than refusing
+   them, so a novi-shell newer than the binary cannot blank the panel
+   by adding a line. **The inhibitor names are listed, not just
+   counted**, which is the whole of decision 7: the remedy for a
+   machine that will not sleep is knowing which client. Where the
+   count (the compositor's) exceeds the names (only the visible ones)
+   it says how many are unnamed, rather than showing a shorter list in
+   silence.
+
+   **The idle row is a clock, so the panel polls** — a 1000 ms
+   `poll(2)` timeout, and only while this panel is showing. A timerfd
+   would be a fourth descriptor for a condition `poll` can express in
+   its own argument, and a settings window that wakes every second to
+   redraw a panel nobody is looking at is the other mistake.
+
+   **Only the health and awake glyphs became clickable.** The bell has
+   somewhere to go and a key that goes there (Super+N); the speaker has
+   no audio panel yet and its own comment says to wire it when there
+   is one. And this does not contradict decision 8: that was about a
+   click that TOGGLES, which would be a second spelling of Super+A.
+   Opening the panel that answers the question the glyph raises is the
+   opposite of a second spelling.
+
+   novi-panel grew `status_layout()` for it — the march computed once
+   from the same flags in the same order, because three things now
+   have to agree about where a glyph is: the drawing, the taskbar's
+   right-hand limit, and the hit-test. The file's own warning is that
+   a hit-test disagreeing with the drawing by one glyph is a taskbar
+   entry that responds to a click on a coffee cup.
+
+   Verified on a booted machine, in an order where each step makes the
+   next one mean something: `--panel nosuch` refused with rc=2 rather
+   than falling back silently; `--panel session` opening straight onto
+   Session; the idle counter moving **125s → 0s** on a keypress, which
+   is the poll timeout working; Super+A flipping *Stay awake* to `on`
+   in accent while the cup appeared on the bar; then **Super+Q leaving
+   an empty desktop, screendumped**, and one click on the cup bringing
+   Settings back on the Session panel. Without that empty frame the
+   last step would have proved nothing — the window was already
+   there.
+
+   The health glyph's click is the same function and the same rect
+   arithmetic, and it was **not** exercised live: it only appears when
+   a service is actually degraded. Said here rather than left implied.

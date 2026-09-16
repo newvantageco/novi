@@ -1745,6 +1745,37 @@ both feeding one decision in novi-shell's idle tick.
   segment deleted. The segment that closes 3 back to 0 is the LEFT
   WALL. Provoking each assertion is what found it, on a glyph that was
   correct: the check was the broken thing.
+- **THE SESSION PANEL IS WHERE BOTH GLYPHS LEAD NOW** (RFC 0036
+  roadmap 4). `novi-settings --panel session`, read-only on purpose:
+  every row is either a `system.conf` key the System panel already
+  edits or a thing a keystroke owns, and a second write path to a key
+  the GUI already reaches is what RFC 0029 decision 10 refused for
+  `firewall.allow`. It shows, and each row names where its thing is
+  changed. **Clicking a glyph to OPEN what explains it is not the
+  toggle decision 8 refused** -- that was a click that would have been
+  a second spelling of Super+A.
+- **THREE THINGS NOW HAVE TO AGREE ABOUT WHERE A STATUS GLYPH IS**:
+  the drawing, the taskbar's right-hand limit, and the hit-test.
+  `status_layout()` computes the leftward march ONCE and all three
+  read it -- the file's own warning is that a hit-test disagreeing
+  with the drawing by one glyph is a taskbar entry that responds to a
+  click on a coffee cup, and that was written before anything here was
+  clickable.
+- **The idle row is a clock, so the panel polls -- and only while it
+  is showing.** A 1000 ms `poll(2)` timeout rather than a timerfd: a
+  fourth descriptor for a condition `poll` already expresses in its
+  own argument, against a settings window that wakes every second to
+  redraw a panel nobody is looking at. `pr == 0` is the news.
+- **`--panel <name>` REFUSES an unknown name** instead of falling back
+  to the default one. A typo'd panel that opens Account looks exactly
+  like a working flag, and the glyph that opens the Account panel has
+  not answered what was clicked on.
+- **AN EMPTY DESKTOP IS WHAT MAKES THE NEXT SCREENSHOT MEAN
+  SOMETHING.** Proving a click opens a window needs a frame with no
+  window in it first -- Super+Q, screendump, then the click. Without
+  it the "after" shot is equally consistent with the window that was
+  already there, which is this repository's own rule about an
+  observable that cannot answer the question.
 - **The shortcut sheet was one row from outgrowing a 1366×768 panel.**
   `CARD_MAX_HEIGHT` is derived from the binding table, so adding a row
   grows the card, and `--keys` has no scroll by design (a reference
@@ -2717,10 +2748,15 @@ is that consumer.
   every thirty seconds is how a notification stops being read. Normal
   urgency, not critical — critical never expires (RFC 0024) and the
   persistent signal is the panel's job.
-- **The indicator is deliberately not clickable**, unlike the two
-  buttons beside it. There is no service UI to open, and a panel item
-  that opens a terminal is not a thing this desktop does. When
-  somewhere exists for it to lead, it should lead there.
+- **The indicator was deliberately not clickable**, unlike the two
+  buttons beside it, for as long as there was no service UI to open --
+  and a panel item that opens a terminal is not a thing this desktop
+  does. **There is somewhere now**: `novi-settings --panel session`
+  (RFC 0036 roadmap 4), which shows the failing service names from the
+  same one-line file. The health glyph and the coffee cup both open
+  it; the bell and the speaker deliberately still do not, because the
+  bell already has a key that goes where it leads and the speaker has
+  no audio panel yet.
 - **Recovery is not instant, and a test that expects it to be is
   wrong.** A service that has just come back from dying reads
   CRASHLOOP for sixty seconds by design, so the indicator clears about
