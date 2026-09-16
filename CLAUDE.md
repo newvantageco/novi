@@ -1101,6 +1101,39 @@ package — the first scripting language this system has ever had.
   thing** -- `type(escape).__name__` reports `function` on a correct
   installation too, because MarkupSafe 3.x's `escape` is a Python
   wrapper around the C `_escape_inner`.
+- **A CROSS-BUILT INTERPRETER REMEMBERS THE CROSS TOOLCHAIN, AND IT
+  SHIPPED THAT WAY.** `_sysconfigdata_*.py` is what `setuptools` reads
+  to compile a C extension, and the shipped package recorded
+  `CC = 'x86_64-linux-musl-gcc'` (a program on no Novi machine) and
+  `LDSHARED = '... -L/build/rootfs/usr/lib'` (a directory on the BUILD
+  HOST) -- 207 lines of it, plus the whole of `config-3.11-*/Makefile`
+  beside it. Every `pip install` without a musllinux wheel would have
+  died on `gcc: not found`, and the mode where it did NOT die is
+  worse: a machine with a `/build/rootfs` would have been handed that
+  tree to link against. `43-python.sh` rewrites both files -- tools to
+  native names, every private build prefix onto `/usr`, the CPython
+  source directory onto the config directory the package installs --
+  and regenerates the `__pycache__` copy, because a cached copy of the
+  file just edited is the same bug wearing a different name.
+  **Found by reading the artifact, not by running it.**
+- **`\b` IS A WORD BOUNDARY AND `+` IS NOT A WORD CHARACTER**, so
+  `s|...-c++\b|c++|` can never match at the end of
+  `x86_64-linux-musl-c++`. The first version of that rewrite left
+  `CXX` naming the cross compiler, silently, past a check that asked
+  only about `gcc`. Two substitution lists now, and the assertion
+  names every tool -- provoked by putting the cross name back.
+- **NOVI COMPILES C EXTENSIONS FOR ITS OWN INTERPRETER** (RFC 0026
+  roadmap 5), verified end to end: `pip install --no-binary :all:
+  MarkupSafe` downloads the sdist, builds a wheel through
+  `pyproject.toml`, installs a `_speedups...musl.so` compiled by the
+  machine's own gcc, and `markupsafe._escape_inner` is a
+  `builtin_function_or_method` from it. A locally built wheel is
+  tagged `linux_x86_64` rather than `musllinux`, which is what every
+  distribution's local build produces.
+- **`pkg sync` FIRST on a console live boot.** The desktop entry runs
+  `novi-live-desktop`, which syncs the on-media index; the plain
+  console entry does not, so `pkg install python` answers
+  `Package 'python' not found` on a medium that is carrying it.
 - **`python3 -m venv` WORKS, with pip inside it**, and it is the
   answer to "pip writes into a directory pkg owns". The venv's pip
   installs from PyPI and the global `/etc/pip.conf` applies there too.

@@ -455,6 +455,83 @@ rm -rf "${D}/files/usr/lib/python${PY_XY}/test" \
        "${D}/files/usr/lib/python${PY_XY}/tkinter" \
        "${D}/files/usr/lib/python${PY_XY}/turtledemo"
 
+# ── The build host must not survive into the package ──────────────────
+#
+# `_sysconfigdata_*.py` is how the interpreter remembers how it was
+# built, and `setuptools` reads it to decide how to compile a C
+# extension. A CROSS build remembers the CROSS toolchain: 207 lines of
+# it named `x86_64-linux-musl-gcc` (a program that exists on no Novi
+# machine) and `-L/build/rootfs/usr/lib` (a directory on THIS host),
+# and the same values sit in `config-*/Makefile` beside it.
+#
+# So `pip install` of anything with no musllinux wheel would have
+# failed with `x86_64-linux-musl-gcc: not found` -- and the mode where
+# it did NOT fail is worse: a machine that happened to have a
+# `/build/rootfs` would have been handed that tree to link against.
+# Found by reading the artifact rather than by running it, which is
+# the only reason it is fixed before anybody met it.
+#
+# The tools are rewritten one at a time rather than with a pattern
+# that strips the triplet: `x86_64-linux-musl` is ALSO the platform
+# triplet, and it has to stay in SOABI, MULTIARCH, the config
+# directory's name and this file's own name. A blanket substitution
+# would rename the interpreter's idea of itself.
+SYSCFG="${D}/files/usr/lib/python${PY_XY}/_sysconfigdata__linux_${TARGET_ARCH}-linux-musl.py"
+SYSMAKE="${D}/files/usr/lib/python${PY_XY}/config-${PY_XY}-${TARGET_ARCH}-linux-musl/Makefile"
+for f in "${SYSCFG}" "${SYSMAKE}"; do
+    [ -f "${f}" ] || { echo "ERROR: ${f} is not where it was expected." >&2; exit 1; }
+    # The recorded names are BARE (`x86_64-linux-musl-gcc`), not the
+    # ${CROSS} paths this stage invokes -- configure records what it was
+    # told, and it was told the triplet-prefixed name on PATH.
+    #
+    # TWO LISTS, because `\b` IS A WORD BOUNDARY AND `+` IS NOT A WORD
+    # CHARACTER: `c++\b` requires a word character after the second
+    # plus, so it can never match at the end of `x86_64-linux-musl-c++`.
+    # The first version had one list and left CXX naming the cross
+    # compiler, silently -- a substitution that cannot fire, found by
+    # reading the artifact afterwards rather than by trusting the loop.
+    for tool in gcc ar readelf ranlib nm strip ld objcopy objdump; do
+        sed -i "s|${TARGET_TRIPLE}-${tool}\b|${tool}|g" "${f}"
+    done
+    for tool in c++ g++; do
+        sed -i "s|${TARGET_TRIPLE}-${tool}|${tool}|g" "${f}"
+    done
+    # Every private prefix this build linked against maps onto the
+    # target's own /usr, which is where those libraries land.
+    sed -i -e "s|${ROOTFS}/usr|/usr|g" \
+           -e "s|${OPENSSL_PREFIX}/usr|/usr|g" \
+           -e "s|${OPENSSL_PREFIX}|/usr|g" \
+           -e "s|${NCURSES_PREFIX}/usr|/usr|g" \
+           -e "s|${SQLITE_PREFIX}/usr|/usr|g" \
+           -e "s|${SRC}|/usr/lib/python${PY_XY}/config-${PY_XY}-${TARGET_ARCH}-linux-musl|g" \
+           "${f}"
+done
+# The ASSERTION, not the sed's exit status: a substitution that missed
+# a prefix leaves a path pointing at a machine the package will never
+# be installed on, and says nothing.
+if grep -l "${BUILD_DIR}/" "${SYSCFG}" "${SYSMAKE}" >/dev/null 2>&1; then
+    echo "ERROR: ${BUILD_DIR} still appears in the shipped sysconfig:" >&2
+    grep -o "${BUILD_DIR}/[^ '\"]*" "${SYSCFG}" "${SYSMAKE}" | sort -u >&2
+    exit 1
+fi
+# Every tool, not just the compiler: the check that named only `gcc`
+# is what let `c++` through.
+for f in "${SYSCFG}" "${SYSMAKE}"; do
+    if grep -qE "${TARGET_TRIPLE}-(gcc|c\+\+|g\+\+|ar|readelf|ranlib|nm|strip|ld|objcopy|objdump)" "${f}"; then
+        echo "ERROR: a cross tool is still named in ${f}:" >&2
+        grep -oE "${TARGET_TRIPLE}-[a-z+]+" "${f}" | sort -u >&2
+        exit 1
+    fi
+done
+# The cached bytecode is a COPY of what was just edited. Left alone it
+# is what `import _sysconfigdata...` actually loads when the source's
+# mtime and size happen to match, and a stale copy of this file is the
+# original bug wearing a different name.
+rm -f "${D}/files/usr/lib/python${PY_XY}/__pycache__/_sysconfigdata_"*.pyc
+"${BUILD_PYTHON}" -m compileall -q \
+    "${D}/files/usr/lib/python${PY_XY}/_sysconfigdata__linux_${TARGET_ARCH}-linux-musl.py" \
+    >/dev/null 2>&1 || true
+
 # ── Where pip looks for certificate authorities ───────────────────────
 #
 # pip DOES NOT USE THE SYSTEM TRUST STORE. It carries a vendored copy

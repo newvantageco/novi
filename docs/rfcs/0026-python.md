@@ -480,11 +480,64 @@ running the artifact you think it is.
    wheel: pip falls back to the sdist, which needs `novi-devel` (RFC
    0015) and the Python headers, both of which exist. Untested, and
    said so.
-5. **A package with no musllinux wheel, built from its sdist.**
-   Everything above stops at the wheel. The pieces for the other path
-   are all present — `novi-devel` has gcc and make (RFC 0015), the
-   `python` package ships 192 headers and `python3-config` — and
-   nothing has put them together. The interesting questions are
-   whether `setuptools` finds the cross-built interpreter's own
-   sysconfig, and what `pip install` does with a package whose build
-   backend wants network access of its own.
+5. ~~**A package with no musllinux wheel, built from its sdist.**~~
+   **Done — and it could not have worked, for a reason that was
+   sitting in the shipped package the whole time.**
+
+   `_sysconfigdata_*.py` is how an interpreter remembers how it was
+   built, and `setuptools` reads it to decide how to compile a C
+   extension. A CROSS build remembers the CROSS toolchain. The shipped
+   `python` package recorded **`CC = 'x86_64-linux-musl-gcc'`** — a
+   program that exists on no Novi machine — and
+   **`LDSHARED = '... -L/build/rootfs/usr/lib'`**, a directory on the
+   machine that built it. **207 lines of that file, and the whole of
+   `config-3.11-*/Makefile` beside it, named this build host.**
+
+   So every `pip install` of anything without a musllinux wheel would
+   have died on `x86_64-linux-musl-gcc: not found`. And the mode where
+   it did *not* die is the worse one: a machine that happened to have
+   a `/build/rootfs` would have been handed that tree to link against.
+
+   **Found by reading the artifact, not by running it** — which is the
+   only reason it was fixed before anyone met it, and the same move
+   that found RFC 0027's missing `/etc/ssl/cert.pem`. `43-python.sh`
+   rewrites both files: the tools to their native names, every private
+   build prefix onto the target's own `/usr`, and the CPython source
+   directory onto the config directory the package actually installs.
+   The stale `__pycache__` copy is regenerated, because a cached copy
+   of the file just edited is the original bug wearing a different
+   name.
+
+   **The first version of that rewrite could not fire on `c++`.** `\b`
+   is a word boundary and `+` is not a word character, so
+   `c++\b` requires a word character after the second plus and never
+   matches at the end of `x86_64-linux-musl-c++`. `CXX` went on naming
+   the cross compiler, silently, past a check that asked only about
+   `gcc`. Two lists now, and the assertion names every tool — provoked
+   by putting the cross name back and watching it fire.
+
+   **Verified on a booted machine.** `sysconfig.get_config_var('CC')`
+   is `gcc`, `CXX` is `c++`, `LDSHARED` points only at `/usr/lib`; and
+   then the whole path end to end: `pip install --no-binary :all:
+   MarkupSafe` downloaded `markupsafe-3.0.3.tar.gz`, built a wheel
+   through `pyproject.toml`, installed
+   `_speedups.cpython-311-x86_64-linux-musl.so` **compiled by the
+   machine's own gcc**, and `markupsafe._escape_inner` is a
+   `builtin_function_or_method` from `markupsafe._speedups`. Novi
+   compiles C extensions for its own interpreter.
+
+   Two things deliberately not done. A locally built wheel is tagged
+   `linux_x86_64` rather than `musllinux`, which is what every
+   distribution's local build produces and is only interesting if
+   somebody starts sharing them. And the five extension modules that
+   carry `/build/python-build/...` inside them do so as `__FILE__`
+   strings in assertions — cosmetic, a reproducible-builds concern
+   rather than a functional one, and `-ffile-prefix-map` on every
+   object is a bigger change than the finding deserves.
+6. **A build backend that wants the network, and one that wants
+   Rust.** `MarkupSafe` is setuptools and C. The packages people
+   actually hit are `cryptography` (Rust, no toolchain here),
+   `numpy` (meson-python and a BLAS hunt) and `lxml` (libxml2 and
+   libxslt, neither packaged). Each is a different wall and none of
+   them is this interpreter's fault; what is worth knowing is which
+   wall comes first.
