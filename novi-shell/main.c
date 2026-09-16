@@ -64,6 +64,14 @@
 #include "keys.h"
 #include "decoration.h"
 #include "../common/theme.h"
+/* RFC 0038: the window watchdog. procstat.h reads a client's CPU time
+ * out of /proc; notifications.h is here only for novi_hist_sanitise(),
+ * which is this repository's ONE sanitiser for text somebody else
+ * chose -- a window title reaching a published file and a notification
+ * summary is exactly what it exists for, and a second copy of it would
+ * be one edit away from disagreeing about what a control character is. */
+#include "../common/procstat.h"
+#include "../common/notifications.h"
 
 /* RFC 0001 decision 6: novi-shell defaults to a small wlroots-native
  * terminal (foot) with no GTK/Qt dependency chain, spawned on
@@ -271,6 +279,44 @@
  * has to start a client on a machine it cannot assume has one. See
  * display_publish(). */
 #define NOVI_DISPLAY_FILE "/run/novi/display"
+
+/* ── RFC 0038: the window watchdog ─────────────────────────────────
+ *
+ * A window is judged unresponsive when its client has burned CPU for
+ * NOVI_WATCHDOG_STALL_TICKS consecutive samples without committing a
+ * surface. Both halves are necessary and neither is sufficient: a
+ * window that commits nothing is usually just a window nobody is
+ * using, and a client that is busy while it draws is a client doing
+ * its job.
+ *
+ * The numbers are deliberately generous. This instrument cannot tell
+ * SLOW from STUCK -- nothing here can, because the client exports no
+ * notion of its own progress, which is exactly what RFC 0031's roadmap
+ * said would be needed -- so the cost of being wrong is a sentence on
+ * screen, and the threshold is set where a legitimate long computation
+ * inside a client process is rare rather than where a hang is caught
+ * quickly. Ten seconds at half a core.
+ *
+ * 50% rather than 90%: the case this exists for is a layout loop on a
+ * machine with other work on it, where the wedged process gets a share
+ * of a core rather than all of one, and `nice 5` on the browser (RFC
+ * 0031 roadmap 5) makes that more likely rather than less. */
+#define NOVI_WATCHDOG_TICK_MS 2000
+#define NOVI_WATCHDOG_STALL_TICKS 5
+#define NOVI_WATCHDOG_CPU_PERCENT 50
+/* Which windows are wedged, published for anything that wants to say
+ * so -- novi-settings' Session panel reads it. Same arrangement as
+ * NOVI_IDLE_FILE above and for the same reason, plus one more: a toast
+ * is gone in five seconds and a machine that is still pegged is not.
+ * RFC 0014's rule -- a toast on the transition, an indicator while it
+ * is true. */
+#define NOVI_WINDOWS_FILE "/run/novi/windows"
+/* The program a "not responding" notification goes out through. Exec'd
+ * with an argv rather than handed to /bin/sh like every other spawn
+ * here, because the summary contains a window TITLE -- text the client
+ * chose, from a program that may be rendering somebody else's web
+ * page. See notify_unresponsive(). */
+#define NOVI_NOTIFY_BIN "novi-notify"
 #define NOVI_DEFAULT_POWER_MENU "novi-launcher --power"
 #define NOVI_DEFAULT_THEMES "novi-launcher --themes"
 /* RFC 0034. The history lives in a file novi-notifyd publishes, so
@@ -466,6 +512,20 @@ struct novi_server {
 	 * has no visibility to test. */
 	bool stay_awake;
 
+	/* RFC 0038: the window watchdog. Its own timer rather than a
+	 * branch of the idle tick, for two reasons that are both about
+	 * what the idle tick IS: it counts idleness, and it returns early
+	 * from several branches (inhibited, waiting for a lock surface,
+	 * having just suspended) -- so a watchdog hung on it would stop
+	 * watching in exactly the situations a machine is least likely to
+	 * be being looked at. The theme watch made the same call and for
+	 * the same reason. */
+	struct wl_event_source *watchdog_timer;
+	/* How many windows the last pass judged wedged, kept only so the
+	 * published file is rewritten when the answer changes rather than
+	 * every two seconds. */
+	int wedged_count;
+
 	/* Layer-shell (RFC 0001 decision 5: the panel/launcher UI layer is
 	 * built as a client of this protocol, not baked into the
 	 * compositor). Scene trees are created once, in this fixed order,
@@ -614,6 +674,31 @@ struct novi_toplevel {
 	 * protocol (see novi_server.foreign_toplevel_manager) -- created on
 	 * map, destroyed on unmap, so a taskbar only ever lists windows
 	 * that are actually currently mapped. */
+	/* RFC 0038: the window watchdog's per-window state.
+	 *
+	 * `committed` is the whole notion of progress this compositor has
+	 * and it is enough: a client that is answering commits surfaces,
+	 * and a client stuck in its own layout loop commits nothing. It is
+	 * set from the commit handler and cleared by the watchdog tick.
+	 *
+	 * The CPU numbers are the client PROCESS's, so two windows of one
+	 * program carry the same figures -- which is correct, because the
+	 * program is what is wedged. `starttime` is what makes the pid
+	 * safe to signal later; see force_quit_toplevel(). */
+	pid_t client_pid;
+	unsigned long long client_starttime;
+	bool committed;
+	unsigned long long cpu_ticks;
+	bool cpu_sampled;
+	int cpu_percent;
+	int stall_ticks;
+	bool unresponsive;
+	/* 0 = nothing sent, 1 = SIGTERM sent. The escalation to SIGKILL is
+	 * the person pressing the key a second time rather than a timer:
+	 * "press it again if it is still there" needs no state machine and
+	 * no guess about how long a dying program deserves. */
+	int kill_stage;
+
 	struct wlr_foreign_toplevel_handle_v1 *foreign_handle;
 	struct wl_listener foreign_request_maximize;
 	struct wl_listener foreign_request_minimize;
@@ -1195,6 +1280,336 @@ static void stay_awake_toggle(struct novi_server *server) {
 	idle_publish(server);
 }
 
+/* ── RFC 0038: the window watchdog ───────────────────────────────────
+ *
+ * RFC 0031 roadmap 6 asked for the half a memory ceiling cannot reach:
+ * a page that pegs a core on 30 MB, which no `s6-softlimit -a` will
+ * ever notice. It said this "needs a notion of progress NetSurf does
+ * not currently export", and that is true of NetSurf and not of the
+ * problem -- the compositor has a notion of progress for every client
+ * on the machine, because a client that is answering COMMITS SURFACES
+ * and one stuck in its own loop commits nothing. Nothing had to be
+ * exported; it had to be looked at.
+ *
+ * So: two facts per window per tick, and a window is judged
+ * unresponsive only when both hold for long enough. Neither alone is
+ * anything. A window that commits nothing is usually a window nobody
+ * is using; a client that is busy while it draws is a client working.
+ *
+ * WHAT THIS CANNOT DO, said here because it decides the design: it
+ * cannot tell SLOW from STUCK. A client laying out a genuinely
+ * enormous page looks exactly like one that will never finish, and no
+ * amount of sampling closes that gap from the outside. Which is why
+ * nothing here kills anything: the watchdog REPORTS, and a person
+ * presses a key. A false positive costs one sentence on screen rather
+ * than somebody's unsaved work.
+ */
+
+/* The client process behind a window, recorded when it maps.
+ *
+ * `starttime` is taken at the same moment as the pid and for one
+ * reason: a pid is a number the kernel reuses, and the only thing this
+ * code ever does with one is send it a signal -- as root. Comparing
+ * the start time before signalling is what stops that landing on
+ * whatever has since inherited the number. */
+static void watchdog_adopt(struct novi_toplevel *toplevel) {
+	toplevel->client_pid = 0;
+	toplevel->client_starttime = 0;
+	toplevel->committed = false;
+	toplevel->cpu_ticks = 0;
+	toplevel->cpu_sampled = false;
+	toplevel->cpu_percent = -1;
+	toplevel->stall_ticks = 0;
+	toplevel->unresponsive = false;
+	toplevel->kill_stage = 0;
+
+	struct wl_resource *resource = toplevel->xdg_toplevel->resource;
+	if (resource == NULL) {
+		return;
+	}
+	pid_t pid = 0;
+	wl_client_get_credentials(wl_resource_get_client(resource), &pid,
+		NULL, NULL);
+	if (pid <= 0) {
+		return;
+	}
+	unsigned long long starttime = 0;
+	if (!novi_procstat_read((int)pid, NULL, &starttime)) {
+		/* No /proc entry for it. A window this compositor cannot
+		 * measure is a window it never judges -- left at pid 0, which
+		 * every test below treats as "making progress". */
+		return;
+	}
+	toplevel->client_pid = pid;
+	toplevel->client_starttime = starttime;
+}
+
+/* Did this window's CLIENT do anything this tick?
+ *
+ * Asked of the client rather than the window because the CPU figure is
+ * the process's: a program with two windows animating one of them is
+ * busy and is working, and judging its other window wedged would be
+ * this code disagreeing with itself about the same process. Recomputed
+ * each tick rather than cached, for the reason the inhibitor count is
+ * -- twenty pointer comparisons every two seconds against a cached
+ * flag that six other code paths would have to remember to update. */
+static bool watchdog_client_progressed(struct novi_server *server,
+		struct novi_toplevel *toplevel) {
+	if (toplevel->committed) {
+		return true;
+	}
+	/* Unmeasurable is never accused. */
+	if (toplevel->client_pid <= 0) {
+		return true;
+	}
+	struct novi_toplevel *other;
+	wl_list_for_each(other, &server->toplevels, link) {
+		if (other != toplevel && other->client_pid == toplevel->client_pid &&
+				other->committed) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/* One `key value` line per fact, like NOVI_IDLE_FILE, and written even
+ * when the answer is "none" so that an ABSENT file means no compositor
+ * rather than no problem -- the distinction a reader needs and cannot
+ * otherwise make.
+ *
+ * The title is somebody else's text -- a web page's <title> reaches
+ * here through the browser -- so it goes through the one sanitiser
+ * this repository has (common/notifications.c), which drops control
+ * characters rather than escaping them. That is what makes a
+ * line-oriented file safe by construction: a newline cannot arrive. */
+static void windows_publish(struct novi_server *server, int wedged) {
+	char tmp[] = NOVI_WINDOWS_FILE ".tmp";
+	FILE *f = fopen(tmp, "w");
+	if (f == NULL) {
+		return;
+	}
+	fprintf(f, "unresponsive %d\n", wedged);
+	struct novi_toplevel *toplevel;
+	wl_list_for_each(toplevel, &server->toplevels, link) {
+		if (!toplevel->unresponsive) {
+			continue;
+		}
+		char title[NOVI_HIST_SUMMARY + 1];
+		novi_hist_sanitise(title, sizeof(title),
+			toplevel->xdg_toplevel->title != NULL ?
+				toplevel->xdg_toplevel->title : "");
+		/* The title is LAST because it is the only field that can
+		 * contain a space -- the same rule novi-wifi's `scan --tsv`
+		 * follows about an SSID, and for the same reason: a trailing
+		 * field cannot be found by counting from the left. */
+		fprintf(f, "window %d %d %d %s\n", (int)toplevel->client_pid,
+			toplevel->cpu_percent,
+			toplevel->stall_ticks * NOVI_WATCHDOG_TICK_MS / 1000,
+			title[0] != '\0' ? title : "(untitled)");
+	}
+	fclose(f);
+	if (rename(tmp, NOVI_WINDOWS_FILE) != 0) {
+		unlink(tmp);
+	}
+}
+
+/* What the key that ends this window is CALLED, right now, on this
+ * machine -- looked up in the loaded table rather than written into
+ * the string, because /etc/novi/keys.conf can move it and a message
+ * naming a key that does nothing is the drift keybindings.h exists to
+ * prevent. Returns NULL when the row has been unbound, which is a
+ * thing somebody can do and which the message then has to not claim. */
+static const char *watchdog_force_quit_key(struct novi_server *server) {
+	for (size_t i = 0; i < NOVI_BINDINGS_COUNT; i++) {
+		if (server->keys.v[i].action != NOVI_ACT_FORCE_QUIT) {
+			continue;
+		}
+		if (server->keys.v[i].sym == XKB_KEY_NoSymbol) {
+			return NULL;
+		}
+		return server->keys.text[i];
+	}
+	return NULL;
+}
+
+/* EXEC'd with an argv, not handed to /bin/sh like every other spawn in
+ * this file, and that is not a style preference: the summary carries a
+ * window TITLE. A title is text the client chose, and the client this
+ * whole feature exists for is one rendering a document off the
+ * network -- so a title of `'; reboot #` reaching a shell would be a
+ * remote command injection into the compositor, as root, delivered by
+ * the code that noticed the page was hostile. There is no quoting
+ * scheme worth getting right here when not having a shell is free. */
+static void notify_unresponsive(struct novi_server *server,
+		struct novi_toplevel *toplevel) {
+	char title[NOVI_HIST_SUMMARY + 1];
+	novi_hist_sanitise(title, sizeof(title),
+		toplevel->xdg_toplevel->title != NULL ?
+			toplevel->xdg_toplevel->title : "");
+	if (title[0] == '\0') {
+		snprintf(title, sizeof(title), "A window");
+	}
+	char summary[NOVI_HIST_SUMMARY + 32];
+	snprintf(summary, sizeof(summary), "%s is not responding", title);
+
+	const char *key = watchdog_force_quit_key(server);
+	char body[256];
+	if (key != NULL) {
+		snprintf(body, sizeof(body),
+			"It has used %d%% of a processor for %d seconds without drawing. "
+			"Press %s to end it.", toplevel->cpu_percent,
+			toplevel->stall_ticks * NOVI_WATCHDOG_TICK_MS / 1000, key);
+	} else {
+		/* No icon and no key: say the true thing rather than the
+		 * useful-sounding one. */
+		snprintf(body, sizeof(body),
+			"It has used %d%% of a processor for %d seconds without drawing. "
+			"No key is bound to end it.", toplevel->cpu_percent,
+			toplevel->stall_ticks * NOVI_WATCHDOG_TICK_MS / 1000);
+	}
+
+	pid_t pid = fork();
+	if (pid < 0) {
+		wlr_log_errno(WLR_ERROR, "fork failed for %s", NOVI_NOTIFY_BIN);
+		return;
+	}
+	if (pid == 0) {
+		setsid();
+		if (chdir("/") != 0) {
+			/* Nothing useful to do about it; the exec below does not
+			 * care where it starts. */
+		}
+		/* No -i: this icon set has no glyph that means "wedged", and
+		 * RFC 0024's rule is that an unknown name is no icon rather
+		 * than a fallback. Borrowing one that means something else
+		 * would be worse than the empty column. */
+		execlp(NOVI_NOTIFY_BIN, NOVI_NOTIFY_BIN, "-u", "normal",
+			summary, body, (char *)NULL);
+		_exit(127);
+	}
+}
+
+static void watchdog_arm(struct novi_server *server) {
+	if (server->watchdog_timer == NULL) {
+		return;
+	}
+	wl_event_source_timer_update(server->watchdog_timer,
+		NOVI_WATCHDOG_TICK_MS);
+}
+
+static int watchdog_timer_fire(void *data) {
+	struct novi_server *server = data;
+	long clk_tck = sysconf(_SC_CLK_TCK);
+	int wedged = 0;
+
+	struct novi_toplevel *toplevel;
+	wl_list_for_each(toplevel, &server->toplevels, link) {
+		bool progressed = watchdog_client_progressed(server, toplevel);
+
+		int percent = -1;
+		unsigned long long now = 0;
+		if (toplevel->client_pid > 0 &&
+				novi_procstat_read((int)toplevel->client_pid, &now, NULL)) {
+			if (toplevel->cpu_sampled) {
+				percent = novi_procstat_cpu_percent(now - toplevel->cpu_ticks,
+					NOVI_WATCHDOG_TICK_MS, clk_tck);
+			}
+			toplevel->cpu_ticks = now;
+			toplevel->cpu_sampled = true;
+		} else {
+			/* The process is gone or unreadable. Drop the sample
+			 * rather than keeping the old one: the next reading would
+			 * be a delta across an unknown gap, which is a number
+			 * rather than a measurement. */
+			toplevel->cpu_sampled = false;
+		}
+		toplevel->cpu_percent = percent;
+
+		/* WHILE THE SCREEN IS BLANKED, NOBODY IS DRAWING AND THAT IS
+		 * NOT A FINDING. wlroots stops sending frame callbacks with
+		 * the outputs off, so every well-behaved client stops
+		 * committing -- and a client legitimately computing in the
+		 * background would be the one window still burning CPU, which
+		 * is precisely the shape this looks for. Found on a booted
+		 * machine, where the idle timeout blanked the screen in the
+		 * middle of a test run.
+		 *
+		 * The verdict FREEZES rather than clearing: a window already
+		 * judged wedged still is, and clearing it would log that it
+		 * had started drawing again -- which would be a lie about a
+		 * dark screen. Sampling continues either way, so the first
+		 * tick after the screen comes back has a real delta rather
+		 * than one spanning the whole blank period. */
+		if (server->blanked) {
+			/* Counted, not skipped: the count drives the published
+			 * file, and a window that is still wedged must not
+			 * disappear from it because the screen went dark. */
+			if (toplevel->unresponsive) {
+				wedged++;
+			}
+			continue;
+		}
+
+		/* A negative percent is "no reading", not "idle", so it can
+		 * never satisfy this -- the first tick after a window appears
+		 * has no previous sample and must not count towards a verdict. */
+		if (!progressed && percent >= NOVI_WATCHDOG_CPU_PERCENT) {
+			toplevel->stall_ticks++;
+		} else {
+			toplevel->stall_ticks = 0;
+		}
+
+		bool now_wedged = toplevel->stall_ticks >= NOVI_WATCHDOG_STALL_TICKS;
+		if (now_wedged != toplevel->unresponsive) {
+			toplevel->unresponsive = now_wedged;
+			if (now_wedged) {
+				wlr_log(WLR_INFO,
+					"watchdog: \"%s\" (pid %d) has used %d%% of a processor "
+					"for %ds without committing a frame",
+					toplevel->xdg_toplevel->title != NULL ?
+						toplevel->xdg_toplevel->title : "(untitled)",
+					(int)toplevel->client_pid, percent,
+					toplevel->stall_ticks * NOVI_WATCHDOG_TICK_MS / 1000);
+				notify_unresponsive(server, toplevel);
+			} else {
+				/* Recovered. The kill stage resets with it: a SIGTERM
+				 * sent during a previous episode must not make the
+				 * next press of the key a SIGKILL. */
+				wlr_log(WLR_INFO, "watchdog: \"%s\" (pid %d) is drawing again",
+					toplevel->xdg_toplevel->title != NULL ?
+						toplevel->xdg_toplevel->title : "(untitled)",
+					(int)toplevel->client_pid);
+				toplevel->kill_stage = 0;
+			}
+		}
+		if (now_wedged) {
+			wedged++;
+		}
+	}
+
+	/* A SECOND pass, and it cannot be folded into the first: the
+	 * judgement above reads OTHER windows' `committed` flags
+	 * (watchdog_client_progressed), so clearing one as we pass it
+	 * would hide a sibling's progress from every window visited after
+	 * it. Same shape as the volume file being read in the layout pass
+	 * rather than where the state is gathered -- a read and a clear
+	 * that disagree about when the tick began. */
+	wl_list_for_each(toplevel, &server->toplevels, link) {
+		toplevel->committed = false;
+	}
+
+	/* Rewritten while anything is wedged (the seconds change) and once
+	 * more when the last one clears. A machine with nothing wrong with
+	 * it does no I/O here at all. */
+	if (wedged > 0 || server->wedged_count > 0) {
+		windows_publish(server, wedged);
+	}
+	server->wedged_count = wedged;
+
+	watchdog_arm(server);
+	return 0;
+}
+
 /* The client let go of its inhibitor, or the client went away. wlroots
  * destroys the object either way, so this is the only unhook needed --
  * an inhibitor cannot outlive the connection that asked for it, which
@@ -1464,6 +1879,77 @@ static void close_focused_toplevel(struct novi_server *server) {
 	}
 }
 
+/* RFC 0038's other half: Super+Shift+Q.
+ *
+ * ONE RULE, stated in keybindings.h and worth repeating where it is
+ * implemented: ask the program to close, and signal it instead when
+ * the watchdog has already established that it cannot hear the
+ * request. That is what makes it safe to put one shift away from
+ * window.close -- pressed by accident on a healthy window it IS
+ * window.close, unsaved-changes prompt and all.
+ *
+ * The asymmetry is unavoidable and worth naming: a close request is
+ * per-WINDOW and a signal is per-PROCESS, so force-quitting a wedged
+ * window of a program with several windows takes them all. There is no
+ * third option -- a client that cannot read its socket cannot act on a
+ * per-window request at all, and the process is the only lever left. */
+static void force_quit_focused(struct novi_server *server) {
+	struct wlr_surface *focused = server->seat->keyboard_state.focused_surface;
+	if (focused == NULL) {
+		return;
+	}
+	struct wlr_xdg_toplevel *xdg_toplevel =
+		wlr_xdg_toplevel_try_from_wlr_surface(focused);
+	if (xdg_toplevel == NULL) {
+		return;
+	}
+	struct novi_toplevel *toplevel = NULL, *t;
+	wl_list_for_each(t, &server->toplevels, link) {
+		if (t->xdg_toplevel == xdg_toplevel) {
+			toplevel = t;
+			break;
+		}
+	}
+	if (toplevel == NULL || !toplevel->unresponsive ||
+			toplevel->client_pid <= 0) {
+		/* Either it is answering, or this compositor never had a
+		 * measurement for it -- both mean the same thing here: there
+		 * is no evidence that the polite request will be ignored, and
+		 * a program killed without that evidence is somebody's work
+		 * thrown away by a keystroke. */
+		wlr_xdg_toplevel_send_close(xdg_toplevel);
+		return;
+	}
+
+	/* A pid is a number the kernel reuses, and this is the one place
+	 * that acts on one -- as root. The start time recorded when the
+	 * window mapped is what says the number still means the same
+	 * process; the race is narrow (the client's socket closing
+	 * destroys this window) and the cost of losing it is signalling a
+	 * stranger, so it is checked rather than reasoned about. */
+	unsigned long long starttime = 0;
+	if (!novi_procstat_read((int)toplevel->client_pid, NULL, &starttime) ||
+			starttime != toplevel->client_starttime) {
+		wlr_log(WLR_ERROR,
+			"force-quit: pid %d is no longer the process that owns this "
+			"window -- not signalling it", (int)toplevel->client_pid);
+		return;
+	}
+
+	int sig = toplevel->kill_stage == 0 ? SIGTERM : SIGKILL;
+	if (kill(toplevel->client_pid, sig) != 0) {
+		wlr_log_errno(WLR_ERROR, "force-quit: could not signal pid %d",
+			(int)toplevel->client_pid);
+		return;
+	}
+	wlr_log(WLR_INFO, "force-quit: sent %s to \"%s\" (pid %d)%s",
+		sig == SIGTERM ? "SIGTERM" : "SIGKILL",
+		xdg_toplevel->title != NULL ? xdg_toplevel->title : "(untitled)",
+		(int)toplevel->client_pid,
+		sig == SIGTERM ? " -- press the key again if it is still there" : "");
+	toplevel->kill_stage = 1;
+}
+
 /* Maps a keysym back to its Super+[1-9] workspace number (1-9), or 0 if
  * it isn't one -- needed because xkb_state_key_get_syms() (what
  * keyboard_handle_key() actually calls) returns the keysym AFTER
@@ -1517,6 +2003,7 @@ static void run_action(struct novi_server *server, enum novi_action action,
 	case NOVI_ACT_TERMINAL:
 		run_spawn("NOVI_TERMINAL", NOVI_DEFAULT_TERMINAL); break;
 	case NOVI_ACT_CLOSE:       close_focused_toplevel(server); break;
+	case NOVI_ACT_FORCE_QUIT:  force_quit_focused(server); break;
 	case NOVI_ACT_WORKSPACE:      switch_workspace(server, digit); break;
 	case NOVI_ACT_WORKSPACE_MOVE: move_focused_to_workspace(server, digit); break;
 	case NOVI_ACT_LAUNCHER:
@@ -3049,6 +3536,13 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 	 * happens to be). */
 	toplevel->workspace = toplevel->server->active_workspace;
 
+	/* RFC 0038. Done here rather than at creation because this is the
+	 * point the window joins server->toplevels, which is the list the
+	 * watchdog walks -- a window that never maps is never watched, and
+	 * a window that maps again after being unmapped starts its
+	 * verdict over rather than inheriting one from a previous life. */
+	watchdog_adopt(toplevel);
+
 	wl_list_insert(&toplevel->server->toplevels, &toplevel->link);
 
 	/* Foreign-toplevel-management handle: created here (not in
@@ -3140,6 +3634,13 @@ static bool default_toplevel_size(struct novi_server *server, int *out_w,
 static void xdg_toplevel_commit(struct wl_listener *listener, void *data) {
 	/* Called when a new surface state is committed. */
 	struct novi_toplevel *toplevel = wl_container_of(listener, toplevel, commit);
+
+	/* RFC 0038: the entire notion of progress the watchdog has. A
+	 * commit means this client's event loop ran and produced
+	 * something; a client stuck inside its own layout gets here never.
+	 * One store, on a path that already runs on every frame -- the
+	 * measurement is in the tick, which is where it can be afforded. */
+	toplevel->committed = true;
 
 	if (toplevel->xdg_toplevel->base->initial_commit) {
 		/* When an xdg_surface performs an initial commit, the compositor
@@ -4105,6 +4606,21 @@ int main(int argc, char *argv[]) {
 			server.blank_after > 0 ? "" : " (never)");
 	}
 
+	/* RFC 0038. Published once here with a count of zero so that the
+	 * file EXISTS on a healthy machine: a reader has to be able to
+	 * tell "nothing is wedged" from "no compositor is running", and an
+	 * absent file is the only honest spelling of the second. */
+	windows_publish(&server, 0);
+	server.watchdog_timer = wl_event_loop_add_timer(
+		wl_display_get_event_loop(server.wl_display), watchdog_timer_fire,
+		&server);
+	if (server.watchdog_timer == NULL) {
+		wlr_log(WLR_ERROR, "could not create the watchdog timer -- "
+			"a wedged window will not be reported");
+	} else {
+		watchdog_arm(&server);
+	}
+
 	/* Run the Wayland event loop. This does not return until you exit the
 	 * compositor. Starting the backend rigged up all of the necessary event
 	 * loop configuration to listen to libinput events, DRM events, generate
@@ -4120,6 +4636,11 @@ int main(int argc, char *argv[]) {
 	 * attempt at a socket that is gone -- recoverable (it times out
 	 * and suspends anyway) but a lie while it lasts. */
 	unlink(NOVI_DISPLAY_FILE);
+	/* Same argument (RFC 0038): the file says which windows this
+	 * compositor judges wedged, and there are no windows and no
+	 * compositor a moment from now. Left behind, it would have the
+	 * Session panel reporting a program that died with the session. */
+	unlink(NOVI_WINDOWS_FILE);
 	wl_display_destroy_clients(server.wl_display);
 	wlr_scene_node_destroy(&server.scene->tree.node);
 	wlr_xcursor_manager_destroy(server.cursor_mgr);

@@ -523,17 +523,42 @@ written for this test. Nothing here has run on physical hardware.
    what the person in front of the failure actually reaches for —
    `keys.conf`'s argument about what a document is for, from the other
    end.
-6. **The CPU half, which the bound does not touch.** Three of the five
-   runaways in the corpus peg a core on 29–44 MB, so no memory ceiling
-   will ever reach them, and the honest version of item 5 says a
-   cumulative CPU limit cannot either. What would: a watchdog that
-   notices a layout has made no progress and offers to stop it, which
-   needs a notion of progress NetSurf does not currently export, and
-   is the point at which "run the page in its own process and kill
-   that" stops being a bigger change than the alternatives. The corpus
-   has both cases to test against — `deep-tables` settles at 73%,
-   `long-line` never does — and that is the whole difficulty in one
-   sentence.
+6. ~~**The CPU half, which the bound does not touch.**~~ **Done, and
+   it is not the browser's — it is the compositor's.** Three of the
+   five runaways in the corpus peg a core on 29–44 MB, so no memory
+   ceiling will ever reach them, and item 5 established that a
+   cumulative CPU limit cannot either. What it wanted was a watchdog
+   that notices a layout has made no progress and offers to stop it.
+   **RFC 0038** is that watchdog, and it watches every window on the
+   machine rather than only this package.
+
+   **THE BLOCKING CLAIM IN THIS ITEM WAS WRONG, and it is the second
+   time in this RFC.** It said such a watchdog "needs a notion of
+   progress NetSurf does not currently export" — true of NetSurf, and
+   false of the problem. **A Wayland client that is answering commits
+   surfaces; one stuck in its own layout loop commits nothing**, and
+   novi-shell has seen that for every client on this machine since the
+   day it existed. Nothing had to be exported. Nothing had to be
+   patched upstream. The sentence after it — that this is "the point
+   at which run the page in its own process and kill that stops being
+   a bigger change than the alternatives" — followed from the wrong
+   premise and does not survive it.
+
+   That is the same shape as this RFC's original claim that a browser
+   "needs Rust and a large native dependency tree", which was true of
+   Chromium and got applied to the category. **A blocking claim in a
+   roadmap deserves the same scepticism as a comment asserting a bug
+   away** — this RFC has now been the example twice.
+
+   What ships: two facts per window every two seconds (did the client
+   commit, how much CPU did its process burn), a verdict after ten
+   seconds of neither-drawing-nor-idle, one notification,
+   `/run/novi/windows`, a row in novi-settings' Session panel, and
+   **Super+Shift+Q** to end it. **It kills nothing on its own**,
+   because from outside a process a slow layout and a stuck one are
+   indistinguishable — see RFC 0038 decision 2, which is the whole
+   reason the corpus pair named in this item (`deep-tables` settles at
+   73%, `long-line` never does) is the test rather than a curiosity.
 7. **Process isolation, which none of the above is.** Said in item 4
    and repeated here because it is the item that never gets written:
    a bound and a priority change what a hostile page can do to the

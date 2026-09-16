@@ -166,6 +166,14 @@ static const char *PANEL_NAMES[PANEL_COUNT] = {
 /* Long enough for `degraded` plus the service names the health
  * service lists; it writes one line and this is a view of it. */
 #define HEALTH_DETAIL_MAX 191
+/* RFC 0038. The compositor publishes one line per window it judges
+ * unresponsive; this is how many of them the panel will name. Six
+ * fills the space a section can have here, and the block says so when
+ * there are more -- a list that shows a subset without saying so is
+ * the bug class this file has already been fixed for twice. */
+#define WEDGED_MAX 6
+#define WEDGED_TITLE_MAX 63
+#define WINDOWS_FILE "/run/novi/windows"
 
 struct session_info {
 	/* A list that shows a subset without saying so is a bug class,
@@ -190,6 +198,18 @@ struct session_info {
 	bool health_known;
 	bool health_ok;
 	char health_detail[HEALTH_DETAIL_MAX + 1];
+	/* RFC 0038. False when /run/novi/windows is absent: no compositor,
+	 * or one too old to publish -- which is a different answer from
+	 * "every window is responding", and the panel says so. */
+	bool windows_known;
+	int wedged;        /* what the compositor counted */
+	int wedged_named;  /* how many of them fitted here */
+	struct wedged_window {
+		int pid;
+		int cpu;
+		int secs;
+		char title[WEDGED_TITLE_MAX + 1];
+	} wedged_rows[WEDGED_MAX];
 };
 
 /* ── The Network panel: WiFi without a terminal ─────────────────────
@@ -1716,6 +1736,37 @@ static void session_refresh(struct novi_settings *state) {
 		}
 		fclose(f);
 	}
+
+	/* RFC 0038. Read here rather than in the draw, for the reason
+	 * keys_refresh() exists: a file open per row per frame is what
+	 * novi-panel's volume glyph was doing wrong, and a read belongs
+	 * where state is gathered. */
+	f = fopen(WINDOWS_FILE, "r");
+	if (f != NULL) {
+		char line[256];
+		while (fgets(line, sizeof(line), f) != NULL) {
+			int n = 0, pid = 0, cpu = 0, secs = 0;
+			char title[WEDGED_TITLE_MAX + 1];
+			if (sscanf(line, "unresponsive %d", &n) == 1) {
+				s->wedged = n;
+				/* This key is what makes the section meaningful, so it
+				 * is what sets `known` -- the same rule the idle
+				 * block follows about its own count. */
+				s->windows_known = true;
+			} else if (sscanf(line, "window %d %d %d %63[^\n]",
+					&pid, &cpu, &secs, title) == 4) {
+				if (s->wedged_named < WEDGED_MAX) {
+					struct wedged_window *w = &s->wedged_rows[s->wedged_named];
+					w->pid = pid;
+					w->cpu = cpu;
+					w->secs = secs;
+					snprintf(w->title, sizeof(w->title), "%s", title);
+					s->wedged_named++;
+				}
+			}
+		}
+		fclose(f);
+	}
 }
 
 static void keys_refresh(struct novi_settings *state) {
@@ -1991,7 +2042,7 @@ static void render_session(struct novi_settings *state, uint32_t *px,
 		"Session", TEXT_PIX);
 	novi_text_draw(dest, state->font_small, CONTENT_X,
 		52 + state->font_small->ascent,
-		"/run/novi/idle, /run/novi/health", LABEL_PIX);
+		"/run/novi/idle, /run/novi/health, /run/novi/windows", LABEL_PIX);
 
 	int y = 84;
 	char val[HEALTH_DETAIL_MAX + 64];
@@ -2088,6 +2139,54 @@ static void render_session(struct novi_settings *state, uint32_t *px,
 			y + state->font_small->ascent,
 			"`novi-state health` says what is wrong with each", LABEL_PIX);
 		y += ROW_HEIGHT;
+	}
+
+	/* RFC 0038: the windows the compositor's watchdog judges wedged.
+	 * The toast that announced one is gone five seconds later and the
+	 * machine is still pegged, which is RFC 0014's rule -- a toast on
+	 * the transition, an indicator while it is true -- and this is the
+	 * indicator's readable half. */
+	y += 8;
+	if (!s->windows_known) {
+		SESSION_ROW("Windows", "-- (no compositor is publishing)", LABEL_PIX);
+	} else if (s->wedged == 0) {
+		SESSION_ROW("Windows", "all responding", SUCCESS_PIX);
+	} else {
+		/* The key is looked up rather than written down:
+		 * /etc/novi/keys.conf can move it, and a panel naming a key
+		 * that does nothing is the drift common/keybindings.h exists
+		 * to prevent. */
+		const char *key = NULL;
+		for (size_t i = 0; i < NOVI_BINDINGS_COUNT; i++) {
+			if (state->keys.v[i].action == NOVI_ACT_FORCE_QUIT &&
+					state->keys.v[i].sym != XKB_KEY_NoSymbol) {
+				key = state->keys.text[i];
+				break;
+			}
+		}
+		if (key != NULL) {
+			snprintf(val, sizeof(val), "%d not responding  (%s ends one)",
+				s->wedged, key);
+		} else {
+			snprintf(val, sizeof(val),
+				"%d not responding  (no key is bound to end one)", s->wedged);
+		}
+		SESSION_ROW("Windows", val, ERROR_PIX);
+		for (int i = 0; i < s->wedged_named; i++) {
+			const struct wedged_window *wd = &s->wedged_rows[i];
+			snprintf(val, sizeof(val), "%s  --  pid %d, %d%% of a processor, %ds",
+				wd->title, wd->pid, wd->cpu, wd->secs);
+			novi_text_draw(dest, state->font_small, CONTENT_X + 226,
+				y + state->font_small->ascent, val, TEXT_PIX);
+			y += ROW_HEIGHT;
+		}
+		if (s->wedged_named < s->wedged) {
+			snprintf(val, sizeof(val), "%d more not named",
+				s->wedged - s->wedged_named);
+			novi_text_draw(dest, state->font_small, CONTENT_X + 226,
+				y + state->font_small->ascent, val, LABEL_PIX);
+			y += ROW_HEIGHT;
+		}
 	}
 	#undef SESSION_ROW
 

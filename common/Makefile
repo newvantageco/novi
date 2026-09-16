@@ -29,10 +29,11 @@ CFLAGS ?= -O1 -Wall -Wextra
 # the second copy of a derived answer this repository keeps deleting.
 # So CI installs libxkbcommon-dev (one line in the workflow) rather
 # than this test skipping itself where it would matter most.
-check: theme-test notifications-test keys-test
+check: theme-test notifications-test keys-test procstat-test
 	@cd .. && common/theme-test
 	@cd .. && common/notifications-test
 	@cd .. && common/keys-test
+	@cd .. && common/procstat-test
 
 theme-test: theme-test.c theme.c theme.h
 	$(CC) $(CFLAGS) -DNOVI_THEME_NO_PIXMAN -I. -o $@ theme-test.c theme.c -lm
@@ -43,7 +44,14 @@ notifications-test: notifications-test.c notifications.c notifications.h
 keys-test: keys-test.c keys.c keys.h keybindings.h
 	$(CC) $(CFLAGS) -Werror -I. -o $@ keys-test.c keys.c -lxkbcommon
 
+# procstat-test links the real parser for the same reason, and needs
+# nothing but libc: the interesting half of that file is a string
+# parse, and the one case a booted machine will never hand you is a
+# process that named itself after a stat line.
+procstat-test: procstat-test.c procstat.c procstat.h
+	$(CC) $(CFLAGS) -Werror -I. -o $@ procstat-test.c procstat.c
+
 clean:
-	rm -f theme-test notifications-test keys-test
+	rm -f theme-test notifications-test keys-test procstat-test
 
 .PHONY: check clean

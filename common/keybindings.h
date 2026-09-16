@@ -57,6 +57,7 @@ enum novi_action {
 	NOVI_ACT_LAUNCHER,
 	NOVI_ACT_TERMINAL,
 	NOVI_ACT_CLOSE,
+	NOVI_ACT_FORCE_QUIT,
 	NOVI_ACT_WORKSPACE,
 	NOVI_ACT_WORKSPACE_MOVE,
 	NOVI_ACT_LOCK,
@@ -160,6 +161,15 @@ static const struct novi_binding NOVI_BINDINGS[] = {
 	  "window.terminal", "Windows", "Open a terminal" },
 	{ NOVI_MOD_LOGO, XKB_KEY_q, 0, NOVI_ACT_CLOSE,
 	  "window.close", "Windows", "Close the focused window" },
+	/* RFC 0038. One key with one rule -- ask the program to close, and
+	 * signal it instead when the watchdog has already established that
+	 * it cannot hear the request. That is what makes it safe a shift
+	 * away from window.close: pressing it by accident on a healthy
+	 * window does exactly what window.close does, prompt to save and
+	 * all. Press it again on a window that is still there and it
+	 * escalates. */
+	{ NOVI_MOD_LOGO | NOVI_MOD_SHIFT, XKB_KEY_q, 0, NOVI_ACT_FORCE_QUIT,
+	  "window.force-quit", "Windows", "End a window that is not responding" },
 
 	{ NOVI_MOD_LOGO, XKB_KEY_1, NOVI_BIND_DIGIT_RANGE, NOVI_ACT_WORKSPACE,
 	  "workspace.switch", "Workspaces", "Switch to a workspace" },

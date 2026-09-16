@@ -1625,6 +1625,138 @@ decides that.
   dispatched, permitted, and unmentioned by `novi-agent` with no
   arguments. `test-agent-verbs.sh` checks all three now.
 
+## Architecture: a window that stopped answering
+
+RFC 0038 (`docs/rfcs/0038-unresponsive-windows.md`). novi-shell samples
+two things about every mapped window every two seconds -- did its
+client commit a surface, and how much CPU did its process burn -- and
+judges a window **not responding** when the answers are "no" and "at
+least half a processor" for ten seconds running.
+
+- **RFC 0031 ITEM 6 SAID THIS NEEDED "a notion of progress NetSurf
+  does not currently export", AND THAT IS TRUE OF NETSURF AND FALSE OF
+  THE PROBLEM.** A Wayland client that is answering COMMITS SURFACES;
+  one stuck in its own layout loop commits nothing. The compositor has
+  had that signal for every client on the machine since it existed.
+  Nothing had to be exported -- it had to be looked at. **Fifth
+  roadmap item in this repository found to be wrong about what is
+  already available**, and the second one in RFC 0031 specifically
+  (after "a browser needs Rust and a large native dependency tree").
+- **NEITHER FACT IS SUFFICIENT AND THAT IS THE WHOLE DESIGN.** Every
+  idle editor on the machine commits nothing; every client that draws
+  while it works burns CPU. Only the pair means anything, and the CPU
+  half is also what makes it cheap -- one store per frame, a
+  measurement five times a minute.
+- **IT CANNOT TELL SLOW FROM STUCK, so it kills nothing.** From
+  outside a process -- the only vantage point available -- a client
+  laying out an enormous document is indistinguishable from one that
+  never will. So the watchdog REPORTS and a person presses a key: a
+  false positive costs one sentence on screen instead of somebody's
+  unsaved work. The thresholds are generous for the same reason,
+  set where a long computation inside a client's own process is rare
+  rather than where a hang is caught soonest.
+- **50%, not 90%.** The case this exists for is a layout loop on a
+  machine with other work on it -- and `nice 5` on the browser (RFC
+  0031 roadmap 5) makes a wedged browser LESS likely to hold a whole
+  core, not more.
+- **The CPU is per-PROCESS and the verdict is per-window**, so a
+  client counts as making progress if ANY of its mapped windows
+  committed. A program animating one window and blocked on another is
+  working, and judging its second window wedged would be this code
+  disagreeing with itself about one process.
+- **The commit flags are cleared in a SECOND pass.** The judgement
+  reads other windows' flags, so clearing one as the loop passes it
+  would hide a sibling's progress from every window visited after it.
+  Same shape as novi-panel reading the volume file inside
+  `layout_taskbar()`.
+- **A window this compositor cannot measure is never accused.** No pid,
+  or no `/proc` entry, and it is permanently "making progress" -- the
+  failure of the instrument must not read as a finding about the thing
+  measured. `novi_procstat_cpu_percent()` returns -1 rather than 0 for
+  the same reason, so the first tick after a window appears (no
+  previous sample) cannot contribute to a verdict.
+- **`Super+Shift+Q` HAS ONE RULE, and that is what makes it safe one
+  shift from `Super+Q`**: ask the program to close, and signal it
+  instead when the watchdog has already established it cannot hear the
+  request. Pressed by accident on a healthy window it IS
+  `window.close`, unsaved-changes prompt and all. Escalation is the
+  person pressing it AGAIN (SIGTERM, then SIGKILL), never a timer --
+  a timer would be guessing how long a dying program deserves.
+  A recovery resets the stage.
+- **A close request is per-window and a signal is per-process**, so
+  force-quitting one wedged window of a program with several takes
+  them all. Unavoidable: a client that cannot read its socket cannot
+  act on a per-window request at all.
+- **THE PID IS CHECKED BEFORE IT IS SIGNALLED.** A pid is a number the
+  kernel reuses and this is the only place the compositor acts on one,
+  as root. The process's start time (field 22) is recorded at map and
+  compared before the signal; a change means a different process is
+  wearing the number.
+- **`/proc/<pid>/stat` CANNOT BE PARSED BY COUNTING FIELDS FROM THE
+  LEFT.** Field 2 is the executable name in parentheses and the kernel
+  neither escapes nor rejects what is in it -- `prctl(PR_SET_NAME)`
+  lets a process name itself `R 1 1 1 1 1 1 1 1 1 1 999 888`, which is
+  attacker-chosen text in exactly the case this watchdog exists for.
+  Parse from the LAST `)`. `common/procstat-test.c` provokes both
+  mistakes; **its `strchr` check could not fail at first**, because
+  with `utime 700, stime 7` the misparse also lands on 707 -- the
+  field it mistakes for utime happens to hold a 7.
+- **NOTHING HERE REACHES A SHELL.** The notification's summary carries
+  a window TITLE -- text a program rendering somebody else's document
+  chose -- and `spawn()` hands its string to `/bin/sh -c`. A page
+  titled `'; reboot #` would have been a remote command injection into
+  the compositor, as root, delivered by the code that noticed the page
+  was hostile. `notify_unresponsive()` forks and `execlp`s with an
+  argv. The same title reaching `/run/novi/windows` goes through
+  `novi_hist_sanitise()`, which DROPS control characters, so a newline
+  cannot arrive to forge a second record.
+- **Its own timer, not the idle tick.** That tick counts idleness and
+  RETURNS EARLY from several branches (inhibited, waiting for a lock
+  surface, having just suspended) -- a watchdog on it would stop
+  watching in exactly the situations where nobody is looking at the
+  machine. RFC 0030's theme watch made the same call.
+- **`/run/novi/windows` is written ONCE AT STARTUP with a count of
+  zero**, so an absent file means no compositor and a present one with
+  `0` means nothing is wrong. Different answers, and a reader cannot
+  otherwise tell them apart. Nothing wedged means no further I/O at
+  all.
+- **The notification names the LIVE binding**, looked up in the table
+  novi-shell loaded rather than written into the string, and says "no
+  key is bound to end it" when somebody has unbound it (RFC 0037).
+- **No icon**, deliberately: this set has no glyph that means "wedged"
+  and RFC 0024's rule is that an unknown name is no icon rather than a
+  fallback. Borrowing `shield` would say something else confidently.
+- **A BLANKED SCREEN IS NOT A FINDING, and only a booted machine was
+  ever going to say so.** With the outputs off wlroots stops sending
+  frame callbacks, so every well-behaved client stops committing --
+  and the one window still burning CPU would be a client legitimately
+  computing in the background, which is exactly the shape this looks
+  for. The verdict FREEZES while blanked rather than clearing: a
+  window already judged wedged still is, and clearing it would log
+  that it had started drawing again about a dark screen. Sampling
+  continues, so the first tick after the screen returns has a real
+  delta rather than one spanning the whole blank period -- watched
+  live: a window wedged for 74 seconds still read 74 after 25 seconds
+  of blanking, then 78 and 102 once a keypress brought the screen
+  back, with the CPU percentage moving throughout.
+- **`long-line.html` WAS JUDGED WEDGED AND THEN RECOVERED FOUR SECONDS
+  LATER**, live, which is decision 2 happening rather than being
+  argued: it was slow, not stuck, and this said the wrong thing about
+  it for four seconds. The cost was one notification, which is the
+  whole reason nothing here kills anything.
+- **CLOSING THE FOCUSED WINDOW LEAVES NOTHING FOCUSED**, so the next
+  keybinding that acts on the focused window does nothing at all.
+  `xdg_toplevel_unmap()` has no refocus. It predates RFC 0038 and cost
+  a confused test round there; it is worth fixing somewhere that is
+  not RFC 0038.
+- **THE SHORTCUT SHEET'S `_Static_assert` FIRED ON THE FIRST ROW ADDED
+  SINCE IT WAS WRITTEN.** Twenty bindings at 32px rows is a 769px
+  buffer against a 768px limit -- over by one pixel, on a 1366x768
+  panel nobody here has. This file had recorded that the sheet was
+  "one row from outgrowing" it and that was exact. `ROW_H_KEYS` is 30
+  now (729px): one more row of headroom and no more, after which the
+  answer is two columns or a scroll rather than another pixel.
+
 ## Architecture: two ways to say "not now"
 
 RFC 0036 (`docs/rfcs/0036-idle-inhibitors.md`).

@@ -99,10 +99,19 @@
  * size constraint rather than a taste: sixteen 40px rows plus the
  * header and the shadow margins come to ~780px, which does not fit a
  * 1366x768 laptop -- a very common panel and one nobody would think to
- * test on before shipping. At 32 the whole sheet is ~580px and fits
- * with room to spare. A reference list is also meant to be denser than
- * a search result; the constraint and the design agree here. */
-#define ROW_H_KEYS 32
+ * test on before shipping. A reference list is also meant to be denser
+ * than a search result; the constraint and the design agree here.
+ *
+ * IT WAS 32, AND THE _Static_assert BELOW FIRED ON THE FIRST ROW ADDED
+ * AFTER IT WAS WRITTEN. RFC 0038's window.force-quit made twenty rows,
+ * which at 32px is a 769px buffer against a 768px limit -- over by one
+ * pixel, on a panel nobody here has. That is the whole value of the
+ * assert: the alternative was a sheet whose header and first row sat
+ * off the top of somebody's screen, discovered by somebody with that
+ * screen. 30px gives 729px, which is one more row of headroom and no
+ * more; the row after that needs a real answer (two columns, or the
+ * scroll this mode does not have) rather than another pixel. */
+#define ROW_H_KEYS 30
 #define MAX_ROWS 6
 /* The shortcut sheet shows every binding at once, because it is a
  * reference rather than a search: six of sixteen with "10 more -- keep
