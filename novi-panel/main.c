@@ -151,6 +151,10 @@
  * NET_BARS_MAX is 4 and not a number someone picked.
  */
 #define NOVI_DEFAULT_SETTINGS "novi-settings"
+/* The health and stay-awake glyphs open the panel that explains them
+ * (RFC 0036 roadmap 4). A separate default from NOVI_DEFAULT_SETTINGS
+ * because it is a different question being asked. */
+#define NOVI_DEFAULT_SESSION_PANEL "novi-settings --panel session"
 
 
 #define NET_ICON_COLOR (NOVI_TEXT_SECONDARY & 0xffffffu)
@@ -323,6 +327,11 @@ struct novi_panel {
 	bool apps_button_hover;
 	bool apps_button_pressed; /* press happened inside the button */
 	bool net_button_hover;
+	/* No hover state for the status glyphs. Hover on the three BUTTONS
+	 * is a background tint on a rectangle that is always there; these
+	 * come and go, and lighting one up on the way past would draw the
+	 * eye to a thing that is not news. The click still works. */
+	bool session_glyph_pressed;
 	bool power_button_hover;
 	/* Read once per repaint from HEALTH_FILE, like the clock reads the
 	 * time: cheap, and the panel already repaints every second. */
@@ -554,22 +563,91 @@ static void read_published_state(struct novi_panel *panel) {
  * three flags rather than measured separately, because the hit-test
  * and the drawing disagreeing by one glyph is a taskbar entry that
  * responds to a click on a coffee cup. */
-static int status_area_w(const struct novi_panel *panel) {
-	int w = 0;
+/* Where each status glyph sits, computed ONCE from the same flags in
+ * the same order, because three things need to agree about it: the
+ * drawing, the taskbar's right-hand limit, and -- since RFC 0036
+ * roadmap 4 -- the hit-test for the two glyphs that now open
+ * something. The file already carried the warning: a hit-test that
+ * disagrees with the drawing by one glyph is a taskbar entry that
+ * responds to a click on a coffee cup.
+ *
+ * x is -1 for a glyph that is not on the bar. The march runs LEFTWARD
+ * from the network button, so `total` is what the taskbar must stop
+ * short of. */
+struct status_layout {
+	int volume_x, health_x, awake_x, bell_x;
+	int total;
+};
+
+static void status_layout(const struct novi_panel *panel,
+		struct status_layout *out) {
+	int net_x, net_y, net_w, net_h;
+	net_button_rect(panel, &net_x, &net_y, &net_w, &net_h);
+	(void)net_y; (void)net_w; (void)net_h;
+
+	out->volume_x = out->health_x = out->awake_x = out->bell_x = -1;
+	int x = net_x;
 	if (panel->volume_known) {
-		w += VOLUME_GAP + VOL_ICON_W;
+		x -= VOLUME_GAP + VOL_ICON_W;
+		out->volume_x = x;
 	}
 	if (panel->health_degraded) {
-		w += HEALTH_GAP + WARN_ICON_W;
+		x -= HEALTH_GAP + WARN_ICON_W;
+		out->health_x = x;
 	}
 	if (panel->holding_awake) {
-		w += AWAKE_GAP + AWAKE_ICON_W;
+		x -= AWAKE_GAP + AWAKE_ICON_W;
+		out->awake_x = x;
 	}
 	if (panel->unread > 0) {
-		w += BELL_GAP + BELL_ICON_W + BELL_COUNT_GAP +
+		x -= BELL_GAP + BELL_ICON_W + BELL_COUNT_GAP +
 			novi_text_width(panel->font_clock, panel->unread_label);
+		out->bell_x = x;
 	}
-	return w;
+	out->total = net_x - x;
+}
+
+static int status_area_w(const struct novi_panel *panel) {
+	struct status_layout sl;
+	status_layout(panel, &sl);
+	return sl.total;
+}
+
+/* The two glyphs that now OPEN something (RFC 0036 roadmap 4). Both of
+ * their comments above said the same thing for as long as they have
+ * existed -- there is nowhere for this to lead, and a panel item that
+ * opens a terminal is not a thing this desktop does. novi-settings has
+ * a Session panel now, so there is.
+ *
+ * NOT the volume glyph and NOT the bell. The bell already has
+ * somewhere to go and a key that goes there (Super+N), so a click
+ * would be a second way to say one thing; the speaker has no audio
+ * panel yet, and its own comment says to wire it when there is one.
+ *
+ * Still not a TOGGLE, which is the part decision 8 was actually
+ * about: Super+A turns stay-awake off and a click that did the same
+ * would be a second spelling of one action. Opening the panel that
+ * ANSWERS the question the glyph raises is the opposite of that. */
+static bool point_in_session_glyph(const struct novi_panel *panel,
+		double px, double py) {
+	struct status_layout sl;
+	status_layout(panel, &sl);
+	int h = (int)panel->height;
+	if (sl.health_x >= 0) {
+		int y = h / 2 - WARN_ICON_H / 2;
+		if (px >= sl.health_x && px < sl.health_x + WARN_ICON_W &&
+				py >= y && py < y + WARN_ICON_H) {
+			return true;
+		}
+	}
+	if (sl.awake_x >= 0) {
+		int y = h / 2 - AWAKE_ICON_H / 2;
+		if (px >= sl.awake_x && px < sl.awake_x + AWAKE_ICON_W &&
+				py >= y && py < y + AWAKE_ICON_H) {
+			return true;
+		}
+	}
+	return false;
 }
 
 static void layout_taskbar(struct novi_panel *panel) {
@@ -809,7 +887,8 @@ static void render(struct novi_panel *panel, uint32_t *px, uint32_t stride_px) {
 	 * one that appears without anybody doing anything. Whatever this
 	 * order is, status_area_w() above must consume exactly the same
 	 * widths, or the taskbar's hit-test and this drawing disagree. */
-	int status_x = net_x;
+	struct status_layout sl;
+	status_layout(panel, &sl);
 
 	if (panel->volume_known) {
 		struct vol_glyph vol = { .arcs = 0u, .muted = panel->volume_muted };
@@ -820,14 +899,13 @@ static void render(struct novi_panel *panel, uint32_t *px, uint32_t stride_px) {
 				vol.arcs = 0x1u;
 			}
 		}
-		status_x -= VOLUME_GAP + VOL_ICON_W;
 		/* Muted is text-secondary, not the warning colour: a muted
 		 * machine is a machine doing what it was told, not a machine
 		 * with something wrong with it. Accent is reserved for one
 		 * thing per window (GUI-DESIGN-LANGUAGE.md), and on this bar
 		 * that is the active taskbar entry. */
 		draw_icon(px, stride_px, w, h,
-			status_x, (int)h / 2 - VOL_ICON_H / 2,
+			sl.volume_x, (int)h / 2 - VOL_ICON_H / 2,
 			VOL_ICON_W, VOL_ICON_H, novi_volume_coverage, &vol,
 			NET_ICON_COLOR);
 	}
@@ -836,9 +914,8 @@ static void render(struct novi_panel *panel, uint32_t *px, uint32_t stride_px) {
 	 * shows a warning glyph, greyed out, teaches people to stop
 	 * looking at it. */
 	if (panel->health_degraded) {
-		status_x -= HEALTH_GAP + WARN_ICON_W;
 		draw_icon(px, stride_px, w, h,
-			status_x, (int)h / 2 - WARN_ICON_H / 2,
+			sl.health_x, (int)h / 2 - WARN_ICON_H / 2,
 			WARN_ICON_W, WARN_ICON_H, novi_warn_coverage, NULL,
 			NOVI_STATUS_WARNING);
 	}
@@ -849,9 +926,8 @@ static void render(struct novi_panel *panel, uint32_t *px, uint32_t stride_px) {
 	 * machine being held awake is a machine doing what it was told,
 	 * the same reading the muted speaker gets. */
 	if (panel->holding_awake) {
-		status_x -= AWAKE_GAP + AWAKE_ICON_W;
 		draw_icon(px, stride_px, w, h,
-			status_x, (int)h / 2 - AWAKE_ICON_H / 2,
+			sl.awake_x, (int)h / 2 - AWAKE_ICON_H / 2,
 			AWAKE_ICON_W, AWAKE_ICON_H, novi_awake_coverage, NULL,
 			NET_ICON_COLOR);
 	}
@@ -865,14 +941,12 @@ static void render(struct novi_panel *panel, uint32_t *px, uint32_t stride_px) {
 	 * whatever is next along, so the number is nearer the thing it
 	 * counts than the thing it is not. */
 	if (panel->unread > 0) {
-		int count_w = novi_text_width(panel->font_clock, panel->unread_label);
-		status_x -= BELL_GAP + BELL_ICON_W + BELL_COUNT_GAP + count_w;
 		draw_icon(px, stride_px, w, h,
-			status_x, (int)h / 2 - BELL_ICON_H / 2,
+			sl.bell_x, (int)h / 2 - BELL_ICON_H / 2,
 			BELL_ICON_W, BELL_ICON_H, novi_bell_coverage, NULL,
 			NET_ICON_COLOR);
 		novi_text_draw(dest, panel->font_clock,
-			status_x + BELL_ICON_W + BELL_COUNT_GAP,
+			sl.bell_x + BELL_ICON_W + BELL_COUNT_GAP,
 			((int)h + panel->font_clock->ascent -
 				panel->font_clock->descent) / 2,
 			panel->unread_label, NOVI_PIX(NOVI_TEXT_SECONDARY));
@@ -1115,6 +1189,8 @@ static void pointer_button(void *data, struct wl_pointer *pointer,
 			point_in_net_button(panel, panel->pointer_x, panel->pointer_y);
 		panel->power_button_pressed =
 			point_in_power_button(panel, panel->pointer_x, panel->pointer_y);
+		panel->session_glyph_pressed =
+			point_in_session_glyph(panel, panel->pointer_x, panel->pointer_y);
 		panel->taskbar_pressed =
 			find_taskbar_entry_at(panel, panel->pointer_x, panel->pointer_y);
 		return;
@@ -1139,6 +1215,17 @@ static void pointer_button(void *data, struct wl_pointer *pointer,
 			point_in_net_button(panel, panel->pointer_x, panel->pointer_y)) {
 		spawn(getenv("NOVI_SETTINGS") ?
 			getenv("NOVI_SETTINGS") : NOVI_DEFAULT_SETTINGS);
+	}
+
+	/* Straight to the panel that answers the question the glyph asks,
+	 * rather than to Settings' front page: a coffee cup that opens the
+	 * Account panel has not answered what was clicked on. */
+	bool session_was_pressed = panel->session_glyph_pressed;
+	panel->session_glyph_pressed = false;
+	if (session_was_pressed &&
+			point_in_session_glyph(panel, panel->pointer_x, panel->pointer_y)) {
+		spawn(getenv("NOVI_SETTINGS_SESSION") ?
+			getenv("NOVI_SETTINGS_SESSION") : NOVI_DEFAULT_SESSION_PANEL);
 	}
 
 	bool power_was_pressed = panel->power_button_pressed;

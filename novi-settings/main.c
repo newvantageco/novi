@@ -47,6 +47,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>   /* strcasecmp, for --panel */
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -129,10 +130,67 @@ enum novi_panel {
 	PANEL_NETWORK,
 	PANEL_SYSTEM,
 	PANEL_KEYS,
+	PANEL_SESSION,
 	PANEL_COUNT,
 };
 
-static const char *PANEL_NAMES[PANEL_COUNT] = { "Account", "Network", "System", "Keys" };
+static const char *PANEL_NAMES[PANEL_COUNT] = {
+	"Account", "Network", "System", "Keys", "Session" };
+
+/* ── The Session panel: where the panel's glyphs finally lead ───────
+ *
+ * RFC 0036 roadmap 4, and RFC 0014's long-open "something should
+ * consume this". The coffee cup and the health dot on novi-panel are
+ * both DISPLAY ONLY, and both of their comments say the same thing:
+ * there is nowhere for them to go, and a panel item that opens a
+ * terminal is not a thing this desktop does. This is the somewhere.
+ *
+ * READ-ONLY, deliberately and not from laziness. Everything on it is
+ * either a `system.conf` key the System panel already edits
+ * (`power.blank`, `power.suspend`) or a thing a keystroke owns
+ * (Super+A). A second write path to a key the GUI already reaches is
+ * exactly what RFC 0029 decision 10 refused for `firewall.allow` and
+ * what RFC 0033's roadmap got wrong about the wired network. So this
+ * panel SHOWS, and says where each thing is changed.
+ *
+ * Every value comes from a published file -- /run/novi/idle, written
+ * by novi-shell on every tick, and /run/novi/health, written by the
+ * health service every 30s. No forks: this is the arrangement RFC
+ * 0009 established for the network interface and RFC 0014 for the
+ * health verdict, and the reason the panel that reads them costs
+ * nothing per repaint. */
+#define IDLE_FILE "/run/novi/idle"
+#define HEALTH_FILE "/run/novi/health"
+#define INHIBITOR_MAX 8
+#define INHIBITOR_NAME_MAX 63
+/* Long enough for `degraded` plus the service names the health
+ * service lists; it writes one line and this is a view of it. */
+#define HEALTH_DETAIL_MAX 191
+
+struct session_info {
+	/* A list that shows a subset without saying so is a bug class,
+	 * not an instance (CLAUDE.md). The health line is a list of
+	 * service names and it is capped, so the panel says when the cap
+	 * bit rather than quietly dropping the rest. */
+	bool health_truncated;
+	/* False when /run/novi/idle is absent: no compositor, or one too
+	 * old to publish. That is "nothing to say", not zero seconds of
+	 * idleness -- the same call `novi-agent describe` makes when it
+	 * reports the idle object as absent rather than as zeros. */
+	bool idle_known;
+	int idle_s;
+	int blank_s;       /* 0 means off, as the file spells it */
+	int suspend_s;
+	bool blanked;
+	bool locked;
+	bool awake;        /* somebody pressed Super+A */
+	int inhibit;       /* how many client surfaces are asking */
+	int inhibitor_count;
+	char inhibitors[INHIBITOR_MAX][INHIBITOR_NAME_MAX + 1];
+	bool health_known;
+	bool health_ok;
+	char health_detail[HEALTH_DETAIL_MAX + 1];
+};
 
 /* ── The Network panel: WiFi without a terminal ─────────────────────
  *
@@ -320,6 +378,11 @@ struct novi_settings {
 	char job_ssid[SSID_MAX + 1];
 	char job_out[JOB_BUF];
 	size_t job_len;
+
+	/* Re-read on a poll timeout while the Session panel is showing,
+	 * and once on entering it. An idle counter that does not count is
+	 * a worse answer than no counter. */
+	struct session_info session;
 
 	/* A status line that is a copy, not a pointer to a literal.
 	 * Everything the Account and System panels report is a fixed
@@ -1571,6 +1634,90 @@ static void render_network(struct novi_settings *state, uint32_t *px,
  * a surgical edit of a file full of comments rather than a rewrite.
  */
 
+/* ── The Session panel's reader ─────────────────────────────────────
+ *
+ * Two published files, both rewritten by their owner with a rename,
+ * so a reader on its own schedule can never see half a line. Every
+ * key this does not recognise is SKIPPED rather than refused: a
+ * novi-shell newer than this binary must not be able to blank the
+ * panel by adding a line, which is the rule novi-panel and
+ * `novi-power idle` already follow over the same file. */
+static void session_refresh(struct novi_settings *state) {
+	struct session_info *s = &state->session;
+	memset(s, 0, sizeof(*s));
+
+	FILE *f = fopen(IDLE_FILE, "r");
+	if (f != NULL) {
+		char line[256];
+		while (fgets(line, sizeof(line), f) != NULL) {
+			int n = 0;
+			char name[INHIBITOR_NAME_MAX + 1];
+			if (sscanf(line, "idle %d", &n) == 1) {
+				s->idle_s = n;
+				/* The presence of this key is what makes the rest
+				 * meaningful, so it is what sets `known` -- a file
+				 * holding only lines this build does not understand
+				 * is not a machine that has been idle zero seconds. */
+				s->idle_known = true;
+			} else if (sscanf(line, "blank %d", &n) == 1) {
+				s->blank_s = n;
+			} else if (sscanf(line, "suspend %d", &n) == 1) {
+				s->suspend_s = n;
+			} else if (sscanf(line, "blanked %d", &n) == 1) {
+				s->blanked = n != 0;
+			} else if (sscanf(line, "locked %d", &n) == 1) {
+				s->locked = n != 0;
+			} else if (sscanf(line, "awake %d", &n) == 1) {
+				s->awake = n != 0;
+			} else if (sscanf(line, "inhibit %d", &n) == 1) {
+				s->inhibit = n;
+			} else if (sscanf(line, "inhibitor %63s", name) == 1) {
+				if (s->inhibitor_count < INHIBITOR_MAX) {
+					snprintf(s->inhibitors[s->inhibitor_count],
+						sizeof(s->inhibitors[0]), "%s", name);
+					s->inhibitor_count++;
+				}
+			}
+		}
+		fclose(f);
+	}
+
+	f = fopen(HEALTH_FILE, "r");
+	if (f != NULL) {
+		/* The reader's bound IS the field's bound, deliberately.
+		 * -Wformat-truncation caught the first version reading 207
+		 * bytes into a 192-byte field, which is the warning this
+		 * repository has now been right about five times -- and the
+		 * fix it points at is the clamp, never a wider buffer. Sized
+		 * this way, fgets cannot hand over more than fits, and
+		 * whether there WAS more is a question with an answer: a
+		 * complete line ends in a newline or at end of file. */
+		char line[HEALTH_DETAIL_MAX + 1];
+		if (fgets(line, sizeof(line), f) != NULL) {
+			s->health_truncated =
+				strchr(line, '\n') == NULL && !feof(f);
+			line[strcspn(line, "\n")] = '\0';
+			s->health_known = true;
+			s->health_ok = strncmp(line, "ok", 2) == 0;
+			if (!s->health_ok) {
+				/* Past "degraded " if it is there, because the names
+				 * are the answer and the word is already the row's
+				 * label. */
+				const char *detail = line;
+				if (strncmp(detail, "degraded", 8) == 0) {
+					detail += 8;
+					while (*detail == ' ') {
+						detail++;
+					}
+				}
+				snprintf(s->health_detail, sizeof(s->health_detail),
+					"%s", detail);
+			}
+		}
+		fclose(f);
+	}
+}
+
 static void keys_refresh(struct novi_settings *state) {
 	/* Straight through the loader every time, never an incremental
 	 * update of the table in hand. The file may have been edited in a
@@ -1826,6 +1973,131 @@ static void render_keys(struct novi_settings *state, uint32_t *px,
 	}
 }
 
+/* The Session panel. Rows are label/value pairs like the System
+ * panel's, and every one of them is READ-ONLY -- what changes each
+ * thing is named in its own row rather than left to be guessed at.
+ *
+ * "Who is holding this machine awake" is the question this exists to
+ * answer, and it is why the inhibitor NAMES are listed rather than
+ * just counted: a machine that will not sleep is a complaint whose
+ * only interesting part is which program is asking. */
+static void render_session(struct novi_settings *state, uint32_t *px,
+		uint32_t stride_px, pixman_image_t *dest) {
+	uint32_t w = state->width, h = state->height;
+	(void)px; (void)stride_px; (void)w;
+	const struct session_info *s = &state->session;
+
+	novi_text_draw(dest, state->font, CONTENT_X, 24 + state->font->ascent,
+		"Session", TEXT_PIX);
+	novi_text_draw(dest, state->font_small, CONTENT_X,
+		52 + state->font_small->ascent,
+		"/run/novi/idle, /run/novi/health", LABEL_PIX);
+
+	int y = 84;
+	char val[HEALTH_DETAIL_MAX + 64];
+
+	/* A row whose value can be absent. `--` and a reason beats a zero:
+	 * a machine with no compositor has no idle clock, and reporting
+	 * "0 seconds" would be a reading of an instrument that is not
+	 * there -- the call `novi-agent describe` makes for the same
+	 * file. */
+	#define SESSION_ROW(label, value, colour) do { \
+		novi_text_draw(dest, state->font_small, CONTENT_X, \
+			y + state->font_small->ascent, (label), LABEL_PIX); \
+		novi_text_draw(dest, state->font_small, CONTENT_X + 210, \
+			y + state->font_small->ascent, (value), (colour)); \
+		y += ROW_HEIGHT; \
+	} while (0)
+
+	if (!s->idle_known) {
+		SESSION_ROW("Idle", "-- (no compositor is publishing)", LABEL_PIX);
+	} else {
+		snprintf(val, sizeof(val), "%ds", s->idle_s);
+		SESSION_ROW("Idle", val, TEXT_PIX);
+
+		if (s->blank_s > 0) {
+			snprintf(val, sizeof(val), "%ds  (power.blank, System panel)",
+				s->blank_s);
+		} else {
+			snprintf(val, sizeof(val), "off  (power.blank, System panel)");
+		}
+		SESSION_ROW("Blank after", val, TEXT_PIX);
+
+		if (s->suspend_s > 0) {
+			snprintf(val, sizeof(val), "%ds  (power.suspend, System panel)",
+				s->suspend_s);
+		} else {
+			snprintf(val, sizeof(val), "off  (power.suspend, System panel)");
+		}
+		SESSION_ROW("Suspend after", val, TEXT_PIX);
+
+		SESSION_ROW("Screen", s->blanked ? "blanked" : "on",
+			s->blanked ? ACCENT_PIX : TEXT_PIX);
+		SESSION_ROW("Locked", s->locked ? "yes" : "no",
+			s->locked ? ACCENT_PIX : TEXT_PIX);
+
+		/* The two askers stay separate here for the same reason the
+		 * file keeps them apart and the panel's one glyph does not:
+		 * this is where the question is ANSWERED, and "a person
+		 * pressed a key" and "a program asked" have different
+		 * remedies. */
+		SESSION_ROW("Stay awake", s->awake ? "on  (Super+A)" : "off  (Super+A)",
+			s->awake ? ACCENT_PIX : TEXT_PIX);
+
+		if (s->inhibit > 0) {
+			snprintf(val, sizeof(val), "%d", s->inhibit);
+			SESSION_ROW("Inhibited by", val, ACCENT_PIX);
+			for (int i = 0; i < s->inhibitor_count; i++) {
+				novi_text_draw(dest, state->font_small, CONTENT_X + 226,
+					y + state->font_small->ascent, s->inhibitors[i],
+					TEXT_PIX);
+				y += ROW_HEIGHT;
+			}
+			/* The count comes from the compositor and the names are
+			 * only the VISIBLE ones, so they can legitimately
+			 * disagree -- and a list that is shorter than its own
+			 * count with nothing said is the silent-elision bug this
+			 * repository keeps finding. */
+			if (s->inhibitor_count < s->inhibit) {
+				snprintf(val, sizeof(val), "%d more not named",
+					s->inhibit - s->inhibitor_count);
+				novi_text_draw(dest, state->font_small, CONTENT_X + 226,
+					y + state->font_small->ascent, val, LABEL_PIX);
+				y += ROW_HEIGHT;
+			}
+		} else {
+			SESSION_ROW("Inhibited by", "nothing", TEXT_PIX);
+		}
+	}
+
+	y += 8;
+	if (!s->health_known) {
+		SESSION_ROW("Services", "-- (services.health is off)", LABEL_PIX);
+	} else if (s->health_ok) {
+		SESSION_ROW("Services", "ok", SUCCESS_PIX);
+	} else {
+		if (s->health_truncated) {
+			snprintf(val, sizeof(val), "%s ... (more than fits)",
+				s->health_detail);
+		} else {
+			snprintf(val, sizeof(val), "%s", s->health_detail[0] != '\0' ?
+				s->health_detail : "degraded");
+		}
+		SESSION_ROW("Services", val, ERROR_PIX);
+		novi_text_draw(dest, state->font_small, CONTENT_X + 210,
+			y + state->font_small->ascent,
+			"`novi-state health` says what is wrong with each", LABEL_PIX);
+		y += ROW_HEIGHT;
+	}
+	#undef SESSION_ROW
+
+	int footer_y = (int)h - 40;
+	novi_text_draw(dest, state->font_small, CONTENT_X,
+		footer_y + state->font_small->ascent,
+		"Nothing here is edited from this panel -- each row says where",
+		LABEL_PIX);
+}
+
 static void render_system(struct novi_settings *state, uint32_t *px,
 		uint32_t stride_px, pixman_image_t *dest) {
 	uint32_t w = state->width, h = state->height;
@@ -1957,6 +2229,7 @@ static void render(struct novi_settings *state, uint32_t *px, uint32_t stride_px
 	case PANEL_NETWORK: render_network(state, px, stride_px, dest); break;
 	case PANEL_SYSTEM:  render_system(state, px, stride_px, dest);  break;
 	case PANEL_KEYS:    render_keys(state, px, stride_px, dest);    break;
+	case PANEL_SESSION: render_session(state, px, stride_px, dest); break;
 	default:            render_account(state, px, stride_px, dest); break;
 	}
 
@@ -2146,6 +2419,10 @@ static void keyboard_key(void *data, struct wl_keyboard *kb, uint32_t serial,
 			 * -- the trap the System panel's comment records. */
 			keys_cancel_edit(state);
 			keys_refresh(state);
+		} else if (state->panel == PANEL_SESSION) {
+			/* Once on entry, and then on the poll timeout in main()
+			 * for as long as this panel is showing. */
+			session_refresh(state);
 		}
 		surface_draw_frame(state);
 		return;
@@ -2542,7 +2819,38 @@ static const struct wl_registry_listener registry_listener = {
 	.global_remove = registry_global_remove,
 };
 
-int main(void) {
+int main(int argc, char **argv) {
+	/* `--panel <name>`, matched against the sidebar's own labels so
+	 * there is no second list of panel names to drift. It exists
+	 * because novi-panel's status glyphs now OPEN this window (RFC
+	 * 0036 roadmap 4), and a coffee cup that opens the Account panel
+	 * has not answered the question that was clicked on. An unknown
+	 * name is a refusal rather than a silent fallback: a typo'd panel
+	 * that opens the default one looks exactly like a working flag. */
+	enum novi_panel start_panel = PANEL_ACCOUNT;
+	for (int i = 1; i < argc; i++) {
+		if (strcmp(argv[i], "--panel") == 0 && i + 1 < argc) {
+			bool found = false;
+			for (int p = 0; p < PANEL_COUNT; p++) {
+				if (strcasecmp(argv[i + 1], PANEL_NAMES[p]) == 0) {
+					start_panel = (enum novi_panel)p;
+					found = true;
+					break;
+				}
+			}
+			if (!found) {
+				fprintf(stderr, "novi-settings: no panel called \"%s\"\n",
+					argv[i + 1]);
+				return 2;
+			}
+			i++;
+		} else {
+			fprintf(stderr, "usage: novi-settings [--panel "
+				"account|network|system|keys|session]\n");
+			return 2;
+		}
+	}
+
 	/* Colours are a runtime table now (RFC 0030). Load the active
 	 * theme BEFORE anything computes a colour; on failure the
 	 * compiled-in defaults stay in force, so this cannot leave the
@@ -2550,6 +2858,7 @@ int main(void) {
 	novi_theme_load();
 	struct novi_settings state = {0};
 	state.running = true;
+	state.panel = start_panel;
 	state.job_fd = -1;   /* 0 is stdin, and a zeroed struct would poll it */
 	state.width = WINDOW_WIDTH;
 	/* Load the document up front so the System panel is correct the
@@ -2559,6 +2868,10 @@ int main(void) {
 	 * its real contents the first time it is shown rather than after
 	 * the first keystroke. */
 	keys_refresh(&state);
+	/* Same argument: the Session panel must be right the moment it is
+	 * shown, and it is the panel most likely to BE the first one
+	 * shown now that the status glyphs open it directly. */
+	session_refresh(&state);
 	state.height = WINDOW_HEIGHT;
 
 	state.display = wl_display_connect(NULL);
@@ -2655,7 +2968,15 @@ int main(void) {
 			n = 3;
 		}
 
-		int pr = poll(pfds, n, -1);
+		/* A timeout ONLY while the Session panel is showing. Its idle
+		 * counter is a clock, and a clock that does not move is worse
+		 * than no clock -- but a settings window that wakes once a
+		 * second forever, on a laptop, to redraw a panel nobody is
+		 * looking at, is the other mistake. A timerfd would be a
+		 * fourth descriptor to manage for a condition poll(2) can
+		 * express in its own argument. */
+		int timeout = state.panel == PANEL_SESSION ? 1000 : -1;
+		int pr = poll(pfds, n, timeout);
 		if (pr < 0) {
 			wl_display_cancel_read(state.display);
 			if (errno == EINTR) {
@@ -2690,6 +3011,13 @@ int main(void) {
 		 * window still in the old palette is the most conspicuous
 		 * place for this to be missing. */
 		if ((pfds[1].revents & POLLIN) && novi_theme_watch_drain(theme_fd)) {
+			surface_draw_frame(&state);
+		}
+
+		/* The timeout fired: nothing happened, which for this one
+		 * panel is itself the news -- another second of idleness. */
+		if (pr == 0 && state.panel == PANEL_SESSION) {
+			session_refresh(&state);
 			surface_draw_frame(&state);
 		}
 	}
