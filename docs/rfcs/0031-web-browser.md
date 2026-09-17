@@ -559,8 +559,14 @@ written for this test. Nothing here has run on physical hardware.
    indistinguishable — see RFC 0038 decision 2, which is the whole
    reason the corpus pair named in this item (`deep-tables` settles at
    73%, `long-line` never does) is the test rather than a curiosity.
-7. **Process isolation, which none of the above is.** Said in item 4
-   and repeated here because it is the item that never gets written:
-   a bound and a priority change what a hostile page can do to the
-   machine, and nothing at all about what it can do inside the process
-   that parsed it.
+7. ~~**Process isolation, which none of the above is.**~~ **Done —
+   RFC 0039.** The item called itself "the item that never gets
+   written" and was right about that for three RFCs; what it was
+   waiting for turned out to be nothing. The kernel had carried
+   `USER_NS`, `PID_NS`, `UTS_NS`, `NET_NS`, `SECCOMP` and
+   `SECCOMP_FILTER` since its config was written, the headers were in
+   the sysroot, and busybox already shipped `unshare`. **No new
+   dependency at all** — the same finding this RFC made about the
+   browser itself, one layer down. `pkg install netsurf` puts the
+   browser behind `novi-sandbox`, and RFC 0039 roadmap 2 added
+   Landlock on top of it.

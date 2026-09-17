@@ -725,6 +725,39 @@ against 273,928 kB sandboxed, which reads as a 39 MB saving; at 40
 seconds both are 516,384 kB. **A sample taken while the number is
 still moving is not a comparison.**
 
+**MS_NOEXEC CLOSED THE MOUNT HALF OF W^X**, the follow-up the Landlock
+decision named and deliberately did not do in the same change. Every
+mount this program makes itself — the root tmpfs, `/tmp`, `/dev`, the
+six device binds and `/dev/shm` — carries it now, and so does every
+`--rw` bind the caller names. The `--ro` binds do not, which is the
+whole point: that is where the program being sandboxed lives.
+
+The evidence is the sandbox's **own `/proc/self/mountinfo`**, not an
+errno, and that is forced: with both layers on, a refused exec on a
+`--rw` path is EACCES from either of them, so the errno can no longer
+say which one answered. Inside, on a booted machine:
+
+```text
+/          rw,nosuid,nodev,noexec      /root/wx  (--rw)  rw,nosuid,nodev,noexec
+/tmp       rw,nosuid,nodev,noexec      /root/ro  (--ro)  ro,nosuid,nodev
+/dev       rw,nosuid,noexec            /bin      (--ro)  ro,nosuid,nodev
+/dev/shm   rw,nosuid,nodev,noexec      /usr      (--ro)  ro,nosuid,nodev
+```
+
+`/dev` is the one without `nodev`, which is the exception the bind
+helper already documents. And the behaviour matches the flags: on the
+`--rw` path a write succeeds and the same script is `Permission
+denied` (126); on the `--ro` path the script runs and a write is
+`Read-only file system`; `/tmp` and `/dev/shm` each take a copy of
+busybox and refuse to run it.
+
+**All three real callers still work**, which is the check that matters
+because `/dev/shm` is now noexec and both GUI clients allocate buffers
+through it: `novi-recon` prints its usage under `--profile recon` and
+`NOVI_SANDBOX_DESCRIBE=1` still reports the exact argv; NetSurf renders
+the control page in 0.1 s with its link laid out; and `novi-view`
+decodes and draws a PNG, window and title bar and all.
+
 ## What this is not
 
 **It is not a security boundary against a kernel bug.** Every mechanism
@@ -737,13 +770,14 @@ that the kernel's do.
 difference between this and a browser sandbox anybody would call
 finished.
 
-**There is no Landlock.** `CONFIG_SECURITY_LANDLOCK` is not in this
-kernel's config — checked, not assumed — so filesystem confinement here
-is entirely the mount namespace, and a program that can open a path it
-was given can do anything with it. Landlock would let the sandbox say
-"read-only, and only these directories" to the kernel directly, which
-is a second lock on the same door and does not depend on getting the
-mount list exactly right.
+~~**There is no Landlock.**~~ **This paragraph was true when it was
+written and is not now** — roadmap 2 added
+`CONFIG_SECURITY_LANDLOCK=y` and `landlock_restrict_self` after the
+pivot, so filesystem confinement is the mount namespace *and* a policy
+this process asks the kernel to hold over itself. It is left here
+struck through rather than deleted because "checked, not assumed" was
+the right habit and the answer simply changed; what would be wrong is
+a reader finding the old sentence and believing it.
 
 **It does not isolate the browser from itself.** One process still
 parses every page; a page that corrupts the layout engine owns the

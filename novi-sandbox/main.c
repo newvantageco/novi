@@ -223,7 +223,19 @@ static void bind_one(const char *path, bool writable, bool allow_dev) {
 	if (!allow_dev) {
 		flags |= MS_NODEV;
 	}
-	if (!writable) {
+	if (writable) {
+		/* W^X AT THE MOUNT LAYER. Landlock already grants EXECUTE on
+		 * the read-only paths and never on the writable ones; this is
+		 * the same rule stated where the kernel enforces it without
+		 * being asked, so a machine with no CONFIG_SECURITY_LANDLOCK
+		 * still gets it. The two are not redundant in the direction
+		 * that matters: Landlock holds whatever the mounts turned out
+		 * to be, and this holds even when Landlock is absent.
+		 *
+		 * The `--ro` paths must NOT get it -- that is where the
+		 * program being sandboxed lives. */
+		flags |= MS_NOEXEC;
+	} else {
 		flags |= MS_RDONLY;
 	}
 	if (mount(NULL, target, NULL, flags, NULL) != 0) {
@@ -384,9 +396,18 @@ static const struct profile *find_profile(const char *name) {
  * write a file there and then execute it. Landlock grants EXECUTE on
  * the read-only paths and never on the writable ones, which is a
  * distinction a bind mount cannot draw without a second flag on every
- * one of them. (MS_NOEXEC would express the same thing for the mounts
- * this program makes itself, and should -- but doing both in one
- * change would leave a refusal nobody could attribute to a layer.)
+ * one of them.
+ *
+ * MS_NOEXEC NOW SAYS THE SAME THING AT THE MOUNT LAYER, and the two
+ * are deliberately not one change: Landlock landed alone so a refusal
+ * could be attributed to it, and this followed once that attribution
+ * was on record. They are not redundant in the direction that
+ * matters -- Landlock holds whatever the bind list turned out to be
+ * (a `--rw` one directory too wide), and MS_NOEXEC holds on a kernel
+ * with no CONFIG_SECURITY_LANDLOCK at all. With both on, a refused
+ * exec on a `--rw` path is EACCES from either, which is why the
+ * evidence for the mount half is `noexec` in the sandbox's own
+ * /proc/self/mountinfo rather than the errno.
  *
  * THE ABI IS ASKED FOR, NOT ASSUMED. `landlock_create_ruleset(NULL, 0,
  * LANDLOCK_CREATE_RULESET_VERSION)` answers with the version this
@@ -896,8 +917,21 @@ int main(int argc, char **argv) {
 	if (mkdtemp(newroot) == NULL) {
 		die("mkdtemp");
 	}
-	if (mount("tmpfs", newroot, "tmpfs", MS_NOSUID | MS_NODEV,
-			"mode=0755") != 0) {
+	/* MS_NOEXEC on every tmpfs this program mounts itself -- the root,
+	 * /tmp, /dev and /dev/shm. Nothing that belongs on any of them is
+	 * ever meant to be executed, and the four together are the whole
+	 * of the writable filesystem a sandboxed program gets unless its
+	 * caller named a `--rw` path (which is MS_NOEXEC too, see
+	 * bind_one). What that buys: a program that can be made to write a
+	 * file cannot then be made to run it, at the mount layer, without
+	 * asking the kernel for a policy first.
+	 *
+	 * The root tmpfs holds only the mount-point directories this
+	 * program creates, and a bind mounted over one of them carries its
+	 * OWN flags -- so `--ro /usr/bin/python3` is still executable
+	 * inside a root that is not. */
+	if (mount("tmpfs", newroot, "tmpfs",
+			MS_NOSUID | MS_NODEV | MS_NOEXEC, "mode=0755") != 0) {
 		die("mount tmpfs");
 	}
 	/* A private /tmp, always. Every program expects one, and sharing
@@ -907,8 +941,8 @@ int main(int argc, char **argv) {
 	if (mkdir_p(tmpdir, 01777) != 0) {
 		die(tmpdir);
 	}
-	if (mount("tmpfs", tmpdir, "tmpfs", MS_NOSUID | MS_NODEV,
-			"mode=1777") != 0) {
+	if (mount("tmpfs", tmpdir, "tmpfs",
+			MS_NOSUID | MS_NODEV | MS_NOEXEC, "mode=1777") != 0) {
 		die("mount /tmp");
 	}
 	/* A minimal /dev, always, rather than something every caller has to
@@ -923,7 +957,8 @@ int main(int argc, char **argv) {
 	if (mkdir_p(devdir, 0755) != 0) {
 		die(devdir);
 	}
-	if (mount("tmpfs", devdir, "tmpfs", MS_NOSUID, "mode=0755") != 0) {
+	if (mount("tmpfs", devdir, "tmpfs", MS_NOSUID | MS_NOEXEC,
+			"mode=0755") != 0) {
 		die("mount /dev");
 	}
 	static const char *const devnodes[] = {
@@ -963,8 +998,11 @@ int main(int argc, char **argv) {
 	if (mkdir_p(shmdir, 01777) != 0) {
 		die(shmdir);
 	}
-	if (mount("tmpfs", shmdir, "tmpfs", MS_NOSUID | MS_NODEV,
-			"mode=1777") != 0) {
+	/* MS_NOEXEC matters more here than on the others: /dev/shm is
+	 * world-writable by construction and is the classic place to drop
+	 * a payload and exec it. */
+	if (mount("tmpfs", shmdir, "tmpfs",
+			MS_NOSUID | MS_NODEV | MS_NOEXEC, "mode=1777") != 0) {
 		die("mount /dev/shm");
 	}
 

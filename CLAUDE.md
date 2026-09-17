@@ -2227,6 +2227,31 @@ netsurf` puts the browser behind it.
   IPC_NS either. **The sweep changed nothing**: the generated `.config`
   is byte-identical apart from Landlock, which is what made it safe to
   do in the same pass.
+- **MS_NOEXEC IS THE MOUNT HALF OF W^X, and it landed SECOND on
+  purpose.** Landlock went in alone so a refusal could be attributed
+  to it; this followed once that attribution was on record. Every
+  mount novi-sandbox makes itself -- the root tmpfs, `/tmp`, `/dev`,
+  the device binds and `/dev/shm` -- carries it, and so does every
+  `--rw` bind. The `--ro` binds do NOT: that is where the program
+  being sandboxed lives.
+- **WITH BOTH LAYERS ON, THE ERRNO CANNOT SAY WHICH ONE ANSWERED.** A
+  refused exec on a `--rw` path is EACCES from Landlock or from the
+  mount, so the evidence for the mount half is `noexec` in the
+  sandbox's OWN `/proc/self/mountinfo`, read from inside. Measured
+  there: `/`, `/tmp`, `/dev`, `/dev/shm`, `/proc` and the `--rw` bind
+  all `noexec`; `/bin`, `/lib`, `/usr` and the `--ro` bind not.
+- **The check that matters is the three real callers, because
+  `/dev/shm` is now noexec and both GUI clients allocate buffers
+  through it.** novi-recon prints its usage under `--profile recon`,
+  NetSurf renders the control page in 0.1 s, novi-view decodes and
+  draws a PNG. A hardening flag applied uniformly is how `MS_NODEV`
+  made `/dev/urandom` unreadable and cost a debugging round three
+  layers from the cause.
+- **RFC 0039's "There is no Landlock" paragraph was true when written
+  and went stale in its own RFC.** It is struck through rather than
+  deleted: "checked, not assumed" was the right habit and the answer
+  changed. A reader finding the old sentence and believing it is the
+  failure, not the sentence having been written.
 - **`test-agent-sandbox.sh` DRIVES THE WRAPPERS THIS REPO SHIPS**,
   extracted from the build stages' `<<'WRAP'` heredocs, against the
   real reader -- a test about two things agreeing must not hold its own

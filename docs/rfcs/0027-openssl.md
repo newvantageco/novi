@@ -237,11 +237,26 @@ repository:
    matters most it earns its place. This is sediment no longer; it is
    a decision, and re-opening it needs a new number rather than a new
    opinion.
-3. **`pip`.** RFC 0026 refused it because it fetches over https and
-   there was none. That objection is gone; the remaining ones (no
-   compiler in the `python` package, so no source wheels; the
-   `x86_64-linux-gnu` SOABI mislabel, so no binary wheels) are real and
-   belong in their own RFC.
+3. ~~**`pip`.**~~ **Done — RFC 0026 roadmap 4 and 5, and BOTH of the
+   objections listed here were already answerable when this item was
+   written.** It named three: https (gone, this RFC), no compiler in
+   the `python` package (true, and irrelevant — the compiler is a
+   PACKAGE, `novi-devel`, and `pip install --no-binary :all:
+   MarkupSafe` now builds a wheel with the machine's own gcc), and the
+   `x86_64-linux-gnu` SOABI mislabel (a real bug, and a **one-word**
+   one: CPython's configure corrects the triplet for musl by testing
+   `build_os` where it should test `host_os`, so a native musl build
+   is corrected and a cross build is not).
+
+   pip also **shipped in the package the whole time**:
+   `--with-ensurepip=no` decides whether pip is INSTALLED, not whether
+   it is present, and `ensurepip`'s bundled wheels are part of the
+   standard library. What the work actually needed was that one word,
+   `/etc/pip.conf` (pip verifies against a vendored certifi bundle, so
+   on a machine whose operator added a CA `pip install` fails while
+   `urllib` succeeds against the same host — measured), and nothing
+   else. **Tenth roadmap item in this repository found to be wrong
+   about what is already built or already possible.**
 4. ~~**Trim the OpenSSL build.**~~ **Done, and the number is smaller
    than the item implied.** Measured, stripped, like for like:
 
