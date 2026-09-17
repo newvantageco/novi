@@ -2059,6 +2059,16 @@ RFC 0040 roadmap 2. `build/47-mandoc.sh`, `pkg install man`.
   stage. A hand-written list of which names are links would be a
   second answer to a question mandoc's own install already gives.
   Confirmed by putting the loop back and watching it fire.
+- **A SECTION-1 PAGE SHIPS ONLY IF ITS PROGRAM DOES**, which is
+  `46-gnu.sh`'s rule for the coreutils pages applied here. mandoc's
+  install writes `demandoc.1` and this package does not install
+  `demandoc`, so `man demandoc` would have rendered the documentation
+  for a command that is not on the machine -- the `idle3` complaint
+  from the other side, and the more misleading direction of it.
+  Sections 5 and 7 are copied unconditionally because they are FORMAT
+  documentation (`mdoc`, `roff`, `tbl`, `man.conf`) and name no
+  program: asking them the same question would delete the pages this
+  package exists to let you read.
 - **A SWEEP SAID THIS WAS THE ONLY ONE.** Every staged package checked
   for byte-identical files that are not hardlinked: `git` (153
   hardlinks), `binutils` (20) and `gcc` (13) all keep theirs, and

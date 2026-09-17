@@ -247,9 +247,35 @@ package() {
 
     # mandoc's own man pages, so `man man` works on a machine that has
     # only installed this.
+    #
+    # A SECTION-1 PAGE IS COPIED ONLY IF ITS PROGRAM SHIPPED -- the
+    # same derived rule `46-gnu.sh` applies to the coreutils pages.
+    # mandoc's install writes `demandoc.1` and this package does not
+    # install `demandoc`, so without the check `man demandoc` renders
+    # the documentation for a command that is not on the machine,
+    # which is the `idle3` complaint from the other side. Sections 5
+    # and 7 are FORMAT documentation (`mdoc`, `roff`, `man.conf`) and
+    # name no program, so they are copied unconditionally -- a rule
+    # that asked the same question of them would delete the pages this
+    # package exists to be able to read.
     if [ -d "${PREFIX}/usr/share/man" ]; then
-        install -d "${d}/files/usr/share/man"
-        cp -a "${PREFIX}/usr/share/man/." "${d}/files/usr/share/man/"
+        local sect page base dropped=0
+        for sect in "${PREFIX}/usr/share/man"/man*; do
+            [ -d "${sect}" ] || continue
+            install -d "${d}/files/usr/share/man/$(basename "${sect}")"
+            for page in "${sect}"/*; do
+                [ -f "${page}" ] || continue
+                base="$(basename "${page}")"
+                if [ "$(basename "${sect}")" = "man1" ] \
+                   && [ ! -e "${d}/files/usr/bin/${base%.*}" ]; then
+                    echo "    not shipping ${base}: no ${base%.*} in this package"
+                    dropped=$((dropped + 1))
+                    continue
+                fi
+                cp -a "${page}" \
+                   "${d}/files/usr/share/man/$(basename "${sect}")/"
+            done
+        done
     fi
 
     install -m 644 "${SRC}/LICENSE" \

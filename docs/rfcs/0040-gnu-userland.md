@@ -307,6 +307,13 @@ applet. `--disable-nls` stands — there are no translations.
    the prefix's own inodes rather than a list of which names are
    links. A sweep of every staged package says this was the only
    instance: `git`, `binutils` and `gcc` keep theirs.
+
+   The same pass found `demandoc.1` shipping without `demandoc`. A
+   section-1 page is copied only if its program is in the package now
+   — `46-gnu.sh`'s rule for the coreutils pages, applied here —
+   while sections 5 and 7 are copied unconditionally, because `mdoc`,
+   `roff`, `tbl` and `man.conf` are formats rather than programs and
+   are the pages this package exists to let somebody read.
 3. **util-linux**, the third name in §5's sentence.
 4. **`sed`, `grep`, `awk` and `tar`**, if the difference turns out to
    matter as often as coreutils' did. It should be measured the way
