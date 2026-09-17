@@ -775,6 +775,22 @@ LIMIT="${NOVI_BROWSER_AS_LIMIT:-1073741824}"
 NICE="${NOVI_BROWSER_NICE:-5}"
 REAL=/usr/libexec/netsurf-fb
 
+# NOVI_SANDBOX_DESCRIBE=1 prints the command this would have run and
+# stops. Every exit goes through run(), so the answer is the argv that
+# would really be exec'd -- runtime branches taken, optional binds
+# resolved -- rather than a second description that can drift from it.
+# `novi-agent describe` READS this file instead (RFC 0029 decision 1:
+# describing must not run anything); this is the exact answer, for a
+# person.
+run() {
+    if [ -n "${NOVI_SANDBOX_DESCRIBE:-}" ]; then
+        printf '%s\n' "$*"
+        exit 0
+    fi
+    exec "$@"
+}
+
+
 # No '' alternative in either case: ${VAR:-default} substitutes for an
 # EMPTY value as well as an unset one, so an empty variable is already
 # the default by the time these run. A branch that cannot fire reads
@@ -837,7 +853,7 @@ fi
 
 if [ -n "${LIMIT}" ]; then set -- s6-softlimit -a "${LIMIT}" "$@"; fi
 if [ -n "${NICE}" ];  then set -- nice -n "${NICE}" "$@"; fi
-exec "$@"
+run "$@"
 WRAP
     chmod 755 "${files}/usr/bin/netsurf-fb"
 

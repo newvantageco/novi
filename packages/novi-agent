@@ -690,6 +690,93 @@ describe_packages() {
     return 0
 }
 
+# WHICH PROGRAMS RUN CONFINED (RFC 0039 roadmap 5). Three wrappers
+# decide that today, so the answer lived in shell scripts inside
+# packages rather than anywhere a person or an agent could ask.
+#
+# THE ITEM SAID `novi-state` AND THAT IS THE WRONG DOCUMENT. novi-state
+# is declared-versus-observed, and nothing converges a sandbox: a
+# wrapper is what a package installed, not a key somebody set, so
+# `diff` could never report it and `apply` could never fix it. Putting
+# it there would be a row that is always "converged" about something
+# the engine does not control. `describe` is the document that says
+# what this machine IS, which is the question.
+#
+# IT READS, IT DOES NOT RUN. RFC 0029 decision 1 is that describing is
+# free because it is a formatted view of files any user can already
+# read, and executing a program to ask about it would quietly end that.
+# The exact answer -- the argv a wrapper would actually build, with
+# every runtime branch taken -- is one command away and belongs to a
+# person debugging: `NOVI_SANDBOX_DESCRIBE=1 novi-view foo.png`.
+#
+# NO LIST OF PROGRAMS. A fourth sandboxed package should appear here
+# because it is sandboxed, not because somebody remembered to add it
+# -- the drift `keybindings.h` and pkgsplit's derived depends both
+# exist to prevent. The test is the wrapper's own text: a /bin/sh
+# script on PATH that invokes novi-sandbox.
+describe_sandbox() {
+    local bindir=/usr/bin
+    local f name joined line real filter net first=1
+    if [ "$FMT" = text ]; then
+        t_head sandbox
+    else
+        printf '['
+    fi
+    for f in "$bindir"/*; do
+        [ -f "$f" ] || continue
+        [ -r "$f" ] || continue
+        head -n 1 "$f" 2>/dev/null | grep -q '^#!/bin/sh' || continue
+        grep -q 'novi-sandbox' "$f" 2>/dev/null || continue
+        name="${f##*/}"
+        # Join continuation lines first: every one of these wrappers
+        # writes its invocation over five or six of them, and a reader
+        # that looked at one line at a time would find `--no-net` and
+        # miss `--profile` or the other way round.
+        # MATCH THE INVOCATION, NOT THE MENTION. Every wrapper also
+        # carries `command -v novi-sandbox >/dev/null 2>&1 || run ...`
+        # -- its own check that the sandbox is installed -- and that
+        # line comes FIRST. Reading it reported novi-recon as having no
+        # profile and novi-view as having the network, which is the
+        # shape of wrong answer this section exists to prevent: both
+        # read as a plausible machine. Caught by the test, not by
+        # looking.
+        joined="$(sed -e ':a' -e '/\\$/N; s/\\\n//; ta' "$f" 2>/dev/null |
+            grep -E '(run|exec|--)[[:space:]]+novi-sandbox[[:space:]]' |
+            head -n 1)"
+        [ -n "$joined" ] || continue
+        case "$joined" in
+            *--no-net*) net=off ;;
+            *) net=on ;;
+        esac
+        case "$joined" in
+            *--profile*) filter="$(printf '%s' "$joined" |
+                sed -n 's/.*--profile[[:space:]]\{1,\}\([A-Za-z0-9_-]*\).*/\1/p')" ;;
+            *) filter=denylist ;;
+        esac
+        [ -n "$filter" ] || filter=denylist
+        # The wrapper names the real program once, in a REAL=
+        # assignment; the invocation itself carries "${REAL}" unexpanded
+        # because this is a read and not a run.
+        real="$(sed -n 's/^REAL=\(.*\)$/\1/p' "$f" 2>/dev/null | head -n 1)"
+        [ -n "$real" ] || real=unknown
+        if [ "$FMT" = text ]; then
+            t_row "$name" "$(printf '%s filter, network %s -> %s' \
+                "$filter" "$net" "$real")"
+            continue
+        fi
+        [ "$first" -eq 1 ] || printf ','
+        first=0
+        printf '{"program": %s, "runs": %s, "filter": %s, "network": %s}' \
+            "$(json_str "$name")" "$(json_str "$real")" \
+            "$(json_str "$filter")" "$(json_str "$net")"
+    done
+    if [ "$FMT" = text ]; then
+        [ "$first" -eq 1 ] || true
+        return 0
+    fi
+    printf ']'
+}
+
 describe_agent() {
     local first=1 v allow
     allow="$("$STATE" get agent.allow 2>/dev/null || printf '')"
@@ -782,6 +869,7 @@ cmd_describe() {
         describe_network
         describe_idle
         describe_packages
+        describe_sandbox
         describe_agent
         # NOT re-rendered here. novi-state owns the human form of each
         # of these, and calling it is one renderer where reimplementing
@@ -810,13 +898,14 @@ cmd_describe() {
     # `schema` stays 1 for an ADDED key -- a consumer written against
     # 1 still reads every field it knew. Renaming or removing one is
     # what would make it 2.
-    printf '{"schema": 1, "identity": %s, "hardware": %s, "network": %s, "idle": %s, "state": %s, "drift": %s, "health": %s, "packages": %s, "agent": %s}\n' \
+    printf '{"schema": 1, "identity": %s, "hardware": %s, "network": %s, "idle": %s, "state": %s, "drift": %s, "health": %s, "packages": %s, "sandbox": %s, "agent": %s}\n' \
         "$(describe_identity)" \
         "$(describe_hardware)" \
         "$(describe_network)" \
         "$(describe_idle)" \
         "$state" "$diff" "$health" \
         "$(describe_packages)" \
+        "$(describe_sandbox)" \
         "$(describe_agent)"
 }
 

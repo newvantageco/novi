@@ -2096,6 +2096,41 @@ netsurf` puts the browser behind it.
   pass that is worth more than the confinement: this one found a
   SIGSEGV in six shipped clients (below), a missing `/dev/shm`, and a
   symlink nobody had thought about.
+- **`novi-agent describe` HAS A `sandbox` SECTION, AND `novi-state`
+  DOES NOT** (RFC 0039 roadmap 5, which asked for novi-state). Nothing
+  converges a sandbox: a wrapper is what a package installed, not a key
+  somebody set, so `diff` could never report it and `apply` could never
+  fix it -- a row there would be permanently "converged" about
+  something the engine does not control, the same reason `keys.conf` is
+  not a `system.conf` key. `describe` is the document that says what
+  this machine IS. **Ninth roadmap item corrected on contact rather
+  than implemented as written.**
+- **IT READS, IT DOES NOT RUN.** RFC 0029 decision 1 is that describing
+  is free because it is a view of files any user can already read, and
+  executing a program to ask about it would quietly end that. The exact
+  answer -- the argv a wrapper builds with every runtime branch taken
+  -- is `NOVI_SANDBOX_DESCRIBE=1 <program>`, which every wrapper
+  honours through the one `run()` its exits go through, so it cannot
+  drift from what actually execs.
+- **NO LIST OF SANDBOXED PROGRAMS.** A fourth one appears because it is
+  sandboxed, not because somebody remembered: the test is a `/bin/sh`
+  script on PATH that invokes novi-sandbox. Watched live -- a fresh
+  boot listed `novi-view` alone and `pkg install novi-recon` made the
+  second row appear.
+- **MATCH THE INVOCATION, NOT THE MENTION.** Every wrapper carries
+  `command -v novi-sandbox … || run …` as its own installed-check, and
+  that line comes FIRST -- so a reader taking the first match reported
+  novi-recon as having no profile and novi-view as having the network.
+  Two plausible machines, neither real, and only the host test caught
+  it.
+- **`test-agent-sandbox.sh` DRIVES THE WRAPPERS THIS REPO SHIPS**,
+  extracted from the build stages' `<<'WRAP'` heredocs, against the
+  real reader -- a test about two things agreeing must not hold its own
+  copy of either. **Its own negative check could not fail at first**:
+  a script with no mention of novi-sandbox is rejected twice over, so
+  breaking either filter left the answer right. The fixture that makes
+  it real is one that MENTIONS the sandbox in a comment and never
+  invokes it.
 
 ## Architecture: two ways to say "not now"
 

@@ -408,6 +408,76 @@ used to exit 139.
 program in one finds the places it assumed they were there.** That is
 worth more than the confinement on a first pass.
 
+### 22. Where "is this confined?" is answered, and where it is not.
+
+Three wrappers decide whether a program runs confined, so the answer
+lived in shell scripts inside packages and nothing on the machine could
+be asked. `novi-agent describe` has a `sandbox` section now, in both
+the JSON and the table.
+
+**THE ITEM SAID `novi-state` AND THAT IS THE WRONG DOCUMENT.**
+novi-state is declared-versus-observed, and *nothing converges a
+sandbox*: a wrapper is what a package installed, not a key somebody
+set, so `diff` could never report it and `apply` could never fix it.
+A row there would be permanently "converged" about something the engine
+does not control — the same reason `keys.conf` is not a `system.conf`
+key (RFC 0037) and `power.lid` has no converger (RFC 0013). `describe`
+is the document that says what this machine *is*, which is the question
+being asked. Ninth roadmap item in this repository to be corrected on
+contact rather than implemented as written.
+
+**IT READS; IT DOES NOT RUN.** RFC 0029 decision 1 is that describing
+is free because it is a formatted view of files any user can already
+read, and executing a program to ask about it would quietly end that.
+
+**NO LIST OF PROGRAMS.** A fourth sandboxed package appears because it
+is sandboxed, not because somebody remembered — the drift
+`keybindings.h` and pkgsplit's derived `depends=` both exist to
+prevent. The test is the wrapper's own text: a `/bin/sh` script on PATH
+that invokes `novi-sandbox`. Watched live: a fresh boot listed
+`novi-view` alone, and `pkg install novi-recon` made the second row
+appear with `recon filter, network on`.
+
+**MATCH THE INVOCATION, NOT THE MENTION.** Every wrapper also carries
+`command -v novi-sandbox >/dev/null 2>&1 || run …` — its own check that
+the sandbox is installed — and that line comes *first*. Reading it
+reported novi-recon as having no profile and novi-view as having the
+network: two plausible-looking machines, neither real. The host test
+caught it; nobody would have caught it by looking.
+
+### 23. The exact answer belongs to the wrapper, and is one variable away.
+
+`describe` reads, so it sees what a wrapper *says*. What a wrapper
+*does* includes runtime branches — novi-view resolves the image path,
+the xkb symlink target and two optional theme paths before it execs.
+`NOVI_SANDBOX_DESCRIBE=1` makes any wrapper print the argv it would
+have run and stop, through the same `run()` every exit path goes
+through, so it cannot be a second description that drifts:
+
+```
+$ NOVI_SANDBOX_DESCRIBE=1 novi-view /root/test.png
+novi-sandbox --no-net --ro /usr/lib --ro /lib --ro /usr/libexec
+  --ro /usr/share/fonts … --rw /run/user/0
+  --ro /usr/share/xkeyboard-config-2 --ro /usr/share/X11
+  --ro /root/test.png -- /usr/libexec/novi-view /root/test.png
+```
+
+Two mechanisms for two audiences. `packages/tests/test-agent-sandbox.sh`
+is where they are held to agreeing about the three things that matter —
+whether there is a sandbox, which filter, and whether the network is
+there — and it drives **the wrappers this repository actually ships**,
+extracted from the build stages that write them, against the real
+reader. A test with its own copy of a wrapper would be testing the
+copy, which is precisely the thing a test about two things agreeing
+must not do.
+
+**Its own negative check could not fail at first.** `plain-tool`, a
+script with no mention of novi-sandbox, is rejected twice over — by the
+grep and again by the invocation match — so breaking either left the
+answer right. A second fixture that *mentions* the sandbox in a comment
+and never invokes it is the layer where a wrong answer is a wrong
+answer. Same correction RFC 0028's five malformed-input checks needed.
+
 ## What was verified
 
 **On the build host, which is where the interesting cases are** — the
@@ -595,7 +665,11 @@ different and much larger change.
    things the confinement itself was not looking for: a missing
    `/dev/shm`, a symlink a bind does not follow, and an unchecked
    `xkb_context_new()` in six clients.
-5. **`novi-state` should be able to say a package runs sandboxed.**
-   Today the wrapper decides, which means the answer lives in a shell
-   script inside a package rather than in the document that describes
-   the machine.
+5. ~~**`novi-state` should be able to say a package runs
+   sandboxed.**~~ **Done** — decisions 22 and 23, though not in
+   novi-state: nothing converges a sandbox, so the answer belongs in
+   `novi-agent describe`, which is the document that says what this
+   machine is. Derived from the wrappers, with no list to maintain.
+
+**Only item 2 is left**, and it is a kernel change rather than a
+userland one.

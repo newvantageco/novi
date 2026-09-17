@@ -105,16 +105,31 @@ cat > "${D}/files/usr/bin/novi-recon" <<'WRAP'
 # holding nine paths (RFC 0039). NOVI_RECON_SANDBOX=off for somebody
 # debugging the difference between the tool failing and a bind missing.
 REAL=/usr/libexec/novi-recon
+# NOVI_SANDBOX_DESCRIBE=1 prints the command this would have run and
+# stops. Every exit goes through run(), so the answer is the argv that
+# would really be exec'd -- runtime branches taken, optional binds
+# resolved -- rather than a second description that can drift from it.
+# `novi-agent describe` READS this file instead (RFC 0029 decision 1:
+# describing must not run anything); this is the exact answer, for a
+# person.
+run() {
+    if [ -n "${NOVI_SANDBOX_DESCRIBE:-}" ]; then
+        printf '%s\n' "$*"
+        exit 0
+    fi
+    exec "$@"
+}
+
 SANDBOX="${NOVI_RECON_SANDBOX:-on}"
 case "${SANDBOX}" in
-    off|none|0) exec "${REAL}" "$@" ;;
+    off|none|0) run "${REAL}" "$@" ;;
     on|1) ;;
     *)
         echo "novi-recon: NOVI_RECON_SANDBOX must be 'on' or 'off'" >&2
         exit 2 ;;
 esac
-command -v novi-sandbox >/dev/null 2>&1 || exec "${REAL}" "$@"
-exec novi-sandbox --profile recon \
+command -v novi-sandbox >/dev/null 2>&1 || run "${REAL}" "$@"
+run novi-sandbox --profile recon \
     --ro /usr/lib --ro /usr/libexec --ro /lib \
     --ro /usr/bin/python3 \
     --ro /etc/ssl --ro /etc/resolv.conf --ro /etc/hosts \

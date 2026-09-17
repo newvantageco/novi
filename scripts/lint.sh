@@ -200,6 +200,7 @@ for t in packages/tests/test-lib-json.sh packages/tests/test-agent-verbs.sh \
          packages/tests/test-agent-text.sh \
          packages/tests/test-state-lock.sh \
          packages/tests/test-state-document.sh \
+         packages/tests/test-agent-sandbox.sh \
          packages/tests/test-pkg-cache-hash.sh; do
     echo ">>> ${t##*/}"
     if ! bash "$t"; then

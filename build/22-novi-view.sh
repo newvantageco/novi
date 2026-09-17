@@ -80,15 +80,30 @@ cat > "${ROOTFS}/usr/bin/novi-view" <<'WRAP'
 # somebody debugging the difference between a bad image and a missing
 # bind.
 REAL=/usr/libexec/novi-view
+# NOVI_SANDBOX_DESCRIBE=1 prints the command this would have run and
+# stops. Every exit goes through run(), so the answer is the argv that
+# would really be exec'd -- runtime branches taken, optional binds
+# resolved -- rather than a second description that can drift from it.
+# `novi-agent describe` READS this file instead (RFC 0029 decision 1:
+# describing must not run anything); this is the exact answer, for a
+# person.
+run() {
+    if [ -n "${NOVI_SANDBOX_DESCRIBE:-}" ]; then
+        printf '%s\n' "$*"
+        exit 0
+    fi
+    exec "$@"
+}
+
 SANDBOX="${NOVI_VIEW_SANDBOX:-on}"
 case "${SANDBOX}" in
-    off|none|0) exec "${REAL}" "$@" ;;
+    off|none|0) run "${REAL}" "$@" ;;
     on|1) ;;
     *)
         echo "novi-view: NOVI_VIEW_SANDBOX must be 'on' or 'off'" >&2
         exit 2 ;;
 esac
-command -v novi-sandbox >/dev/null 2>&1 || exec "${REAL}" "$@"
+command -v novi-sandbox >/dev/null 2>&1 || run "${REAL}" "$@"
 
 RUNTIME="${XDG_RUNTIME_DIR:-/run/user/0}"
 if [ "$#" -ge 1 ] && IMG="$(readlink -f -- "$1" 2>/dev/null)" &&
@@ -134,7 +149,7 @@ set -- novi-sandbox --no-net \
     --ro /var/cache/fontconfig \
     --rw "${RUNTIME}" \
     "$@"
-exec "$@"
+run "$@"
 WRAP
 chmod 755 "${ROOTFS}/usr/bin/novi-view"
 
