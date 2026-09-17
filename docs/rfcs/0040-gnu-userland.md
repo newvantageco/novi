@@ -391,14 +391,46 @@ applet. `--disable-nls` stands — there are no translations.
 
    Building `sed` is not scheduled by this measurement; the
    measurement says it is the one worth scheduling.
-5. **A post-install hook in `pkg`**, and `makewhatis` is the first
-   caller — see roadmap 2. The need is narrow and real: an index
-   derived from what is installed cannot be shipped *in* a package,
-   because two packages share `/usr/gnu/share/man` and the second one
-   to carry a `mandoc.db` would be refused by roadmap 1's conflict
-   check. It is a change to the program that installs code as root, so
-   it is its own item rather than a patch inside a `man` package —
-   the same reason the conflict check itself was not folded into the
-   GNU stage. Whatever shape it takes has to answer what a *failing*
-   hook means: an install that half-happened is worse than one that
-   did not, and `pkg` currently has no notion of a partial success.
+5. ~~**A post-install hook in `pkg`.**~~ **It already exists**, and
+   this item was written without checking — **the eleventh roadmap
+   item in this repository found to be wrong about what is already
+   built**, and the first one where the author of the item made the
+   mistake within the same day. `pkg` has run
+   `scripts/{pre,post}-{install,remove}` as root since it was written,
+   `mkpkg` packs them, and `packages/pkg-format.md` documents them.
+   **Nothing has ever shipped one**, which is why the mechanism was
+   unexercised and why nobody had noticed the next two things.
+
+   **The spec was wrong about the arguments, in the worst direction.**
+   It said all four receive *"one argument: the package version"*. The
+   install pair were passed `<name> <version>` and the remove pair
+   only `<name>`, so a script written from the document treats `$1` as
+   a version and is handed a name — silently, in code running as root.
+   All four take `<name> <version>` now; with zero users, correcting
+   the interface was still cheaper than documenting the inconsistency,
+   and it will never be cheaper again (the same argument RFC 0036 made
+   about `/run/novi/idle`'s format).
+
+   **The one worked example in the format spec called two commands
+   that exist nowhere on Novi** — `ldconfig`, which musl does not ship
+   *at all* because its dynamic linker has no cache, and
+   `gtk-update-icon-cache`, on a system with no GTK. Replaced with one
+   that runs here, and that guards on the formatter being installed.
+
+   **Only `pre-install` is fatal, and the table did not say so.** That
+   asymmetry is right — it runs before anything has moved, so refusing
+   leaves the machine untouched, while the other three run once files
+   are already on or off the disk, where aborting would leave a
+   half-installed package. But an undocumented asymmetry in
+   root-executed code is exactly what somebody relies on backwards.
+
+   `packages/tests/test-pkg-lifecycle.sh` is 32 checks over the
+   mechanism, each provoked. What it does NOT do is use it: **whether
+   the man index should be a per-package script or something `pkg`
+   derives is still open**, and the answer is not obvious. A script
+   means three packages (`man`, `coreutils`, `bash`) each carrying a
+   copy of the same `makewhatis` call, which is the drift this project
+   writes tests to prevent; deriving it means putting knowledge of man
+   pages into the program that installs code as root. Until that is
+   decided, `man` warns until somebody runs `makewhatis`, and says so
+   itself.

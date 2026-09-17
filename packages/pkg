@@ -759,7 +759,12 @@ install_pkg_file() {
         msg "Installing $name ($version)"
     fi
 
-    # Run pre-install script if present
+    # ONLY `pre-install` IS FATAL, and that asymmetry is the design
+    # rather than an accident: it runs BEFORE anything is extracted, so
+    # refusing leaves the machine exactly as it was. The other three
+    # run after files have already moved, where aborting would leave a
+    # half-installed package -- worse than either outcome. They warn.
+    # `pkg-format.md`'s table did not say this.
     local preinst="$PKG_TMP/extract/scripts/pre-install"
     if [ -f "$preinst" ]; then
         chmod +x "$preinst"
@@ -930,6 +935,17 @@ cmd_remove() {
 
         msg "Removing $name"
 
+        # THE LIFECYCLE SCRIPTS ALL TAKE `<name> <version>`. They used
+        # to disagree -- the install pair got both, the remove pair got
+        # only the name -- and `pkg-format.md` said all four got "one
+        # argument: the package version", which was wrong about every
+        # one of them and wrong in the worst direction: a script
+        # written from the spec treats $1 as a version and is handed a
+        # name. Nothing shipped a script yet, so this is the moment to
+        # make the four agree and it will never be cheaper.
+        local rm_version
+        rm_version="$(manifest_field "$(db_path "$name")" version)"
+
         local rdeps
         rdeps="$(rdeps_of "$name")"
 
@@ -942,7 +958,8 @@ cmd_remove() {
         local prerm="$PKG_DB/$name/scripts/pre-remove"
         if [ -f "$prerm" ]; then
             info "Running pre-remove script..."
-            "$prerm" "$name" || warn "pre-remove script exited non-zero"
+            "$prerm" "$name" "$rm_version" \
+                || warn "pre-remove script exited non-zero"
         fi
 
         # Remove installed files (reverse order to clear empty dirs)
@@ -1002,7 +1019,8 @@ cmd_remove() {
         local postrm="$PKG_DB/$name/scripts/post-remove"
         if [ -f "$postrm" ]; then
             info "Running post-remove script..."
-            "$postrm" "$name" || warn "post-remove script exited non-zero"
+            "$postrm" "$name" "$rm_version" \
+                || warn "post-remove script exited non-zero"
         fi
 
         # Remove database entry

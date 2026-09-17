@@ -4785,6 +4785,53 @@ original so `pkg remove` puts it back. `packages/tests/test-pkg-conflicts.sh`.
   also how it happened live: one `pkg install a b c ...` over six
   packages, several already there.
 
+## Architecture: the four scripts pkg runs as root
+
+RFC 0040 roadmap 5, `packages/tests/test-pkg-lifecycle.sh`.
+
+- **THE HOOK ALREADY EXISTED AND THE ROADMAP ITEM ASKED FOR IT.** `pkg`
+  has run `scripts/{pre,post}-{install,remove}` as root since it was
+  written, `mkpkg` packs them and `pkg-format.md` documents them.
+  **Eleventh roadmap item in this repository found to be wrong about
+  what is already built** -- and the first where the person who filed
+  the item made the mistake the same day. Check the code before
+  believing an item, including one you just wrote.
+- **NOTHING HAS EVER SHIPPED ONE**, which is why the mechanism was
+  unexercised and why the next two defects had survived.
+- **THE SPEC WAS WRONG ABOUT THE ARGUMENTS, IN THE WORST DIRECTION.**
+  It said all four receive "one argument: the package version". The
+  install pair got `<name> <version>`; the remove pair got only
+  `<name>`. So a script written from the document treats `$1` as a
+  version and is handed a name -- silently, as root. All four take
+  `<name> <version>` now: with zero users the INTERFACE could still be
+  corrected rather than the document, and that will never be cheaper
+  again (RFC 0036's argument about `/run/novi/idle`).
+- **THE ONE WORKED EXAMPLE CALLED TWO COMMANDS THAT EXIST NOWHERE
+  HERE** -- `ldconfig`, which **musl does not ship at all** because its
+  dynamic linker has no cache, and `gtk-update-icon-cache` on a system
+  with no GTK. The example in a format spec is the thing people copy.
+- **ONLY `pre-install` IS FATAL, and the table did not say so.** It
+  runs before anything has moved, so refusing leaves the machine
+  exactly as it was; the other three run once files are already on or
+  off the disk, where aborting would leave a half-installed package --
+  worse than either outcome. Right design, undocumented, in
+  root-executed code.
+- **A SCRIPT RUNS UNATTENDED AT BOOT.** `packages.<name>` means boot
+  convergence can install a package, so "runs as root at install time"
+  includes "as root, at boot, with nobody reading it". The spec says to
+  prefer shipping a file over running code, and to keep what runs
+  idempotent because an upgrade runs it again.
+- **`scripts/` is copied into the install database**, because
+  `pre-remove` runs long after the archive is gone. If that copy stops
+  happening the remove pair silently never runs again -- which is a
+  check in the suite.
+- **Whether the man index should be a script or something pkg derives
+  is STILL OPEN**, deliberately. A script means `man`, `coreutils` and
+  `bash` each carrying a copy of one `makewhatis` call -- the drift
+  this project writes tests to prevent; deriving it puts knowledge of
+  man pages into the program that installs code as root. Neither is
+  obviously right, so nothing was built on a guess.
+
 ## Architecture: /dev/fd, and testing the image not the shell
 
 `/dev/fd` did not exist on the shipped image — devtmpfs does not create it
