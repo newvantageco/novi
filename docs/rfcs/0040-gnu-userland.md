@@ -278,8 +278,8 @@ applet. `--disable-nls` stands — there are no translations.
    absent, which is RFC 0026's argument for deleting `idle3`.
 
    `pkg install man` brings **mandoc** (ISC, one self-contained C
-   program, ~584 KB, what Alpine and OpenBSD ship) and the coreutils
-   and bash packages carry their pages. It is also **the first real
+   program, 532 KB stripped, what Alpine and OpenBSD ship) and the
+   coreutils and bash packages carry their pages. It is also **the first real
    user of roadmap 1's `replaces-files=`**: mandoc installs
    `/usr/bin/man`, which is busybox's, so it declares the takeover and
    `pkg remove man` puts the applet back. A mechanism built for
@@ -292,6 +292,21 @@ applet. `--disable-nls` stands — there are no translations.
    would have built against a libc it invented. `configure.local` is
    upstream's documented override, and every value in it was read out
    of this musl with `nm` and `ls` rather than guessed.
+
+   **And it shipped 2.1 MB of the same binary five times before
+   anybody weighed the package.** mandoc dispatches on `argv[0]`, so
+   `make install` leaves `mandoc`, `man`, `apropos`, `whatis` and
+   `makewhatis` as one inode with a link count of 5 — and `cp -a`
+   preserves a hardlink only among the sources of a *single*
+   invocation, so the staging loop that copied them one at a time
+   produced five independent files. 2944k against 608k, measured both
+   ways. The links survive the entire real chain (GNU tar in `mkpkg`,
+   busybox `tar -xzf` and busybox's `tar -cf - | tar -xf -` in `pkg`,
+   and `strip`, which copies in place when `st_nlink > 1`), so one
+   `cp -a` is the whole fix; the stage now asserts it, derived from
+   the prefix's own inodes rather than a list of which names are
+   links. A sweep of every staged package says this was the only
+   instance: `git`, `binutils` and `gcc` keep theirs.
 3. **util-linux**, the third name in §5's sentence.
 4. **`sed`, `grep`, `awk` and `tar`**, if the difference turns out to
    matter as often as coreutils' did. It should be measured the way

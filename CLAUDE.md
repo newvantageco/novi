@@ -141,9 +141,15 @@ below for why `/build` is hardcoded and unrelated to the repo checkout path.
   coreutils (RFC 0040), the CLI gap `docs/PLATFORM-ROADMAP.md` §5
   named and nobody built. Staged into `/build/stage-devtools` and
   published by `53-devtools-repo.sh`. **`/usr/gnu/bin`, never
-  `/usr/bin`**: `pkg` has NO file-conflict handling, so a package
-  shipping `/usr/bin/ls` would silently take the busybox symlink and
-  `pkg remove` would then delete it
+  `/usr/bin`**: `pkg` refuses an unowned path now (RFC 0040 roadmap
+  1), so a package shipping `/usr/bin/ls` would have to declare
+  `replaces-files=` for it -- ~100 declared takeovers with ~100 saved
+  originals, which is a worse answer than a prefix and a PATH entry
+- `bash build/47-mandoc.sh [mandoc|package|all]` -- mandoc (RFC 0040
+  roadmap 2), the `man` package. Staged into `/build/stage-devtools`
+  and published by `53-devtools-repo.sh`. Every `configure` answer is
+  supplied by hand in `configure.local`, because mandoc's `runtest`
+  compiles a probe and then **executes** it
 - `bash build/44-novi-recon.sh` — `novi-recon` (RFC 0028), the recon
   tool. Nothing to compile: it is a Python script, which is the point.
   It runs the host test suite and parses the script with the target's
@@ -1943,14 +1949,19 @@ bash` -- the full GNU tools under `/usr/gnu/bin`, ahead of the busybox
 applets on a LOGIN shell's PATH and nowhere else.
 
 - **`/usr/gnu/bin` IS A DESIGN MADE AROUND AN ABSENCE, not a
-  preference.** `pkg install` extracts an archive over the root
+  preference.** `pkg install` extracted an archive over the root
   filesystem: no owner check, no conflict refusal, no backup --
   checked, not assumed. `/bin/ls` is a symlink to busybox, so a
   package shipping `/usr/bin/ls` would quietly take the name and
   **`pkg remove coreutils` would then DELETE it**, leaving a machine
   with no `ls` and no way for pkg to know. Times ~100 names. Teaching
-  pkg about ownership is the right fix and is a change to the program
-  that installs code as root -- not a side effect of adding a shell.
+  pkg about ownership was the right fix and was a change to the
+  program that installs code as root -- not a side effect of adding a
+  shell, which is why it became roadmap 1 rather than a patch in this
+  stage. **It is done now and the prefix STAYS**: ~100 declared
+  takeovers with ~100 saved originals is a worse answer than a prefix
+  and a PATH entry, so what changed is that `/usr/gnu` is a choice
+  rather than a requirement.
 - **A LOGIN SHELL IS THE RIGHT SCOPE, and that is what makes
   prepending safe here.** `/etc/profile` is NOT what gives an s6
   service its PATH -- s6-linux-init-maker's `-p` is (`04-s6.sh`) -- so
@@ -2005,6 +2016,85 @@ applets on a LOGIN shell's PATH and nowhere else.
   and this package is additive. `bashbug` goes too: it mails through a
   `sendmail` this system does not have, and a command that cannot work
   is worse than one that is absent (RFC 0026's `idle3`).
+
+## Architecture: a `man` that could never have worked
+
+RFC 0040 roadmap 2. `build/47-mandoc.sh`, `pkg install man`.
+
+- **THE BASE HAS SHIPPED A `man` SINCE THE FIRST IMAGE AND IT COULD
+  NOT DISPLAY A PAGE.** busybox's applet is a shell pipeline: it runs
+  `tbl`, `nroff` and `col`, none of which exist here, so `man ls`
+  printed two "not found" lines and stopped. Measured by running the
+  shipped busybox binary against a real page, not read out of its
+  source -- the same rule this file states about `/dev/fd` (testing
+  the shell answers a different question than testing the image). A
+  command that cannot work is worse than one that is absent, which is
+  RFC 0026's argument for deleting `idle3`, and this one had the
+  additional cost of looking like the feature was there.
+- **mandoc, not groff.** One self-contained C program (532 KB
+  stripped, ISC), which is what Alpine and OpenBSD ship. groff is C++,
+  needs its own preprocessor chain, and would put a second formatter's
+  worth of build on a system whose `man` pages are almost entirely
+  mdoc and man macros anyway.
+- **IT IS ONE BINARY UNDER FIVE NAMES, AND THE STAGING TURNED THAT
+  INTO FIVE BINARIES.** mandoc dispatches on `argv[0]`, so `make
+  install` leaves `mandoc`, `man`, `apropos`, `whatis` and
+  `makewhatis` as one inode with a link count of 5 -- and **`cp -a`
+  preserves a hardlink only among the sources of a SINGLE
+  invocation**, so a `for` loop copying them one at a time silently
+  produced five full copies. Measured both ways: **2944k for the loop
+  against 608k for the one call**, i.e. 2.1 MB of duplicate binary on
+  every machine that installs `man`. Dead weight is not inert (RFC
+  0007) and nothing about the package looked wrong.
+- **The links survive the whole real chain, which is why preserving
+  them is worth anything.** Checked rather than assumed, with the
+  shipped busybox: GNU tar create (`mkpkg`), busybox `tar -xzf`
+  (`pkg`'s extract), and busybox `tar -cf - | tar -xf -` (`pkg`'s pipe
+  into the root) all keep them -- 512k in, 512k out. `strip` keeps
+  them too, because binutils copies in place rather than renaming when
+  `st_nlink > 1`; that is what lets one `cp -a` come before the strip
+  instead of needing the links rebuilt after it.
+- **The assertion is DERIVED from the prefix**: any two names sharing
+  an inode in `make install`'s output must still share one in the
+  stage. A hand-written list of which names are links would be a
+  second answer to a question mandoc's own install already gives.
+  Confirmed by putting the loop back and watching it fire.
+- **A SWEEP SAID THIS WAS THE ONLY ONE.** Every staged package checked
+  for byte-identical files that are not hardlinked: `git` (153
+  hardlinks), `binutils` (20) and `gcc` (13) all keep theirs, and
+  Python's only duplicates are CPython's own `.opt-1`/`.opt-2`
+  pycache variants, which are upstream's layout rather than a
+  staging bug. Worth doing -- it is the difference between "fixed an
+  instance" and "fixed the instance".
+- **EVERY `configure` ANSWER IS SUPPLIED BY HAND, because `runtest`
+  EXECUTES its probe.** mandoc's configure is a shell script that
+  compiles a small program and then RUNS it -- which a cross build
+  cannot do, so every answer would have come back "no" and mandoc
+  would have built against a libc it invented (its own `strlcat`, its
+  own `getsubopt`, no `wchar` support). `configure.local` is
+  upstream's documented override and `runtest` skips any variable
+  already set, so the file is the whole interface. Every value in it
+  was read out of THIS musl with `nm` and `ls` rather than guessed.
+- **`NEED_GNU_SOURCE` IS ONLY SET WHEN A TEST ACTUALLY RUNS**, so
+  pre-seeding the answers means it never gets set -- `-D_GNU_SOURCE`
+  goes in `CFLAGS` explicitly. A variable that a skipped test would
+  have set is invisible in exactly the configuration that skips it.
+- **IT IS THE FIRST REAL USER OF `replaces-files=`** (roadmap 1).
+  mandoc installs `/usr/bin/man`, which is busybox's symlink, so the
+  package declares the takeover, `pkg` saves the original, and `pkg
+  remove man` puts the applet back. A mechanism built for binutils'
+  `strings` that the very next package needed is a reasonable sign it
+  was the right shape.
+- **`MANPATH_DEFAULT` HAS TO NAME `/usr/gnu/share/man`.** The pages
+  are in the coreutils and bash packages, which install under the
+  prefix, so a mandoc built with the stock default would find nothing
+  and report it as "no entry" -- the absence of a path reading as the
+  absence of a page.
+- **The pages are copied by asking whether the PROGRAM shipped.**
+  `46-gnu.sh`'s man loop is keyed on `[ -f "${d}/files/…/bin/${base%.*}" ]`,
+  so the derived sweep decides the pages too: a page for a program the
+  build did not produce (`chcon`, `runcon`) does not ship, and nobody
+  maintains a second list. Same argument as the binary sweep itself.
 
 ## Architecture: a process that cannot reach the machine
 
