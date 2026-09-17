@@ -47,6 +47,49 @@ static double ink_centroid_y(icon_coverage_fn fn, const void *ctx,
 	return total > 0.0 ? weighted / total : -1.0;
 }
 
+/* The horizontal EXTENT of a row's ink -- rightmost inked column minus
+ * leftmost. NOT a count of inked columns: an outline glyph inks two
+ * strokes on most rows whatever its width, so a count says nothing
+ * about how wide the shape is there. The bell's "the rim is wider than
+ * the dome" check was written as a count once and passed with the
+ * overhang removed. */
+static double row_extent(icon_coverage_fn fn, const void *ctx, int w,
+		double y) {
+	double first = -1.0, last = -1.0;
+	for (int x = 0; x < w; x++) {
+		if (fn(x + 0.5, y, ctx) > 0.05) {
+			if (first < 0.0) {
+				first = x;
+			}
+			last = x;
+		}
+	}
+	return first < 0.0 ? -1.0 : last - first;
+}
+
+/* How many separate runs of ink a row has. Two strokes with clear air
+ * between them is the whole difference between an hourglass and a Z,
+ * and every other property they share.
+ *
+ * The threshold is a PARAMETER and the callers pass 0.35 rather than
+ * the 0.05 every other probe here uses, because two strokes a couple
+ * of pixels apart still share antialiasing tails: measured at 0.05 the
+ * row a quarter of the way down the hourglass reads as ONE run while
+ * rendering with a visible gap in it. A tail is not a stroke. 0.35 is
+ * the level show() prints as `+` -- ink somebody can see. */
+static int row_runs(icon_coverage_fn fn, const void *ctx, int w, double y,
+		double threshold) {
+	int runs = 0, in_run = 0;
+	for (int x = 0; x < w; x++) {
+		int inked = fn(x + 0.5, y, ctx) > threshold;
+		if (inked && !in_run) {
+			runs++;
+		}
+		in_run = inked;
+	}
+	return runs;
+}
+
 static void show(const char *label, icon_coverage_fn fn, const void *ctx,
 		int w, int h) {
 	printf("%s\n", label);
@@ -81,6 +124,8 @@ int main(void) {
 		AWAKE_ICON_W, AWAKE_ICON_H);
 	show("unread notifications", novi_bell_coverage, NULL,
 		BELL_ICON_W, BELL_ICON_H);
+	show("window not responding", novi_wedge_coverage, NULL,
+		WEDGE_ICON_W, WEDGE_ICON_H);
 
 	struct net_fan fan[6];
 	for (int bars = 0; bars <= 4; bars++) {
@@ -479,6 +524,91 @@ int main(void) {
 		}
 		check("bell: the dome is above and the clapper below",
 			top_ink > bottom_ink + 4.0 && bottom_ink > 1.0);
+	}
+
+	/* ── The wedged-window hourglass (RFC 0038 roadmap 3) ──────────
+	 *
+	 * Two bars and two full diagonals, whose union is the silhouette.
+	 * Drawing four half-segments as two strokes is cheap and it is
+	 * also the shape of the mistake: DELETE ONE DIAGONAL AND WHAT IS
+	 * LEFT IS A Z, which has both bars, has a narrow middle, has ink
+	 * at the centre, and is symmetric under a 180-degree rotation.
+	 * Every obvious check passes on it. The one that does not is the
+	 * count of separate ink runs on a row between the waist and a
+	 * bar: an hourglass has two there and a Z has one.
+	 */
+	{
+		double edge = 0.0;
+		for (int x = 0; x < WEDGE_ICON_W; x++) {
+			edge += novi_wedge_coverage(x + 0.5, 0.5, NULL);
+			edge += novi_wedge_coverage(x + 0.5, WEDGE_ICON_H - 0.5, NULL);
+		}
+		for (int y = 0; y < WEDGE_ICON_H; y++) {
+			edge += novi_wedge_coverage(0.5, y + 0.5, NULL);
+			edge += novi_wedge_coverage(WEDGE_ICON_W - 0.5, y + 0.5, NULL);
+		}
+		check("wedge: nothing touches the icon box's border", edge < 0.05);
+
+		/* Both bars, both the full width of the glyph, and both
+		 * CONTINUOUS. The extent alone is not enough and finding that
+		 * out is what the provocation is for: the diagonals END at
+		 * the bars' own corners, so deleting a bar outright leaves
+		 * ink at both ends of that row and the leftmost-to-rightmost
+		 * measurement does not move by a pixel. The check passed on a
+		 * glyph with no bottom bar at all. What a missing or short
+		 * bar leaves is a row with a HOLE in it, so the row must also
+		 * be ONE run. */
+		double top_w = row_extent(novi_wedge_coverage, NULL,
+			WEDGE_ICON_W, WEDGE_TOP_Y);
+		double bot_w = row_extent(novi_wedge_coverage, NULL,
+			WEDGE_ICON_W, WEDGE_BOT_Y);
+		check("wedge: the top bar spans the glyph, unbroken",
+			top_w > 8.0 && row_runs(novi_wedge_coverage, NULL,
+				WEDGE_ICON_W, WEDGE_TOP_Y, 0.35) == 1);
+		check("wedge: the bottom bar spans the glyph, unbroken",
+			bot_w > 8.0 && row_runs(novi_wedge_coverage, NULL,
+				WEDGE_ICON_W, WEDGE_BOT_Y, 0.35) == 1);
+
+		/* The waist. Measured as an EXTENT against the bars' extent,
+		 * for the reason row_extent() exists: at the crossing the two
+		 * diagonals are one stroke, and counting inked columns would
+		 * compare one stroke against an outline's two and report the
+		 * waist WIDER than the bar. */
+		double waist_y = (WEDGE_TOP_Y + WEDGE_BOT_Y) / 2.0;
+		double waist_w = row_extent(novi_wedge_coverage, NULL,
+			WEDGE_ICON_W, waist_y);
+		check("wedge: the waist is narrower than the bars",
+			waist_w >= 0.0 && waist_w < top_w / 2.0);
+		/* And it is inked AT ALL. Two diagonals that miss each other
+		 * leave a gap at the crossing, and the glyph becomes two
+		 * unconnected chevrons -- which at 16px reads as damage. */
+		check("wedge: the diagonals meet at the waist",
+			novi_wedge_coverage(WEDGE_ICON_W / 2.0, waist_y, NULL) > 0.7);
+
+		/* TWO runs above the waist and two below. This is the check
+		 * the Z fails and the only one it does. */
+		double above_y = (WEDGE_TOP_Y + waist_y) / 2.0;
+		double below_y = (waist_y + WEDGE_BOT_Y) / 2.0;
+		check("wedge: two separate strokes above the waist",
+			row_runs(novi_wedge_coverage, NULL, WEDGE_ICON_W, above_y, 0.35) == 2);
+		check("wedge: two separate strokes below the waist",
+			row_runs(novi_wedge_coverage, NULL, WEDGE_ICON_W, below_y, 0.35) == 2);
+
+		/* Symmetric about the waist. An hourglass upside down is an
+		 * hourglass, so unlike the bell and the RJ45 jack there is no
+		 * right way up to assert -- what there is instead is that the
+		 * two halves must MATCH, which catches a bar or a diagonal
+		 * that has moved on one side only. */
+		double upper = 0.0, lower = 0.0;
+		for (int y = 0; y < WEDGE_ICON_H / 2; y++) {
+			for (int x = 0; x < WEDGE_ICON_W; x++) {
+				upper += novi_wedge_coverage(x + 0.5, y + 0.5, NULL);
+				lower += novi_wedge_coverage(x + 0.5,
+					WEDGE_ICON_H - 1 - y + 0.5, NULL);
+			}
+		}
+		check("wedge: the two halves mirror each other",
+			fabs(upper - lower) < 0.5 && upper > 4.0);
 	}
 
 	/* The jack's tab is below its body. The upside-down version passed

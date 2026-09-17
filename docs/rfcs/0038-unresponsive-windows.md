@@ -8,9 +8,9 @@
 > much CPU that client's process burned. A window whose client has
 > burned half a processor for ten seconds without committing anything
 > is judged **not responding** — one notification, a line in
-> `/run/novi/windows`, and a row in novi-settings' Session panel.
-> **Super+Shift+Q** is what ends it. Nothing here kills anything on
-> its own.
+> `/run/novi/windows`, an hourglass — in the notification and in the
+> status bar — and a row in novi-settings' Session panel. **Super+Shift+Q** is what ends it.
+> Nothing here kills anything on its own.
 
 ## Motivation & Problem Statement
 
@@ -248,6 +248,61 @@ configurable at all, which is a smaller promise than an environment
 variable and can grow into one if anybody's machine disagrees with
 them.
 
+### 13. An hourglass in the status bar, and not a warning sign.
+
+Roadmap item 3, and the argument for it is the one that put the bell
+there (RFC 0034 roadmap 1): the toast is gone in five seconds and the
+condition is not. Five seconds after a window wedges, a machine with a
+wedged window on it looked exactly like a machine with nothing wrong
+with it — the fact was in `/run/novi/windows` and in the Session
+panel, and nothing on screen said to go and look.
+
+**An hourglass, in text-secondary, not a triangle in the warning
+colour** — and that is decision 2 above rather than a matter of taste.
+The watchdog cannot tell slow from stuck; the strongest claim it can
+support is *this is taking a long time*. `long-line.html` was judged
+and then recovered four seconds later, having merely been slow, and a
+glyph that had shouted about it would have been wrong in a way the
+code that raised it is careful not to be. The health glyph is the
+warning colour because a service that has died is a fact.
+
+**One glyph, no number**, which is a departure from the bell rather
+than an oversight. A number beside an hourglass reads as a *duration*
+— the exact quantity this glyph is about — while what the compositor
+counts is windows. The Session panel names each window with its stall
+time and its CPU, which is where a count can be read without being
+mistaken for something else.
+
+It goes **between the health glyph and the coffee cup**, so that the
+three glyphs which open the Session panel are contiguous: a click that
+lands between two of them still opens the window that explains
+whichever was aimed at. `status_layout()` computes the march once and
+the drawing, the taskbar's right-hand limit and the hit-test all read
+it — RFC 0036 decision 11's rule, now about four glyphs instead of
+three.
+
+**An absent `/run/novi/windows` and one saying `unresponsive 0` draw
+the same nothing**, and they are different answers. There is no glyph
+for "asked, and everything is fine" — the same reason the health glyph
+is absent on a healthy machine rather than greyed out.
+
+### 14. And the notification has an icon now — decision 10, closed.
+
+Decision 10 said the empty icon column was "the honest column until
+somebody draws the right glyph", because the rasterised set had no
+glyph meaning *wedged* and borrowing `shield` or `power` would have
+said something else confidently. Drawing the panel's hourglass is what
+made it obvious that Lucide already has one — `hourglass`, vendored at
+the same pinned commit as every other icon here, and **the same two
+bars and two diagonals meeting at a waist** that
+`novi_wedge_coverage()` draws procedurally. Two pipelines agreeing, as
+`wifi` and `power` already do; neither is derived from the other.
+
+The rule did not bend for it. An unknown name is still no icon, the
+name is still matched against a fixed list in `novi-notifyd`, and the
+new entry says the thing decision 2 permits — *taking a long time* —
+rather than the thing a warning triangle would have claimed.
+
 ## What was verified
 
 **The parse has a host test** (`common/procstat-test.c`, run by
@@ -377,8 +432,12 @@ perfectly.
    and the moment any client here offers it, the slow/stuck
    distinction stops being unavailable. Not worth a protocol before
    there is a caller (RFC 0036 decision 0's argument).
-3. **The panel says nothing.** novi-settings' Session panel reads the
-   file and the notification announces the transition, but the status
-   bar — which already draws a health glyph and a bell — has no glyph
-   for a machine with a wedged window on it. Same argument that put
-   the bell there: a toast is gone in five seconds.
+3. ~~**The panel says nothing.**~~ **Done** — decision 13. An
+   hourglass between the health glyph and the coffee cup, in
+   text-secondary rather than the warning colour because the watchdog
+   cannot tell slow from stuck, with no number beside it because a
+   number next to an hourglass reads as a duration. Clicking it opens
+   the Session panel, which is where the windows are named.
+4. ~~**The notification still has no icon.**~~ **Done** — decision 14,
+   which closes decision 10. Lucide's `hourglass` at the pinned
+   commit, and it is the same shape the panel draws procedurally.

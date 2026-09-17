@@ -1871,6 +1871,63 @@ least half a processor" for ten seconds running.
   "one row from outgrowing" it and that was exact. `ROW_H_KEYS` is 30
   now (729px): one more row of headroom and no more, after which the
   answer is two columns or a scroll rather than another pixel.
+- **THE PANEL DRAWS AN HOURGLASS NOW, AND ITS COLOUR IS THE
+  ARGUMENT** (RFC 0038 roadmap 3, decision 13). text-secondary, like
+  the muted speaker and the coffee cup -- not the warning colour the
+  health glyph gets. Decision 2 is why: the watchdog cannot tell slow
+  from stuck, so "this is taking a long time" is the strongest claim
+  it can support, and `long-line.html` recovering four seconds after
+  being judged is what that limit looks like in practice. A glyph
+  that shouted would claim a certainty the code raising it has
+  already refused.
+- **NO NUMBER BESIDE IT, and that is a real difference from the
+  bell.** A number next to an hourglass reads as a DURATION -- the
+  exact quantity this glyph is about -- while what the compositor
+  counts is windows. The Session panel names each one with its stall
+  time.
+- **It goes BETWEEN the health glyph and the coffee cup** so the
+  three glyphs that open `novi-settings --panel session` are
+  contiguous: a click landing between two of them still opens the
+  window that explains whichever was aimed at. `status_layout()` is
+  the one march the drawing, the taskbar's right-hand limit and the
+  hit-test all read -- now four glyphs, same rule.
+- **AN ABSENT `/run/novi/windows` AND ONE SAYING `unresponsive 0`
+  DRAW THE SAME NOTHING, and they are different answers.** There is
+  no glyph for "asked, and everything is fine", exactly as there is
+  none for a healthy machine's services.
+- **`row_extent()` CANNOT SEE A MISSING BAR, and the provocation is
+  what found that.** The hourglass's diagonals END at the bars' own
+  corners, so deleting a bar outright leaves ink at both ends of that
+  row and leftmost-to-rightmost does not move by a pixel -- the check
+  passed on a glyph with no bottom bar. What a missing or short bar
+  leaves is a HOLE, so the row must also be ONE run. Fourth time in
+  this file that a probe, rather than the code, was the broken thing.
+- **A RUN COUNT NEEDS A THRESHOLD THAT MEANS "ink somebody can
+  see".** Two strokes a couple of pixels apart still share
+  antialiasing tails: at the 0.05 every other probe here uses, the
+  row a quarter of the way down reads as ONE run while rendering with
+  a visible gap. 0.35 -- what `show()` prints as `+`. The check it
+  makes possible is the only one a **Z** fails: delete one diagonal
+  and what is left has both bars, a narrow middle, ink at the centre,
+  and 180-degree symmetry.
+- **DECISION 10's "no icon" IS CLOSED, and drawing the panel glyph is
+  what closed it.** That decision said the empty notification icon
+  column was honest "until somebody draws the right glyph" -- and
+  Lucide already had one: `hourglass`, the SAME two-bars-and-two-
+  diagonals shape the panel now draws procedurally. Two pipelines
+  agreeing (the panel's geometry in `novi-panel/icons.c`, the
+  rasterised SVG set in `shared/icons/`), as `wifi` and `power`
+  already do. An icon name is still matched against a fixed list and
+  an unknown one is still no icon.
+- **A NEW SHARED ICON IS FOUR LISTS, not one**: the vendored SVG plus
+  its MANIFEST row, `shared/icons/icons.h`'s enum, `svg2icon.c`'s
+  table (with a SIZE -- 24 for a notification column, 16 for chrome),
+  and then every client's own name table -- novi-notifyd's
+  `icon_by_name` AND novi-launcher's `resolve_icon_name`, which is
+  what the history list reads. RFC 0034 already learned the second
+  half of that the hard way: two rows out of three had an empty icon
+  column because the launcher's table had never learned `drive` or
+  `eject`.
 
 ## Architecture: a process that cannot reach the machine
 

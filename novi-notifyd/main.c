@@ -177,6 +177,14 @@ static bool icon_by_name(const char *name, enum novi_icon_id *out) {
 		{ "file",    ICON_FILE },
 		{ "folder",  ICON_FOLDER },
 		{ "settings", ICON_SETTINGS },
+		/* RFC 0038. Decision 10 of that RFC said this set had no
+		 * glyph meaning "wedged" and that the empty column was the
+		 * honest column "until somebody draws the right glyph".
+		 * Lucide has one -- and it is the same two-bars-and-two-
+		 * diagonals shape the panel's status glyph draws
+		 * procedurally, which is what made it obviously right rather
+		 * than merely available. */
+		{ "hourglass", ICON_HOURGLASS },
 	};
 	for (size_t i = 0; i < sizeof(TABLE) / sizeof(TABLE[0]); i++) {
 		if (strcmp(TABLE[i].name, name) == 0) {

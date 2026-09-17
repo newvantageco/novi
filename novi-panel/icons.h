@@ -206,6 +206,33 @@ struct net_fan {
 #define BELL_CLAPPER_CY 13.4
 #define BELL_CLAPPER_R 1.35
 
+/* ── The wedged-window glyph: an hourglass ────────────────────────── */
+/* Drawn when novi-shell's watchdog has judged at least one window not
+ * responding (RFC 0038, /run/novi/windows).
+ *
+ * AN HOURGLASS AND NOT A WARNING SIGN, and that is decision 2 of that
+ * RFC rather than a matter of taste: the watchdog CANNOT TELL SLOW
+ * FROM STUCK. From outside a process, a client laying out an enormous
+ * document is indistinguishable from one that never will -- which is
+ * why the thing kills nothing and why `long-line.html` was judged and
+ * then recovered four seconds later. "This is taking a long time" is
+ * the claim the compositor can support; a warning triangle or a cross
+ * would say "this is broken", which it cannot know. The panel's
+ * existing WARN glyph already means the other thing (a service that
+ * has actually died), and two glyphs claiming the same certainty about
+ * different evidence would be worse than one.
+ *
+ * Two bars and two full diagonals. The diagonals cross at the waist,
+ * so their union is exactly the hourglass silhouette -- four
+ * half-segments, drawn as two strokes. */
+#define WEDGE_ICON_W 16
+#define WEDGE_ICON_H 16
+#define WEDGE_ICON_STROKE 1.7
+#define WEDGE_BAR_L 3.6
+#define WEDGE_BAR_R 12.4
+#define WEDGE_TOP_Y 3.0
+#define WEDGE_BOT_Y 13.0
+
 /* Which arcs this pass draws: bit 0 is the inner, bit 1 the outer.
  * `muted` replaces them entirely. The body is always drawn -- an
  * indicator that vanishes at zero volume is one that cannot tell you
@@ -222,6 +249,7 @@ typedef double (*icon_coverage_fn)(double x, double y, const void *ctx);
 
 double novi_rounded_box_sdf(double px, double py, double half_w,
 	double half_h, double radius);
+
 double novi_stroke_coverage(double d, double half_stroke);
 
 double novi_apps_icon_coverage(double x, double y, const void *ctx);
@@ -231,6 +259,7 @@ double novi_power_coverage(double x, double y, const void *ctx);
 double novi_warn_coverage(double x, double y, const void *ctx);
 double novi_volume_coverage(double x, double y, const void *ctx);
 double novi_awake_coverage(double x, double y, const void *ctx);
+double novi_wedge_coverage(double x, double y, const void *ctx);
 double novi_bell_coverage(double x, double y, const void *ctx);
 
 #endif

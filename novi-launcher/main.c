@@ -255,6 +255,7 @@ static int resolve_icon_name(const char *name) {
 		{"wifi", ICON_WIFI},
 		{"power", ICON_POWER},
 		{"file", ICON_FILE},
+		{"hourglass", ICON_HOURGLASS},
 	};
 	for (size_t i = 0; i < sizeof(NAMES) / sizeof(NAMES[0]); i++) {
 		if (strcmp(NAMES[i].name, name) == 0) {

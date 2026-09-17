@@ -233,6 +233,31 @@
  * does not: it is there for the life of a machine with a sound card. */
 #define IDLE_FILE "/run/novi/idle"
 #define AWAKE_GAP 10
+/* The wedged-window indicator, between the health glyph and the
+ * stay-awake one. RFC 0038 roadmap 3: novi-shell's watchdog notices a
+ * window that has stopped answering, sends one notification and
+ * publishes the verdict here -- and the panel said nothing, so five
+ * seconds after the toast the machine looked exactly like a machine
+ * with nothing wrong with it. That is the argument that put the bell
+ * on this bar, about a fact that lasts far longer than a toast does.
+ *
+ * ONE GLYPH, NO NUMBER, and that is a departure from the bell rather
+ * than an omission. A number beside an hourglass reads as a DURATION
+ * -- the very quantity this glyph is about -- and what the compositor
+ * counts is windows. The Session panel names each of them with its
+ * stall time and its CPU, which is where a count belongs.
+ *
+ * text-secondary, not the warning colour, and RFC 0038 decision 2 is
+ * why: the watchdog CANNOT TELL SLOW FROM STUCK, so the strongest
+ * claim it can make is "this is taking a long time". The health glyph
+ * is the warning colour because a service that has died is a fact.
+ *
+ * It sits beside health deliberately. Those two and the coffee cup
+ * all open the Session panel, so keeping them contiguous means a
+ * click that lands between two of them still opens the window that
+ * explains whichever was aimed at. */
+#define WINDOWS_FILE "/run/novi/windows"
+#define WEDGE_GAP 10
 /* The unread-notification indicator, between the health glyph and the
  * stay-awake one. RFC 0034 gave this desktop a notification history
  * and no way to know there was anything in it: a toast is up for five
@@ -349,6 +374,14 @@ struct novi_panel {
 	 * "nothing is holding this awake" and "there is no idle clock
 	 * here" both mean there is nothing to draw. */
 	bool holding_awake;
+	/* Read from WINDOWS_FILE at the same moment. False when the file
+	 * is absent -- no compositor, or one too old to publish -- which
+	 * is a different answer from "every window is responding" and
+	 * draws the same as it: nothing. Claiming either way about a
+	 * machine that has not been asked is what novi-settings' Session
+	 * panel refuses to do in words and what this refuses to do in a
+	 * glyph. */
+	bool windows_wedged;
 	/* How many notifications are newer than the marker the launcher
 	 * wrote when it last showed the list. Zero draws nothing at all:
 	 * a bell that is always there, greyed, is the thing that teaches
@@ -555,14 +588,35 @@ static void read_published_state(struct novi_panel *panel) {
 			fclose(idf);
 		}
 	}
+
+	/* `unresponsive <n>` is the FIRST line and the only one read here;
+	 * the `window ...` records after it are for the Session panel,
+	 * which has room to name them. novi-shell writes this once at
+	 * startup with a zero, so an absent file and a present one saying
+	 * `0` are genuinely different answers -- and both draw nothing,
+	 * because there is no glyph for "asked and everything is fine". */
+	panel->windows_wedged = false;
+	{
+		FILE *wf = fopen(WINDOWS_FILE, "r");
+		if (wf != NULL) {
+			char line[256];
+			if (fgets(line, sizeof(line), wf) != NULL) {
+				int n = 0;
+				if (sscanf(line, "unresponsive %d", &n) == 1 && n > 0) {
+					panel->windows_wedged = true;
+				}
+			}
+			fclose(wf);
+		}
+	}
 }
 
 /* How much room the conditional status glyphs take, gaps included --
  * the width the taskbar must stop short of, and the same quantity the
  * leftward march in render() consumes. Derived from the identical
- * three flags rather than measured separately, because the hit-test
- * and the drawing disagreeing by one glyph is a taskbar entry that
- * responds to a click on a coffee cup. */
+ * flags rather than measured separately, because the hit-test and the
+ * drawing disagreeing by one glyph is a taskbar entry that responds
+ * to a click on a coffee cup. */
 /* Where each status glyph sits, computed ONCE from the same flags in
  * the same order, because three things need to agree about it: the
  * drawing, the taskbar's right-hand limit, and -- since RFC 0036
@@ -575,7 +629,7 @@ static void read_published_state(struct novi_panel *panel) {
  * from the network button, so `total` is what the taskbar must stop
  * short of. */
 struct status_layout {
-	int volume_x, health_x, awake_x, bell_x;
+	int volume_x, health_x, wedge_x, awake_x, bell_x;
 	int total;
 };
 
@@ -585,7 +639,8 @@ static void status_layout(const struct novi_panel *panel,
 	net_button_rect(panel, &net_x, &net_y, &net_w, &net_h);
 	(void)net_y; (void)net_w; (void)net_h;
 
-	out->volume_x = out->health_x = out->awake_x = out->bell_x = -1;
+	out->volume_x = out->health_x = out->wedge_x = -1;
+	out->awake_x = out->bell_x = -1;
 	int x = net_x;
 	if (panel->volume_known) {
 		x -= VOLUME_GAP + VOL_ICON_W;
@@ -594,6 +649,10 @@ static void status_layout(const struct novi_panel *panel,
 	if (panel->health_degraded) {
 		x -= HEALTH_GAP + WARN_ICON_W;
 		out->health_x = x;
+	}
+	if (panel->windows_wedged) {
+		x -= WEDGE_GAP + WEDGE_ICON_W;
+		out->wedge_x = x;
 	}
 	if (panel->holding_awake) {
 		x -= AWAKE_GAP + AWAKE_ICON_W;
@@ -613,11 +672,13 @@ static int status_area_w(const struct novi_panel *panel) {
 	return sl.total;
 }
 
-/* The two glyphs that now OPEN something (RFC 0036 roadmap 4). Both of
- * their comments above said the same thing for as long as they have
- * existed -- there is nowhere for this to lead, and a panel item that
- * opens a terminal is not a thing this desktop does. novi-settings has
- * a Session panel now, so there is.
+/* The glyphs that OPEN something (RFC 0036 roadmap 4): health, the
+ * wedged-window hourglass (RFC 0038 roadmap 3) and the coffee cup.
+ * The first two's comments above said the same thing for as long as
+ * they have existed -- there is nowhere for this to lead, and a panel
+ * item that opens a terminal is not a thing this desktop does.
+ * novi-settings has a Session panel now, so there is, and all three of
+ * these lead to it -- which is why they are adjacent in the march.
  *
  * NOT the volume glyph and NOT the bell. The bell already has
  * somewhere to go and a key that goes there (Super+N), so a click
@@ -637,6 +698,13 @@ static bool point_in_session_glyph(const struct novi_panel *panel,
 		int y = h / 2 - WARN_ICON_H / 2;
 		if (px >= sl.health_x && px < sl.health_x + WARN_ICON_W &&
 				py >= y && py < y + WARN_ICON_H) {
+			return true;
+		}
+	}
+	if (sl.wedge_x >= 0) {
+		int y = h / 2 - WEDGE_ICON_H / 2;
+		if (px >= sl.wedge_x && px < sl.wedge_x + WEDGE_ICON_W &&
+				py >= y && py < y + WEDGE_ICON_H) {
 			return true;
 		}
 	}
@@ -881,7 +949,8 @@ static void render(struct novi_panel *panel, uint32_t *px, uint32_t stride_px) {
 	 * whether the machine has a sound card.
 	 *
 	 * The order out from the network button is volume, health,
-	 * stay-awake, unread -- least likely to come and go first, so
+	 * wedged, stay-awake, unread -- least likely to come and go
+	 * first, so
 	 * that the ones which do come and go move as little else as
 	 * possible. The unread bell is outermost because it is the only
 	 * one that appears without anybody doing anything. Whatever this
@@ -918,6 +987,20 @@ static void render(struct novi_panel *panel, uint32_t *px, uint32_t stride_px) {
 			sl.health_x, (int)h / 2 - WARN_ICON_H / 2,
 			WARN_ICON_W, WARN_ICON_H, novi_warn_coverage, NULL,
 			NOVI_STATUS_WARNING);
+	}
+
+	/* Next along from health, and drawn in text-secondary rather than
+	 * the warning colour beside it. The watchdog cannot tell a client
+	 * laying out an enormous document from one that never will (RFC
+	 * 0038 decision 2) -- which is why it kills nothing, and why this
+	 * says "taking a long time" rather than "broken". Making it shout
+	 * would be the glyph claiming a certainty the code that raised it
+	 * has already refused to claim. */
+	if (panel->windows_wedged) {
+		draw_icon(px, stride_px, w, h,
+			sl.wedge_x, (int)h / 2 - WEDGE_ICON_H / 2,
+			WEDGE_ICON_W, WEDGE_ICON_H, novi_wedge_coverage, NULL,
+			NET_ICON_COLOR);
 	}
 
 	/* Outermost, so that toggling it -- the one thing here a person

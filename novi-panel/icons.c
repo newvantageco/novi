@@ -494,3 +494,28 @@ double novi_bell_coverage(double x, double y, const void *ctx) {
 	}
 	return best;
 }
+
+/* The hourglass (RFC 0038 roadmap 3). Two bars and two full diagonals:
+ * the diagonals cross at the waist, so between them they cover all
+ * four half-segments an hourglass outline is made of, and two strokes
+ * draw what would otherwise be four.
+ *
+ * `seg_distance` for every one of them, so the joins at the corners
+ * are the union of two rounded strokes rather than a mitre this
+ * rasteriser has no way to express. */
+double novi_wedge_coverage(double x, double y, const void *ctx) {
+	(void)ctx;
+	double half_stroke = WEDGE_ICON_STROKE / 2.0;
+	double d = seg_distance(x, y, WEDGE_BAR_L, WEDGE_TOP_Y,
+		WEDGE_BAR_R, WEDGE_TOP_Y);
+	double o = seg_distance(x, y, WEDGE_BAR_L, WEDGE_BOT_Y,
+		WEDGE_BAR_R, WEDGE_BOT_Y);
+	if (o < d) { d = o; }
+	o = seg_distance(x, y, WEDGE_BAR_L, WEDGE_TOP_Y,
+		WEDGE_BAR_R, WEDGE_BOT_Y);
+	if (o < d) { d = o; }
+	o = seg_distance(x, y, WEDGE_BAR_R, WEDGE_TOP_Y,
+		WEDGE_BAR_L, WEDGE_BOT_Y);
+	if (o < d) { d = o; }
+	return novi_stroke_coverage(d, half_stroke);
+}

@@ -1479,12 +1479,18 @@ static void notify_unresponsive(struct novi_server *server,
 			/* Nothing useful to do about it; the exec below does not
 			 * care where it starts. */
 		}
-		/* No -i: this icon set has no glyph that means "wedged", and
-		 * RFC 0024's rule is that an unknown name is no icon rather
-		 * than a fallback. Borrowing one that means something else
-		 * would be worse than the empty column. */
+		/* `hourglass`, and it took RFC 0038 roadmap 4 to get here.
+		 * This started with no -i at all, because the set had no
+		 * glyph meaning "wedged" and RFC 0024's rule is that an
+		 * unknown name is no icon rather than a fallback -- borrowing
+		 * `shield` or `power` would have said something else
+		 * confidently. The glyph exists now (Lucide's `hourglass`,
+		 * vendored at the pinned commit), and it means the same thing
+		 * the panel's status glyph does: taking a long time, not
+		 * broken. Decision 2 again -- this watchdog cannot tell slow
+		 * from stuck, so neither may its icon. */
 		execlp(NOVI_NOTIFY_BIN, NOVI_NOTIFY_BIN, "-u", "normal",
-			summary, body, (char *)NULL);
+			"-i", "hourglass", summary, body, (char *)NULL);
 		_exit(127);
 	}
 }
