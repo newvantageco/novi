@@ -272,10 +272,15 @@ applet. `--disable-nls` stands — there are no translations.
    and the item understated it: the base image has shipped a `man`
    **that could never display a page** for the life of the project.
    busybox's applet shells out to `tbl`, `nroff` and `col`, none of
-   which exist here, so `man ls` printed two "not found" lines and
-   nothing else — measured with the shipped busybox binary, not
-   assumed. A command that cannot work is worse than one that is
-   absent, which is RFC 0026's argument for deleting `idle3`.
+   which exist here. Measured with the shipped busybox binary rather
+   than assumed (`tests/busybox-man/probe.sh`, a chroot on the build
+   host — RFC 0018's rule about BusyBox `fdisk` again): the pipeline
+   is `tbl | nroff -mandoc -rLL=78n -rLT=78n 2>&1 | col -b -p -x`,
+   and **it exits 0 having printed its own "not found" lines where
+   the page text should be**, because that `2>&1` goes into the pipe.
+   Not merely broken — broken while reporting success. A command that
+   cannot work is worse than one that is absent, which is RFC 0026's
+   argument for deleting `idle3`.
 
    `pkg install man` brings **mandoc** (ISC, one self-contained C
    program, 532 KB stripped, what Alpine and OpenBSD ship) and the

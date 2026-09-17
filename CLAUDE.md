@@ -2067,15 +2067,29 @@ opinion"*. The number says they are not alike.
 RFC 0040 roadmap 2. `build/47-mandoc.sh`, `pkg install man`.
 
 - **THE BASE HAS SHIPPED A `man` SINCE THE FIRST IMAGE AND IT COULD
-  NOT DISPLAY A PAGE.** busybox's applet is a shell pipeline: it runs
-  `tbl`, `nroff` and `col`, none of which exist here, so `man ls`
-  printed two "not found" lines and stopped. Measured by running the
-  shipped busybox binary against a real page, not read out of its
-  source -- the same rule this file states about `/dev/fd` (testing
-  the shell answers a different question than testing the image). A
-  command that cannot work is worse than one that is absent, which is
-  RFC 0026's argument for deleting `idle3`, and this one had the
-  additional cost of looking like the feature was there.
+  NOT DISPLAY A PAGE.** busybox's applet is a shell pipeline --
+  `tbl | nroff -mandoc -rLL=78n -rLT=78n 2>&1 | col -b -p -x` --
+  and busybox provides NONE of those three as applets (only `less`).
+  A command that cannot work is worse than one that is absent (RFC
+  0026's `idle3`), and this one had the additional cost of looking
+  like the feature was there.
+- **IT EXITS 0, AND PRINTS ITS OWN ERROR WHERE THE PAGE SHOULD BE.**
+  That is the finding, and it is worse than "it fails": the nroff
+  stage carries `2>&1` **into the pipe**, so a missing formatter's
+  diagnostics go to stdout as page text, and the applet returns
+  success having rendered none of the document. A caller testing the
+  exit status is told it worked.
+- **`tests/busybox-man/probe.sh` PROVES IT WITHOUT A VM**, on the
+  shipped static binary in a chroot, which is RFC 0018's rule about
+  BusyBox `fdisk` applied again. Two things it has to do that a naive
+  run does not: **put a real page there first** (with no pages
+  installed the applet answers "no manual entry" and never reaches
+  its formatter, so a probe against the bare base proves nothing),
+  and **capture stdout as well as stderr** -- a first reading that
+  looked only at stderr saw `tbl` and `col` and concluded nroff was
+  never invoked at all, because `2>&1` had put its line in the pipe.
+  Shims standing in for the three helpers are what show the real
+  argv; reading the strings in the binary gave the wrong chain.
 - **mandoc, not groff.** One self-contained C program (532 KB
   stripped, ISC), which is what Alpine and OpenBSD ship. groff is C++,
   needs its own preprocessor chain, and would put a second formatter's
