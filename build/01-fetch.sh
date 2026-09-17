@@ -337,6 +337,10 @@ fetch "https://ftp.gnu.org/gnu/readline/readline-${READLINE_VERSION}.tar.gz"
 # decides at configure time whether `_sqlite3` exists, and says nothing
 # afterwards. It runs AFTER 40 because its shell links that readline.
 fetch "${SQLITE_URL}"
+# GNU coreutils and bash (RFC 0040). Packages, never base -- see the
+# RFC for why they install under /usr/gnu rather than over busybox.
+fetch "https://ftp.gnu.org/gnu/bash/bash-${GNU_BASH_VERSION}.tar.gz"
+fetch "https://ftp.gnu.org/gnu/coreutils/coreutils-${COREUTILS_VERSION}.tar.xz"
 
 # Full-disk encryption (RFC 0018). popt and json-c are cryptsetup's
 # hard dependencies; util-linux and LVM2 are enormous trees fetched for

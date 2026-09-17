@@ -186,6 +186,33 @@ READLINE_VERSION="8.2"
 #
 # The URL carries a year directory that does NOT follow from the
 # version number, so it is spelled out rather than derived.
+# GNU coreutils and bash (RFC 0040) -- the CLI gap this project's own
+# platform roadmap named in §5 and never built: "Full GNU
+# coreutils/util-linux/bash become an ordinary `pkg install` for any
+# real interactive system". BusyBox is the right base userland and is
+# a SUBSET; the difference is a papercut a developer meets several
+# times a day.
+#
+# NOT `BASH_VERSION`, AND THAT IS NOT STYLE. `BASH_VERSION` is a
+# variable BASH ITSELF SETS, and this file is SOURCED by every build
+# stage -- all of which are `#!/bin/bash`. Assigning it would make
+# `$BASH_VERSION` report "5.3" inside a bash that is some other
+# version, silently, in a file whose whole job is to be sourced.
+# Nothing here reads it today, which is exactly the kind of "harmless
+# until somebody uses it" this repository has been caught by before.
+# 5.2.37 AND NOT 5.3, AND THAT IS A PAIRING RATHER THAN CAUTION.
+# GNU releases bash X.Y alongside readline (X+3).Y, and bash 5.3 uses
+# two symbols that arrived in readline 8.3 -- `rl_completion_rewrite_hook`
+# and `rl_full_quoting_desired`. This system pins readline 8.2 for
+# CPython (RFC 0026 roadmap 2), and build/46-gnu.sh links bash against
+# THAT copy rather than the one bash bundles, so the pair has to match.
+# Found by the linker, not by reading a NEWS file. Bumping readline to
+# 8.3 is the other way to close it and is a change to the package
+# CPython depends on, which is a decision for the day something needs
+# 8.3 rather than a side effect of adding a shell.
+GNU_BASH_VERSION="5.2.37"
+COREUTILS_VERSION="9.12"
+
 SQLITE_VERSION="3.53.4"
 SQLITE_TARBALL="sqlite-autoconf-3530400.tar.gz"
 SQLITE_URL="https://sqlite.org/2026/${SQLITE_TARBALL}"

@@ -137,6 +137,13 @@ below for why `/build` is hardcoded and unrelated to the repo checkout path.
 - `bash build/15-novi-state.sh` also installs `/usr/lib/novi/json.sh`
   and `novi-agent` (RFC 0029) — the agent interface is base image, not
   a package
+- `bash build/46-gnu.sh [bash|coreutils|package|all]` — GNU bash and
+  coreutils (RFC 0040), the CLI gap `docs/PLATFORM-ROADMAP.md` §5
+  named and nobody built. Staged into `/build/stage-devtools` and
+  published by `53-devtools-repo.sh`. **`/usr/gnu/bin`, never
+  `/usr/bin`**: `pkg` has NO file-conflict handling, so a package
+  shipping `/usr/bin/ls` would silently take the busybox symlink and
+  `pkg remove` would then delete it
 - `bash build/44-novi-recon.sh` — `novi-recon` (RFC 0028), the recon
   tool. Nothing to compile: it is a Python script, which is the point.
   It runs the host test suite and parses the script with the target's
@@ -1928,6 +1935,76 @@ least half a processor" for ten seconds running.
   half of that the hard way: two rows out of three had an empty icon
   column because the launcher's table had never learned `drive` or
   `eject`.
+
+## Architecture: the CLI gap, and a prefix chosen by an absence
+
+RFC 0040 (`docs/rfcs/0040-gnu-userland.md`). `pkg install coreutils
+bash` -- the full GNU tools under `/usr/gnu/bin`, ahead of the busybox
+applets on a LOGIN shell's PATH and nowhere else.
+
+- **`/usr/gnu/bin` IS A DESIGN MADE AROUND AN ABSENCE, not a
+  preference.** `pkg install` extracts an archive over the root
+  filesystem: no owner check, no conflict refusal, no backup --
+  checked, not assumed. `/bin/ls` is a symlink to busybox, so a
+  package shipping `/usr/bin/ls` would quietly take the name and
+  **`pkg remove coreutils` would then DELETE it**, leaving a machine
+  with no `ls` and no way for pkg to know. Times ~100 names. Teaching
+  pkg about ownership is the right fix and is a change to the program
+  that installs code as root -- not a side effect of adding a shell.
+- **A LOGIN SHELL IS THE RIGHT SCOPE, and that is what makes
+  prepending safe here.** `/etc/profile` is NOT what gives an s6
+  service its PATH -- s6-linux-init-maker's `-p` is (`04-s6.sh`) -- so
+  the drop-in reaches the person typing and nothing else. On a
+  distribution where /etc/profile is the system's PATH this would be
+  reckless. `/etc/profile` already sourced `/etc/profile.d/*.sh`, so
+  the package needed no base change at all.
+- **`/bin/sh` IS NEVER REPOINTED.** Every `#!/bin/sh` script here was
+  written against busybox ash and `packages/pkg` depends on it
+  (`set -o pipefail`). The declarative way to log in with bash already
+  exists: `users.<name>.shell = /usr/gnu/bin/bash` (RFC 0005).
+- **bash 5.3 NEEDS readline 8.3 AND THE LINKER IS WHAT SAID SO** --
+  `rl_completion_rewrite_hook`, `rl_full_quoting_desired`. GNU pairs
+  bash X.Y with readline (X+3).Y; this system pins 8.2 for CPython, so
+  what ships is the matched pair, bash **5.2.37**. It links the
+  PACKAGED readline (`--with-installed-readline`) rather than the copy
+  it bundles: one library, one CVE to watch, one GPL-3 COPYING already
+  travelling.
+- **`-shared -pie` FOR THE THIRD AND FOURTH TIME, and gcc still does
+  not warn.** bash's loadable builtins and coreutils' `libstdbuf.so`.
+  bash's is worse: the top-level makefile prefixes that recursion with
+  `-`, so **`make install` exits 0** having printed fourteen undefined
+  references and `Error 2 (ignored)` in the middle of its output.
+- **AND THE COREUTILS FIX NEEDED TWO GOES, because the second bug hid
+  behind the first.** Filtering `-pie` out of the link got past
+  `undefined reference to 'main'` and into `relocation R_X86_64_PC32
+  against symbol 'stderr' ... recompile with -fPIC`: automake's
+  compile rule is `$(src_libstdbuf_so_CFLAGS) $(CFLAGS)`, so
+  upstream's own `-fPIC` comes FIRST and the hardening `-fPIE` wins. A
+  target-specific variable fixes that one object.
+- **A LINE-ANCHORED `sed` CANNOT SEE A CONTINUED MAKE RULE.** automake
+  writes that LINK rule across two lines, so `$(LDFLAGS)` is on the
+  second and the first fix "succeeded" by matching nothing. It is an
+  appended override now (a later simple assignment wins in GNU make),
+  and the check is on the ARTIFACT -- a `PT_INTERP` in `libstdbuf.so`
+  would mean gcc had linked an executable again.
+- **A PROGRAM IS NOT ALWAYS ONE FILE, and the floor checked the wrong
+  half.** `stdbuf` is a launcher that `LD_PRELOAD`s
+  `libexec/coreutils/libstdbuf.so`; the packaging swept `bin/` only,
+  so it installed, ran, and answered `failed to find 'libstdbuf.so'`.
+  It was on the floor list PRECISELY because it was the likeliest to
+  go missing -- and the floor asserted the part that was there. Only a
+  booted machine showed it.
+- **WHAT IS IN THE PACKAGE IS DERIVED; WHAT MUST BE THERE IS A
+  FLOOR.** Naming all 103 programs by hand fired on the second run:
+  `chcon` and `runcon` need libselinux, which this system does not
+  have. A hand-written list drifts from what the build produces --
+  pkgsplit's argument -- so the sweep takes what was built and a short
+  floor catches a build that lost something.
+- **Five programs are deliberately NOT installed** (`kill`, `uptime`,
+  `hostname`, `stty`, `arch`) because busybox ships them in the BASE
+  and this package is additive. `bashbug` goes too: it mails through a
+  `sendmail` this system does not have, and a command that cannot work
+  is worse than one that is absent (RFC 0026's `idle3`).
 
 ## Architecture: a process that cannot reach the machine
 
