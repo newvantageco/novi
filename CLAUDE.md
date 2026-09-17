@@ -2090,6 +2090,26 @@ RFC 0040 roadmap 2. `build/47-mandoc.sh`, `pkg install man`.
   never invoked at all, because `2>&1` had put its line in the pipe.
   Shims standing in for the three helpers are what show the real
   argv; reading the strings in the binary gave the wrong chain.
+- **THE BASE SHIPS 79 MAN PAGES IT HAS NEVER BEEN ABLE TO DISPLAY.**
+  alsa-utils installs `/usr/share/man/man1/{aconnect,alsactl,amixer,…}`
+  as BASE content, so this was never hypothetical -- there have been
+  pages on every image since RFC 0011 and no way to read one. Measured
+  on a booted machine before installing anything: `man alsactl` gives
+  `sh: tbl: not found`, `sh: col: not found`, **exit 0**, and no page;
+  after `pkg install man` the identical command renders it.
+- **EVERY `man` INVOCATION WARNS UNTIL SOMEBODY RUNS `makewhatis`**,
+  and that is the one thing still wrong. `outdated mandoc.db lacks
+  <page> entry, run makewhatis <dir>` prints above the page --
+  confirmed both ways, gone after `makewhatis`, back when the db is
+  deleted. The page renders regardless and the message names its own
+  remedy, which beats a silent failure, but a warning on every
+  invocation is how a warning stops being read (`/init`'s
+  twenty-two module lines). **It is deliberately not patched around**:
+  a generated index cannot be package-owned, because
+  `/usr/gnu/share/man` is shared by `coreutils` and `bash` and the
+  second package to ship a `mandoc.db` there would be REFUSED by RFC
+  0040 roadmap 1's own conflict check -- correctly. The fix is a
+  post-install hook in `pkg`, which is roadmap 5.
 - **mandoc, not groff.** One self-contained C program (532 KB
   stripped, ISC), which is what Alpine and OpenBSD ship. groff is C++,
   needs its own preprocessor chain, and would put a second formatter's

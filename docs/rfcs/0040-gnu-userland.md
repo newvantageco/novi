@@ -313,6 +313,36 @@ applet. `--disable-nls` stands — there are no translations.
    links. A sweep of every staged package says this was the only
    instance: `git`, `binutils` and `gcc` keep theirs.
 
+   **Verified on a booted machine, and the base image turns out to
+   ship 79 man pages it has never been able to display** — alsa-utils
+   installs `/usr/share/man/man1/{aconnect,alsactl,amixer,…}` as base
+   content, so `man` has had something to fail on since RFC 0011, not
+   hypothetically. On that machine, before installing anything:
+   `man alsactl` → `sh: tbl: not found`, `sh: col: not found`,
+   **exit 0**, no page. After `pkg install man`, the identical command
+   renders it. The rest of the run: the adopted record reads
+   `link usr/bin/man ../../bin/busybox`, `man ls` renders the GNU page
+   out of `/usr/gnu/share/man` (which is what `MANPATH_DEFAULT` is
+   for), `man bash` and `man mandoc` render, `apropos "list directory"`
+   returns `dir(1)`, `ls(1)` and `vdir(1)`, and `pkg remove man` logs
+   `restored usr/bin/man -> ../../bin/busybox` and puts the applet
+   back.
+
+   **One defect remains and is roadmap 5's.** Every `man` invocation
+   prints `outdated mandoc.db lacks <page> entry, run makewhatis
+   <dir>` above the page, because nothing runs `makewhatis` at install
+   time. Confirmed both directions: after `makewhatis` the warning is
+   gone, and deleting the db brings it back. The page renders either
+   way and the message names its own remedy, which is better than a
+   silent failure — but a warning on every invocation is how a warning
+   stops being read (this file's own complaint about `/init`'s
+   twenty-two meaningless module lines). It is deliberately **not**
+   patched around here: a generated index cannot be package-owned,
+   because `/usr/gnu/share/man` is shared by `coreutils` and `bash`
+   and the second package to ship a `mandoc.db` there would be refused
+   by roadmap 1's own conflict check — correctly. The fix is a
+   post-install hook in `pkg`.
+
    The same pass found `demandoc.1` shipping without `demandoc`. A
    section-1 page is copied only if its program is in the package now
    — `46-gnu.sh`'s rule for the coreutils pages, applied here —
@@ -361,3 +391,14 @@ applet. `--disable-nls` stands — there are no translations.
 
    Building `sed` is not scheduled by this measurement; the
    measurement says it is the one worth scheduling.
+5. **A post-install hook in `pkg`**, and `makewhatis` is the first
+   caller — see roadmap 2. The need is narrow and real: an index
+   derived from what is installed cannot be shipped *in* a package,
+   because two packages share `/usr/gnu/share/man` and the second one
+   to carry a `mandoc.db` would be refused by roadmap 1's conflict
+   check. It is a change to the program that installs code as root, so
+   it is its own item rather than a patch inside a `man` package —
+   the same reason the conflict check itself was not folded into the
+   GNU stage. Whatever shape it takes has to answer what a *failing*
+   hook means: an install that half-happened is worse than one that
+   did not, and `pkg` currently has no notion of a partial success.
