@@ -2017,6 +2017,51 @@ applets on a LOGIN shell's PATH and nowhere else.
   `sendmail` this system does not have, and a command that cannot work
   is worse than one that is absent (RFC 0026's `idle3`).
 
+## Architecture: the four tools that are not alike
+
+RFC 0040 roadmap 4, `tests/textutils-gap/`. The item named `sed`,
+`grep`, `awk` and `tar` in one breath and asked for *"a number, not an
+opinion"*. The number says they are not alike.
+
+- **52 constructs, 37 agree, 15 differ** -- each run under the shipped
+  busybox AND under the GNU program, comparing output and exit status.
+- **LOUD VERSUS SILENT IS WHAT DECIDES IT, not agree versus differ.** A
+  busybox that errors is a bug report the person at the terminal gets
+  for free. One that **exits 0 with different text** has quietly
+  corrupted the output of a script that looked like it worked. Twelve
+  of the fifteen are loud.
+- **ALL THREE SILENT ONES ARE `sed`.** `\U` and `\L` emit a literal
+  `U`/`L` instead of converting case, and `0,/re/` matches nothing.
+  That is what earns sed a package and nothing else here does.
+- **`awk` DOES NOT EARN ONE, which is not what anyone expected.** 14
+  of 15 agree -- `gensub`, `strftime`, `ENVIRON`, regex `RS` and
+  `length(array)` included. Only `asort` is missing. `tar` does not
+  either: its three gaps (`--transform`, `--owner`/`--group`,
+  `--sparse`) are packaging flags, while hardlinks, mtimes,
+  `--exclude`, `--strip-components`, `-z` and `-J` all agree.
+- **DEBIAN'S `awk` IS mawk**, so the first run compared busybox
+  against mawk and reported `gensub` as a busybox WIN -- inverting the
+  one conclusion those rows exist to reach. The probe names `gawk` and
+  refuses to run without it. Read what `command -v awk` actually
+  points at before calling a comparison "GNU".
+- **A PIPELINE REPORTS ITS LAST COMMAND'S STATUS, for the fourth time
+  in this file.** `printf | $T -z | tr` returned 0 with busybox's
+  `unrecognized option: z` in the output, so two LOUD failures were
+  counted as SILENT ones -- by the instrument built to measure exactly
+  that distinction. `bash -o pipefail -c`.
+- **ISOLATING THE TWO SIDES IS WHAT MADE THE TAR COLUMN MEAN
+  ANYTHING.** They shared a directory, so the hardlink case failed
+  under busybox with `File exists` -- left by the GNU run of the same
+  case -- and read as a busybox limitation it is not. Giving each run
+  a clean directory then exposed that seven tar cases had been
+  chaining off the first case's `td`.
+- **`--self-check` POINTS BOTH SIDES AT GNU AND MUST RETURN 52/52.** A
+  harness that found a difference in every case would produce exactly
+  this alarming table and nothing in the output would say so. Its own
+  first shim was `#!/bin/sh` with `"${@:2}"`, which dash expands to
+  nothing -- so the check that proves the harness can report agreement
+  reported 0/52.
+
 ## Architecture: a `man` that could never have worked
 
 RFC 0040 roadmap 2. `build/47-mandoc.sh`, `pkg install man`.

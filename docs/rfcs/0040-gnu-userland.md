@@ -315,6 +315,44 @@ applet. `--disable-nls` stands — there are no translations.
    `roff`, `tbl` and `man.conf` are formats rather than programs and
    are the pages this package exists to let somebody read.
 3. **util-linux**, the third name in §5's sentence.
-4. **`sed`, `grep`, `awk` and `tar`**, if the difference turns out to
-   matter as often as coreutils' did. It should be measured the way
-   RFC 0027's collapse was: a number, not an opinion.
+4. ~~**`sed`, `grep`, `awk` and `tar`.**~~ **Measured**
+   (`tests/textutils-gap/`), and **the item was wrong to name the four
+   in one breath** — they are not alike, and only one of them earns a
+   package. 52 constructs, each something a script written elsewhere
+   plausibly contains, run under the shipped busybox *and* under the
+   GNU program, comparing output and exit status: **37 agree, 15
+   differ.**
+
+   **What decides it is LOUD versus SILENT, not agree versus differ.**
+   A busybox that errors is a bug report the person at the terminal
+   gets for free; one that exits 0 with different text has quietly
+   corrupted the output of a script that looked like it worked. Twelve
+   of the fifteen are loud. **All three silent ones are `sed`**:
+   `\U` and `\L` emit a literal `U`/`L` instead of converting case,
+   and `0,/re/` matches nothing at all.
+
+   So: **`sed` earns a package** — it is the only one of the four that
+   answers differently while exiting 0, three times over. **`grep` is
+   arguable** (4 differences, all loud: `-P` twice, `-r --include`,
+   `-z`). **`awk` does not** — 14 of 15 agree, `gensub`, `strftime`,
+   `ENVIRON`, regex `RS` and `length(array)` included, with only
+   `asort` missing; busybox awk is close to a drop-in for gawk, which
+   is not what anyone expected. **`tar` does not** — its three gaps
+   are `--transform`, `--owner`/`--group` and `--sparse`, all
+   packaging flags, while hardlinks, mtimes, `--exclude`,
+   `--strip-components`, `-z` and `-J` all agree.
+
+   Three probe bugs, each of which changed an answer, are written up
+   in that directory's README: Debian's `awk` is **mawk**, so the
+   first run reported `gensub` as a busybox *win*; the two sides
+   shared a directory, so a tar case failed on state the other side
+   left behind; and a case written as a pipeline reported `tr`'s exit
+   status, counting two loud failures as silent ones — the trap
+   CLAUDE.md already records three times, hit by the instrument
+   measuring for a fourth. `--self-check` points both sides at GNU and
+   must come back 52/52, because a harness that found a difference in
+   every case would produce exactly this table and say nothing about
+   it.
+
+   Building `sed` is not scheduled by this measurement; the
+   measurement says it is the one worth scheduling.
