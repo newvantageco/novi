@@ -1668,7 +1668,25 @@ int main(int argc, char **argv) {
 			"(is WAYLAND_DISPLAY set?)\n");
 		return 1;
 	}
+	/* xkb_context_new RETURNS NULL when it cannot add a single default
+	 * include path, having logged `failed to add default include path
+	 * /usr/share/X11/xkb` -- and every client in this desktop used the
+	 * result unchecked, so the first keymap the compositor sent went
+	 * to xkb_keymap_new_from_string(NULL, ...) and the process died
+	 * with SIGSEGV. Six clients, novi-lockscreen among them, where a
+	 * crash means the session is not locked.
+	 *
+	 * Invisible until something removed that directory: RFC 0039
+	 * roadmap 4 put novi-view in a sandbox whose root holds only what
+	 * was named, and `/usr/share/X11/xkb` is an absolute symlink to
+	 * `/usr/share/xkeyboard-config-2` -- so binding `/usr/share/X11`
+	 * gave a dangling link and the client exited 139. */
 	e.xkb_context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+	if (e.xkb_context == NULL) {
+		fprintf(stderr, "novi-edit: could not create an xkb context -- is "
+			"/usr/share/X11/xkb present (xkeyboard-config)?\n");
+		return 1;
+	}
 	e.registry = wl_display_get_registry(e.display);
 	wl_registry_add_listener(e.registry, &registry_listener, &e);
 	wl_display_roundtrip(e.display);

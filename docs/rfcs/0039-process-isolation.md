@@ -329,6 +329,85 @@ own last act is to exec the target, *after* the filter goes on, so a
 profile without it fails there and reads exactly like the program not
 being installed.
 
+### 18. `--no-net` has a caller: the image viewer.
+
+Decision 6 shipped `--no-net` and roadmap 4 named it honestly as wiring
+for a hypothetical. The caller was there all along. **novi-view decodes
+a PNG off somebody else's USB stick through libpng and zlib** — the
+same class of surface RFC 0031 roadmap 4 pointed a corpus at for the
+browser — and unlike the browser it has no business on a socket at all.
+`pkg install novi-desktop` now puts it behind `novi-sandbox --no-net`,
+script in `/usr/libexec`, wrapper on PATH.
+
+**The bind list is built at RUNTIME, which no other wrapper here has
+needed.** The one file this program reads is chosen when it starts, so
+the list cannot be fixed in the script. Two details in resolving it:
+the cwd inside the sandbox is `/`, so a relative path would resolve
+against the wrong directory; and a **symlink** would otherwise be bound
+at its target and opened at its link name, which does not exist inside.
+The resolved path is what novi-view is given.
+
+Verified on a booted machine, from the package: the image renders
+(screendumped, with the status bar and both fonts), the root holds
+`dev etc lib proc root run tmp usr var`, `/usr/share` holds only the
+five directories the wrapper named, **`/root` holds only the image**,
+`/etc/shadow` is absent, `Seccomp` is 2, and the process sits in its
+own network namespace with only `lo` and `sit0` — `net:[4026532212]`
+against init's `net:[4026531840]`. The pair that makes `--no-net` mean
+something: `wget` inside reports *Network unreachable*, and the same
+`wget` without the flag succeeds.
+
+### 19. A minimal `/dev` needs `/dev/shm`, and a window is how you find out.
+
+musl implements `shm_open(3)` by opening a file under `/dev/shm`, so a
+Wayland client asking for a buffer the usual way gets ENOENT from a
+directory that is simply not there. It surfaces as `failed to allocate
+shm buffer`, three layers from the cause.
+
+The sandbox now mounts **its own tmpfs** there rather than binding the
+machine's: shared memory is a channel, and binding the real `/dev/shm`
+would hand the sandbox a way to pass bytes to anything else that can
+name a segment, which is most of what the mount namespace is for.
+
+The gap survived two sandboxed programs — NetSurf and novi-glinfo —
+because their stacks reach for `memfd` instead. **A hole that two
+programs walked past is not a hole anybody would have reasoned their
+way to.**
+
+### 20. A bind does not follow a symlink out of what it bound.
+
+`/usr/share/X11/xkb` is an **absolute** symlink to
+`/usr/share/xkeyboard-config-2`. Binding `/usr/share/X11` therefore
+puts a *dangling* link inside, because an absolute link resolves
+against the sandbox's root, where the target is not. Bisected rather
+than guessed: the wrapper's list segfaulted, `--ro /usr/share/X11`
+segfaulted, `--ro /usr/share/xkeyboard-config-2` segfaulted, **both
+together survived**, and so did `--ro /usr/share` wholesale.
+
+The wrapper binds both ends and **resolves the target rather than
+writing it down** — the `2` in that directory name is a version.
+
+### 21. That crash was novi-view's, and five other clients had it too.
+
+`xkb_context_new()` **returns NULL** when it cannot add a single
+default include path, having logged `failed to add default include
+path`. Six clients in this desktop called it and used the result
+unchecked, so the first keymap the compositor sent went to
+`xkb_keymap_new_from_string(NULL, …)` and the process died with
+SIGSEGV. **novi-lockscreen is one of the six, where a crash means the
+session is not locked.**
+
+This is not a sandbox bug and the fix is not in the sandbox: any
+machine without xkeyboard-config had it, and nothing had ever produced
+such a machine. All six check and report now, naming the directory —
+the provoked run prints *"could not create an xkb context — is
+/usr/share/X11/xkb present (xkeyboard-config)?"* and exits 1 where it
+used to exit 139.
+
+**A sandbox is a machine with things missing, which is why putting a
+program in one finds the places it assumed they were there.** That is
+worth more than the confinement on a first pass.
+
 ## What was verified
 
 **On the build host, which is where the interesting cases are** — the
@@ -510,10 +589,12 @@ different and much larger change.
    tracing rather than written, diffed against the measurement at build
    time, with `clone` accepted only as a thread. The browser keeps the
    denylist, as the item said it should.
-4. **A `--no-net` caller.** Nothing uses it yet, which by RFC 0036's
-   own rule means it is wiring for a hypothetical — it ships because it
-   is four lines and the alternative is a flag added under pressure
-   later, but a feature with no caller should be named as one.
+4. ~~**A `--no-net` caller.**~~ **Done** — decisions 18 to 21.
+   `novi-view`, which decodes a stranger's PNG through libpng and has
+   no business on a socket. Putting it in the sandbox found three
+   things the confinement itself was not looking for: a missing
+   `/dev/shm`, a symlink a bind does not follow, and an unchecked
+   `xkb_context_new()` in six clients.
 5. **`novi-state` should be able to say a package runs sandboxed.**
    Today the wrapper decides, which means the answer lives in a shell
    script inside a package rather than in the document that describes

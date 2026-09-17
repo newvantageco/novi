@@ -77,6 +77,15 @@ DESKTOP_BINARIES = [
     "usr/bin/novi-settings",
     "usr/bin/novi-edit",
     "usr/bin/novi-files",
+    # Both halves of novi-view, and they are here for different
+    # reasons. /usr/libexec holds the ELF, so it is what seeds the
+    # closure with libpng and zlib; /usr/bin is the sandbox wrapper
+    # (RFC 0039 roadmap 4), a shell script that NEEDs nothing and so
+    # contributes no closure at all -- but a file nothing reaches is a
+    # file that silently stays in the base, and the base would then
+    # carry a wrapper pointing at a binary that had left with the
+    # desktop. Seeding it is what moves it.
+    "usr/libexec/novi-view",
     "usr/bin/novi-view",
     "usr/bin/novi-lockscreen",
     "usr/bin/novi-screenshot",

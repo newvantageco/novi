@@ -569,6 +569,32 @@ is §1-§3 as C constants and every client includes it.
   `wayland-client.pc` sitting in the rootfs. Read the whole list
   before believing the first name in it.
 
+## Architecture: `xkb_context_new` returns NULL, and nobody checked
+
+Every Wayland client here -- novi-view, novi-edit, novi-files,
+novi-settings, novi-lockscreen, novi-launcher -- called
+`xkb_context_new(XKB_CONTEXT_NO_FLAGS)` and used the result unchecked.
+
+- **IT RETURNS NULL when it cannot add a single default include path**,
+  having logged `failed to add default include path /usr/share/X11/xkb`
+  -- a message that reads like a warning and is a fatal error one
+  event later. The first keymap the compositor sends then reaches
+  `xkb_keymap_new_from_string(NULL, ...)` and the process dies with
+  **SIGSEGV**.
+- **novi-lockscreen is one of the six**, and there a crash means the
+  session is not locked. That is the reason this is written up as a
+  class rather than as one client's bug.
+- **Nothing had ever produced a machine without xkeyboard-config**, so
+  it was unreachable until RFC 0039 roadmap 4 put novi-view in a
+  sandbox whose root contains only what was named. It presented as
+  `exit=139` with one xkbcommon line above it.
+- The fix is five lines in each: check, name the directory, exit 1.
+  A program that cannot read a keyboard should say so, not fall over.
+- **The first theory was wrong and reading the code is what stopped
+  it.** `keyboard_modifiers` calls `xkb_state_update_mask(v->xkb_state,
+  ...)` and looked like the obvious unguarded deref -- it is guarded.
+  The NULL was one level up, in the context nobody checked.
+
 ## Architecture: the compositor draws exactly one thing
 
 `novi-shell/decoration.c` is the whole of the window chrome — title,
@@ -2040,6 +2066,36 @@ netsurf` puts the browser behind it.
   sandbox skips an absent path by design, so the only symptom was one
   `skipping ... (not present)` line per run: invisible for a GUI
   program, and the first line of output for a command-line one.
+- **`--no-net` HAS A CALLER NOW: THE IMAGE VIEWER** (RFC 0039 roadmap
+  4). novi-view decodes a stranger's PNG through libpng and zlib and
+  has no business on a socket, so `pkg install novi-desktop` puts it
+  behind `novi-sandbox --no-net`. Its BIND LIST IS BUILT AT RUNTIME,
+  which no other wrapper here needs: the one file it reads is chosen
+  when it starts. The path is resolved with `readlink -f` for two
+  reasons -- the cwd inside is `/`, so a relative path resolves against
+  the wrong directory, and a SYMLINK would be bound at its target and
+  opened at its link name.
+- **A MINIMAL `/dev` NEEDS `/dev/shm`.** musl's `shm_open(3)` opens a
+  file under it, so a Wayland client asking for a buffer the usual way
+  gets ENOENT from a directory that is not there -- surfacing as
+  `failed to allocate shm buffer`, three layers from the cause. Its own
+  tmpfs, never a bind of the machine's: shared memory is a channel, and
+  binding the real one hands the sandbox a way to pass bytes to
+  anything that can name a segment. **Two sandboxed programs walked
+  past this gap** (NetSurf and novi-glinfo use memfd), which is why
+  nobody reasoned their way to it.
+- **A BIND DOES NOT FOLLOW A SYMLINK OUT OF WHAT IT BOUND.**
+  `/usr/share/X11/xkb` is an ABSOLUTE link to
+  `/usr/share/xkeyboard-config-2`, so binding `/usr/share/X11` leaves a
+  dangling link -- an absolute link resolves against the SANDBOX's
+  root. Bisected rather than guessed: either end alone segfaulted, both
+  together worked. Bind both, and RESOLVE the target rather than
+  writing it down (the `2` is a version).
+- **A SANDBOX IS A MACHINE WITH THINGS MISSING, WHICH IS WHY PUTTING A
+  PROGRAM IN ONE FINDS WHERE IT ASSUMED THEY WERE THERE.** On a first
+  pass that is worth more than the confinement: this one found a
+  SIGSEGV in six shipped clients (below), a missing `/dev/shm`, and a
+  symlink nobody had thought about.
 
 ## Architecture: two ways to say "not now"
 

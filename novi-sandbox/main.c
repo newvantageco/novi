@@ -768,6 +768,40 @@ int main(int argc, char **argv) {
 		bind_one(devnodes[d], true, true);
 	}
 
+	/* A PRIVATE /dev/shm, and it is not optional for anything with a
+	 * window. musl implements `shm_open(3)` by opening a file under
+	 * /dev/shm, so a Wayland client asking for a buffer the usual way
+	 * gets ENOENT from a directory that is simply not there -- which
+	 * arrives as `failed to allocate shm buffer`, three layers from the
+	 * cause. Found by putting novi-view behind this (RFC 0039 roadmap
+	 * 4); NetSurf and novi-glinfo had not needed it because their
+	 * stacks reach for memfd instead, so the gap survived two
+	 * sandboxed programs.
+	 *
+	 * Its own tmpfs rather than a bind of the machine's: shared memory
+	 * is a channel, and binding the real /dev/shm would hand the
+	 * sandbox a way to pass bytes to anything else on the machine that
+	 * can name a segment -- which is most of what the mount namespace
+	 * is for. 1777 because that is what /dev/shm is everywhere, and
+	 * there is exactly one process here to own it. */
+	/* 80, not PATH_MAX, and checked -- `-Wformat-truncation` refused
+	 * the PATH_MAX version and was right for the seventh time in this
+	 * repository. The fix it points at is always the CLAMP: `newroot`
+	 * is 64 bytes by construction (see its declaration) and this
+	 * appends nine. */
+	char shmdir[80];
+	if (snprintf(shmdir, sizeof(shmdir), "%s/dev/shm", newroot) >=
+			(int)sizeof(shmdir)) {
+		die_msg("sandbox /dev/shm path too long");
+	}
+	if (mkdir_p(shmdir, 01777) != 0) {
+		die(shmdir);
+	}
+	if (mount("tmpfs", shmdir, "tmpfs", MS_NOSUID | MS_NODEV,
+			"mode=1777") != 0) {
+		die("mount /dev/shm");
+	}
+
 	char procdir[PATH_MAX];
 	snprintf(procdir, sizeof(procdir), "%s/proc", newroot);
 	if (mkdir_p(procdir, 0555) != 0) {
