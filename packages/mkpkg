@@ -74,6 +74,19 @@ PKG_ARCH="$(get_field arch)"
 # MANIFEST was written from this script's own header comment, which
 # had the separator wrong. Rejecting it here is the only place the
 # mistake is cheap to find.
+# `replaces-files` is SPACE-separated, deliberately unlike `depends`: its
+# entries are PATHS, and a comma is a legal character in a filename
+# where a space in a package name is not. Each one is checked for the
+# shape pkg compares against -- root-relative, no leading slash --
+# because a `replaces-files=/usr/bin/strings` that silently matches nothing
+# is a declaration that reads correct and permits nothing.
+for _r in $(get_field replaces-files); do
+    case "$_r" in
+        /*)  die "MANIFEST: replaces-files must be root-relative (no leading /): $_r" ;;
+        ./*) die "MANIFEST: replaces-files must be root-relative (no leading ./): $_r" ;;
+        "")  ;;
+    esac
+done
 case "$(get_field depends)" in
     *" "*) die "MANIFEST: depends must be comma-separated, not space-separated: $(get_field depends)" ;;
 esac

@@ -165,6 +165,17 @@ fi
 # `power.lid`, `power.button` and `agent.enabled` live in the shipped
 # document and absent from that reference.
 #
+# test-pkg-conflicts.sh is the eighth, and it guards the other half of
+# what `pkg install` does as root: not "is this archive what the index
+# says", but "is this path somebody else's". It extracted over the root
+# filesystem with no owner check at all, and the live case was one
+# package deep -- binutils ships usr/bin/strings where the base has a
+# busybox symlink, so removing binutils deleted a command the base
+# image had. The test provokes all four branches (own file, another
+# package's, unowned, declared) because the interesting one is the
+# third, and confirmed by removing the check (15 of 28 fail) and by
+# removing only the restore-on-remove half (3 fail).
+#
 # test-state-lock.sh is the seventh, and it is the only one here that
 # has to PROVE ITS OWN BUG before it can prove the fix: it runs the
 # same two-writer race against a copy with the locking removed and
@@ -201,6 +212,7 @@ for t in packages/tests/test-lib-json.sh packages/tests/test-agent-verbs.sh \
          packages/tests/test-state-lock.sh \
          packages/tests/test-state-document.sh \
          packages/tests/test-agent-sandbox.sh \
+         packages/tests/test-pkg-conflicts.sh \
          packages/tests/test-pkg-cache-hash.sh; do
     echo ">>> ${t##*/}"
     if ! bash "$t"; then

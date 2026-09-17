@@ -237,11 +237,36 @@ gap and its own item.
 
 ## Roadmap
 
-1. **`pkg` should know about file conflicts.** Decision 1 is a design
-   made around an absence. An install that would overwrite a file
-   another package owns, or a file no package owns, should say so and
-   stop — and then `/usr/gnu` becomes a choice rather than a
-   requirement.
+1. ~~**`pkg` should know about file conflicts.**~~ **Done**, and it
+   found a live case one package deep. `pkg install` now refuses a
+   path another package owns, refuses a path nothing owns, and takes
+   over an unowned path only when the MANIFEST says `replaces-files=` — in
+   which case it **saves the original and `pkg remove` puts it back**.
+   `--overwrite` is the operator's escape hatch and is deliberately
+   not something a MANIFEST can ask for.
+
+   Measured against this repository before writing a line: **zero
+   paths are shared between the 60 packages** (pkgsplit derives them,
+   so it could not be otherwise) and **exactly one package overlays
+   base content** — `binutils` ships `usr/bin/strings` where the base
+   has a symlink to busybox. So `pkg install novi-devel` silently took
+   that name and `pkg remove binutils` deleted it outright. binutils
+   declares it now, and on a booted machine the record reads `link
+   usr/bin/strings ../../bin/busybox`, removal logs `restored
+   usr/bin/strings -> ../../bin/busybox`, and `strings` runs again.
+
+   `/usr/gnu` stays a choice rather than a requirement now — but it
+   stays, because ~100 declared takeovers with ~100 saved originals is
+   a worse answer than a prefix and a PATH entry.
+
+   **The regression check that mattered was the whole repository, not
+   the unit tests.** `pkg install novi-devel python netsurf novi-recon
+   sqlite openssh coreutils bash` on a booted machine — eight packages
+   and everything they depend on — installs with **zero** refusals and
+   one line reading `binutils: taking over 1 declared path(s);
+   originals saved`. The first attempt at that run did NOT pass, and
+   what it found was a pre-existing bug rather than a false positive:
+   see RFC 0006's roadmap.
 2. **`man`, and the pages these packages already build.** Both
    upstreams generate man pages this build throws away, because
    nothing on the machine could display one.

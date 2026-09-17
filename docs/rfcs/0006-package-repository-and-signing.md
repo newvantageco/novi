@@ -336,3 +336,13 @@ slirp). Every claim below is from that live run.
 - **`packages.*` and the event loop.** Moving `novi-state` subprocess
   calls off the Wayland thread was already on RFC 0002's roadmap; a
   package install is the first converger that makes it visible.
+- ~~**Nothing checked who owned a file.**~~ **Done** (RFC 0040
+  roadmap 1), and it belongs on this RFC's list because it is the
+  second thing `pkg install` does as root that nobody was checking.
+  The first was the archive's hash on the local path. This one is the
+  path it writes to: the program extracted a tarball over the root
+  filesystem with no owner check, no conflict refusal and no backup.
+  It refuses another package's file, refuses an unowned one, and
+  takes over an unowned path only on an explicit `replaces-files=` in the
+  MANIFEST — saving the original so `pkg remove` restores it.
+  `packages/tests/test-pkg-conflicts.sh` provokes all four branches.

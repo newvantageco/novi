@@ -50,14 +50,39 @@ Plain `key=value`, one per line. Blank lines and `#` comments allowed.
 
 | Field | Description | Example |
 |---|---|---|
-| `depends` | Space-separated list of package names | `musl zlib openssl` |
-| `provides` | Virtual packages this satisfies | `libcurl` |
-| `conflicts` | Packages that must not be installed | `curl-legacy` |
-| `replaces` | Packages this supersedes on upgrade | `curl-old` |
+| `depends` | **Comma**-separated list of package names | `musl,zlib,openssl` |
+| `replaces-files` | Space-separated root-relative paths this package knowingly takes over from no other package | `usr/bin/strings` |
+| `provides` | Virtual packages this satisfies — **not implemented** | `libcurl` |
+| `conflicts` | Packages that must not be installed — **not implemented** | `curl-legacy` |
+| `replaces` | Packages this supersedes on upgrade — **not implemented** | `curl-old` |
 | `size` | Installed size in KB (auto-set by mkpkg) | `1024` |
 | `url` | Upstream homepage | `https://curl.se` |
 | `license` | SPDX license identifier | `MIT` |
 | `maintainer` | Package maintainer | `Your Name` |
+
+**`depends` is COMMA-separated, and this table said "space" for a long
+time.** `pkg` splits it with `tr ',' '\n'` and `mkpkg` now refuses a
+space outright. A package written from the old row built fine, indexed
+fine, and failed at install naming the whole list as one imaginary
+package — so the row is corrected here rather than left as the second
+place somebody could read it wrong.
+
+**Three of these fields are documented and not implemented**, and the
+table says so now. That matters for more than tidiness: `replaces` is
+the conventional dpkg name for *superseding a package*, and the field
+RFC 0040 roadmap 1 needed is about *paths*. Rather than take a
+well-known name for a different idea, the new one says what it is
+about — `replaces-files`.
+
+**What `replaces-files` means.** `pkg install` refuses to write a path
+that another package owns, and refuses a path that no package owns
+(base content, or a file a person made). A package that must take over
+an unowned path names it here; pkg then **saves what was there** and
+`pkg remove` puts it back. Exactly one package in this repository
+needs it: `binutils` ships `usr/bin/strings` where the base image has
+a symlink to busybox. Paths are root-relative with no leading `/` or
+`./` — `mkpkg` refuses the other spellings, because a declaration that
+matches nothing reads correct and permits nothing.
 
 ### Example MANIFEST
 

@@ -547,10 +547,184 @@ resolve_deps() {
 # ---------------------------------------------------------------------------
 # Extract and install a single package archive
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# File conflicts (RFC 0040 roadmap 1)
+#
+# `pkg install` used to extract an archive over the root filesystem
+# with no owner check, no conflict refusal and no backup. That is not
+# a hypothetical: measured against this project's own repository,
+# exactly one package overlays base content -- `binutils` ships
+# `usr/bin/strings` where the base has a symlink to busybox -- so
+# `pkg install novi-devel` silently replaced it and
+# `pkg remove binutils` then DELETED `/usr/bin/strings`, taking away
+# a command the base image had. Multiply that by ~100 names and it is
+# the reason RFC 0040 put GNU coreutils under /usr/gnu instead.
+#
+# Three answers, by who owns the path:
+#
+#   this package      an upgrade. Fine, and the common case.
+#   another package   REFUSED. Two packages owning one path is a
+#                     database that cannot answer "who owns this",
+#                     and a removal that guts the other one.
+#   nobody            base content, or a file a person made. Refused
+#                     too -- UNLESS the MANIFEST says `replaces-files=`,
+#                     which is the package declaring the takeover
+#                     out loud, in a field a reviewer can see.
+#
+# NOT `replaces`: packages/pkg-format.md already documents that name
+# with the conventional dpkg meaning -- "packages this supersedes on
+# upgrade" -- and nothing implements it. Taking a well-known name for
+# a different idea is how a reader ends up confidently wrong, so this
+# one says what it is about: FILES.
+#
+# A declared takeover SAVES what was there and `pkg remove` puts it
+# back, because the harm was never the overwrite -- it was that the
+# machine could not be returned to the state it was in.
+# ---------------------------------------------------------------------------
+
+# Which installed package owns $1 (a root-relative path), or empty.
+#
+# One pass over the database rather than a grep per file: a package
+# with 101 programs would otherwise be 101 scans of 60 files.
+owner_index_build() {
+    OWNER_INDEX="$PKG_TMP/owner-index"
+    mkdir -p "$PKG_TMP"
+    : > "$OWNER_INDEX"
+    local flist oname
+    for flist in "$PKG_DB"/*/files; do
+        [ -f "$flist" ] || continue
+        oname="$(basename "$(dirname "$flist")")"
+        # "<path> <owner>", so a lookup is one anchored grep.
+        sed "s|\$| $oname|" "$flist" >> "$OWNER_INDEX"
+    done
+}
+
+# ALWAYS SUCCEEDS, and that is the whole of the second line.
+# `grep` exits 1 when it matches nothing, and the caller writes
+# `owner="$(owner_of_path "$rel")"` -- an assignment from a FAILING
+# command substitution ends a `set -e` script on the spot. CLAUDE.md
+# records that trap from novi-agent; here it meant that the first
+# unowned path killed pkg silently, mid-install, with nothing on
+# stderr: the refusal this function exists to produce never printed,
+# and a DECLARED takeover died the same way. Found by the test, not by
+# reading it.
+owner_of_path() {
+    [ -f "${OWNER_INDEX:-}" ] || return 0
+    grep -m1 -- "^$1 " "$OWNER_INDEX" 2>/dev/null | sed "s|^$1 ||" || true
+    return 0
+}
+
+# Does $1 (a root-relative path) appear in the space-separated
+# `replaces` list $2? Leading "./" and "/" are both tolerated, because
+# a MANIFEST is written by a person.
+replaces_declared() {
+    local path="$1" list="$2" entry
+    for entry in $list; do
+        entry="${entry#./}"
+        entry="${entry#/}"
+        [ "$entry" = "$path" ] && return 0
+    done
+    return 1
+}
+
+# Refuse, or record what a declared takeover is about to destroy.
+# Writes the saved originals under $3 (the package's db directory).
+check_conflicts() {
+    local files_dir="$1" name="$2" db_dir="$3" replaces="$4" force="$5"
+    local rel target owner conflicts="" adopted=0
+
+    owner_index_build
+    # STAGED, NOT WRITTEN INTO THE DATABASE YET. Creating $db_dir here
+    # left a registered-looking directory behind for a package that was
+    # then refused -- so `pkg list` and the owner index above would
+    # both have counted a package that is not installed. The records
+    # move into place only once the decision is "install".
+    local stage="$PKG_TMP/conflict-stage"
+    rm -rf "$stage"; mkdir -p "$stage"
+    : > "$stage/adopted"
+
+    ( cd "$files_dir" && find . -not -type d ) | sed "s|^\./||" \
+        > "$PKG_TMP/incoming"
+
+    while IFS= read -r rel; do
+        [ -n "$rel" ] || continue
+        target="${PKG_ROOT:-}/$rel"
+        # Not there: nothing to conflict with. `-e` is false for a
+        # DANGLING symlink, which is still a path in the way, so -L too.
+        [ -e "$target" ] || [ -L "$target" ] || continue
+
+        owner="$(owner_of_path "$rel")"
+        [ "$owner" = "$name" ] && continue          # our own, upgrading
+
+        if [ -n "$owner" ]; then
+            conflicts="$conflicts
+  $rel (owned by $owner)"
+            continue
+        fi
+
+        # Owned by nobody: base content, or somebody's own file.
+        if ! replaces_declared "$rel" "$replaces"; then
+            conflicts="$conflicts
+  $rel (not owned by any package)"
+            continue
+        fi
+
+        # Declared. Save what is there so `remove` can put it back.
+        mkdir -p "$stage/saved/$(dirname "$rel")"
+        if [ -L "$target" ]; then
+            printf 'link %s %s\n' "$rel" "$(readlink "$target")" \
+                >> "$stage/adopted"
+        else
+            cp -a "$target" "$stage/saved/$rel"
+            printf 'file %s\n' "$rel" >> "$stage/adopted"
+        fi
+        adopted=$((adopted + 1))
+    done < "$PKG_TMP/incoming"
+    rm -f "$PKG_TMP/incoming"
+
+    if [ -n "$conflicts" ]; then
+        if [ "$force" = "yes" ]; then
+            warn "$name: overwriting files this package does not own:$conflicts"
+            return 0
+        fi
+        printf 'ERROR: %s would overwrite files it does not own:%s\n' \
+            "$name" "$conflicts" >&2
+        printf '       A package that takes a path another package owns makes\n' >&2
+        printf '       the database unable to say who owns it, and removing\n' >&2
+        printf '       either one guts the other. To take over a path nothing\n' >&2
+        printf '       owns, the package declares `replaces-files=<path>` and pkg\n' >&2
+        printf '       saves the original so `pkg remove` can restore it.\n' >&2
+        printf '       `pkg install --overwrite` does it anyway.\n' >&2
+        exit 1
+    fi
+    # Decision made: the records become the package's.
+    mkdir -p "$db_dir"
+    cp "$stage/adopted" "$db_dir/adopted"
+    [ -d "$stage/saved" ] && cp -a "$stage/saved" "$db_dir/saved"
+    rm -rf "$stage"
+    [ "$adopted" -eq 0 ] || info "$name: taking over $adopted declared path(s); originals saved"
+    return 0
+}
+
 install_pkg_file() {
     local archive="$1"
     local force="${2:-no}"
 
+    # WIPED, NOT JUST CREATED, and this was a real bug rather than
+    # tidiness. The cleanup at the bottom of this function only runs on
+    # the success path -- the "already installed at this version" early
+    # return above skips it -- so the next package's `tar -xzf` merged
+    # into a directory still holding the previous one's tree.
+    #
+    # What that cost, before anything checked: `find` over `files/`
+    # then recorded the LEFTOVERS in this package's
+    # /var/lib/pkg/installed/<name>/files, so `pkg remove` would delete
+    # another package's files. It surfaced the moment the conflict
+    # check started reading that same list -- `openssh would overwrite
+    # usr/lib/libsqlite3.so.0 (owned by sqlite)`, about an openssh
+    # archive containing no such file. The check was right about what
+    # it was shown; what it was shown was wrong.
+    rm -rf "$PKG_TMP/extract"
     mkdir -p "$PKG_TMP/extract"
 
     # Extract archive into temp dir
@@ -567,6 +741,8 @@ install_pkg_file() {
     desc="$(manifest_field "$manifest" "description")"
     size="$(manifest_field "$manifest" "size")"
     depends="$(manifest_field "$manifest" "depends")"
+    local replaces
+    replaces="$(manifest_field "$manifest" "replaces-files")"
 
     [ -n "$name" ]    || die "MANIFEST missing 'name' field in $archive"
     [ -n "$version" ] || die "MANIFEST missing 'version' field in $archive"
@@ -593,14 +769,23 @@ install_pkg_file() {
 
     # Install files
     local files_dir="$PKG_TMP/extract/files"
+    local db_dir="$PKG_DB/$name"
     if [ -d "$files_dir" ]; then
+        # BEFORE anything is written. A conflict found halfway through
+        # an extraction is a machine with half a package on it, which
+        # is worse than either outcome this is choosing between.
+        # NOT the `force` parameter beside it: that one means "install
+        # even though this version is already here", and reusing it
+        # would make a reinstall quietly also a permission to clobber.
+        # Two questions, two flags.
+        check_conflicts "$files_dir" "$name" "$db_dir" "$replaces" \
+            "${PKG_OVERWRITE:-no}"
         # Use tar to preserve permissions, symlinks, ownership
         ( cd "$files_dir" && tar -cf - . ) | tar -xf - -C "${PKG_ROOT:-/}" \
             || die "Failed to install files for $name"
     fi
 
     # Register package in database
-    local db_dir="$PKG_DB/$name"
     mkdir -p "$db_dir"
     cp "$manifest" "$db_dir/MANIFEST"
 
@@ -637,7 +822,23 @@ install_pkg_file() {
 
 cmd_install() {
     need_root
-    [ $# -ge 1 ] || die "Usage: pkg install <package|archive> [...]"
+
+    # --overwrite is the operator's escape hatch from the conflict
+    # check, and it is deliberately not something a MANIFEST can ask
+    # for: a package declaring `replaces-files=` is saying "this path, and
+    # save the original"; a person typing --overwrite is saying "yes,
+    # I know, do it anyway" about whatever is in the way.
+    PKG_OVERWRITE="no"
+    local args="" a
+    for a in "$@"; do
+        case "$a" in
+            --overwrite) PKG_OVERWRITE="yes" ;;
+            *) args="$args $a" ;;
+        esac
+    done
+    [ "$PKG_OVERWRITE" = "yes" ] && set -- $args
+
+    [ $# -ge 1 ] || die "Usage: pkg install [--overwrite] <package|archive> [...]"
 
     mkdir -p "$PKG_DB" "$PKG_CACHE" "$PKG_TMP"
 
@@ -770,6 +971,31 @@ cmd_remove() {
                 rmdir --ignore-fail-on-non-empty "$dir" 2>/dev/null || true
             done < "$files_list_sorted"
             rm -f "$files_list_sorted"
+        fi
+
+        # PUT BACK WHAT A DECLARED TAKEOVER REPLACED (RFC 0040
+        # roadmap 1). The harm this fixes was never the overwrite --
+        # it was that `pkg remove binutils` left the machine without
+        # a `/usr/bin/strings` the base image had shipped. Restored
+        # AFTER the removal loop above, which has just deleted the
+        # package's own copy of that path.
+        local adopted="$PKG_DB/$name/adopted"
+        if [ -f "$adopted" ]; then
+            local kind rel link
+            while read -r kind rel link; do
+                [ -n "$rel" ] || continue
+                case "$kind" in
+                    link)
+                        ln -sf "$link" "${PKG_ROOT:-}/$rel" \
+                            && info "restored $rel -> $link" ;;
+                    file)
+                        if [ -e "$PKG_DB/$name/saved/$rel" ]; then
+                            mkdir -p "$(dirname "${PKG_ROOT:-}/$rel")"
+                            cp -a "$PKG_DB/$name/saved/$rel" "${PKG_ROOT:-}/$rel" \
+                                && info "restored $rel"
+                        fi ;;
+                esac
+            done < "$adopted"
         fi
 
         # Run post-remove script

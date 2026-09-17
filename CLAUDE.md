@@ -4541,6 +4541,71 @@ Things not to undo:
   downgrade. An older version in the index is refused loudly, not silently:
   repositories do legitimately roll back a release.
 
+## Architecture: who owns this file
+
+RFC 0040 roadmap 1. `pkg install` refuses a path another package
+owns, refuses a path nothing owns, and takes over an unowned one only
+on an explicit `replaces-files=` in the MANIFEST -- saving the
+original so `pkg remove` puts it back. `packages/tests/test-pkg-conflicts.sh`.
+
+- **IT EXTRACTED A TARBALL OVER THE ROOT FILESYSTEM WITH NO OWNER
+  CHECK AT ALL**, no conflict refusal and no backup. Measured before
+  writing a line: zero paths are shared between the 60 packages
+  (pkgsplit derives them) and **exactly one package overlays base
+  content** -- `binutils` ships `usr/bin/strings` where the base has a
+  busybox symlink. So `pkg install novi-devel` took the name silently
+  and `pkg remove binutils` DELETED a command the base image had.
+- **`replaces-files`, NOT `replaces`.** `packages/pkg-format.md`
+  already documents `replaces` with the conventional dpkg meaning
+  ("packages this supersedes on upgrade") and NOTHING IMPLEMENTS IT --
+  along with `provides` and `conflicts`. Taking a well-known name for
+  a different idea is how a reader ends up confidently wrong.
+- **THE SAME TABLE SAID `depends` WAS SPACE-SEPARATED.** It is
+  comma-separated, `mkpkg` refuses a space outright, and CLAUDE.md
+  already records a package written from that belief failing at
+  install. The wrong row was still in the FORMAT SPEC, which is the
+  document somebody writing a package actually reads.
+- **A DECLARED TAKEOVER IS ONLY WORTH HAVING BECAUSE IT IS
+  REVERSIBLE.** The harm was never the overwrite; it was that the
+  machine could not be put back. A symlink records `link <path>
+  <target>`; a regular file is copied aside. Watched live: `link
+  usr/bin/strings ../../bin/busybox`, then on removal `restored
+  usr/bin/strings -> ../../bin/busybox` and `strings` runs again.
+- **`--overwrite` IS THE OPERATOR'S, AND DELIBERATELY NOT SOMETHING A
+  MANIFEST CAN ASK FOR.** A package saying `replaces-files=` declares
+  one path and saves it; a person typing `--overwrite` is answering
+  for whatever is in the way. Reusing the existing `force` parameter
+  (which means "install even though this version is here") would have
+  made a reinstall quietly also a permission to clobber.
+- **`grep` EXITS 1 WHEN IT MATCHES NOTHING, and the caller assigns
+  from a command substitution** -- which ends a `set -e` script. So
+  the first unowned path killed pkg mid-install with nothing on
+  stderr: the refusal this function exists to print never printed, and
+  a DECLARED takeover died the same way. CLAUDE.md already recorded
+  that trap from novi-agent. `|| true` and an explicit `return 0`.
+- **A REFUSED INSTALL MUST LEAVE NO DATABASE ENTRY.** The first
+  version created `$PKG_DB/<name>` before deciding, so a refused
+  package left a registered-looking directory that `pkg list` and the
+  owner index would both have counted. The records are staged in
+  `$PKG_TMP` and move into place only once the answer is "install".
+- **AND THE CHECK EXPOSED A PRE-EXISTING BUG THAT HAD BEEN CORRUPTING
+  THE DATABASE.** `$PKG_TMP/extract` is only cleaned on the SUCCESS
+  path, and the "already installed at this version" early return skips
+  it -- so the next `tar -xzf` in the same invocation merged into a
+  directory still holding the previous package's tree. `find` then
+  recorded the LEFTOVERS as this package's files, and `pkg remove`
+  would have deleted another package's files. It surfaced as `openssh
+  would overwrite usr/lib/libsqlite3.so.0 (owned by sqlite)` about an
+  openssh archive containing no such file: **the check was right about
+  what it was shown, and what it was shown was wrong.**
+- **THE PROBE FOR THAT COULD NOT FAIL AT FIRST.** `PKG_TMP` is
+  `/tmp/pkg.$$`, so leftovers only survive WITHIN one invocation --
+  the first version of the check used two separate `pkg install` calls
+  and passed with the bug put back. One invocation installing an
+  already-present package and then another reproduces it, which is
+  also how it happened live: one `pkg install a b c ...` over six
+  packages, several already there.
+
 ## Architecture: /dev/fd, and testing the image not the shell
 
 `/dev/fd` did not exist on the shipped image — devtmpfs does not create it

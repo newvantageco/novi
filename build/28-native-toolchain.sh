@@ -47,16 +47,25 @@ ONLY="${1:-all}"
 
 export PATH="${TOOLS}/bin:${PATH}"
 
-# stage_pkg <name> <version> <depends> <description>
+# stage_pkg <name> <version> <depends> <description> [replaces]
 # Creates STAGE_DIR/<name>/{MANIFEST,files} and echoes the files dir.
+#
+# `replaces` is the fifth field because exactly one package here needs
+# it: binutils ships `usr/bin/strings` where the BASE image has a
+# symlink to busybox. Before RFC 0040 roadmap 1, pkg took that name
+# silently and `pkg remove binutils` then deleted it outright, leaving
+# a machine without a command the base had shipped. Declaring it is
+# what makes pkg save the symlink and put it back on removal.
 stage_pkg() {
-    local name="$1" version="$2" depends="$3" desc="$4" d="${STAGE_DIR}/$1"
+    local name="$1" version="$2" depends="$3" desc="$4" replaces="${5:-}"
+    local d="${STAGE_DIR}/$1"
     rm -rf "$d"; mkdir -p "$d/files"
     {
         echo "name=${name}"
         echo "version=${version}"
         echo "arch=${TARGET_ARCH}"
         echo "depends=${depends}"
+        [ -n "${replaces}" ] && echo "replaces-files=${replaces}"
         echo "description=${desc}"
     } > "$d/MANIFEST"
     printf '%s\n' "$d/files"
@@ -133,7 +142,7 @@ if [ "$ONLY" = "all" ] || [ "$ONLY" = "binutils" ]; then
             --disable-gprofng >/dev/null
         make -j"${JOBS}" >/dev/null
     )
-    files="$(stage_pkg binutils "${BINUTILS_VERSION}" "musl-dev" "GNU assembler, linker and binary utilities")"
+    files="$(stage_pkg binutils "${BINUTILS_VERSION}" "musl-dev" "GNU assembler, linker and binary utilities" "usr/bin/strings")"
     make -C "${WORK}/build-binutils" DESTDIR="${files}" install >/dev/null
     rm -rf "${files}/usr/share/info" "${files}/usr/share/man" "${files}/usr/share/locale" "${files}/usr/share/doc"
     find "${files}" -type f -perm -u+x -exec "${CROSS}-strip" --strip-unneeded {} \; 2>/dev/null || true
