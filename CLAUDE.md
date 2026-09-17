@@ -2123,6 +2123,53 @@ netsurf` puts the browser behind it.
   novi-recon as having no profile and novi-view as having the network.
   Two plausible machines, neither real, and only the host test caught
   it.
+- **LANDLOCK IS THE SECOND LAYER, AND WHAT IT ADDS IS W^X** (RFC 0039
+  roadmap 2). A bind mount cannot say "writable but not executable";
+  Landlock grants EXECUTE on the `--ro` paths and never on the `--rw`
+  ones. Measured, same file, same sandbox, one flag apart: `--rw` reads
+  and writes and **cannot exec (EACCES)**; `--ro` reads and execs and
+  **cannot write (EROFS)**. **Two layers, two errnos** -- neither can
+  state the other's rule, which is the whole argument for both.
+  `MS_NOEXEC` should follow on the mounts this program makes itself;
+  doing both at once would have left a refusal nobody could attribute.
+- **ASK FOR THE ABI, DO NOT ASSUME IT.**
+  `landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION)`
+  answers with the version; `REFER` arrives at 2, `TRUNCATE` at 3,
+  `IOCTL_DEV` at 5, and a ruleset naming a right the kernel does not
+  know is EINVAL. Same rule as reading `/proc/self/ns`.
+- **A DIRECTORY-ONLY RIGHT ON A FILE IS EINVAL, NOT IGNORED.**
+  `READ_DIR`, the `MAKE_*` set, `REMOVE_*` and `REFER` are refused
+  outright on a regular file -- and this sandbox binds plenty of single
+  files (`/usr/bin/python3`, `/etc/resolv.conf`, the image a viewer was
+  given), so granting the read-only set uniformly killed every
+  sandboxed program with `landlock_add_rule: Invalid argument`, which
+  names the call and not the reason. Mask by `S_ISDIR`.
+- **LANDLOCK BEFORE SECCOMP, AND NO_NEW_PRIVS BEFORE BOTH.** After the
+  filter the landlock syscalls are subject to it, and an allowlist
+  profile derived from a program that never calls them -- every profile
+  here -- answers EPERM to the sandbox's own last step.
+- **THE CALLER'S BINDS GO ON LAST, because they were being buried.**
+  They used to be applied before the private `/tmp`, the minimal `/dev`
+  and `/proc`, so `--rw /tmp/work` was bound and then covered by the
+  tmpfs on top: the mount existed, nothing could reach it, and the
+  program said `nonexistent directory` about a path the caller named.
+  **Third buried mount in this repository** (RFC 0003's `/run/live`,
+  RFC 0018's ESP), and the first where the buried thing was something
+  somebody asked for.
+- **A `CONFIG_X=y` LINE IS A CLAIM, AND THIRTY-TWO OF THEM WERE
+  FALSE.** olddefconfig drops a symbol whose dependencies are unmet, or
+  that upstream renamed or removed, SILENTLY. `CONFIG_IPC_NS` did that
+  and cost this program its first booted run; a sweep found 32 more --
+  sixteen renamed or removed upstream, sixteen unreachable, four of
+  those *select-only* and therefore meaningless in a config file. **One
+  is `CONFIG_SECURITY_SELINUX`**, which needs `CONFIG_AUDIT`: SELinux
+  has never been in this kernel while the config claimed it for the
+  life of the project. `05-kernel.sh` diffs the curated file against
+  the generated `.config` and FAILS on any `=y` that did not survive --
+  derived, because a hand-written watch list would not have contained
+  IPC_NS either. **The sweep changed nothing**: the generated `.config`
+  is byte-identical apart from Landlock, which is what made it safe to
+  do in the same pass.
 - **`test-agent-sandbox.sh` DRIVES THE WRAPPERS THIS REPO SHIPS**,
   extracted from the build stages' `<<'WRAP'` heredocs, against the
   real reader -- a test about two things agreeing must not hold its own

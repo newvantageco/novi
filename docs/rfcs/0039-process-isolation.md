@@ -478,6 +478,112 @@ answer right. A second fixture that *mentions* the sandbox in a comment
 and never invokes it is the layer where a wrong answer is a wrong
 answer. Same correction RFC 0028's five malformed-input checks needed.
 
+### 24. Landlock, and the one thing the mounts cannot say.
+
+`CONFIG_SECURITY_LANDLOCK=y` and `landlock_restrict_self` after the
+pivot. The mount namespace is still the filesystem boundary; this is a
+second one the kernel enforces on the process's own request, and it
+holds whatever the mount list turned out to be.
+
+**WHAT IT ADDS IS W^X, and that is a thing a bind mount cannot
+express.** A `--rw` path is bound writable, so a program can write a
+file there and then run it. Landlock grants `EXECUTE` on the read-only
+paths and never on the writable ones. Measured on a booted machine —
+the same file, the same sandbox, one flag apart:
+
+| bind | read | write | execute |
+|---|---|---|---|
+| `--rw` | allowed | allowed | **REFUSED — Permission denied** |
+| `--ro` | allowed | **REFUSED — Read-only file system** | allowed |
+
+**Two layers, two errnos.** `EACCES` on the exec is Landlock; `EROFS`
+on the write is the mount. Neither can state the other's rule, which
+is the whole argument for having both. (`MS_NOEXEC` would give the
+mounts a W^X of their own and should follow — doing both in one change
+would have left a refusal nobody could attribute to a layer.)
+
+**THE ABI IS ASKED FOR, NOT ASSUMED.**
+`landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION)`
+answers with the version this kernel speaks, and the handled set is
+built up from that number — `REFER` at 2, `TRUNCATE` at 3, `IOCTL_DEV`
+at 5. A ruleset naming a right the kernel does not know is EINVAL, so
+a hardcoded set would turn one kernel bump into a sandbox that refuses
+to start. Same rule as reading `/proc/self/ns`, which is the mistake
+this program's first booted run made.
+
+**Absent is not fatal, and never silent.** A kernel without it still
+gets the mount namespace, the PID namespace and the filter; one line
+on stderr says what is missing.
+
+**Order is forced in both directions.** `PR_SET_NO_NEW_PRIVS` comes
+out of `install_filter()` and runs first, because `restrict_self`
+requires it for the same reason seccomp does. And **Landlock goes
+before seccomp**: after the filter, the landlock syscalls are subject
+to it, and an allowlist profile derived from a program that never
+calls them — which is every profile here — would answer EPERM to the
+sandbox's own last step.
+
+### 25. A directory-only right on a file is EINVAL, not ignored.
+
+`LANDLOCK_ACCESS_FS_READ_DIR`, the `MAKE_*` set, `REMOVE_*` and `REFER`
+mean nothing about a regular file, and `landlock_add_rule` **refuses**
+rather than dropping them. This sandbox binds plenty of single files —
+`/usr/bin/python3`, `/etc/resolv.conf`, the image a viewer was given —
+so the first build granted its read-only set uniformly and every
+sandboxed program died with `novi-sandbox: landlock_add_rule: Invalid
+argument`, which names the call and not the reason. The rights are
+masked by `S_ISDIR` now.
+
+### 26. The caller's binds go on last, because they were being buried.
+
+They used to be applied *before* the private `/tmp`, the minimal `/dev`
+and `/proc` — so `--rw /tmp/work` was bound and then covered by the
+tmpfs mounted on top of it. The mount existed, nothing could reach it,
+and the program reported `nonexistent directory` about a path the
+caller had named on the command line.
+
+**Third time this repository has buried a mount by ordering** — RFC
+0003's `/run/live`, RFC 0018's ESP under `/boot` — and the first where
+the thing buried was something somebody asked for. What this program
+supplies by default goes down first; what the caller named goes on top.
+
+### 27. A `CONFIG_X=y` line is a claim, and thirty-two of them were false.
+
+Adding one kernel symbol meant checking it survived, and that check
+found the rest. `olddefconfig` drops a symbol whose dependencies are
+unmet, or that upstream renamed or removed, **silently** — the line
+stays in the curated config reading as policy and the kernel is built
+without it. `CONFIG_IPC_NS` did exactly that and cost this program its
+first booted run (decision 3's note). A sweep for the same shape found
+**thirty-two more**:
+
+- **Sixteen upstream has renamed or removed**: `SLAB`, `X86_SMAP`,
+  `X86_SMEP`, `PAGE_TABLE_ISOLATION`, `RETPOLINE`, `MNT_NS`,
+  `MEMCG_SWAP`, `BPFILTER`, `INTEL_PSTATE`, `EFI_VARS` and six more.
+- **Sixteen that exist and cannot be reached from here.** Four of those
+  are *select-only* — `PARAVIRT`, `LOCKUP_DETECTOR`, `SND_HWDEP`,
+  `SND_RAWMIDI` — which a config file can never set, so stating them
+  was meaningless by construction.
+- **`CONFIG_SECURITY_SELINUX` is in that second group.** It needs
+  `CONFIG_AUDIT`, which this config does not set, so **SELinux has
+  never been in this kernel** while the config claimed it for the life
+  of the project. There is no SELinux policy on this system either, so
+  it could not have done anything — but a security claim that was
+  never true is worth naming as one.
+
+`05-kernel.sh` now diffs the curated file against the generated
+`.config` and **fails the build** on any `=y` that did not survive.
+Derived, with no list to maintain: a hand-written set of symbols to
+watch would not have contained `IPC_NS` either.
+
+**The sweep changed nothing about the kernel**, which is the property
+that made it safe to do in the same pass: every line removed was one
+the build was already ignoring, and the generated `.config` after the
+cleanup is byte-identical to the one before it apart from Landlock.
+Making a dependency reachable — `AUDIT` for SELinux, `DEBUG_KERNEL`
+for the lockup detectors, `HYPERVISOR_GUEST` for paravirt — is a
+decision about what this kernel should be, not a typo fix.
+
 ## What was verified
 
 **On the build host, which is where the interesting cases are** — the
@@ -652,8 +758,16 @@ different and much larger change.
    fails, what it costs in CPU, or what it costs in memory. It changes
    what a page that fails can reach, which this corpus does not
    measure and never could.
-2. **Landlock**, which is one kernel symbol and a second policy layer
-   that does not depend on the mount list being complete.
+2. ~~**Landlock**~~ **Done** — decisions 24 to 27. One kernel symbol,
+   as the item said; the W^X it buys is measured, and getting there
+   found a directory-only right that is EINVAL on a file, a bind list
+   the sandbox was burying under its own defaults, and thirty-two
+   kernel symbols this config claimed and never had.
+
+**Every item in this roadmap is now closed.** What is left is named
+under *What this is not*, and the largest of it — an allowlist for the
+browser, per-tab processes, a boundary against a kernel bug — is not
+this RFC's.
 3. ~~**An allowlist filter for programs whose syscall set is
    knowable.**~~ **Done** — decisions 14 to 17. 48 syscalls, derived by
    tracing rather than written, diffed against the measurement at build

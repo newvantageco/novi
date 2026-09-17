@@ -57,6 +57,15 @@ done
 grep -q "^CONFIG_NET_NS=y$" "${KCONFIG}" || {
     echo ">>> note: CONFIG_NET_NS is not set -- --no-net will fail."
 }
+# Landlock is the same shape: optional, and the sandbox is weaker
+# without it rather than absent. novi-sandbox asks the kernel for the
+# ABI version at runtime and says on stderr when there is none, so a
+# build against a kernel without it is a decision somebody can see
+# rather than a silently smaller sandbox.
+grep -q "^CONFIG_SECURITY_LANDLOCK=y$" "${KCONFIG}" || {
+    echo ">>> note: CONFIG_SECURITY_LANDLOCK is not set -- the mount"
+    echo ">>>       namespace will be the only filesystem boundary."
+}
 
 harden_flags
 

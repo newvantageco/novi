@@ -83,6 +83,44 @@ else
     make ARCH=x86_64 CROSS_COMPILE="${CROSS}" olddefconfig
 fi
 
+# ==> A `CONFIG_X=y` LINE IS A CLAIM, AND olddefconfig MAY IGNORE IT.
+#
+# A symbol whose dependencies are unmet, or that upstream renamed or
+# removed, is dropped SILENTLY: the line stays in the curated config
+# reading as policy and the kernel is built without it. `CONFIG_IPC_NS`
+# did exactly that -- stated for a kernel that never had it, because it
+# needs SYSVIPC which this config deliberately omits -- and was found
+# only when novi-sandbox asked for an IPC namespace on a booted machine
+# and got EINVAL (RFC 0039). A sweep for the same shape then found
+# THIRTY-TWO more.
+#
+# So: every `=y` in the curated file must be `=y` in the generated
+# one. Derived, with no list to maintain -- the alternative is a
+# hand-written set of symbols to watch, which is a list that rots and
+# would not have contained IPC_NS either.
+#
+# The way to state something this config cannot honour is a comment
+# saying so, which is what those thirty-two became.
+if [ -f "${REPO_ROOT}/kernel/config-${TARGET_ARCH}" ]; then
+    echo "==> Checking every stated symbol survived olddefconfig"
+    dropped=""
+    while read -r line; do
+        sym="${line%=y}"
+        grep -q "^${sym}=y$" .config || dropped="${dropped} ${sym}"
+    done < <(grep -E '^CONFIG_[A-Z0-9_]+=y$' "${REPO_ROOT}/kernel/config-${TARGET_ARCH}")
+    if [ -n "${dropped}" ]; then
+        echo "ERROR: the curated config states symbols the build did not honour:" >&2
+        for sym in ${dropped}; do echo "  ${sym}" >&2; done
+        echo "" >&2
+        echo "Each is either renamed or removed upstream, or has a dependency" >&2
+        echo "this config does not set. A line that cannot be honoured is a" >&2
+        echo "claim about this kernel that is not true -- fix the dependency" >&2
+        echo "or say so in a comment, as the existing NOT BUILT lines do." >&2
+        exit 1
+    fi
+    echo "    every stated symbol is in the generated .config"
+fi
+
 echo "==> Building kernel (this takes a while)"
 make ARCH=x86_64 CROSS_COMPILE="${CROSS}" -j${NPROC} bzImage modules
 

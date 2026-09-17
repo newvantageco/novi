@@ -74,6 +74,7 @@
 #include <linux/audit.h>
 #include <linux/filter.h>
 #include <linux/seccomp.h>
+#include <linux/landlock.h>
 
 #define MAX_BINDS 64
 
@@ -368,6 +369,181 @@ static const struct profile *find_profile(const char *name) {
 	return NULL;
 }
 
+/* LANDLOCK: THE SECOND LOCK ON THE DOOR THE MOUNTS ALREADY SHUT
+ * (RFC 0039 roadmap 2).
+ *
+ * The mount namespace is the filesystem boundary here, and it has one
+ * weakness worth a second layer: it is only as good as the bind list
+ * the caller wrote. A `--rw` one directory too wide is a hole, and
+ * nothing in the namespace notices. Landlock is the kernel enforcing a
+ * policy this process asks for on ITSELF, so it holds whatever the
+ * mounts turned out to be.
+ *
+ * WHAT IT ADDS THAT THE MOUNTS DO NOT, concretely: **W^X**. A `--rw`
+ * path is bound MS_NOSUID|MS_NODEV and writable, so a program can
+ * write a file there and then execute it. Landlock grants EXECUTE on
+ * the read-only paths and never on the writable ones, which is a
+ * distinction a bind mount cannot draw without a second flag on every
+ * one of them. (MS_NOEXEC would express the same thing for the mounts
+ * this program makes itself, and should -- but doing both in one
+ * change would leave a refusal nobody could attribute to a layer.)
+ *
+ * THE ABI IS ASKED FOR, NOT ASSUMED. `landlock_create_ruleset(NULL, 0,
+ * LANDLOCK_CREATE_RULESET_VERSION)` answers with the version this
+ * kernel speaks; a ruleset naming a right the kernel does not know is
+ * EINVAL, so the handled set is built up from that number. Same rule
+ * as reading /proc/self/ns rather than assuming the namespace set --
+ * the mistake that cost this program its first booted run.
+ *
+ * AND IT IS NOT FATAL WHEN ABSENT, but never silent either. A kernel
+ * without CONFIG_SECURITY_LANDLOCK still gets the mount namespace, the
+ * PID namespace and the filter; what it does not get is this, and one
+ * line on stderr says so. A sandbox that quietly gives you less than
+ * it says is the failure this whole file is written against.
+ */
+#define LL_V1 ( \
+	LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_WRITE_FILE | \
+	LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR | \
+	LANDLOCK_ACCESS_FS_REMOVE_DIR | LANDLOCK_ACCESS_FS_REMOVE_FILE | \
+	LANDLOCK_ACCESS_FS_MAKE_CHAR | LANDLOCK_ACCESS_FS_MAKE_DIR | \
+	LANDLOCK_ACCESS_FS_MAKE_REG | LANDLOCK_ACCESS_FS_MAKE_SOCK | \
+	LANDLOCK_ACCESS_FS_MAKE_FIFO | LANDLOCK_ACCESS_FS_MAKE_BLOCK | \
+	LANDLOCK_ACCESS_FS_MAKE_SYM)
+
+/* Read-only: look, and run. Write-side rights are handled and never
+ * granted here, so they are denied. */
+#define LL_RO (LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR | \
+	LANDLOCK_ACCESS_FS_EXECUTE)
+
+/* Writable: everything a program does to a directory it owns, and
+ * DELIBERATELY NOT EXECUTE. */
+#define LL_RW (LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR | \
+	LANDLOCK_ACCESS_FS_WRITE_FILE | LANDLOCK_ACCESS_FS_REMOVE_FILE | \
+	LANDLOCK_ACCESS_FS_REMOVE_DIR | LANDLOCK_ACCESS_FS_MAKE_REG | \
+	LANDLOCK_ACCESS_FS_MAKE_DIR | LANDLOCK_ACCESS_FS_MAKE_SOCK | \
+	LANDLOCK_ACCESS_FS_MAKE_FIFO | LANDLOCK_ACCESS_FS_MAKE_SYM)
+
+/* NO_NEW_PRIVS, and it is doing three jobs now: it is what allows an
+ * unprivileged process to install a seccomp filter at all, it is what
+ * `landlock_restrict_self` requires for the same reason, and it is
+ * what stops a setuid binary inside the sandbox handing back what the
+ * sandbox took away. It was inside install_filter() until Landlock
+ * needed it first. */
+static void set_no_new_privs(void) {
+	if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) {
+		die("prctl(PR_SET_NO_NEW_PRIVS)");
+	}
+}
+
+static int landlock_abi(void) {
+	long v = syscall(__NR_landlock_create_ruleset, NULL, 0,
+		LANDLOCK_CREATE_RULESET_VERSION);
+	return v < 0 ? -1 : (int)v;
+}
+
+/* Rights that only mean anything about a DIRECTORY. Granting one of
+ * these on a regular file is EINVAL from landlock_add_rule -- not
+ * ignored, refused -- and this sandbox binds plenty of single files
+ * (/usr/bin/python3, /etc/resolv.conf, the image a viewer was given).
+ * The first build granted LL_RO uniformly and every sandboxed program
+ * died with `landlock_add_rule: Invalid argument`, which names the
+ * call and not the reason. */
+#define LL_DIR_ONLY ( \
+	LANDLOCK_ACCESS_FS_READ_DIR | LANDLOCK_ACCESS_FS_REMOVE_DIR | \
+	LANDLOCK_ACCESS_FS_REMOVE_FILE | LANDLOCK_ACCESS_FS_MAKE_CHAR | \
+	LANDLOCK_ACCESS_FS_MAKE_DIR | LANDLOCK_ACCESS_FS_MAKE_REG | \
+	LANDLOCK_ACCESS_FS_MAKE_SOCK | LANDLOCK_ACCESS_FS_MAKE_FIFO | \
+	LANDLOCK_ACCESS_FS_MAKE_BLOCK | LANDLOCK_ACCESS_FS_MAKE_SYM | \
+	LANDLOCK_ACCESS_FS_REFER)
+
+static void landlock_allow(int fd, const char *path, __u64 rights,
+		__u64 handled) {
+	struct stat st;
+	if (stat(path, &st) != 0) {
+		/* Same rule as a bind: a path that is not here is not an
+		 * error, because the caller names what a program might need. */
+		return;
+	}
+	if (!S_ISDIR(st.st_mode)) {
+		rights &= ~(__u64)LL_DIR_ONLY;
+	}
+	int pfd = open(path, O_PATH | O_CLOEXEC);
+	if (pfd < 0) {
+		return;
+	}
+	struct landlock_path_beneath_attr attr = {
+		/* A right the ruleset does not HANDLE cannot be granted --
+		 * landlock_add_rule answers EINVAL -- so the grant is masked
+		 * by what this kernel's ABI let us handle. Without this, a
+		 * kernel one ABI behind turns every rule into a hard failure. */
+		.allowed_access = rights & handled,
+		.parent_fd = pfd,
+	};
+	if (attr.allowed_access != 0 &&
+			syscall(__NR_landlock_add_rule, fd,
+				LANDLOCK_RULE_PATH_BENEATH, &attr, 0) != 0) {
+		die("landlock_add_rule");
+	}
+	close(pfd);
+}
+
+static void install_landlock(void) {
+	int abi = landlock_abi();
+	if (abi < 1) {
+		fprintf(stderr, "novi-sandbox: no Landlock on this kernel "
+			"(%s) -- the mount namespace is the only filesystem "
+			"boundary here\n", strerror(errno));
+		return;
+	}
+
+	__u64 handled = LL_V1;
+	if (abi >= 2) { handled |= LANDLOCK_ACCESS_FS_REFER; }
+	if (abi >= 3) { handled |= LANDLOCK_ACCESS_FS_TRUNCATE; }
+	if (abi >= 5) { handled |= LANDLOCK_ACCESS_FS_IOCTL_DEV; }
+
+	struct landlock_ruleset_attr rattr = { .handled_access_fs = handled };
+	int fd = (int)syscall(__NR_landlock_create_ruleset, &rattr,
+		sizeof(rattr), 0);
+	if (fd < 0) {
+		die("landlock_create_ruleset");
+	}
+
+	/* The caller's list, with the same read/write split the mounts got.
+	 * TRUNCATE rides with the writable set where the kernel has it: a
+	 * program that may write a file may shorten it. */
+	__u64 rw = LL_RW;
+	if (abi >= 3) { rw |= LANDLOCK_ACCESS_FS_TRUNCATE; }
+	if (abi >= 2) { rw |= LANDLOCK_ACCESS_FS_REFER; }
+	for (int i = 0; i < bind_count; i++) {
+		landlock_allow(fd, binds[i].path,
+			binds[i].writable ? rw : LL_RO, handled);
+	}
+
+	/* What this program mounted itself, which is not in the bind list.
+	 * /dev's nodes need IOCTL_DEV -- a terminal is configured with
+	 * ioctls, and without it a program that calls isatty() on a real
+	 * tty gets EACCES rather than a false answer. */
+	__u64 dev = rw | LANDLOCK_ACCESS_FS_MAKE_CHAR;
+	if (abi >= 5) { dev |= LANDLOCK_ACCESS_FS_IOCTL_DEV; }
+	landlock_allow(fd, "/dev", dev, handled);
+	landlock_allow(fd, "/tmp", rw, handled);
+	/* /proc is a view of this process, read-only: nothing in a sandbox
+	 * has business writing to sysctls it can see. */
+	landlock_allow(fd, "/proc", LANDLOCK_ACCESS_FS_READ_FILE |
+		LANDLOCK_ACCESS_FS_READ_DIR, handled);
+	/* The new root itself: listable, and nothing more. A program may
+	 * see that /usr exists without being able to create /usr2. */
+	landlock_allow(fd, "/", LANDLOCK_ACCESS_FS_READ_DIR, handled);
+
+	/* PR_SET_NO_NEW_PRIVS is already set by the caller -- restrict_self
+	 * requires it, for the same reason seccomp does: without it a
+	 * setuid binary would be a way back out. */
+	if (syscall(__NR_landlock_restrict_self, fd, 0) != 0) {
+		die("landlock_restrict_self");
+	}
+	close(fd);
+}
+
 static void install_filter(const struct profile *allow) {
 	/* Two instructions per listed call, plus the architecture check and
 	 * the two terminators -- and four more for clone's flag test. The
@@ -452,13 +628,6 @@ static void install_filter(const struct profile *allow) {
 	}
 
 	struct sock_fprog prog = { .len = (unsigned short)n, .filter = f };
-	/* NO_NEW_PRIVS first, and it is doing two jobs: it is what allows
-	 * an unprivileged process to install a filter at all, and it is
-	 * what stops a setuid binary inside the sandbox handing back what
-	 * the sandbox took away. */
-	if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) {
-		die("prctl(PR_SET_NO_NEW_PRIVS)");
-	}
 	if (syscall(SYS_seccomp, SECCOMP_SET_MODE_FILTER, 0, &prog) != 0) {
 		die("seccomp");
 	}
@@ -731,9 +900,6 @@ int main(int argc, char **argv) {
 			"mode=0755") != 0) {
 		die("mount tmpfs");
 	}
-	for (int b = 0; b < bind_count; b++) {
-		bind_one(binds[b].path, binds[b].writable, false);
-	}
 	/* A private /tmp, always. Every program expects one, and sharing
 	 * the machine's is a two-way channel by definition. */
 	char tmpdir[PATH_MAX];
@@ -812,6 +978,25 @@ int main(int argc, char **argv) {
 		die("mount /proc");
 	}
 
+	/* THE CALLER'S LIST IS APPLIED LAST, and the order is the whole
+	 * of why. It used to come first, before the private /tmp, the
+	 * minimal /dev and /proc -- so `--rw /tmp/work` was bound and
+	 * then BURIED under the tmpfs mounted on top of it: the mount
+	 * existed, nothing could reach it, and the program reported
+	 * `nonexistent directory` about a path the caller had named.
+	 * Third time this repository has buried a mount by ordering
+	 * (RFC 0003's /run/live, RFC 0018's ESP under /boot), and the
+	 * first where the thing buried was something somebody asked
+	 * for on a command line.
+	 *
+	 * So: what this program supplies by default goes down first, and
+	 * what the caller named goes on top of it. A caller who binds
+	 * something under /tmp or /dev means it.
+	 */
+	for (int b = 0; b < bind_count; b++) {
+		bind_one(binds[b].path, binds[b].writable, false);
+	}
+
 	/* pivot_root, not chroot. chroot leaves the old root reachable
 	 * through any directory fd that survives it and through `..` from a
 	 * directory outside the new tree; pivot_root replaces the process's
@@ -834,6 +1019,14 @@ int main(int argc, char **argv) {
 		die("rmdir /.oldroot");
 	}
 
+	/* ORDER IS FORCED, in both directions. NO_NEW_PRIVS before either,
+	 * because both refuse without it. And LANDLOCK BEFORE SECCOMP: the
+	 * filter is installed last because after it the landlock syscalls
+	 * are themselves subject to it, and an allowlist profile derived
+	 * from a program that never calls them -- which is every profile
+	 * here -- would answer EPERM to the sandbox's own last step. */
+	set_no_new_privs();
+	install_landlock();
 	install_filter(prof);
 
 	execvp(cmd[0], cmd);
