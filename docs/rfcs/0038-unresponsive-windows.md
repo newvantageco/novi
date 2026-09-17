@@ -399,6 +399,35 @@ It predates all of this by the life of the compositor;
 it, which is what made the omission look deliberate. Fixed separately
 with the same MRU-first pick, restricted to the active workspace.
 
+**The panel glyph and the notification icon were verified the same
+way**, on a fresh boot of the rebuilt image, with `unclosed-tags.html`
+served from the guest's own loopback:
+
+- **Before**: `/run/novi/windows` reads `unresponsive 0` and the status
+  march is speaker, monitor, clock, power — inked columns at x=1097–1111,
+  1136–1149, 1173–1226, 1246–1257, and nothing between the taskbar and
+  the speaker. That "before" frame is what makes the next one mean
+  something (RFC 0036's rule about an empty desktop).
+- **After ~50 s**: `unresponsive 1` / `window 9972 100 54 NetSurf`, and a
+  new inked run at **x=1073–1082** — the hourglass — with the bell and
+  its `1` outside it. Text-secondary, the same weight as the speaker
+  beside it, which is decision 13's colour argument as a picture.
+- **A click at (1078, 18)** opened `novi-settings` on the **Session**
+  panel: *"Windows — 1 not responding (Super + Shift + Q ends one)"* and
+  *"NetSurf — pid 9972, 98% of a processor, 190s"*. The glyph raises the
+  question; the panel answers it, which is the division RFC 0036
+  decision 12 drew for the health glyph.
+- **The notification carries the hourglass** (decision 14). The history
+  row reads *"NetSurf is not responding — It has used 100% of a
+  processor for 10 seconds witho…"* with Lucide's glyph in the icon
+  column, in accent — the column that was empty by design until there
+  was a glyph that meant this.
+- **Super+Shift+Q cleared it.** `/run/novi/windows` back to
+  `unresponsive 0`, and the inked runs back to exactly the four the
+  "before" frame had: **the hourglass leaves no trace when nothing is
+  wedged**, which is the other half of "absent and zero draw the same
+  nothing".
+
 ## What this is not
 
 **It is not a sandbox, and it is not process isolation.** RFC 0031
