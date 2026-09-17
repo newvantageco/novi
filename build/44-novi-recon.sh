@@ -61,8 +61,8 @@ echo ">>> syntax check against python${PYTHON_VERSION%.*} ..."
 "python${PYTHON_VERSION%.*}" -c "import ast,sys; ast.parse(open(sys.argv[1]).read(), sys.argv[1])" "${SRC}"
 
 D="${STAGE_DIR}/novi-recon"
-rm -rf "${D}"; mkdir -p "${D}/files/usr/bin"
-install -m 755 "${SRC}" "${D}/files/usr/bin/novi-recon"
+rm -rf "${D}"; mkdir -p "${D}/files/usr/bin" "${D}/files/usr/libexec"
+install -m 755 "${SRC}" "${D}/files/usr/libexec/novi-recon"
 
 # The shebang says `#!/usr/bin/env python3` in the repository, which is
 # right for running it out of a checkout on any machine. On the target
@@ -71,7 +71,57 @@ install -m 755 "${SRC}" "${D}/files/usr/bin/novi-recon"
 # exec on every invocation, and a $PATH that finds a different python3
 # first is a way for a system tool to behave differently for different
 # users.
-sed -i '1s|.*|#!/usr/bin/python3|' "${D}/files/usr/bin/novi-recon"
+sed -i '1s|.*|#!/usr/bin/python3|' "${D}/files/usr/libexec/novi-recon"
+
+# THE ALLOWLIST WRAPPER (RFC 0039 roadmap 3). The script moves to
+# /usr/libexec and what goes on PATH is a wrapper -- the same shape RFC
+# 0031 roadmap 5 gave the browser, and for the same reason: a bound
+# somebody bypasses by typing the other name is not a bound.
+#
+# novi-recon is the case the denylist was not written for. It makes DNS
+# queries and TLS connections, reads no file it was not given, and runs
+# on an interpreter out of this same build -- so its syscall set is
+# knowable, and 48 of them were measured (see
+# novi-sandbox/profile-recon.syscalls). Everything is read-only: this
+# tool writes nothing, which is worth saying because it means the bind
+# list has no --rw at all.
+#
+# /usr/bin/python3 is bound as a FILE rather than /usr/bin as a
+# directory. The shebang names it, and binding the directory would put
+# every base binary on the machine inside a sandbox built to contain
+# one script.
+#
+# NOT /etc/nsswitch.conf, which the browser's wrapper listed and which
+# has never existed on this system -- 18-network.sh's own comment says
+# musl does not read it. novi-sandbox skips an absent path by design
+# (a caller names what a program MIGHT need), so the only symptom was
+# one `skipping /etc/nsswitch.conf (not present)` line on stderr per
+# run, which nobody sees for a GUI program and which was the first
+# line of output for this one. A bind list is a claim about what a
+# program needs; an entry nothing has ever provided is not one.
+cat > "${D}/files/usr/bin/novi-recon" <<'WRAP'
+#!/bin/sh
+# novi-recon under an allowlist seccomp filter and a root filesystem
+# holding nine paths (RFC 0039). NOVI_RECON_SANDBOX=off for somebody
+# debugging the difference between the tool failing and a bind missing.
+REAL=/usr/libexec/novi-recon
+SANDBOX="${NOVI_RECON_SANDBOX:-on}"
+case "${SANDBOX}" in
+    off|none|0) exec "${REAL}" "$@" ;;
+    on|1) ;;
+    *)
+        echo "novi-recon: NOVI_RECON_SANDBOX must be 'on' or 'off'" >&2
+        exit 2 ;;
+esac
+command -v novi-sandbox >/dev/null 2>&1 || exec "${REAL}" "$@"
+exec novi-sandbox --profile recon \
+    --ro /usr/lib --ro /usr/libexec --ro /lib \
+    --ro /usr/bin/python3 \
+    --ro /etc/ssl --ro /etc/resolv.conf --ro /etc/hosts \
+    --ro /etc/services \
+    -- "${REAL}" "$@"
+WRAP
+chmod 755 "${D}/files/usr/bin/novi-recon"
 
 {
     echo "name=novi-recon"
@@ -83,6 +133,6 @@ sed -i '1s|.*|#!/usr/bin/python3|' "${D}/files/usr/bin/novi-recon"
 
 echo ""
 echo ">>> Staged under ${D}  ($(du -sh "${D}/files" | cut -f1))"
-head -1 "${D}/files/usr/bin/novi-recon"
+head -1 "${D}/files/usr/libexec/novi-recon"
 echo ""
 echo "Publish it with:  bash build/53-devtools-repo.sh"

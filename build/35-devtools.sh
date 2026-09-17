@@ -827,7 +827,7 @@ if [ -n "${SANDBOX}" ] && command -v novi-sandbox >/dev/null 2>&1; then
     set -- novi-sandbox \
         --ro /usr/libexec --ro /usr/lib --ro /usr/share \
         --ro /etc/ssl --ro /etc/resolv.conf --ro /etc/hosts \
-        --ro /etc/services --ro /etc/nsswitch.conf \
+        --ro /etc/services \
         --ro /lib \
         --rw "${RUNTIME}" \
         --rw "${HOME:-/root}/.netsurf" \

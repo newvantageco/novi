@@ -281,13 +281,102 @@ static struct sock_filter bpf_jump(unsigned short code, unsigned k,
 	return f;
 }
 
-static void install_filter(void) {
-	/* Two instructions per denied call, plus the architecture check and
-	 * the two terminators. The architecture check is not decoration: a
+/* AN ALLOWLIST, FOR A PROGRAM WHOSE SYSCALL SET IS KNOWABLE (RFC 0039
+ * roadmap 3). The denylist above is what the browser gets, and the
+ * file says why: nobody can enumerate what a layout engine and its
+ * libc will ever do. `novi-recon` is the other case -- it makes DNS
+ * queries and TLS connections, reads no file it was not given, and
+ * runs on an interpreter that ships from this same build.
+ *
+ * THE LIST IS DERIVED, NOT WRITTEN. Every number here was measured on
+ * a booted machine by tracing the program (build/45-novi-sandbox.sh
+ * builds the tracer), over every subcommand plus the host test suite's
+ * error branches. `novi-sandbox/profile-recon.syscalls` holds the
+ * measured numbers and the derivation; the build stage DIFFS this
+ * table against that file, so a name/number mistake here stops the
+ * build rather than shipping a filter that refuses something the tool
+ * needs.
+ *
+ * WHAT BEING WRONG COSTS, said plainly: a syscall on a path nobody
+ * exercised gets `EPERM`, which in Python is an OSError with a
+ * traceback naming the line -- not a dead process, and not silence.
+ * That is the whole reason the action is ERRNO here as it is there.
+ * `NOVI_RECON_SANDBOX=off` is the hatch.
+ *
+ * Names rather than numbers in this table, because `SYS_recvfrom` is
+ * reviewable and `45` is not -- and the diff against the measured file
+ * is what keeps the two honest about each other. */
+static const int profile_recon[] = {
+	/* stdio, and the files the interpreter opens to start at all */
+	SYS_read, SYS_write, SYS_open, SYS_close, SYS_lseek, SYS_readv,
+	SYS_fcntl, SYS_ioctl, SYS_getdents64, SYS_readlink,
+	/* stat, and musl's three spellings of it -- glibc would reach for
+	 * newfstatat and this list would need a different entry */
+	SYS_stat, SYS_fstat, SYS_lstat,
+	/* memory */
+	SYS_mmap, SYS_mprotect, SYS_munmap, SYS_mremap, SYS_brk,
+	/* signals and the interpreter's own bookkeeping */
+	SYS_rt_sigaction, SYS_rt_sigprocmask, SYS_arch_prctl,
+	SYS_set_tid_address, SYS_futex, SYS_membarrier,
+	/* identity, which CPython reads at startup */
+	SYS_getpid, SYS_gettid, SYS_getuid, SYS_getgid, SYS_geteuid,
+	SYS_getegid,
+	/* the network, which is the whole job */
+	SYS_socket, SYS_connect, SYS_bind, SYS_sendto, SYS_recvfrom,
+	SYS_recvmsg, SYS_getsockname, SYS_getpeername, SYS_setsockopt,
+	SYS_getsockopt, SYS_poll, SYS_epoll_create1,
+	/* time and randomness */
+	SYS_clock_gettime, SYS_getrandom,
+	/* threads: `ports` and nothing else. Accepted only with
+	 * CLONE_THREAD -- see the flag check in install_filter(). */
+	SYS_clone,
+	/* starting and stopping. execve is what the sandbox's own last
+	 * step needs, so a profile without it fails at exec and looks
+	 * exactly like a missing program; install_filter() refuses such a
+	 * profile rather than letting that happen. */
+	SYS_execve, SYS_exit, SYS_exit_group,
+};
+
+struct profile {
+	const char *name;
+	const int *calls;
+	int count;
+};
+
+static const struct profile profiles[] = {
+	{ "recon", profile_recon,
+	  (int)(sizeof(profile_recon) / sizeof(profile_recon[0])) },
+};
+
+#define PROFILE_COUNT ((int)(sizeof(profiles) / sizeof(profiles[0])))
+
+static bool profile_allows(const struct profile *p, int nr) {
+	for (int i = 0; i < p->count; i++) {
+		if (p->calls[i] == nr) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static const struct profile *find_profile(const char *name) {
+	for (int i = 0; i < PROFILE_COUNT; i++) {
+		if (strcmp(profiles[i].name, name) == 0) {
+			return &profiles[i];
+		}
+	}
+	return NULL;
+}
+
+static void install_filter(const struct profile *allow) {
+	/* Two instructions per listed call, plus the architecture check and
+	 * the two terminators -- and four more for clone's flag test. The
+	 * architecture check is not decoration: a
 	 * syscall NUMBER means nothing without it, and a 32-bit process
 	 * entering through the compat layer would otherwise be filtered
 	 * against a table that is not its own. */
-	struct sock_filter *f = calloc(DENIED_COUNT * 2 + 5, sizeof(*f));
+	int listed = allow != NULL ? allow->count : DENIED_COUNT;
+	struct sock_filter *f = calloc((size_t)listed * 2 + 12, sizeof(*f));
 	if (f == NULL) {
 		die_msg("out of memory building the filter");
 	}
@@ -301,13 +390,66 @@ static void install_filter(void) {
 	f[n++] = bpf_stmt(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS);
 	f[n++] = bpf_stmt(BPF_LD | BPF_W | BPF_ABS,
 		offsetof(struct seccomp_data, nr));
-	for (int i = 0; i < DENIED_COUNT; i++) {
-		f[n++] = bpf_jump(BPF_JMP | BPF_JEQ | BPF_K,
-			(unsigned)denied[i], 0, 1);
+	if (allow != NULL && !profile_allows(allow, SYS_execve)) {
+		/* The last thing this program does is execve the target, and it
+		 * does it AFTER the filter is installed. A profile without
+		 * execve therefore fails at that exec with EPERM, which reads
+		 * exactly like the program not being there. Refuse the profile
+		 * instead of producing that. */
+		die_msg("profile does not allow execve -- it could never start "
+			"the program");
+	}
+	if (allow == NULL) {
+		for (int i = 0; i < DENIED_COUNT; i++) {
+			f[n++] = bpf_jump(BPF_JMP | BPF_JEQ | BPF_K,
+				(unsigned)denied[i], 0, 1);
+			f[n++] = bpf_stmt(BPF_RET | BPF_K,
+				SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA));
+		}
+		f[n++] = bpf_stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
+	} else {
+		/* Each entry is a compare and a return, so every jump offset is
+		 * 0 or 1 whatever the list's length. The obvious shape -- every
+		 * compare jumping forward to one shared ALLOW -- needs an
+		 * offset that grows with the list, and a BPF jump offset is 8
+		 * bits. This one cannot run out. */
+		for (int i = 0; i < allow->count; i++) {
+			if (allow->calls[i] == SYS_clone) {
+				continue;   /* below, with its flag test */
+			}
+			f[n++] = bpf_jump(BPF_JMP | BPF_JEQ | BPF_K,
+				(unsigned)allow->calls[i], 0, 1);
+			f[n++] = bpf_stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
+		}
+		if (profile_allows(allow, SYS_clone)) {
+			/* CLONE ONLY AS A THREAD. clone(2) with no CLONE_THREAD is
+			 * fork, and a list that says "this program creates threads"
+			 * should not also say "this program starts processes" --
+			 * which is the difference an allowlist exists to be able to
+			 * draw. seccomp can read the flags because they are the
+			 * first argument.
+			 *
+			 * `clone3` is not on any list here, so it is EPERM'd, which
+			 * is what keeps this from being the usual clone-filter
+			 * bypass -- musl's pthread_create uses clone(2) and glibc
+			 * has moved to clone3, so this is a fact about THIS image.
+			 * Re-check it if the libc ever changes. */
+			f[n++] = bpf_jump(BPF_JMP | BPF_JEQ | BPF_K,
+				(unsigned)SYS_clone, 0, 4);
+			f[n++] = bpf_stmt(BPF_LD | BPF_W | BPF_ABS,
+				offsetof(struct seccomp_data, args[0]));
+			f[n++] = bpf_stmt(BPF_ALU | BPF_AND | BPF_K, CLONE_THREAD);
+			f[n++] = bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, CLONE_THREAD, 0, 1);
+			f[n++] = bpf_stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
+			/* Anything reaching here compared against `nr` again would
+			 * be reading a register this branch has overwritten, so the
+			 * refusal below is the only thing left and that is correct:
+			 * a clone without CLONE_THREAD gets EPERM like any other
+			 * unlisted call. */
+		}
 		f[n++] = bpf_stmt(BPF_RET | BPF_K,
 			SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA));
 	}
-	f[n++] = bpf_stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
 
 	struct sock_fprog prog = { .len = (unsigned short)n, .filter = f };
 	/* NO_NEW_PRIVS first, and it is doing two jobs: it is what allows
@@ -392,12 +534,23 @@ static void usage(void) {
 		"  --ro PATH   make PATH visible, read-only\n"
 		"  --rw PATH   make PATH visible and writable\n"
 		"  --no-net    an empty network namespace (NOT the default:\n"
-		"              a browser needs the network)\n");
+		"              a browser needs the network)\n"
+		"  --profile N an ALLOWLIST filter instead of the default\n"
+		"              denylist, for a program whose syscall set is\n"
+		"              known. Stronger, and only correct for a program\n"
+		"              somebody measured.\n"
+		"\n"
+		"Profiles:\n");
+	for (int i = 0; i < PROFILE_COUNT; i++) {
+		fprintf(stderr, "  %-11s %d syscalls\n",
+			profiles[i].name, profiles[i].count);
+	}
 	_exit(2);
 }
 
 int main(int argc, char **argv) {
 	bool no_net = false;
+	const struct profile *prof = NULL;
 	int i = 1;
 	for (; i < argc; i++) {
 		if (strcmp(argv[i], "--") == 0) {
@@ -417,6 +570,21 @@ int main(int argc, char **argv) {
 			i++;
 		} else if (strcmp(argv[i], "--no-net") == 0) {
 			no_net = true;
+		} else if (strcmp(argv[i], "--profile") == 0) {
+			if (i + 1 >= argc) {
+				usage();
+			}
+			prof = find_profile(argv[i + 1]);
+			if (prof == NULL) {
+				/* Refused, never quietly fallen back to the denylist:
+				 * a typo'd profile that silently gives the weaker
+				 * filter looks exactly like a working flag. Same rule
+				 * as novi-settings' --panel. */
+				fprintf(stderr, "novi-sandbox: no such profile: %s\n",
+					argv[i + 1]);
+				usage();
+			}
+			i++;
 		} else if (strcmp(argv[i], "-h") == 0 ||
 				strcmp(argv[i], "--help") == 0) {
 			usage();
@@ -632,7 +800,7 @@ int main(int argc, char **argv) {
 		die("rmdir /.oldroot");
 	}
 
-	install_filter();
+	install_filter(prof);
 
 	execvp(cmd[0], cmd);
 	fprintf(stderr, "novi-sandbox: %s: %s\n", cmd[0], strerror(errno));

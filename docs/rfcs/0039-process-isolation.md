@@ -228,6 +228,107 @@ A pipe says the same thing without needing a shared namespace. The
 child closes its write end and asks whether the pipe is already at
 EOF; it can only be if the supervisor's end is closed too.
 
+### 14. An allowlist, where the program's syscall set is knowable.
+
+Decision 5 chose a denylist and gave the reason: nobody can enumerate
+what a layout engine and its libc will ever do. **`novi-recon` is the
+other case.** It makes DNS queries and TLS connections, reads no file
+it was not given, and runs on an interpreter that ships from this same
+build. `novi-sandbox --profile recon` is deny-by-default with 48
+syscalls allowed, and `pkg install novi-recon` puts the tool behind it
+— the script in `/usr/libexec`, a wrapper on PATH, exactly the shape
+RFC 0031 roadmap 5 gave the browser.
+
+**THE LIST IS DERIVED, NOT WRITTEN.** A hand-written allowlist is
+somebody's reading of a program, and being wrong means a tool that
+worked everywhere it was tried and fails on the path nobody exercised.
+So `build/45-novi-sandbox.sh` builds a ptrace tracer —
+`/build/sandbox-test/novi-syscalls`, never installed, the hostapd
+bargain from RFC 0009 — and the list is the union over every
+subcommand plus the host test suite's error branches. Eleven runs, 30
+to 44 syscalls each, **48 in the union**, recorded with their
+provenance in `novi-sandbox/profile-recon.syscalls`.
+
+**`SECCOMP_RET_LOG` was the obvious instrument and it logs nothing
+here.** It needs `audit_seccomp()`, which without `CONFIG_AUDIT` is a
+no-op stub in `include/linux/audit.h` — checked in the config, not
+assumed. A logging mode that silently logs nothing is worse than no
+logging mode, and turning audit on to get one is a kernel change for
+an instrument. ptrace needs nothing from the config.
+
+**THE TABLE AND THE MEASUREMENT ARE DIFFED AT BUILD TIME.** `main.c`
+writes the list as `SYS_recvfrom` and friends because that is what a
+reviewer can read; the derivation is numbers because that is what the
+tracer produced. Neither is a copy of the other and a transcription
+mistake between them is silent in both directions — a missing entry is
+a tool that fails on one subcommand, an extra one is a hole. So the
+stage extracts the C table, compiles it, and diffs. Provoked both ways:
+dropping `SYS_recvmsg` reports `-47`, adding `SYS_ptrace` reports
+`+101`.
+
+**WHY A DERIVED LIST IS STABLE HERE and would not be elsewhere:** the
+libc, the interpreter and the kernel all come out of this build. musl
+reaches for `open` where glibc uses `openat`, and `stat` where glibc
+uses `newfstatat`; neither of those numbers is in the list, and on a
+glibc system both would have to be. A distribution that mixes versions
+cannot make that claim; this one can.
+
+### 15. `clone` only as a thread, and only because one subcommand needs it.
+
+`clone` appears in exactly one of the eleven traces: `ports`, whose
+connect scan uses threads. Nothing else in the tool needs it — and
+`clone(2)` without `CLONE_THREAD` is `fork`, so a list saying "this
+program creates threads" would also be saying "this program starts
+processes", which is the distinction an allowlist exists to be able to
+draw. seccomp can read the flags, because they are the syscall's first
+argument.
+
+Verified on a booted machine by running **the same probe twice, with
+the same binds, changing only the filter**:
+
+```
+--profile recon           threading.Thread : works
+                          os.fork()        : refused -- Operation not permitted
+
+(no profile, the denylist) threading.Thread : works
+                           os.fork()        : SUCCEEDED
+```
+
+Which is the point of the whole decision: the denylist cannot draw that
+line and does not pretend to, and the difference is visible rather than
+argued. (The probe has to be a FILE under a bound directory, not
+`python3 -c` — see decision 16.)
+
+`clone3` is on no list here, so it is `EPERM`'d — which is what keeps
+this from being the usual clone-filter bypass. That is a fact about
+**this image**: musl's `pthread_create` uses `clone(2)` where glibc has
+moved to `clone3`. Re-check it if the libc ever changes.
+
+### 16. A profile is a program's, not a language's.
+
+`python3 -c 'import threading'` under `--profile recon` fails, and the
+one syscall it wants is **`getcwd` (79)** — `-c` puts the working
+directory on `sys.path`, and novi-recon, exec'd by absolute path from
+`/usr/libexec`, never asks. It is not in the list because it was never
+measured, and putting it there "just in case" is how a derived list
+stops being derived.
+
+It is worth stating the other way round too: **the profile does not
+make Python safe, it makes one program's use of Python bounded.**
+
+### 17. What being wrong costs is `EPERM`, not a dead process.
+
+`SECCOMP_RET_ERRNO`, as in the denylist and for the same reason. A
+syscall on an unexercised path becomes an `OSError` with a traceback
+naming the line — diagnosable, and recoverable by
+`NOVI_RECON_SANDBOX=off`. A `KILL_PROCESS` allowlist would turn the
+same mistake into a program that vanishes.
+
+The profile is also checked for `execve` at install time: the sandbox's
+own last act is to exec the target, *after* the filter goes on, so a
+profile without it fails there and reads exactly like the program not
+being installed.
+
 ## What was verified
 
 **On the build host, which is where the interesting cases are** — the
@@ -347,6 +448,22 @@ is inherited across the fork and the exec into the namespace.
 `unclosed-tags.html` sandboxed reads 1,048,576 kB at 700 seconds and
 holds — the same ceiling, the same plateau.
 
+**THE ALLOWLIST WAS CHECKED FROM THE PACKAGE, not from a hand-copied
+binary** — `pkg install novi-recon` on a freshly built image, which is
+what puts the wrapper on PATH and the script in `/usr/libexec`. On a
+booted machine: inside `--profile recon` the root holds `dev etc lib
+proc tmp usr` and nothing else, `/root` and `/etc/shadow` are not
+there, `Seccomp: 2` and `NoNewPrivs: 1` sit beside
+`CapEff: 000001ffffffffff` — so the refusals are the filter and not a
+privilege drop — `threading.Thread` works, and `os.fork()` is refused.
+Every subcommand behaves the same as with `NOVI_RECON_SANDBOX=off`:
+`dns`, `tls`, `ports` and `all` succeed with the same output, and
+`whois`, `headers`, `robots` and `pwned` fail **byte for byte
+identically in both modes** — this network blocks port 43 and
+intercepts TLS with a CA the guest does not trust. Running both modes
+is the only reason that could be told apart from a sandbox that had
+broken four subcommands.
+
 One measurement corrected another, too. A single sample taken 13
 seconds in showed `many-siblings.html` at 312,948 kB unsandboxed
 against 273,928 kB sandboxed, which reads as a 39 MB saving; at 40
@@ -388,10 +505,11 @@ different and much larger change.
    measure and never could.
 2. **Landlock**, which is one kernel symbol and a second policy layer
    that does not depend on the mount list being complete.
-3. **An allowlist filter for programs whose syscall set is knowable.**
-   `novi-recon` makes DNS queries and TLS connections and reads no
-   files it was not given; that is a short list, and a short list can be
-   an allowlist. The browser is the hard case and can keep the denylist.
+3. ~~**An allowlist filter for programs whose syscall set is
+   knowable.**~~ **Done** — decisions 14 to 17. 48 syscalls, derived by
+   tracing rather than written, diffed against the measurement at build
+   time, with `clone` accepted only as a thread. The browser keeps the
+   denylist, as the item said it should.
 4. **A `--no-net` caller.** Nothing uses it yet, which by RFC 0036's
    own rule means it is wiring for a hypothetical — it ships because it
    is four lines and the alternative is a flag added under pressure

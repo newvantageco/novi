@@ -1979,6 +1979,67 @@ netsurf` puts the browser behind it.
   could find it; the symptom was `httpd: bind: Address in use` from a
   run whose previous line had just tried to clear the port. Match the
   command line.
+- **THERE IS AN ALLOWLIST NOW, FOR ONE PROGRAM** (RFC 0039 roadmap 3).
+  `novi-sandbox --profile recon` is deny-by-default with 48 syscalls,
+  and `pkg install novi-recon` puts the tool behind it -- script in
+  `/usr/libexec`, wrapper on PATH, RFC 0031 roadmap 5's shape. The
+  browser keeps the denylist: nobody can enumerate what a layout
+  engine will do, and novi-recon is the opposite case.
+- **THE LIST IS DERIVED, AND THE BUILD DIFFS IT AGAINST THE
+  MEASUREMENT.** `45-novi-sandbox.sh` builds a ptrace tracer
+  (`/build/sandbox-test/novi-syscalls`, never installed -- the hostapd
+  bargain); the list is the union over every subcommand plus the host
+  test suite's error branches, recorded with its provenance in
+  `novi-sandbox/profile-recon.syscalls`. `main.c` writes `SYS_recvfrom`
+  because that is reviewable; the stage EXTRACTS that table, compiles
+  it and diffs the numbers, because a transcription slip is silent in
+  both directions -- a missing entry breaks one subcommand, an extra
+  one is a hole. Provoked both ways (`-47`, `+101`).
+- **`SECCOMP_RET_LOG` LOGS NOTHING ON THIS KERNEL.** It goes through
+  `audit_seccomp()`, which without `CONFIG_AUDIT` is a no-op stub in
+  `include/linux/audit.h` -- so the obvious way to learn a program's
+  syscall set allows everything and records none of it. Checked in the
+  config, not assumed. ptrace needs nothing from the config.
+- **TRACE THE PROGRAM, NOT A SHELL AROUND IT.** The first union was
+  taken with `sh -c 'echo … | novi-recon pwned'` under the tracer and
+  collected the SHELL's `fork`, `wait4` and `dup2` -- in the one list
+  where "it can spawn processes" must not arrive by accident. Redirect
+  from a file.
+- **`clone` COMES FROM EXACTLY ONE SUBCOMMAND** (`ports`, whose connect
+  scan threads), so the filter accepts it only with `CLONE_THREAD`:
+  `clone(2)` without that flag is `fork`. Verified by running the SAME
+  probe twice with the same binds and only the filter changed: under
+  `--profile recon` `threading.Thread` works and `os.fork()` is
+  refused; under the denylist `threading.Thread` works and **`os.fork()`
+  SUCCEEDS**. The difference is visible rather than argued, which is
+  the whole case for the profile. `clone3` is on
+  no list and so is EPERM'd, which is what stops the usual bypass, and
+  that is a fact about THIS image: musl's `pthread_create` uses
+  `clone(2)` where glibc has moved to `clone3`.
+- **A PROFILE IS A PROGRAM'S, NOT A LANGUAGE'S.** `python3 -c 'import
+  threading'` under `--profile recon` fails, and the one syscall it
+  wants is **`getcwd`** -- `-c` puts the working directory on
+  `sys.path` and novi-recon, exec'd by absolute path, never asks. It
+  stays out: adding a syscall nobody measured is how a derived list
+  stops being derived.
+- **A DERIVED LIST IS STABLE HERE AND WOULD NOT BE ON A NORMAL
+  DISTRIBUTION**, and that is worth saying because it is the argument
+  for doing this at all: the libc, the interpreter and the kernel all
+  come out of this build. musl reaches for `open` where glibc uses
+  `openat`, and `stat` where glibc uses `newfstatat` -- neither number
+  is in the list, and on a glibc system both would have to be.
+- **RUN BOTH MODES OR YOU CANNOT READ THE RESULT.** Four novi-recon
+  subcommands fail under the sandbox; they fail BYTE FOR BYTE
+  IDENTICALLY with `NOVI_RECON_SANDBOX=off`, because this network
+  blocks port 43 and intercepts TLS with a CA the guest does not
+  trust. Without the second column that reads as a sandbox which broke
+  four subcommands.
+- **A BIND LIST IS A CLAIM ABOUT WHAT A PROGRAM NEEDS.** Both wrappers
+  bound `/etc/nsswitch.conf`, which has never existed here --
+  `18-network.sh`'s own comment says musl does not read it. The
+  sandbox skips an absent path by design, so the only symptom was one
+  `skipping ... (not present)` line per run: invisible for a GUI
+  program, and the first line of output for a command-line one.
 
 ## Architecture: two ways to say "not now"
 

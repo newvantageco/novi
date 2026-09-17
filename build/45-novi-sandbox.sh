@@ -75,6 +75,72 @@ echo ">>> Building novi-sandbox ..."
 
 install -D -m 755 "${WORK}/novi-sandbox" "${ROOTFS}/usr/bin/novi-sandbox"
 
+# The tracer, into /build/sandbox-test and DELIBERATELY NOT into the
+# image -- the hostapd bargain from RFC 0009 and the sshd one from RFC
+# 0019. It exists to DERIVE an allowlist (RFC 0039 roadmap 3) from a
+# program rather than from somebody's reading of it, and the derived
+# list is then committed as C. A ptrace tool on the target would be a
+# second way to inspect a process on a system whose whole argument is
+# that there is one way.
+echo ">>> Building novi-syscalls (test only, not installed) ..."
+(
+    cd "${WORK}"
+    # shellcheck disable=SC2086
+    "${CC}" ${CFLAGS} ${LDFLAGS} -std=gnu11 -Wall -Wextra -Werror \
+        -o novi-syscalls "${REPO_ROOT}/novi-sandbox/syscall-trace.c"
+    "${TOOLS}/bin/${TARGET_TRIPLE}-strip" novi-syscalls
+)
+install -D -m 755 "${WORK}/novi-syscalls" \
+    "${BUILD_DIR}/sandbox-test/novi-syscalls"
+
+# THE PROFILE IS DIFFED AGAINST WHAT WAS MEASURED (RFC 0039 roadmap 3).
+# main.c writes the allowlist as `SYS_recvfrom` and friends, because a
+# reviewer can read that and cannot read `45`; the derivation lives in
+# profile-recon.syscalls as numbers, because that is what the tracer
+# produced. Neither is a copy of the other and a transcription mistake
+# between them is silent in both directions -- a missing entry is a
+# tool that fails on one subcommand, an extra one is a hole. So the
+# table is EXTRACTED from main.c and run.
+#
+# Host cc, deliberately: these are kernel ABI numbers from
+# <asm/unistd_64.h>, identical whichever libc's headers include it, and
+# a target binary would have to be run to print anything.
+echo ">>> Checking the recon profile against the measured list ..."
+PROF_SRC="${WORK}/profile-check.c"
+{
+    echo '#include <stdio.h>'
+    echo '#include <stddef.h>'
+    echo '#include <sys/syscall.h>'
+    sed -n '/^static const int profile_recon\[\] = {/,/^};/p' \
+        "${REPO_ROOT}/novi-sandbox/main.c"
+    echo 'int main(void) {'
+    echo '    size_t n = sizeof(profile_recon) / sizeof(profile_recon[0]);'
+    echo '    for (size_t i = 0; i < n; i++) printf("%d\n", profile_recon[i]);'
+    echo '    return 0;'
+    echo '}'
+} > "${PROF_SRC}"
+grep -q 'profile_recon\[\]' "${PROF_SRC}" || {
+    echo "ERROR: could not extract profile_recon[] from novi-sandbox/main.c." >&2
+    echo "       The sed range above no longer matches the source." >&2
+    exit 1
+}
+cc -O0 -w -o "${WORK}/profile-check" "${PROF_SRC}"
+"${WORK}/profile-check" | sort -n -u > "${WORK}/profile-from-c.txt"
+grep -v '^#' "${REPO_ROOT}/novi-sandbox/profile-recon.syscalls" |
+    grep -v '^$' | sort -n -u > "${WORK}/profile-measured.txt"
+if ! diff -u "${WORK}/profile-measured.txt" "${WORK}/profile-from-c.txt" \
+        > "${WORK}/profile.diff"; then
+    echo "ERROR: novi-sandbox's recon profile does not match the measured" >&2
+    echo "       list in novi-sandbox/profile-recon.syscalls." >&2
+    echo "       -- is measured and absent from main.c;" >&2
+    echo "       ++ is in main.c and was never measured." >&2
+    sed -n '3,$p' "${WORK}/profile.diff" >&2
+    exit 1
+fi
+echo "    recon profile: $(wc -l < "${WORK}/profile-from-c.txt") syscalls, matching the measured list"
+
 echo ""
 echo "novi-sandbox installed:"
 ls -la "${ROOTFS}/usr/bin/novi-sandbox"
+echo "novi-syscalls (not installed):"
+ls -la "${BUILD_DIR}/sandbox-test/novi-syscalls"
