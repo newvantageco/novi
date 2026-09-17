@@ -210,6 +210,17 @@ READLINE_VERSION="8.2"
 # 8.3 is the other way to close it and is a change to the package
 # CPython depends on, which is a decision for the day something needs
 # 8.3 rather than a side effect of adding a shell.
+# mandoc (RFC 0040 roadmap 2) -- a formatter, because the base image
+# has shipped a `man` that could never display a page. busybox's applet
+# shells out to `tbl`, `nroff` and `col`, none of which exist here, so
+# `man ls` has always printed two "not found" lines and nothing else.
+#
+# mandoc rather than groff: one self-contained C program with no
+# dependencies against groff's ~4 MB and a Perl requirement for parts
+# of it, and mandoc is what Alpine, OpenBSD and Void ship for exactly
+# this reason. ISC-licensed.
+MANDOC_VERSION="1.14.6"
+
 GNU_BASH_VERSION="5.2.37"
 COREUTILS_VERSION="9.12"
 

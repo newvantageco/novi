@@ -341,6 +341,7 @@ fetch "${SQLITE_URL}"
 # RFC for why they install under /usr/gnu rather than over busybox.
 fetch "https://ftp.gnu.org/gnu/bash/bash-${GNU_BASH_VERSION}.tar.gz"
 fetch "https://ftp.gnu.org/gnu/coreutils/coreutils-${COREUTILS_VERSION}.tar.xz"
+fetch "https://mandoc.bsd.lv/snapshots/mandoc-${MANDOC_VERSION}.tar.gz"
 
 # Full-disk encryption (RFC 0018). popt and json-c are cryptsetup's
 # hard dependencies; util-linux and LVM2 are enormous trees fetched for

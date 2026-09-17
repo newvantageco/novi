@@ -231,9 +231,10 @@ BusyBox: that is what boots, what installs, and what every service
 runs. This is a package a person installs when they want the full
 tools, which is exactly what §5 asked for.
 
-**No documentation is shipped.** `--disable-nls` and no man pages —
-there is no `man` on this system to read them with, which is its own
-gap and its own item.
+~~**No documentation is shipped.**~~ **The man pages ship now** (see
+roadmap 2): they were built all along, 102 of them and 916 KB, and
+thrown away because the only `man` on the machine was busybox's
+applet. `--disable-nls` stands — there are no translations.
 
 ## Roadmap
 
@@ -267,9 +268,30 @@ gap and its own item.
    originals saved`. The first attempt at that run did NOT pass, and
    what it found was a pre-existing bug rather than a false positive:
    see RFC 0006's roadmap.
-2. **`man`, and the pages these packages already build.** Both
-   upstreams generate man pages this build throws away, because
-   nothing on the machine could display one.
+2. ~~**`man`, and the pages these packages already build.**~~ **Done**,
+   and the item understated it: the base image has shipped a `man`
+   **that could never display a page** for the life of the project.
+   busybox's applet shells out to `tbl`, `nroff` and `col`, none of
+   which exist here, so `man ls` printed two "not found" lines and
+   nothing else — measured with the shipped busybox binary, not
+   assumed. A command that cannot work is worse than one that is
+   absent, which is RFC 0026's argument for deleting `idle3`.
+
+   `pkg install man` brings **mandoc** (ISC, one self-contained C
+   program, ~584 KB, what Alpine and OpenBSD ship) and the coreutils
+   and bash packages carry their pages. It is also **the first real
+   user of roadmap 1's `replaces-files=`**: mandoc installs
+   `/usr/bin/man`, which is busybox's, so it declares the takeover and
+   `pkg remove man` puts the applet back. A mechanism built for
+   binutils' `strings` that the very next package needed is a
+   reasonable sign it was the right shape.
+
+   Cross-compiling it needed every `configure` answer supplied by hand
+   — `runtest` compiles a probe and then **executes** it, which a cross
+   build cannot, so each answer would have come back "no" and mandoc
+   would have built against a libc it invented. `configure.local` is
+   upstream's documented override, and every value in it was read out
+   of this musl with `nm` and `ls` rather than guessed.
 3. **util-linux**, the third name in §5's sentence.
 4. **`sed`, `grep`, `awk` and `tar`**, if the difference turns out to
    matter as often as coreutils' did. It should be measured the way

@@ -326,6 +326,35 @@ stage_one() {
         echo "ERROR: ${name}: nothing was copied into the package." >&2
         exit 1
     }
+    # THE MAN PAGES SHIP NOW (RFC 0040 roadmap 2). They were built all
+    # along -- 102 of them, 916 KB -- and thrown away, because the only
+    # `man` on the machine was busybox's applet, which shells out to
+    # `nroff` and `col` and could never display a page. `man` is a
+    # package now, so the pages have a reader and this is the other
+    # half of that item.
+    #
+    # Not gzipped: mandoc reads both, the saving is under 600 KB, and a
+    # plain file is one a person can `cat`.
+    if [ -d "${PREFIX}${GNU_PREFIX}/share/man" ]; then
+        install -d "${d}/files${GNU_PREFIX}/share/man"
+        local sect page base
+        for sect in "${PREFIX}${GNU_PREFIX}/share/man"/man*; do
+            [ -d "${sect}" ] || continue
+            for page in "${sect}"/*; do
+                [ -f "${page}" ] || continue
+                base="$(basename "${page}")"
+                # Only the pages for programs THIS package ships --
+                # the two share a prefix, so a blind copy would put
+                # bash's page in coreutils and every coreutils page in
+                # bash. Keyed on the file that is actually installed.
+                [ -f "${d}/files${GNU_PREFIX}/bin/${base%.*}" ] || continue
+                install -d "${d}/files${GNU_PREFIX}/share/man/$(basename "${sect}")"
+                cp -a "${page}" \
+                   "${d}/files${GNU_PREFIX}/share/man/$(basename "${sect}")/"
+            done
+        done
+    fi
+
     # A PROGRAM IS NOT ALWAYS ONE FILE, and the floor above checked the
     # wrong thing on its first run. `stdbuf` is a launcher for
     # ${GNU_PREFIX}/libexec/coreutils/libstdbuf.so -- it sets LD_PRELOAD
