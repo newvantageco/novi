@@ -4841,6 +4841,19 @@ RFC 0040 roadmap 5, `packages/tests/test-pkg-lifecycle.sh`.
   pkg's own conflict check, and `/usr/share/man` settles it alone: the
   base image's 79 alsa-utils pages live there, so a db built at
   package-build time is stale about pages no package owns.
+- **AND THE FIRST VERSION WAS BROKEN IN THE ORDER PEOPLE WILL ACTUALLY
+  USE.** It refreshed only the directories an invocation TOUCHED, so
+  `pkg install coreutils` (no formatter yet, correctly a no-op) then
+  `pkg install man` (touches `/usr/share/man` and nothing else) left
+  the GNU tree unindexed and `man ls` still warning -- the exact defect
+  the work exists to remove, surviving in the common case. So a man
+  root an INSTALLED package owns that has **no db at all** joins the
+  pass: derived from the install database rather than from a manpath,
+  bounded (it runs only when something already put pages on the
+  machine) and self-limiting (a directory indexed once has a db).
+  Verified booted: `pkg install man` produces BOTH dbs, the second for
+  a directory that install never touched, and `man ls` renders with no
+  warning line.
 - **THE ACCUMULATOR IS A FILE, NOT A VARIABLE, and that is forced.**
   `cmd_install` installs DEPENDENCIES inside a `printf | while`
   pipeline, which is a SUBSHELL -- a variable would silently keep only

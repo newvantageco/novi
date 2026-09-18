@@ -438,6 +438,18 @@ applet. `--disable-nls` stands — there are no translations.
    learns is one rule with one entry, inert on any machine without
    `makewhatis`, off the trust path, and unable to fail an install.
 
+   **Verified on a booted machine in the order people will actually
+   use**, which is the order that was broken in the first draft:
+   `pkg install coreutils` on a machine with no formatter reports no
+   index and says nothing; `pkg install man` then produces **both**
+   `/usr/share/man/mandoc.db` (51,536 bytes) and
+   `/usr/gnu/share/man/mandoc.db` (8,488) — and the second is a
+   directory that install never touched, so it is the no-db sweep
+   doing its job. `man ls` renders **with no warning line above the
+   page**, `man mandoc` and `man bash` likewise, and `apropos "list
+   directory"` answers with nobody having run `makewhatis` by hand.
+   Installing `sqlite`, which ships no pages, runs nothing extra.
+
    **Shipping a prebuilt index was ruled out by measurement, not
    taste**: `mandoc.db` is per-DIRECTORY (a booted machine had one
    under `/usr/share/man` and one under `/usr/gnu/share/man`),
