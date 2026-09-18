@@ -766,7 +766,32 @@ refresh_indexes() {
     # is EVERY machine that has not installed `man` -- so this is the
     # common case and it must be a silent no-op, not a warning.
     command -v makewhatis >/dev/null 2>&1 || { rm -f "$PKG_TMP/mandirs"; return 0; }
-    local dir
+
+    # A DIRECTORY WITH NO INDEX AT ALL IS ALSO STALE, and without this
+    # the ordinary ordering stays broken: `pkg install coreutils` on a
+    # machine with no formatter is correctly a no-op, and the later
+    # `pkg install man` only touches /usr/share/man -- so coreutils'
+    # pages under /usr/gnu/share/man would never be indexed and `man
+    # ls` would go on warning. So every man root an INSTALLED package
+    # owns that has no `mandoc.db` joins this pass.
+    #
+    # Derived from the install database rather than from a manpath
+    # this program would otherwise have to know. Bounded: it runs only
+    # when something already put man pages on the machine, and it is
+    # self-limiting, because a directory that has been indexed once
+    # has a db and is skipped.
+    local known dir rel
+    known="$(cat "$PKG_DB"/*/files 2>/dev/null \
+             | grep -E '(^|/)share/man/man[^/]*/' || true)"
+    if [ -n "$known" ]; then
+        printf '%s\n' "$known" | while read -r rel; do
+            dir="/${rel%/*}"; dir="${dir%/*}"
+            [ -d "${PKG_ROOT:-}$dir" ] || continue
+            [ -f "${PKG_ROOT:-}$dir/mandoc.db" ] && continue
+            printf '%s\n' "$dir" >> "$PKG_TMP/mandirs"
+        done
+    fi
+
     # `${PKG_ROOT:-}`, the same prefix every other path in this program
     # uses. The first version special-cased PKG_ROOT and skipped
     # entirely, which was over-clever in the direction that hides

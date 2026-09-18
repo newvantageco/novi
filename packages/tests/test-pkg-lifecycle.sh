@@ -247,5 +247,43 @@ check "install succeeds with no formatter present" "$rc" "0"
 absent "and says nothing about indexing" "$out" "could not index"
 mv "$T/bin/makewhatis.off" "$T/bin/makewhatis"
 
+# ── 14. THE ORDERING EVERYBODY WILL ACTUALLY DO ──────────────────────
+# `pkg install coreutils` on a machine with no formatter is correctly
+# a silent no-op -- and the later `pkg install man` only touches
+# /usr/share/man. Without a second rule, the pages installed while
+# there was no formatter are NEVER indexed and `man ls` goes on
+# warning forever. So a man root that an installed package owns and
+# that has NO db at all joins the pass.
+#
+# This is the case the first implementation got wrong, and it is the
+# common one.
+rm -rf "$T/root" "$T/db"; mkdir -p "$T/root" "$T/db" "$T/log"
+mv "$T/bin/makewhatis" "$T/bin/makewhatis.off"
+run_pkg install "$PA" >/dev/null 2>&1          # pages, no formatter
+[ -f "$T/root/usr/gnu/share/man/man1/aa.1" ] && ok \
+    || bad "the no-formatter install did not land its page"
+mv "$T/bin/makewhatis.off" "$T/bin/makewhatis"
+# The stand-in must leave a db behind, or "already indexed" can never
+# be distinguished from "not indexed yet".
+cat > "$T/bin/makewhatis" <<MW
+#!/bin/sh
+echo "makewhatis \$*" >> "$T/log/mw"
+for d in "\$@"; do : > "\$d/mandoc.db"; done
+MW
+chmod 755 "$T/bin/makewhatis"
+mw_reset
+run_pkg install "$PC" >/dev/null 2>&1          # pages elsewhere, formatter now present
+contains "the directory this install touched is indexed" "$(mw)" "/usr/share/man"
+contains "AND the one indexed by nobody yet" "$(mw)" "/usr/gnu/share/man"
+
+# ── 15. AND IT DOES NOT RE-INDEX WHAT ALREADY HAS A DB ───────────────
+# Self-limiting, or every install re-reads every manual page on the
+# machine forever.
+mw_reset
+run_pkg install "$PB" >/dev/null 2>&1
+n="$(mw | grep -c '/usr/share/man$' || true)"
+check "an already-indexed directory is left alone" "$n" "0"
+contains "the touched one is still done" "$(mw)" "/usr/gnu/share/man"
+
 echo ">>> pkg lifecycle scripts: $((PASS + FAIL)) check(s), $FAIL failure(s)"
 [ "$FAIL" -eq 0 ] || exit 1
