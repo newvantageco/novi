@@ -162,5 +162,90 @@ run_pkg install "$H1" >/dev/null 2>&1
     || bad "scripts were not copied into the install database"
 run_pkg remove hooked >/dev/null 2>&1
 
+# ── 10. THE DERIVED MAN-INDEX REFRESH ────────────────────────────────
+# Not a script: pkg refreshes an index when a package installed pages
+# into the directory it covers. Three packages here ship man pages and
+# a fourth would have been forgotten, which is why the trigger is what
+# was installed rather than what somebody remembered to write.
+#
+# A STAND-IN `makewhatis` on PATH, because the real one is a target
+# binary. It records its argv, which is the whole contract.
+mkdir -p "$T/bin"
+cat > "$T/bin/makewhatis" <<MW
+#!/bin/sh
+echo "makewhatis \$*" >> "$T/log/mw"
+MW
+chmod 755 "$T/bin/makewhatis"
+PATH="$T/bin:$PATH"; export PATH
+mw() { cat "$T/log/mw" 2>/dev/null; }
+mw_reset() { : > "$T/log/mw"; }
+
+# A package that ships a man page, and one that ships none.
+manpkg() {
+    local name="$1" dir="$2" page="$3" deps="${4:-}"
+    local b="$T/b-$name"; rm -rf "$b"
+    mkdir -p "$b/files/$dir/man1" "$b/files/usr/bin"
+    printf '.TH X 1\n' > "$b/files/$dir/man1/$page.1"
+    printf 'x\n' > "$b/files/usr/bin/$name"
+    { echo "name=$name"; echo "version=1.0"; echo "arch=x86_64"
+      [ -n "$deps" ] && echo "depends=$deps"
+      echo "description=ships a manual page"; } > "$b/MANIFEST"
+    bash packages/mkpkg "$b" "$T/repo" >/dev/null 2>&1 \
+        || { echo "mkpkg failed for $name" >&2; exit 1; }
+}
+manpkg pagesa usr/gnu/share/man aa
+manpkg pagesb usr/gnu/share/man bb
+manpkg pagesd usr/gnu/share/man dd pagesb
+manpkg pagesc usr/share/man cc
+PA="$(echo "$T"/repo/pagesa-1.0-*.pkg.tar.gz)"
+PC="$(echo "$T"/repo/pagesc-1.0-*.pkg.tar.gz)"
+
+mkdir -p "$T/root/usr/gnu/share/man" "$T/root/usr/share/man"
+mw_reset
+out="$(run_pkg install "$PA")"; rc=$?
+check "a package shipping man pages installs" "$rc" "0"
+contains "its directory was indexed" "$(mw)" "/usr/gnu/share/man"
+
+# ── 11. ONCE PER INVOCATION, NOT ONCE PER PACKAGE ────────────────────
+# makewhatis re-reads every page in the directory, so two packages
+# landing in one tree must not mean two passes over it.
+#
+# IT HAS TO BE TWO PACKAGES IN ONE INVOCATION, and the first version of
+# this check installed one -- where per-package and per-invocation are
+# the same number, so moving the call into install_pkg_file left it
+# passing. `pagesd` depends on `pagesb` and both ship into
+# /usr/gnu/share/man, which also drives the DEPENDENCY path: pkg
+# installs a dependency inside a `printf | while` SUBSHELL, so this is
+# the case a variable-accumulating implementation loses.
+PD="$(echo "$T"/repo/pagesd-1.0-*.pkg.tar.gz)"
+mw_reset
+out="$(run_pkg install "$PD")"; rc=$?
+check "a package and its dependency install" "$rc" "0"
+[ -f "$T/root/usr/gnu/share/man/man1/bb.1" ] && ok || bad "the dependency's page is missing"
+[ -f "$T/root/usr/gnu/share/man/man1/dd.1" ] && ok || bad "the package's page is missing"
+n="$(mw | grep -c '/usr/gnu/share/man$' || true)"
+check "two packages, one pass over the directory" "$n" "1"
+
+# And a second directory in the same invocation is its own pass.
+mw_reset
+run_pkg install "$PC" >/dev/null 2>&1
+n="$(mw | grep -c '/usr/share/man$' || true)"
+check "a different directory is indexed too" "$n" "1"
+
+# ── 12. A PACKAGE WITH NO PAGES TRIGGERS NOTHING ─────────────────────
+mw_reset
+run_pkg install "$P1" >/dev/null 2>&1
+check "no pages, no index run" "$(mw)" ""
+
+# ── 13. NO makewhatis ON THE MACHINE MEANS NO-OP, NOT AN ERROR ───────
+# Every machine that has not installed `man` is in this case, so a
+# regression here breaks every install rather than none.
+PB="$(echo "$T"/repo/pagesb-1.0-*.pkg.tar.gz)"
+mv "$T/bin/makewhatis" "$T/bin/makewhatis.off"
+out="$(run_pkg install "$PB")"; rc=$?
+check "install succeeds with no formatter present" "$rc" "0"
+absent "and says nothing about indexing" "$out" "could not index"
+mv "$T/bin/makewhatis.off" "$T/bin/makewhatis"
+
 echo ">>> pkg lifecycle scripts: $((PASS + FAIL)) check(s), $FAIL failure(s)"
 [ "$FAIL" -eq 0 ] || exit 1

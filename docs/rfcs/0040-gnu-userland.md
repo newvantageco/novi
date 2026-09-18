@@ -328,10 +328,10 @@ applet. `--disable-nls` stands — there are no translations.
    `restored usr/bin/man -> ../../bin/busybox` and puts the applet
    back.
 
-   **One defect remains and is roadmap 5's.** Every `man` invocation
-   prints `outdated mandoc.db lacks <page> entry, run makewhatis
-   <dir>` above the page, because nothing runs `makewhatis` at install
-   time. Confirmed both directions: after `makewhatis` the warning is
+   **That left one defect, and roadmap 5 closed it.** Every `man`
+   invocation printed `outdated mandoc.db lacks <page> entry, run
+   makewhatis <dir>` above the page, because nothing ran `makewhatis`
+   at install time. Confirmed both directions: after `makewhatis` the warning is
    gone, and deleting the db brings it back. The page renders either
    way and the message names its own remedy, which is better than a
    silent failure — but a warning on every invocation is how a warning
@@ -424,13 +424,25 @@ applet. `--disable-nls` stands — there are no translations.
    half-installed package. But an undocumented asymmetry in
    root-executed code is exactly what somebody relies on backwards.
 
-   `packages/tests/test-pkg-lifecycle.sh` is 32 checks over the
-   mechanism, each provoked. What it does NOT do is use it: **whether
-   the man index should be a per-package script or something `pkg`
-   derives is still open**, and the answer is not obvious. A script
-   means three packages (`man`, `coreutils`, `bash`) each carrying a
-   copy of the same `makewhatis` call, which is the drift this project
-   writes tests to prevent; deriving it means putting knowledge of man
-   pages into the program that installs code as root. Until that is
-   decided, `man` warns until somebody runs `makewhatis`, and says so
-   itself.
+   `packages/tests/test-pkg-lifecycle.sh` is 42 checks over the
+   mechanism, each provoked.
+
+   **And the man index does NOT use it.** That question was left open
+   deliberately and is settled now: the index is **derived**, refreshed
+   by `pkg` from what a run of installs actually put on the machine. A
+   script would mean `man`, `coreutils` and `bash` each carrying a copy
+   of one `makewhatis` call — and the fourth package to ship a page
+   getting a stale index because nobody remembered, which is the rule
+   this project keeps writing tests to enforce (pkgsplit's derived
+   split; novi-sandbox's "no list of sandboxed programs"). What `pkg`
+   learns is one rule with one entry, inert on any machine without
+   `makewhatis`, off the trust path, and unable to fail an install.
+
+   **Shipping a prebuilt index was ruled out by measurement, not
+   taste**: `mandoc.db` is per-DIRECTORY (a booted machine had one
+   under `/usr/share/man` and one under `/usr/gnu/share/man`),
+   `/usr/gnu/share/man` is shared by two packages so the second to
+   carry a db there is refused by roadmap 1's conflict check, and
+   `/usr/share/man` settles it alone — the base image's 79 alsa-utils
+   pages live there, so a db built when the `man` package was made
+   would be stale about pages no package owns.

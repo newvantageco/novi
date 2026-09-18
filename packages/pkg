@@ -706,6 +706,84 @@ check_conflicts() {
     return 0
 }
 
+# ---------------------------------------------------------------------------
+# Derived index refresh
+#
+# WHY THIS IS DERIVED AND NOT A PER-PACKAGE SCRIPT. `pkg` runs
+# `scripts/post-install` as root and three packages ship man pages
+# (`man`, `coreutils`, `bash`), so the obvious answer is a script in
+# each. That is three copies of one `makewhatis` call, and -- worse --
+# the FOURTH package to ship a man page gets a stale index because
+# nobody remembered. This repository's own rule, from pkgsplit and
+# from novi-sandbox's wrapper detection: nobody maintains a second
+# list. So the trigger is what was INSTALLED, and a package that ships
+# a page gets an index because it shipped a page.
+#
+# What pkg learns is ONE rule -- "refresh a stale index when the tool
+# that owns it is present" -- with one entry, inert on any machine
+# without `makewhatis`, which is every machine that has not installed
+# `man`. It is not on the trust path and cannot fail an install.
+#
+# A GENERATED INDEX CANNOT BE PACKAGE-OWNED, which is what rules out
+# the other answers: `mandoc.db` is PER DIRECTORY (measured -- a booted
+# machine had one under /usr/share/man and one under
+# /usr/gnu/share/man), `/usr/gnu/share/man` is shared by coreutils and
+# bash, and the second package to ship a db there would be refused by
+# this program's own conflict check. Correctly.
+#
+# `/usr/share/man` settles it on its own: the base image's 79
+# alsa-utils pages live there, so a db built when the `man` package
+# was made would be stale about pages no package owns.
+
+# Record the man roots a package just installed into. A FILE, not a
+# variable: cmd_install runs install_pkg_file for dependencies inside a
+# `printf | while` pipeline, which is a SUBSHELL, so an accumulating
+# variable would silently lose every dependency's pages and keep only
+# the top-level package's. Same trap novi-state's observer cache hit.
+note_man_dirs() {
+    local list="$1" rel root
+    [ -f "$list" ] || return 0
+    while read -r rel; do
+        case "$rel" in
+            */share/man/man*/*|share/man/man*/*) ;;
+            *) continue ;;
+        esac
+        # usr/gnu/share/man/man1/ls.1 -> /usr/gnu/share/man
+        root="/${rel%/*}"     # drop the filename
+        root="${root%/*}"     # drop manN
+        printf '%s\n' "$root" >> "$PKG_TMP/mandirs"
+    done < "$list"
+    return 0
+}
+
+# Refresh every index a run of installs invalidated. Called ONCE per
+# invocation rather than per package: `pkg install coreutils bash man`
+# touches one directory three times, and makewhatis reads every page in
+# it each time.
+refresh_indexes() {
+    [ -f "$PKG_TMP/mandirs" ] || return 0
+    # No formatter on the machine means nothing owns the index, which
+    # is EVERY machine that has not installed `man` -- so this is the
+    # common case and it must be a silent no-op, not a warning.
+    command -v makewhatis >/dev/null 2>&1 || { rm -f "$PKG_TMP/mandirs"; return 0; }
+    local dir
+    # `${PKG_ROOT:-}`, the same prefix every other path in this program
+    # uses. The first version special-cased PKG_ROOT and skipped
+    # entirely, which was over-clever in the direction that hides
+    # things: it also skipped under the test harness, whose doctored
+    # copy sets PKG_ROOT to a temporary tree -- so the feature was
+    # unreachable in the one place that could check it.
+    sort -u "$PKG_TMP/mandirs" | while read -r dir; do
+        [ -d "${PKG_ROOT:-}$dir" ] || continue
+        # Never fatal: the package's files are installed and correct;
+        # only a lookup cache is behind.
+        makewhatis "${PKG_ROOT:-}$dir" >/dev/null 2>&1 \
+            || warn "could not index manual pages in $dir"
+    done
+    rm -f "$PKG_TMP/mandirs"
+    return 0
+}
+
 install_pkg_file() {
     local archive="$1"
     local force="${2:-no}"
@@ -809,6 +887,8 @@ install_pkg_file() {
         chmod +x "$db_dir/scripts/"* 2>/dev/null || true
     fi
 
+    note_man_dirs "$db_dir/files"
+
     # Run post-install script if present
     local postinst="$PKG_TMP/extract/scripts/post-install"
     if [ -f "$postinst" ]; then
@@ -884,6 +964,11 @@ cmd_install() {
 
         install_pkg_file "$archive"
     done
+
+    # ONCE per invocation, not once per package: `pkg install coreutils
+    # bash man` touches one man directory three times and makewhatis
+    # re-reads every page in it each time.
+    refresh_indexes
 }
 
 # Which installed packages name $1 in their `depends`, space-separated
@@ -1127,6 +1212,8 @@ cmd_update() {
         install_pkg_file "$archive" force
         upgraded=$(( upgraded + 1 ))
     done
+
+    refresh_indexes
 
     if [ "$upgraded" -eq 0 ]; then
         msg "nothing to upgrade ($checked package(s) checked)"

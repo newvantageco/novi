@@ -4825,12 +4825,40 @@ RFC 0040 roadmap 5, `packages/tests/test-pkg-lifecycle.sh`.
   `pre-remove` runs long after the archive is gone. If that copy stops
   happening the remove pair silently never runs again -- which is a
   check in the suite.
-- **Whether the man index should be a script or something pkg derives
-  is STILL OPEN**, deliberately. A script means `man`, `coreutils` and
-  `bash` each carrying a copy of one `makewhatis` call -- the drift
-  this project writes tests to prevent; deriving it puts knowledge of
-  man pages into the program that installs code as root. Neither is
-  obviously right, so nothing was built on a guess.
+- **THE MAN INDEX IS DERIVED, AND THAT IS WHY IT DOES NOT USE THE
+  HOOK.** A per-package script means `man`, `coreutils` and `bash` each
+  carrying a copy of one `makewhatis` call, and the FOURTH package to
+  ship a page getting a stale index because nobody remembered --
+  pkgsplit's argument and novi-sandbox's "no list of sandboxed
+  programs". `pkg` notes the man roots a package installed into and
+  refreshes them; what it learns is ONE rule with ONE entry, inert on
+  any machine without `makewhatis` (every machine that has not
+  installed `man`), off the trust path, unable to fail an install.
+- **A PREBUILT INDEX WAS RULED OUT BY MEASUREMENT.** `mandoc.db` is
+  per-DIRECTORY -- a booted machine had one under `/usr/share/man` and
+  one under `/usr/gnu/share/man` -- `/usr/gnu/share/man` is shared by
+  coreutils and bash so the second to ship a db there is refused by
+  pkg's own conflict check, and `/usr/share/man` settles it alone: the
+  base image's 79 alsa-utils pages live there, so a db built at
+  package-build time is stale about pages no package owns.
+- **THE ACCUMULATOR IS A FILE, NOT A VARIABLE, and that is forced.**
+  `cmd_install` installs DEPENDENCIES inside a `printf | while`
+  pipeline, which is a SUBSHELL -- a variable would silently keep only
+  the top-level package's directories and lose every dependency's.
+  Same trap as novi-state's observer cache and `packages/pkg`'s own
+  earlier one. Provoked: swapping the file for a variable fails the
+  dependency check.
+- **ONCE PER INVOCATION, NOT PER PACKAGE**, because makewhatis re-reads
+  every page in the directory. **And the first check for that could not
+  fail**: it installed ONE package, where the two are the same number,
+  so moving the call into `install_pkg_file` left it green. It takes a
+  package plus a DEPENDENCY both shipping into one directory -- which
+  is also the case that exercises the subshell.
+- **The first version special-cased `PKG_ROOT` and skipped**, which was
+  over-clever in the direction that hides things: the test harness's
+  doctored copy sets `PKG_ROOT` to a temporary tree, so the feature was
+  unreachable in the one place that could check it. It uses the
+  `${PKG_ROOT:-}` prefix now, like every other path in the program.
 
 ## Architecture: /dev/fd, and testing the image not the shell
 
