@@ -47,6 +47,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>   /* strcasecmp, for --panel */
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -57,6 +58,7 @@
 
 #include "xdg-shell-client-protocol.h"
 #include "../common/text.h"
+#include "../common/keys.h"
 #include "../common/theme.h"
 
 #define WINDOW_WIDTH 640
@@ -127,10 +129,88 @@ enum novi_panel {
 	PANEL_ACCOUNT = 0,
 	PANEL_NETWORK,
 	PANEL_SYSTEM,
+	PANEL_KEYS,
+	PANEL_SESSION,
 	PANEL_COUNT,
 };
 
-static const char *PANEL_NAMES[PANEL_COUNT] = { "Account", "Network", "System" };
+static const char *PANEL_NAMES[PANEL_COUNT] = {
+	"Account", "Network", "System", "Keys", "Session" };
+
+/* ── The Session panel: where the panel's glyphs finally lead ───────
+ *
+ * RFC 0036 roadmap 4, and RFC 0014's long-open "something should
+ * consume this". The coffee cup and the health dot on novi-panel are
+ * both DISPLAY ONLY, and both of their comments say the same thing:
+ * there is nowhere for them to go, and a panel item that opens a
+ * terminal is not a thing this desktop does. This is the somewhere.
+ *
+ * READ-ONLY, deliberately and not from laziness. Everything on it is
+ * either a `system.conf` key the System panel already edits
+ * (`power.blank`, `power.suspend`) or a thing a keystroke owns
+ * (Super+A). A second write path to a key the GUI already reaches is
+ * exactly what RFC 0029 decision 10 refused for `firewall.allow` and
+ * what RFC 0033's roadmap got wrong about the wired network. So this
+ * panel SHOWS, and says where each thing is changed.
+ *
+ * Every value comes from a published file -- /run/novi/idle, written
+ * by novi-shell on every tick, and /run/novi/health, written by the
+ * health service every 30s. No forks: this is the arrangement RFC
+ * 0009 established for the network interface and RFC 0014 for the
+ * health verdict, and the reason the panel that reads them costs
+ * nothing per repaint. */
+#define IDLE_FILE "/run/novi/idle"
+#define HEALTH_FILE "/run/novi/health"
+#define INHIBITOR_MAX 8
+#define INHIBITOR_NAME_MAX 63
+/* Long enough for `degraded` plus the service names the health
+ * service lists; it writes one line and this is a view of it. */
+#define HEALTH_DETAIL_MAX 191
+/* RFC 0038. The compositor publishes one line per window it judges
+ * unresponsive; this is how many of them the panel will name. Six
+ * fills the space a section can have here, and the block says so when
+ * there are more -- a list that shows a subset without saying so is
+ * the bug class this file has already been fixed for twice. */
+#define WEDGED_MAX 6
+#define WEDGED_TITLE_MAX 63
+#define WINDOWS_FILE "/run/novi/windows"
+
+struct session_info {
+	/* A list that shows a subset without saying so is a bug class,
+	 * not an instance (CLAUDE.md). The health line is a list of
+	 * service names and it is capped, so the panel says when the cap
+	 * bit rather than quietly dropping the rest. */
+	bool health_truncated;
+	/* False when /run/novi/idle is absent: no compositor, or one too
+	 * old to publish. That is "nothing to say", not zero seconds of
+	 * idleness -- the same call `novi-agent describe` makes when it
+	 * reports the idle object as absent rather than as zeros. */
+	bool idle_known;
+	int idle_s;
+	int blank_s;       /* 0 means off, as the file spells it */
+	int suspend_s;
+	bool blanked;
+	bool locked;
+	bool awake;        /* somebody pressed Super+A */
+	int inhibit;       /* how many client surfaces are asking */
+	int inhibitor_count;
+	char inhibitors[INHIBITOR_MAX][INHIBITOR_NAME_MAX + 1];
+	bool health_known;
+	bool health_ok;
+	char health_detail[HEALTH_DETAIL_MAX + 1];
+	/* RFC 0038. False when /run/novi/windows is absent: no compositor,
+	 * or one too old to publish -- which is a different answer from
+	 * "every window is responding", and the panel says so. */
+	bool windows_known;
+	int wedged;        /* what the compositor counted */
+	int wedged_named;  /* how many of them fitted here */
+	struct wedged_window {
+		int pid;
+		int cpu;
+		int secs;
+		char title[WEDGED_TITLE_MAX + 1];
+	} wedged_rows[WEDGED_MAX];
+};
 
 /* ── The Network panel: WiFi without a terminal ─────────────────────
  *
@@ -246,6 +326,46 @@ struct novi_settings {
 	char edit_buf[STATE_VAL_MAX + 1];
 	size_t edit_len;
 
+	/* ── Keys panel (RFC 0037 roadmap 1) ──
+	 *
+	 * /etc/novi/keys.conf is the one configuration file on this
+	 * machine the System panel cannot reach, and deliberately so: it
+	 * is not a `system.conf` key, because nothing CONVERGES a keyboard
+	 * shortcut. So a text editor was the only way to change a
+	 * shortcut, which is the same gap RFC 0001 promised was closed and
+	 * RFC 0037 actually closed -- half of it. This is the other half.
+	 *
+	 * The table is the loader's, not a second parse: `novi_keys_load`
+	 * fills it and `novi_keys_format` writes every row's text, so what
+	 * this panel shows is what novi-shell will dispatch and what
+	 * `novi-launcher --keys` will list. */
+	struct novi_keys keys;
+	int keys_selected;
+	int keys_top;
+	/* Typed, not CAPTURED, and that is forced rather than chosen:
+	 * novi-shell grabs Super+<anything> before a client sees it, so a
+	 * "press the shortcut you want" prompt would have the compositor
+	 * close this window when somebody pressed Super+Q at it. Typing
+	 * the binding is what the parser already reads and the formatter
+	 * already writes. */
+	bool keys_editing;
+	char keys_buf[NOVI_KEYS_TEXT_MAX + 1];
+	size_t keys_len;
+	/* Something was written this session, so the panel can say that
+	 * novi-shell is still dispatching the old table -- it reads the
+	 * file once at startup (RFC 0037), which is a decision rather than
+	 * an omission: rebinding live could hand somebody a conflicting
+	 * table with no restart left to recover through. */
+	bool keys_written;
+	/* Which rows this machine's keys.conf actually sets, filled once by
+	 * keys_refresh(). Asking novi_keys_is_set() from the draw looks
+	 * harmless and is a file open and a full parse PER VISIBLE ROW PER
+	 * FRAME -- fourteen of them, at whatever rate a held-down arrow key
+	 * repeats. Same mistake as novi-panel reading the volume file
+	 * inside layout_taskbar(): a read belongs where the state is
+	 * gathered, not where it is drawn. */
+	bool keys_mine[NOVI_BINDINGS_COUNT];
+
 	/* ── Network panel ── */
 	char wifi_iface[32];             /* "" = no wireless device */
 	char wifi_state[32];             /* wpa_supplicant's wpa_state */
@@ -278,6 +398,11 @@ struct novi_settings {
 	char job_ssid[SSID_MAX + 1];
 	char job_out[JOB_BUF];
 	size_t job_len;
+
+	/* Re-read on a poll timeout while the Session panel is showing,
+	 * and once on entering it. An idle counter that does not count is
+	 * a worse answer than no counter. */
+	struct session_info session;
 
 	/* A status line that is a copy, not a pointer to a literal.
 	 * Everything the Account and System panels report is a fixed
@@ -631,6 +756,13 @@ static bool entry_is_toggleable(const struct state_entry *e) {
 }
 
 static void set_status(struct novi_settings *state, const char *msg, bool is_error);
+/* Declared here because apply_state() below needs it and the runner
+ * itself lives with the Network panel that brought it (see the
+ * enum job_kind comment). It is not the Network panel's runner any
+ * more -- an apply is an apply whichever panel asked for it. */
+static bool job_start(struct novi_settings *state, enum job_kind kind,
+	const char *path, char *const argv[], const char *stdin_data,
+	const char *ssid);
 
 static void toggle_selected(struct novi_settings *state) {
 	if (state->entry_count == 0) {
@@ -726,15 +858,26 @@ static void commit_edit(struct novi_settings *state) {
 	set_status(state, "Declared -- press Enter to apply", false);
 }
 
+/* AS A JOB, not a blocking fork, and that stopped being a nicety the
+ * day `packages.*` became a domain novi-state converges: an apply can
+ * now mean `pkg install`, which fetches from a mirror over a network
+ * and unpacks. The comment at the top of this section has warned since
+ * it was written that these calls block the Wayland event loop and
+ * that it would stop being acceptable "the first time a domain
+ * converges something slow (a package install)". That is this, and RFC
+ * 0002's roadmap named it in the same breath as the domain itself.
+ *
+ * The runner already existed for the WiFi scan, and JOB_APPLY already
+ * existed because turning the radio on restarts the supplicant -- so
+ * the System panel's Enter was the one remaining path that could
+ * freeze the window, and it was the one that could freeze it longest.
+ * The completion handler refreshes both panels and reports, so there
+ * is nothing panel-specific to add here. */
 static void apply_state(struct novi_settings *state) {
 	char *const argv[] = { (char *)"novi-state", (char *)"apply", NULL };
-	int rc = run_novi_state(argv);
-	refresh_system(state);
-	if (rc != 0) {
-		set_status(state, "Apply failed", true);
-		return;
+	if (job_start(state, JOB_APPLY, NOVI_STATE_BIN, argv, NULL, NULL)) {
+		set_status(state, "Applying...", false);
 	}
-	set_status(state, "Applied -- system matches the document", false);
 }
 
 /* ── The Network panel ─────────────────────────────────────────────
@@ -1272,11 +1415,11 @@ static const char *FIELD_LABELS[FIELD_COUNT] = {
 /* Every one of these was ALSO written with the shift-left-8 bug
  * NOVI_PIX() exists to rule out: 0xe0 became 0xe000 instead of 0xe0e0,
  * so nothing here was ever quite the colour it claimed. */
-static const pixman_color_t TEXT_PIX    = NOVI_PIX(NOVI_TEXT_PRIMARY);
-static const pixman_color_t LABEL_PIX   = NOVI_PIX(NOVI_TEXT_SECONDARY);
-static const pixman_color_t ERROR_PIX   = NOVI_PIX(NOVI_STATUS_ERROR);
-static const pixman_color_t SUCCESS_PIX = NOVI_PIX(NOVI_STATUS_SUCCESS);
-static const pixman_color_t ACCENT_PIX  = NOVI_PIX(NOVI_ACCENT);
+#define TEXT_PIX NOVI_PIX(NOVI_TEXT_PRIMARY)
+#define LABEL_PIX NOVI_PIX(NOVI_TEXT_SECONDARY)
+#define ERROR_PIX NOVI_PIX(NOVI_STATUS_ERROR)
+#define SUCCESS_PIX NOVI_PIX(NOVI_STATUS_SUCCESS)
+#define ACCENT_PIX NOVI_PIX(NOVI_ACCENT)
 
 static void render_sidebar(struct novi_settings *state, uint32_t *px,
 		uint32_t stride_px, pixman_image_t *dest) {
@@ -1504,6 +1647,556 @@ static void render_network(struct novi_settings *state, uint32_t *px,
 	}
 }
 
+/* ── Keys panel ───────────────────────────────────────────────────────
+ *
+ * RFC 0037 roadmap 1. See the state struct for why the binding is
+ * typed rather than captured, and `common/keys.h` for why the write is
+ * a surgical edit of a file full of comments rather than a rewrite.
+ */
+
+/* ── The Session panel's reader ─────────────────────────────────────
+ *
+ * Two published files, both rewritten by their owner with a rename,
+ * so a reader on its own schedule can never see half a line. Every
+ * key this does not recognise is SKIPPED rather than refused: a
+ * novi-shell newer than this binary must not be able to blank the
+ * panel by adding a line, which is the rule novi-panel and
+ * `novi-power idle` already follow over the same file. */
+static void session_refresh(struct novi_settings *state) {
+	struct session_info *s = &state->session;
+	memset(s, 0, sizeof(*s));
+
+	FILE *f = fopen(IDLE_FILE, "r");
+	if (f != NULL) {
+		char line[256];
+		while (fgets(line, sizeof(line), f) != NULL) {
+			int n = 0;
+			char name[INHIBITOR_NAME_MAX + 1];
+			if (sscanf(line, "idle %d", &n) == 1) {
+				s->idle_s = n;
+				/* The presence of this key is what makes the rest
+				 * meaningful, so it is what sets `known` -- a file
+				 * holding only lines this build does not understand
+				 * is not a machine that has been idle zero seconds. */
+				s->idle_known = true;
+			} else if (sscanf(line, "blank %d", &n) == 1) {
+				s->blank_s = n;
+			} else if (sscanf(line, "suspend %d", &n) == 1) {
+				s->suspend_s = n;
+			} else if (sscanf(line, "blanked %d", &n) == 1) {
+				s->blanked = n != 0;
+			} else if (sscanf(line, "locked %d", &n) == 1) {
+				s->locked = n != 0;
+			} else if (sscanf(line, "awake %d", &n) == 1) {
+				s->awake = n != 0;
+			} else if (sscanf(line, "inhibit %d", &n) == 1) {
+				s->inhibit = n;
+			} else if (sscanf(line, "inhibitor %63s", name) == 1) {
+				if (s->inhibitor_count < INHIBITOR_MAX) {
+					snprintf(s->inhibitors[s->inhibitor_count],
+						sizeof(s->inhibitors[0]), "%s", name);
+					s->inhibitor_count++;
+				}
+			}
+		}
+		fclose(f);
+	}
+
+	f = fopen(HEALTH_FILE, "r");
+	if (f != NULL) {
+		/* The reader's bound IS the field's bound, deliberately.
+		 * -Wformat-truncation caught the first version reading 207
+		 * bytes into a 192-byte field, which is the warning this
+		 * repository has now been right about five times -- and the
+		 * fix it points at is the clamp, never a wider buffer. Sized
+		 * this way, fgets cannot hand over more than fits, and
+		 * whether there WAS more is a question with an answer: a
+		 * complete line ends in a newline or at end of file. */
+		char line[HEALTH_DETAIL_MAX + 1];
+		if (fgets(line, sizeof(line), f) != NULL) {
+			s->health_truncated =
+				strchr(line, '\n') == NULL && !feof(f);
+			line[strcspn(line, "\n")] = '\0';
+			s->health_known = true;
+			s->health_ok = strncmp(line, "ok", 2) == 0;
+			if (!s->health_ok) {
+				/* Past "degraded " if it is there, because the names
+				 * are the answer and the word is already the row's
+				 * label. */
+				const char *detail = line;
+				if (strncmp(detail, "degraded", 8) == 0) {
+					detail += 8;
+					while (*detail == ' ') {
+						detail++;
+					}
+				}
+				snprintf(s->health_detail, sizeof(s->health_detail),
+					"%s", detail);
+			}
+		}
+		fclose(f);
+	}
+
+	/* RFC 0038. Read here rather than in the draw, for the reason
+	 * keys_refresh() exists: a file open per row per frame is what
+	 * novi-panel's volume glyph was doing wrong, and a read belongs
+	 * where state is gathered. */
+	f = fopen(WINDOWS_FILE, "r");
+	if (f != NULL) {
+		char line[256];
+		while (fgets(line, sizeof(line), f) != NULL) {
+			int n = 0, pid = 0, cpu = 0, secs = 0;
+			char title[WEDGED_TITLE_MAX + 1];
+			if (sscanf(line, "unresponsive %d", &n) == 1) {
+				s->wedged = n;
+				/* This key is what makes the section meaningful, so it
+				 * is what sets `known` -- the same rule the idle
+				 * block follows about its own count. */
+				s->windows_known = true;
+			} else if (sscanf(line, "window %d %d %d %63[^\n]",
+					&pid, &cpu, &secs, title) == 4) {
+				if (s->wedged_named < WEDGED_MAX) {
+					struct wedged_window *w = &s->wedged_rows[s->wedged_named];
+					w->pid = pid;
+					w->cpu = cpu;
+					w->secs = secs;
+					snprintf(w->title, sizeof(w->title), "%s", title);
+					s->wedged_named++;
+				}
+			}
+		}
+		fclose(f);
+	}
+}
+
+static void keys_refresh(struct novi_settings *state) {
+	/* Straight through the loader every time, never an incremental
+	 * update of the table in hand. The file may have been edited in a
+	 * terminal since this panel was last shown, and a panel showing a
+	 * stale view recreates exactly the two-sources-of-truth problem
+	 * the System panel's own refresh exists to prevent. */
+	novi_keys_defaults(&state->keys);
+	novi_keys_load(&state->keys, NOVI_KEYS_PATH);
+	for (size_t i = 0; i < NOVI_BINDINGS_COUNT; i++) {
+		state->keys_mine[i] =
+			novi_keys_is_set(NOVI_KEYS_PATH, state->keys.v[i].name);
+	}
+	if (state->keys_selected >= (int)NOVI_BINDINGS_COUNT) {
+		state->keys_selected = (int)NOVI_BINDINGS_COUNT - 1;
+	}
+	if (state->keys_selected < 0) {
+		state->keys_selected = 0;
+	}
+}
+
+static void keys_cancel_edit(struct novi_settings *state) {
+	state->keys_editing = false;
+	state->keys_buf[0] = '\0';
+	state->keys_len = 0;
+}
+
+static void keys_begin_edit(struct novi_settings *state) {
+	if (state->keys_selected < 0 ||
+			state->keys_selected >= (int)NOVI_BINDINGS_COUNT) {
+		return;
+	}
+	/* Pre-filled with what the row reads NOW, so the common edit is
+	 * adding Shift to something rather than retyping it -- and so that
+	 * the accepted spelling is visible rather than guessed at. */
+	snprintf(state->keys_buf, sizeof(state->keys_buf), "%s",
+		state->keys.text[state->keys_selected]);
+	state->keys_len = strlen(state->keys_buf);
+	state->keys_editing = true;
+}
+
+/* One place turns an errno from the writer into a sentence, because
+ * EACCES is the ordinary answer here -- keys.conf is root-owned -- and
+ * "failed" would send somebody looking for a bug instead of a
+ * password. */
+static void keys_report(struct novi_settings *state, int rc, const char *did) {
+	char buf[128];
+	if (rc == 0) {
+		/* "restart the desktop" belongs on the STANDING line, which is
+		 * where it stays true after this message is cleared by the
+		 * next keystroke. Repeating it here would put the same
+		 * sentence on the screen twice. */
+		state->keys_written = true;
+		set_status(state, did, false);
+		return;
+	}
+	if (rc == EINVAL) {
+		set_status(state, "Not a binding this desktop can use", true);
+	} else if (rc == EACCES || rc == EPERM) {
+		snprintf(buf, sizeof(buf), "Cannot write %s -- needs root",
+			NOVI_KEYS_PATH);
+		set_status(state, buf, true);
+	} else {
+		snprintf(buf, sizeof(buf), "Could not write %s: %s",
+			NOVI_KEYS_PATH, strerror(rc));
+		set_status(state, buf, true);
+	}
+}
+
+static void keys_commit_edit(struct novi_settings *state) {
+	if (!state->keys_editing) {
+		return;
+	}
+	const char *action = state->keys.v[state->keys_selected].name;
+	/* Trim, because the buffer is pre-filled from a formatted string
+	 * ("Super + Return") and a person editing it leaves spaces around
+	 * the separators. The parser handles them; leading and trailing
+	 * ones would still be written into the file. */
+	char spec[NOVI_KEYS_TEXT_MAX + 1];
+	snprintf(spec, sizeof(spec), "%s", state->keys_buf);
+	char *b = spec;
+	while (*b == ' ' || *b == '\t') {
+		b++;
+	}
+	size_t n = strlen(b);
+	while (n > 0 && (b[n - 1] == ' ' || b[n - 1] == '\t')) {
+		b[--n] = '\0';
+	}
+	if (*b == '\0') {
+		/* An empty box means "leave it alone", not "unbind it" --
+		 * unbinding is `off`, and clearing a field by accident is far
+		 * more likely than meaning it. */
+		keys_cancel_edit(state);
+		set_status(state, NULL, false);
+		return;
+	}
+	int rc = novi_keys_write(NOVI_KEYS_PATH, action, b);
+	keys_cancel_edit(state);
+	keys_refresh(state);
+	keys_report(state, rc, "Saved");
+}
+
+static void keys_reset_selected(struct novi_settings *state) {
+	if (state->keys_selected < 0 ||
+			state->keys_selected >= (int)NOVI_BINDINGS_COUNT) {
+		return;
+	}
+	const char *action = state->keys.v[state->keys_selected].name;
+	if (!novi_keys_is_set(NOVI_KEYS_PATH, action)) {
+		/* Nothing to undo. Said rather than silently succeeding: a key
+		 * that appears to do nothing is how somebody concludes the
+		 * panel is broken. */
+		set_status(state, "That shortcut is already the default", false);
+		return;
+	}
+	int rc = novi_keys_write(NOVI_KEYS_PATH, action, NULL);
+	keys_refresh(state);
+	keys_report(state, rc, "Back to the default");
+}
+
+static void render_keys(struct novi_settings *state, uint32_t *px,
+		uint32_t stride_px, pixman_image_t *dest) {
+	uint32_t w = state->width, h = state->height;
+
+	novi_text_draw(dest, state->font, CONTENT_X, 24 + state->font->ascent,
+		"Keys", TEXT_PIX);
+	/* The file is named on screen for the same reason the System panel
+	 * names system.conf: the claim is that this panel and $EDITOR are
+	 * aimed at one document, and the way to make that credible is to
+	 * say which one. */
+	novi_text_draw(dest, state->font_small, CONTENT_X,
+		52 + state->font_small->ascent, NOVI_KEYS_PATH, LABEL_PIX);
+
+	int list_y = 84;
+	int count = (int)NOVI_BINDINGS_COUNT;
+	int rows = ((int)h - 46 - list_y) / ROW_HEIGHT;
+	if (rows < 1) {
+		rows = 1;
+	}
+	/* Clamped in the draw, where the height is known -- the System
+	 * panel's rule, and for the same reason: a resize must not leave
+	 * `top` pointing at a row that is no longer there. */
+	if (state->keys_selected < state->keys_top) {
+		state->keys_top = state->keys_selected;
+	}
+	if (state->keys_selected >= state->keys_top + rows) {
+		state->keys_top = state->keys_selected - rows + 1;
+	}
+	if (state->keys_top > count - rows) {
+		state->keys_top = count - rows;
+	}
+	if (state->keys_top < 0) {
+		state->keys_top = 0;
+	}
+
+	for (int i = state->keys_top; i < count && i < state->keys_top + rows; i++) {
+		int y = list_y + (i - state->keys_top) * ROW_HEIGHT;
+		bool sel = (i == state->keys_selected);
+		if (sel) {
+			draw_rect(px, stride_px, w, h, CONTENT_X - 8, y - 3,
+				FIELD_WIDTH + 16, ROW_HEIGHT, ROW_SELECTED_COLOR);
+		}
+		/* The DESCRIPTION, not the action name. `window.close` is what
+		 * you write in the file and "Close the focused window" is what
+		 * you are looking for; the sheet has always grouped by the
+		 * second. The action name is in the footer for the row you are
+		 * on, which is where somebody about to edit the file needs
+		 * it. */
+		novi_text_draw(dest, state->font_small, CONTENT_X,
+			y + state->font_small->ascent, state->keys.v[i].what,
+			sel ? TEXT_PIX : LABEL_PIX);
+
+		if (state->keys_editing && sel) {
+			int box_x = CONTENT_X + FIELD_WIDTH / 2;
+			draw_rect(px, stride_px, w, h, box_x - 6, y - 3,
+				FIELD_WIDTH / 2 + 14, ROW_HEIGHT, FIELD_BG_COLOR);
+			int end_x = novi_text_draw(dest, state->font_small, box_x,
+				y + state->font_small->ascent, state->keys_buf, TEXT_PIX);
+			draw_rect(px, stride_px, w, h, end_x + 1, y - 1, 2,
+				ROW_HEIGHT - 4, ACCENT_COLOR);
+			continue;
+		}
+
+		const char *text = state->keys.text[i];
+		int val_w = novi_text_width(state->font_small, text);
+		int val_x = CONTENT_X + FIELD_WIDTH - val_w - 8;
+		/* A row somebody CHANGED is drawn in the accent, the way a
+		 * drifted key is in the System panel -- "this one is yours"
+		 * is the question a person opening this panel is asking, and
+		 * it cannot be answered by comparing against the compiled
+		 * table: setting a shortcut to what it already was is a real
+		 * thing somebody does, and the file is what says so. */
+		bool mine = state->keys_mine[i];
+		novi_text_draw(dest, state->font_small, val_x,
+			y + state->font_small->ascent, text,
+			mine ? ACCENT_PIX : (sel ? TEXT_PIX : LABEL_PIX));
+		if (mine) {
+			novi_text_draw(dest, state->font_small, val_x - 18,
+				y + state->font_small->ascent, "*", ACCENT_PIX);
+		}
+	}
+
+	/* TWO footer lines, and the split is what makes a refusal visible.
+	 * The first draft had one, chosen by a chain that reached
+	 * `keys_written` before anything else -- so once you had saved
+	 * once, every later answer was shadowed by the standing "Saved"
+	 * and a REFUSED write reported nothing at all. Found by typing
+	 * `Ctrl+Q` at a booted machine and screenshotting the result: the
+	 * file was correctly untouched and the panel said "Saved". A
+	 * standing fact about the file and an answer to what you just did
+	 * are different things and cannot share a line. */
+	int footer_y = (int)h - 34;
+	int standing_y = footer_y - 20;
+	char buf[192];
+
+	/* Standing: true of the file until something changes it. */
+	if (state->keys.unreadable > 0) {
+		/* First, because a line the loader threw away is a shortcut
+		 * somebody thinks they set. */
+		snprintf(buf, sizeof(buf),
+			"%d line(s) in %s could not be understood",
+			state->keys.unreadable, NOVI_KEYS_PATH);
+		novi_text_draw(dest, state->font_small, CONTENT_X,
+			standing_y + state->font_small->ascent, buf, ERROR_PIX);
+	} else if (state->keys.conflicts > 0) {
+		snprintf(buf, sizeof(buf),
+			"%d shortcut(s) unbound for clashing with an earlier one",
+			state->keys.conflicts);
+		novi_text_draw(dest, state->font_small, CONTENT_X,
+			standing_y + state->font_small->ascent, buf, ERROR_PIX);
+	} else if (state->keys_written) {
+		novi_text_draw(dest, state->font_small, CONTENT_X,
+			standing_y + state->font_small->ascent,
+			"novi-shell reads this file when it starts, "
+			"so restart the desktop", ACCENT_PIX);
+	}
+
+	/* Answer: what the last thing you did produced. */
+	if (state->keys_editing) {
+		snprintf(buf, sizeof(buf),
+			"%s -- Super+Shift+T, Print, off; Enter saves, Esc cancels",
+			state->keys.v[state->keys_selected].name);
+		novi_text_draw(dest, state->font_small, CONTENT_X,
+			footer_y + state->font_small->ascent, buf, ACCENT_PIX);
+	} else if (state->status != NULL) {
+		novi_text_draw(dest, state->font_small, CONTENT_X,
+			footer_y + state->font_small->ascent, state->status,
+			state->status_is_error ? ERROR_PIX : SUCCESS_PIX);
+	} else {
+		snprintf(buf, sizeof(buf), "%s -- e edits, d restores the default",
+			state->keys.v[state->keys_selected].name);
+		novi_text_draw(dest, state->font_small, CONTENT_X,
+			footer_y + state->font_small->ascent, buf, LABEL_PIX);
+	}
+}
+
+/* The Session panel. Rows are label/value pairs like the System
+ * panel's, and every one of them is READ-ONLY -- what changes each
+ * thing is named in its own row rather than left to be guessed at.
+ *
+ * "Who is holding this machine awake" is the question this exists to
+ * answer, and it is why the inhibitor NAMES are listed rather than
+ * just counted: a machine that will not sleep is a complaint whose
+ * only interesting part is which program is asking. */
+static void render_session(struct novi_settings *state, uint32_t *px,
+		uint32_t stride_px, pixman_image_t *dest) {
+	uint32_t w = state->width, h = state->height;
+	(void)px; (void)stride_px; (void)w;
+	const struct session_info *s = &state->session;
+
+	novi_text_draw(dest, state->font, CONTENT_X, 24 + state->font->ascent,
+		"Session", TEXT_PIX);
+	novi_text_draw(dest, state->font_small, CONTENT_X,
+		52 + state->font_small->ascent,
+		"/run/novi/idle, /run/novi/health, /run/novi/windows", LABEL_PIX);
+
+	int y = 84;
+	char val[HEALTH_DETAIL_MAX + 64];
+
+	/* A row whose value can be absent. `--` and a reason beats a zero:
+	 * a machine with no compositor has no idle clock, and reporting
+	 * "0 seconds" would be a reading of an instrument that is not
+	 * there -- the call `novi-agent describe` makes for the same
+	 * file. */
+	#define SESSION_ROW(label, value, colour) do { \
+		novi_text_draw(dest, state->font_small, CONTENT_X, \
+			y + state->font_small->ascent, (label), LABEL_PIX); \
+		novi_text_draw(dest, state->font_small, CONTENT_X + 210, \
+			y + state->font_small->ascent, (value), (colour)); \
+		y += ROW_HEIGHT; \
+	} while (0)
+
+	if (!s->idle_known) {
+		SESSION_ROW("Idle", "-- (no compositor is publishing)", LABEL_PIX);
+	} else {
+		snprintf(val, sizeof(val), "%ds", s->idle_s);
+		SESSION_ROW("Idle", val, TEXT_PIX);
+
+		if (s->blank_s > 0) {
+			snprintf(val, sizeof(val), "%ds  (power.blank, System panel)",
+				s->blank_s);
+		} else {
+			snprintf(val, sizeof(val), "off  (power.blank, System panel)");
+		}
+		SESSION_ROW("Blank after", val, TEXT_PIX);
+
+		if (s->suspend_s > 0) {
+			snprintf(val, sizeof(val), "%ds  (power.suspend, System panel)",
+				s->suspend_s);
+		} else {
+			snprintf(val, sizeof(val), "off  (power.suspend, System panel)");
+		}
+		SESSION_ROW("Suspend after", val, TEXT_PIX);
+
+		SESSION_ROW("Screen", s->blanked ? "blanked" : "on",
+			s->blanked ? ACCENT_PIX : TEXT_PIX);
+		SESSION_ROW("Locked", s->locked ? "yes" : "no",
+			s->locked ? ACCENT_PIX : TEXT_PIX);
+
+		/* The two askers stay separate here for the same reason the
+		 * file keeps them apart and the panel's one glyph does not:
+		 * this is where the question is ANSWERED, and "a person
+		 * pressed a key" and "a program asked" have different
+		 * remedies. */
+		SESSION_ROW("Stay awake", s->awake ? "on  (Super+A)" : "off  (Super+A)",
+			s->awake ? ACCENT_PIX : TEXT_PIX);
+
+		if (s->inhibit > 0) {
+			snprintf(val, sizeof(val), "%d", s->inhibit);
+			SESSION_ROW("Inhibited by", val, ACCENT_PIX);
+			for (int i = 0; i < s->inhibitor_count; i++) {
+				novi_text_draw(dest, state->font_small, CONTENT_X + 226,
+					y + state->font_small->ascent, s->inhibitors[i],
+					TEXT_PIX);
+				y += ROW_HEIGHT;
+			}
+			/* The count comes from the compositor and the names are
+			 * only the VISIBLE ones, so they can legitimately
+			 * disagree -- and a list that is shorter than its own
+			 * count with nothing said is the silent-elision bug this
+			 * repository keeps finding. */
+			if (s->inhibitor_count < s->inhibit) {
+				snprintf(val, sizeof(val), "%d more not named",
+					s->inhibit - s->inhibitor_count);
+				novi_text_draw(dest, state->font_small, CONTENT_X + 226,
+					y + state->font_small->ascent, val, LABEL_PIX);
+				y += ROW_HEIGHT;
+			}
+		} else {
+			SESSION_ROW("Inhibited by", "nothing", TEXT_PIX);
+		}
+	}
+
+	y += 8;
+	if (!s->health_known) {
+		SESSION_ROW("Services", "-- (services.health is off)", LABEL_PIX);
+	} else if (s->health_ok) {
+		SESSION_ROW("Services", "ok", SUCCESS_PIX);
+	} else {
+		if (s->health_truncated) {
+			snprintf(val, sizeof(val), "%s ... (more than fits)",
+				s->health_detail);
+		} else {
+			snprintf(val, sizeof(val), "%s", s->health_detail[0] != '\0' ?
+				s->health_detail : "degraded");
+		}
+		SESSION_ROW("Services", val, ERROR_PIX);
+		novi_text_draw(dest, state->font_small, CONTENT_X + 210,
+			y + state->font_small->ascent,
+			"`novi-state health` says what is wrong with each", LABEL_PIX);
+		y += ROW_HEIGHT;
+	}
+
+	/* RFC 0038: the windows the compositor's watchdog judges wedged.
+	 * The toast that announced one is gone five seconds later and the
+	 * machine is still pegged, which is RFC 0014's rule -- a toast on
+	 * the transition, an indicator while it is true -- and this is the
+	 * indicator's readable half. */
+	y += 8;
+	if (!s->windows_known) {
+		SESSION_ROW("Windows", "-- (no compositor is publishing)", LABEL_PIX);
+	} else if (s->wedged == 0) {
+		SESSION_ROW("Windows", "all responding", SUCCESS_PIX);
+	} else {
+		/* The key is looked up rather than written down:
+		 * /etc/novi/keys.conf can move it, and a panel naming a key
+		 * that does nothing is the drift common/keybindings.h exists
+		 * to prevent. */
+		const char *key = NULL;
+		for (size_t i = 0; i < NOVI_BINDINGS_COUNT; i++) {
+			if (state->keys.v[i].action == NOVI_ACT_FORCE_QUIT &&
+					state->keys.v[i].sym != XKB_KEY_NoSymbol) {
+				key = state->keys.text[i];
+				break;
+			}
+		}
+		if (key != NULL) {
+			snprintf(val, sizeof(val), "%d not responding  (%s ends one)",
+				s->wedged, key);
+		} else {
+			snprintf(val, sizeof(val),
+				"%d not responding  (no key is bound to end one)", s->wedged);
+		}
+		SESSION_ROW("Windows", val, ERROR_PIX);
+		for (int i = 0; i < s->wedged_named; i++) {
+			const struct wedged_window *wd = &s->wedged_rows[i];
+			snprintf(val, sizeof(val), "%s  --  pid %d, %d%% of a processor, %ds",
+				wd->title, wd->pid, wd->cpu, wd->secs);
+			novi_text_draw(dest, state->font_small, CONTENT_X + 226,
+				y + state->font_small->ascent, val, TEXT_PIX);
+			y += ROW_HEIGHT;
+		}
+		if (s->wedged_named < s->wedged) {
+			snprintf(val, sizeof(val), "%d more not named",
+				s->wedged - s->wedged_named);
+			novi_text_draw(dest, state->font_small, CONTENT_X + 226,
+				y + state->font_small->ascent, val, LABEL_PIX);
+			y += ROW_HEIGHT;
+		}
+	}
+	#undef SESSION_ROW
+
+	int footer_y = (int)h - 40;
+	novi_text_draw(dest, state->font_small, CONTENT_X,
+		footer_y + state->font_small->ascent,
+		"Nothing here is edited from this panel -- each row says where",
+		LABEL_PIX);
+}
+
 static void render_system(struct novi_settings *state, uint32_t *px,
 		uint32_t stride_px, pixman_image_t *dest) {
 	uint32_t w = state->width, h = state->height;
@@ -1634,6 +2327,8 @@ static void render(struct novi_settings *state, uint32_t *px, uint32_t stride_px
 	switch (state->panel) {
 	case PANEL_NETWORK: render_network(state, px, stride_px, dest); break;
 	case PANEL_SYSTEM:  render_system(state, px, stride_px, dest);  break;
+	case PANEL_KEYS:    render_keys(state, px, stride_px, dest);    break;
+	case PANEL_SESSION: render_session(state, px, stride_px, dest); break;
 	default:            render_account(state, px, stride_px, dest); break;
 	}
 
@@ -1761,6 +2456,11 @@ static void keyboard_enter(void *data, struct wl_keyboard *kb, uint32_t serial,
 	} else if (state->panel == PANEL_NETWORK) {
 		refresh_network(state);
 		surface_draw_frame(state);
+	} else if (state->panel == PANEL_KEYS) {
+		/* Same reason: somebody may have just edited keys.conf in a
+		 * terminal and come back. */
+		keys_refresh(state);
+		surface_draw_frame(state);
 	}
 }
 
@@ -1811,6 +2511,17 @@ static void keyboard_key(void *data, struct wl_keyboard *kb, uint32_t serial,
 		} else if (state->panel == PANEL_NETWORK) {
 			pass_clear(state);
 			refresh_network(state);
+		} else if (state->panel == PANEL_KEYS) {
+			/* cancel_edit() above clears the System panel's editor;
+			 * this one has its own, and leaving a panel mid-edit has
+			 * to abandon it here too or the mode survives the switch
+			 * -- the trap the System panel's comment records. */
+			keys_cancel_edit(state);
+			keys_refresh(state);
+		} else if (state->panel == PANEL_SESSION) {
+			/* Once on entry, and then on the poll timeout in main()
+			 * for as long as this panel is showing. */
+			session_refresh(state);
 		}
 		surface_draw_frame(state);
 		return;
@@ -1873,6 +2584,64 @@ static void keyboard_key(void *data, struct wl_keyboard *kb, uint32_t serial,
 		case XKB_KEY_Return:
 		case XKB_KEY_KP_Enter:
 			net_activate(state);
+			break;
+		default:
+			break;
+		}
+		surface_draw_frame(state);
+		return;
+	}
+
+	if (state->panel == PANEL_KEYS && state->keys_editing) {
+		/* Modal, and FIRST for the reason the System panel's editor is
+		 * first: `d` must type a d rather than reset the row being
+		 * edited, and Escape must cancel the edit rather than do
+		 * whatever Escape does below. */
+		if (sym == XKB_KEY_Escape) {
+			keys_cancel_edit(state);
+			set_status(state, NULL, false);
+		} else if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter) {
+			keys_commit_edit(state);
+		} else if (sym == XKB_KEY_BackSpace) {
+			if (state->keys_len > 0) {
+				state->keys_buf[--state->keys_len] = '\0';
+			}
+		} else if (sym >= 32 && sym < 127) {
+			if (state->keys_len < NOVI_KEYS_TEXT_MAX) {
+				state->keys_buf[state->keys_len++] = (char)sym;
+				state->keys_buf[state->keys_len] = '\0';
+			}
+		}
+		surface_draw_frame(state);
+		return;
+	}
+
+	if (state->panel == PANEL_KEYS) {
+		switch (sym) {
+		case XKB_KEY_e:
+		case XKB_KEY_E:
+			keys_begin_edit(state);
+			break;
+		case XKB_KEY_d:
+		case XKB_KEY_D:
+			keys_reset_selected(state);
+			break;
+		case XKB_KEY_Up:
+			if (state->keys_selected > 0) {
+				state->keys_selected--;
+			}
+			set_status(state, NULL, false);
+			break;
+		case XKB_KEY_Down:
+			if (state->keys_selected + 1 < (int)NOVI_BINDINGS_COUNT) {
+				state->keys_selected++;
+			}
+			set_status(state, NULL, false);
+			break;
+		case XKB_KEY_r:
+		case XKB_KEY_R:
+			keys_refresh(state);
+			set_status(state, "Reloaded from disk", false);
 			break;
 		default:
 			break;
@@ -2149,14 +2918,59 @@ static const struct wl_registry_listener registry_listener = {
 	.global_remove = registry_global_remove,
 };
 
-int main(void) {
+int main(int argc, char **argv) {
+	/* `--panel <name>`, matched against the sidebar's own labels so
+	 * there is no second list of panel names to drift. It exists
+	 * because novi-panel's status glyphs now OPEN this window (RFC
+	 * 0036 roadmap 4), and a coffee cup that opens the Account panel
+	 * has not answered the question that was clicked on. An unknown
+	 * name is a refusal rather than a silent fallback: a typo'd panel
+	 * that opens the default one looks exactly like a working flag. */
+	enum novi_panel start_panel = PANEL_ACCOUNT;
+	for (int i = 1; i < argc; i++) {
+		if (strcmp(argv[i], "--panel") == 0 && i + 1 < argc) {
+			bool found = false;
+			for (int p = 0; p < PANEL_COUNT; p++) {
+				if (strcasecmp(argv[i + 1], PANEL_NAMES[p]) == 0) {
+					start_panel = (enum novi_panel)p;
+					found = true;
+					break;
+				}
+			}
+			if (!found) {
+				fprintf(stderr, "novi-settings: no panel called \"%s\"\n",
+					argv[i + 1]);
+				return 2;
+			}
+			i++;
+		} else {
+			fprintf(stderr, "usage: novi-settings [--panel "
+				"account|network|system|keys|session]\n");
+			return 2;
+		}
+	}
+
+	/* Colours are a runtime table now (RFC 0030). Load the active
+	 * theme BEFORE anything computes a colour; on failure the
+	 * compiled-in defaults stay in force, so this cannot leave the
+	 * client worse off than it was. */
+	novi_theme_load();
 	struct novi_settings state = {0};
 	state.running = true;
+	state.panel = start_panel;
 	state.job_fd = -1;   /* 0 is stdin, and a zeroed struct would poll it */
 	state.width = WINDOW_WIDTH;
 	/* Load the document up front so the System panel is correct the
 	 * first time it's shown, not one keystroke later. */
 	refresh_system(&state);
+	/* Loaded once at startup like the state file, so the panel draws
+	 * its real contents the first time it is shown rather than after
+	 * the first keystroke. */
+	keys_refresh(&state);
+	/* Same argument: the Session panel must be right the moment it is
+	 * shown, and it is the panel most likely to BE the first one
+	 * shown now that the status glyphs open it directly. */
+	session_refresh(&state);
 	state.height = WINDOW_HEIGHT;
 
 	state.display = wl_display_connect(NULL);
@@ -2166,7 +2980,25 @@ int main(void) {
 		return 1;
 	}
 
+	/* xkb_context_new RETURNS NULL when it cannot add a single default
+	 * include path, having logged `failed to add default include path
+	 * /usr/share/X11/xkb` -- and every client in this desktop used the
+	 * result unchecked, so the first keymap the compositor sent went
+	 * to xkb_keymap_new_from_string(NULL, ...) and the process died
+	 * with SIGSEGV. Six clients, novi-lockscreen among them, where a
+	 * crash means the session is not locked.
+	 *
+	 * Invisible until something removed that directory: RFC 0039
+	 * roadmap 4 put novi-view in a sandbox whose root holds only what
+	 * was named, and `/usr/share/X11/xkb` is an absolute symlink to
+	 * `/usr/share/xkeyboard-config-2` -- so binding `/usr/share/X11`
+	 * gave a dangling link and the client exited 139. */
 	state.xkb_context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+	if (state.xkb_context == NULL) {
+		fprintf(stderr, "novi-settings: could not create an xkb context -- is "
+			"/usr/share/X11/xkb present (xkeyboard-config)?\n");
+		return 1;
+	}
 
 	state.registry = wl_display_get_registry(state.display);
 	wl_registry_add_listener(state.registry, &registry_listener, &state);
@@ -2212,6 +3044,8 @@ int main(void) {
 	 * events or cancel the read -- cancel on EVERY path that does not
 	 * read, including a poll error, or the next prepare_read blocks
 	 * forever. */
+	int theme_fd = novi_theme_watch();
+
 	while (state.running) {
 		while (wl_display_prepare_read(state.display) != 0) {
 			if (wl_display_dispatch_pending(state.display) < 0) {
@@ -2227,19 +3061,39 @@ int main(void) {
 			break;
 		}
 
-		struct pollfd pfds[2];
-		nfds_t n = 1;
+		/* Three slots: the display, the running job (if there is
+		 * one), and the theme watch. The job slot is conditional
+		 * because state.job_fd is reused, so a stale fd from a
+		 * finished job must not be polled; the theme slot is
+		 * unconditional because a -1 fd is ignored by poll(2) and
+		 * making it conditional would mean tracking which index it
+		 * landed on. Hence a fixed index for the theme and a moving
+		 * one for the job -- the opposite of what reads naturally,
+		 * and the reason the job slot is last. */
+		struct pollfd pfds[3];
+		nfds_t n = 2;
 		pfds[0].fd = wl_display_get_fd(state.display);
 		pfds[0].events = POLLIN;
 		pfds[0].revents = 0;
+		pfds[1].fd = theme_fd;
+		pfds[1].events = POLLIN;
+		pfds[1].revents = 0;
 		if (state.job != JOB_NONE && state.job_fd >= 0) {
-			pfds[1].fd = state.job_fd;
-			pfds[1].events = POLLIN;
-			pfds[1].revents = 0;
-			n = 2;
+			pfds[2].fd = state.job_fd;
+			pfds[2].events = POLLIN;
+			pfds[2].revents = 0;
+			n = 3;
 		}
 
-		int pr = poll(pfds, n, -1);
+		/* A timeout ONLY while the Session panel is showing. Its idle
+		 * counter is a clock, and a clock that does not move is worse
+		 * than no clock -- but a settings window that wakes once a
+		 * second forever, on a laptop, to redraw a panel nobody is
+		 * looking at, is the other mistake. A timerfd would be a
+		 * fourth descriptor to manage for a condition poll(2) can
+		 * express in its own argument. */
+		int timeout = state.panel == PANEL_SESSION ? 1000 : -1;
+		int pr = poll(pfds, n, timeout);
 		if (pr < 0) {
 			wl_display_cancel_read(state.display);
 			if (errno == EINTR) {
@@ -2263,12 +3117,28 @@ int main(void) {
 		 * and on a job that printed nothing that is the only event
 		 * there will ever be. Waiting for POLLIN alone would leave the
 		 * job hanging and the window saying "Scanning..." forever. */
-		if (n == 2 && (pfds[1].revents & (POLLIN | POLLHUP | POLLERR))) {
+		if (n == 3 && (pfds[2].revents & (POLLIN | POLLHUP | POLLERR))) {
 			if (job_pump(&state)) {
 				surface_draw_frame(&state);
 			}
 		}
+
+		/* A theme switch (RFC 0030 roadmap 1). Settings is where a
+		 * person is standing when they change one, so a Settings
+		 * window still in the old palette is the most conspicuous
+		 * place for this to be missing. */
+		if ((pfds[1].revents & POLLIN) && novi_theme_watch_drain(theme_fd)) {
+			surface_draw_frame(&state);
+		}
+
+		/* The timeout fired: nothing happened, which for this one
+		 * panel is itself the news -- another second of idleness. */
+		if (pr == 0 && state.panel == PANEL_SESSION) {
+			session_refresh(&state);
+			surface_draw_frame(&state);
+		}
 	}
+	novi_theme_watch_close(theme_fd);
 
 	if (state.job_fd >= 0) {
 		close(state.job_fd);

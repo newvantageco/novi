@@ -1,0 +1,46 @@
+<!DOCTYPE html><html><head><title>modern</title></head><body>
+<div id="root">loading...</div>
+<script>
+/* Pure ES5 so this page always parses, and it reports with textContent
+   and appendChild only -- innerHTML is one of the things under test,
+   so it cannot also be the instrument. */
+var out = [];
+function probe(name, src) {
+  try { var r = eval(src); out.push(name + ': ' + r); }
+  catch (e) { out.push(name + ': FAIL (' + e.name + ')'); }
+}
+probe('ES5 function',      '(function(x){return x*2;})(21)');
+probe('let',               'eval("let q=1"), "ok"');
+probe('const',             'eval("const c=1"), "ok"');
+probe('arrow fn',          'eval("(x=>x*2)(21)")');
+probe('template literal',  'eval("`t${1+1}`")');
+probe('class',             'eval("(function(){ class A{m(){return 1}} return new A().m(); })()")');
+probe('for..of',           'eval("(function(){var s=0; for (var v of [1,2,3]) s+=v; return s;})()")');
+/* This line was wrong first time round: it evaluated
+   Math.max.apply(null,[1,5,3]), which is ES5 and passes on any engine,
+   and reported "spread: 5" about a feature it never touched. Both are
+   here now -- the ES5 one as the control, the real syntax as the
+   test. */
+probe('apply (ES5 control)', 'Math.max.apply(null,[1,5,3])');
+probe('spread',            'eval("Math.max(...[1,5,3])")');
+probe('Promise',           'typeof Promise');
+probe('fetch',             'typeof fetch');
+probe('JSON',              'JSON.stringify({a:1})');
+probe('innerHTML set',     '(function(){var d=document.createElement("div"); d.innerHTML="<b>x</b>"; return d.childNodes.length;})()');
+probe('querySelector',     'typeof document.querySelector');
+probe('querySelectorAll',  'typeof document.querySelectorAll');
+probe('getElementsByTagName', 'typeof document.getElementsByTagName');
+probe('addEventListener',  'typeof document.addEventListener');
+probe('localStorage',      'typeof localStorage');
+probe('XMLHttpRequest',    'typeof XMLHttpRequest');
+probe('setTimeout',        'typeof setTimeout');
+probe('canvas getContext', 'typeof document.createElement("canvas").getContext');
+var root = document.getElementById('root');
+root.textContent = 'features:';
+for (var i = 0; i < out.length; i++) {
+  var p = document.createElement('p');
+  p.textContent = out[i];
+  document.body.appendChild(p);
+}
+</script>
+</body></html>

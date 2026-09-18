@@ -240,9 +240,9 @@ static void render(struct novi_lockscreen *state, uint32_t *px,
 	/* Written with the shift-left-8 bug NOVI_PIX() exists to rule out
 	 * (0xe0 -> 0xe000 rather than 0xe0e0), on top of not being palette
 	 * colours in the first place. */
-	static const pixman_color_t text_color = NOVI_PIX(NOVI_TEXT_PRIMARY);
-	static const pixman_color_t hint_color = NOVI_PIX(NOVI_TEXT_MUTED);
-	static const pixman_color_t error_color = NOVI_PIX(NOVI_STATUS_ERROR);
+#define text_color NOVI_PIX(NOVI_TEXT_PRIMARY)
+#define hint_color NOVI_PIX(NOVI_TEXT_MUTED)
+#define error_color NOVI_PIX(NOVI_STATUS_ERROR)
 
 	const char *label = "Locked";
 	int label_w = novi_text_width(state->font, label);
@@ -525,6 +525,11 @@ static const struct wl_registry_listener registry_listener = {
 };
 
 int main(void) {
+	/* Colours are a runtime table now (RFC 0030). Load the active
+	 * theme BEFORE anything computes a colour; on failure the
+	 * compiled-in defaults stay in force, so this cannot leave the
+	 * client worse off than it was. */
+	novi_theme_load();
 	struct novi_lockscreen state = {0};
 	state.running = true;
 
@@ -547,7 +552,25 @@ int main(void) {
 		return 1;
 	}
 
+	/* xkb_context_new RETURNS NULL when it cannot add a single default
+	 * include path, having logged `failed to add default include path
+	 * /usr/share/X11/xkb` -- and every client in this desktop used the
+	 * result unchecked, so the first keymap the compositor sent went
+	 * to xkb_keymap_new_from_string(NULL, ...) and the process died
+	 * with SIGSEGV. Six clients, novi-lockscreen among them, where a
+	 * crash means the session is not locked.
+	 *
+	 * Invisible until something removed that directory: RFC 0039
+	 * roadmap 4 put novi-view in a sandbox whose root holds only what
+	 * was named, and `/usr/share/X11/xkb` is an absolute symlink to
+	 * `/usr/share/xkeyboard-config-2` -- so binding `/usr/share/X11`
+	 * gave a dangling link and the client exited 139. */
 	state.xkb_context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+	if (state.xkb_context == NULL) {
+		fprintf(stderr, "novi-lockscreen: could not create an xkb context -- is "
+			"/usr/share/X11/xkb present (xkeyboard-config)?\n");
+		return 1;
+	}
 
 	state.registry = wl_display_get_registry(state.display);
 	wl_registry_add_listener(state.registry, &registry_listener, &state);

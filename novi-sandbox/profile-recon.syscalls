@@ -1,0 +1,88 @@
+# novi-recon's syscall set, DERIVED (RFC 0039 roadmap 3).
+#
+# Not a hand-written list. Produced by build/45-novi-sandbox.sh's
+# novi-syscalls (ptrace) on a booted Novi, as the union of:
+#
+#   novi-recon                       31    (usage)
+#   novi-recon dns example.com       35
+#   novi-recon whois example.com     39
+#   novi-recon tls example.com       42
+#   novi-recon headers example.com   43
+#   novi-recon robots example.com    43
+#   novi-recon ports 127.0.0.1 ...   39
+#   novi-recon all example.com       44
+#   novi-recon nosuchverb            31    (the refusal path)
+#   novi-recon pwned < file          43
+#   python3 tests/test_recon.py      30    (every parser and error branch)
+#                                  ----
+#                            union    48
+#
+# TRACE THE PROGRAM, NOT A SHELL AROUND IT. The first run of this put
+# `sh -c 'echo … | novi-recon pwned'` under the tracer and collected the
+# shell's fork(57), wait4(61) and dup2(33) as if they were novi-recon's
+# -- in the one list where "it can spawn processes" must not arrive by
+# accident. Redirect from a file instead.
+#
+# `clone` (56) is here and comes from EXACTLY ONE subcommand: `ports`,
+# whose connect scan uses threads. Nothing else in the tool needs it,
+# which is why the filter accepts it only with CLONE_THREAD set.
+#
+# WHY A DERIVED LIST IS STABLE HERE and would not be on an ordinary
+# distribution: the libc, the interpreter and the kernel all come out
+# of this build, so "which syscall does this operation use" is fixed by
+# the image rather than by whatever the machine happens to have. musl
+# reaches for `open` where glibc would use `openat`, and `stat` where
+# glibc would use `newfstatat` -- neither of those numbers is in this
+# list, and on a glibc system both would have to be.
+#
+# Re-derive after changing novi-recon or bumping CPython:
+#   bash build/45-novi-sandbox.sh       # builds /build/sandbox-test/novi-syscalls
+#   (on the target) sh trace-recon.sh   # see the RFC
+0
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+16
+19
+25
+39
+41
+42
+44
+45
+47
+49
+51
+52
+54
+55
+56
+59
+60
+72
+89
+102
+104
+107
+108
+158
+186
+202
+217
+218
+228
+231
+291
+318
+324

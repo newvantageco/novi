@@ -26,8 +26,13 @@ jobs:
       # shellcheck is preinstalled on ubuntu-latest. Installing it
       # explicitly costs a second and means this job does not silently
       # change behaviour if that ever stops being true.
-      - name: Install shellcheck
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+      # libxkbcommon-dev is for common/keys-test, which links the real
+      # keys.conf parser -- and that parser turns "Return" into a
+      # keysym with xkb_keysym_from_name(). A test that skipped itself
+      # where the header is missing would skip itself here, which is
+      # the one place it needs to run.
+      - name: Install shellcheck and the headers the host tests need
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck libxkbcommon-dev
 
       # Exactly the command a contributor runs locally. This replaces a
       # third-party action that was pinned to a commit SHA which does

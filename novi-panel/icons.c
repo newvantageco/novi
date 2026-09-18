@@ -373,3 +373,149 @@ double novi_volume_coverage(double x, double y, const void *ctx) {
 	}
 	return best;
 }
+
+/* ── The stay-awake glyph ─────────────────────────────────────────────
+ *
+ * A cup with a handle and two ticks of steam. Drawn on the panel while
+ * something is keeping this machine from blanking or suspending; see
+ * AWAKE_* in icons.h for why one glyph covers both askers.
+ *
+ * The cup is a closed polyline for the same reason the speaker body is
+ * (a union of shapes draws its own seam through the join), and the
+ * handle is an arc rather than a second closed shape so that its two
+ * ends run back inside the cup's outline and disappear into it.
+ */
+static const double AWAKE_CUP[AWAKE_CUP_POINTS][2] = {
+	{ AWAKE_CUP_TOP_LEFT,     AWAKE_CUP_TOP },
+	{ AWAKE_CUP_TOP_RIGHT,    AWAKE_CUP_TOP },
+	{ AWAKE_CUP_BOTTOM_RIGHT, AWAKE_CUP_BOTTOM },
+	{ AWAKE_CUP_BOTTOM_LEFT,  AWAKE_CUP_BOTTOM },
+};
+
+double novi_awake_coverage(double x, double y, const void *ctx) {
+	(void)ctx;
+	double half_stroke = AWAKE_ICON_STROKE / 2.0;
+
+	/* The cup. The loop walks points 0->1->2->3 -- top, right side,
+	 * base -- and the segment BEFORE it closes 3 back to 0, which is
+	 * the left wall. Leave it out and the cup is a C lying on its
+	 * back, which at this size reads as a slightly thin cup rather
+	 * than as a bug. The speaker body lost its own flat end that
+	 * way. */
+	double d = seg_distance(x, y,
+		AWAKE_CUP[AWAKE_CUP_POINTS - 1][0], AWAKE_CUP[AWAKE_CUP_POINTS - 1][1],
+		AWAKE_CUP[0][0], AWAKE_CUP[0][1]);
+	for (int i = 0; i + 1 < AWAKE_CUP_POINTS; i++) {
+		double e = seg_distance(x, y, AWAKE_CUP[i][0], AWAKE_CUP[i][1],
+			AWAKE_CUP[i + 1][0], AWAKE_CUP[i + 1][1]);
+		if (e < d) {
+			d = e;
+		}
+	}
+	double best = novi_stroke_coverage(d, half_stroke);
+
+	/* The handle, kept where dx >= slope * r as the volume arcs are --
+	 * except that this slope is NEGATIVE, so the arc runs past the
+	 * vertical at both ends and closes onto the cup's own side. */
+	double hx = x - AWAKE_HANDLE_CX;
+	double hy = y - AWAKE_HANDLE_CY;
+	double hr = sqrt(hx * hx + hy * hy);
+	if (hx >= AWAKE_HANDLE_SLOPE * hr) {
+		double handle = novi_stroke_coverage(hr - AWAKE_HANDLE_R, half_stroke);
+		if (handle > best) {
+			best = handle;
+		}
+	}
+
+	/* The steam: two vertical ticks, thinner than the cup's own stroke
+	 * so they read as rising vapour rather than as two more walls. */
+	static const double steam_x[2] = { AWAKE_STEAM_X1, AWAKE_STEAM_X2 };
+	for (int i = 0; i < 2; i++) {
+		double s = seg_distance(x, y, steam_x[i], AWAKE_STEAM_TOP,
+			steam_x[i], AWAKE_STEAM_BOTTOM);
+		double cov = novi_stroke_coverage(s, half_stroke * 0.85);
+		if (cov > best) {
+			best = cov;
+		}
+	}
+	return best;
+}
+
+/* ── The unread-notification glyph ────────────────────────────────────
+ *
+ * Four pieces: the dome (an upper half-circle), the two sides that
+ * drop from its ends to the rim, the rim itself, and the clapper (a
+ * lower half-circle) hanging below with a gap. Half-circles rather
+ * than full ones because a bell is not two rings: the dome's lower
+ * half would draw a line straight through the middle of the bell, and
+ * the clapper's upper half would close it into a bead.
+ */
+double novi_bell_coverage(double x, double y, const void *ctx) {
+	(void)ctx;
+	double half_stroke = BELL_ICON_STROKE / 2.0;
+	double best = 0.0;
+
+	/* The dome. `dy <= 0` is the upper half: everything at or above
+	 * the circle's own centre. */
+	double dx = x - BELL_CX;
+	double dy = y - BELL_DOME_CY;
+	if (dy <= 0.0) {
+		best = novi_stroke_coverage(sqrt(dx * dx + dy * dy) - BELL_DOME_R,
+			half_stroke);
+	}
+
+	/* The two sides, from where the dome ends down to the rim, and the
+	 * rim across them. */
+	double sides = seg_distance(x, y, BELL_CX - BELL_DOME_R, BELL_DOME_CY,
+		BELL_CX - BELL_DOME_R, BELL_SIDE_BOTTOM);
+	double right = seg_distance(x, y, BELL_CX + BELL_DOME_R, BELL_DOME_CY,
+		BELL_CX + BELL_DOME_R, BELL_SIDE_BOTTOM);
+	if (right < sides) {
+		sides = right;
+	}
+	double rim = seg_distance(x, y, BELL_CX - BELL_RIM_HALF, BELL_RIM_Y,
+		BELL_CX + BELL_RIM_HALF, BELL_RIM_Y);
+	if (rim < sides) {
+		sides = rim;
+	}
+	double cov = novi_stroke_coverage(sides, half_stroke);
+	if (cov > best) {
+		best = cov;
+	}
+
+	/* The clapper. */
+	double cy = y - BELL_CLAPPER_CY;
+	if (cy >= 0.0) {
+		double clap = novi_stroke_coverage(
+			sqrt(dx * dx + cy * cy) - BELL_CLAPPER_R, half_stroke);
+		if (clap > best) {
+			best = clap;
+		}
+	}
+	return best;
+}
+
+/* The hourglass (RFC 0038 roadmap 3). Two bars and two full diagonals:
+ * the diagonals cross at the waist, so between them they cover all
+ * four half-segments an hourglass outline is made of, and two strokes
+ * draw what would otherwise be four.
+ *
+ * `seg_distance` for every one of them, so the joins at the corners
+ * are the union of two rounded strokes rather than a mitre this
+ * rasteriser has no way to express. */
+double novi_wedge_coverage(double x, double y, const void *ctx) {
+	(void)ctx;
+	double half_stroke = WEDGE_ICON_STROKE / 2.0;
+	double d = seg_distance(x, y, WEDGE_BAR_L, WEDGE_TOP_Y,
+		WEDGE_BAR_R, WEDGE_TOP_Y);
+	double o = seg_distance(x, y, WEDGE_BAR_L, WEDGE_BOT_Y,
+		WEDGE_BAR_R, WEDGE_BOT_Y);
+	if (o < d) { d = o; }
+	o = seg_distance(x, y, WEDGE_BAR_L, WEDGE_TOP_Y,
+		WEDGE_BAR_R, WEDGE_BOT_Y);
+	if (o < d) { d = o; }
+	o = seg_distance(x, y, WEDGE_BAR_R, WEDGE_TOP_Y,
+		WEDGE_BAR_L, WEDGE_BOT_Y);
+	if (o < d) { d = o; }
+	return novi_stroke_coverage(d, half_stroke);
+}

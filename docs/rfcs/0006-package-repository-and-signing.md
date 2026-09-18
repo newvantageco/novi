@@ -166,7 +166,7 @@ The desktop: `foot` and `fcft`, and Novi's own `novi-shell`,
 `novi-screenshot`. §2 wants a small native base with everything else
 delivered as packages, and the desktop is the largest thing currently
 baked into the base image that a console-only machine has no use for.
-`build/40-repo.sh` builds these from exactly the binaries the earlier
+`build/50-repo.sh` builds these from exactly the binaries the earlier
 stages produced, so the repository's contents and the image's contents
 cannot drift.
 
@@ -176,7 +176,7 @@ repository at all.
 
 ### The signing key
 
-`build/40-repo.sh` generates a development key under `${BUILD_DIR}/keys`
+`build/50-repo.sh` generates a development key under `${BUILD_DIR}/keys`
 on first run and installs its public half into the image at
 `/etc/novi/keys/novi-repo.pub`. That is correct for a build you run
 yourself — you are the publisher, and trusting your own repository is
@@ -222,7 +222,7 @@ Implemented:
 - `packages/pkg` — `pkg sync`, mirror fetch, SHA-256 verification,
   index-aware `search`/`info`
 - `rootfs/etc/novi/pkg.conf`, installed by `build/11-pkg.sh`
-- `build/40-repo.sh` — builds and signs the first-party repository
+- `build/50-repo.sh` — builds and signs the first-party repository
 - `packages/novi-state` — the `packages.*` domain
 
 ### Three bugs this work surfaced
@@ -277,6 +277,36 @@ slirp). Every claim below is from that live run.
   `novi-screenshot`'s archive *in the pool on the server* made
   `pkg install` fail its SHA-256 check, discard the download, and
   install nothing. Restoring the archive made the same command succeed.
+- **AND THAT TEST PICKED THE ONE PLACE THE CHECK WORKED.** Tampering
+  *on the server* means the archive is fetched, and the fetch path is
+  where the hashing lived — `fetch_from_mirror`, under a comment
+  promising that a cached copy got hashed too. It did, inside that
+  function; `locate_pkg` searches `/var/cache/pkg/archives` and the
+  on-media repository **before** the mirror and accepted a match from
+  either without hashing it, so the verifying path was the one taken
+  only when nothing local matched. A modified archive in the cache was
+  unpacked as root with a correctly signed index beside it naming a
+  different hash.
+
+  Found by accident and not by review: a package rebuilt at the same
+  version installed its old bytes from the cache on a machine whose
+  index had just been re-synced. The symptom looked like a stale build,
+  which is how it would have gone on looking.
+
+  The check is one function now (`archive_matches_index`) and every
+  path goes through it — a cached copy that fails is deleted and the
+  mirror asked again, a failing file in a repo directory is skipped
+  because that is somebody's media and possibly read-only, and an
+  archive the index says nothing about is not blocked, since there is
+  no published hash to check it against and refusing would make an
+  unindexed local repository unusable rather than safer.
+  `packages/tests/test-pkg-cache-hash.sh` covers all four cases, and
+  **7 of its 13 checks fail against the old code**, one of them by
+  installing a file whose contents are `echo pwned`. The lesson
+  generalises past this bug: **a verification test that tampers in one
+  location tests one code path**, and here the two locations were the
+  difference between the property holding and only reading as though it
+  did.
 - **A tampered index is refused.** Appending a package line to the
   signed index on the server made `pkg sync` fail signature
   verification and leave the previous index in place — the injected
@@ -306,3 +336,13 @@ slirp). Every claim below is from that live run.
 - **`packages.*` and the event loop.** Moving `novi-state` subprocess
   calls off the Wayland thread was already on RFC 0002's roadmap; a
   package install is the first converger that makes it visible.
+- ~~**Nothing checked who owned a file.**~~ **Done** (RFC 0040
+  roadmap 1), and it belongs on this RFC's list because it is the
+  second thing `pkg install` does as root that nobody was checking.
+  The first was the archive's hash on the local path. This one is the
+  path it writes to: the program extracted a tarball over the root
+  filesystem with no owner check, no conflict refusal and no backup.
+  It refuses another package's file, refuses an unowned one, and
+  takes over an unowned path only on an explicit `replaces-files=` in the
+  MANIFEST — saving the original so `pkg remove` restores it.
+  `packages/tests/test-pkg-conflicts.sh` provokes all four branches.

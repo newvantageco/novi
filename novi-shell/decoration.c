@@ -434,15 +434,31 @@ static void draw_bar(struct novi_decor *d) {
 
 	uint32_t top_rgb = d->focused ? NOVI_BG_CARD_RAISED : NOVI_BG_CARD;
 	for (int y = 0; y < h; y++) {
-		/* Mix top_rgb into bg-card by how far down the bar we are. */
+		/* Mix top_rgb into bg-card by how far down the bar we are.
+		 *
+		 * THE CHANNELS ARE PULLED OUT INTO FLOATS FIRST, and that is
+		 * a fix rather than tidying. NOVI_R() yields an unsigned int,
+		 * so `NOVI_R(top) - (int)NOVI_R(card)` promotes the int back
+		 * to unsigned: when the raised layer is DARKER than the card
+		 * the difference wraps to ~4.29e9, the float multiply carries
+		 * it, and the cast back to uint32_t writes garbage into the
+		 * red channel and beyond.
+		 *
+		 * On a dark palette the raised layer is always lighter, so
+		 * the difference was always positive and this was invisible
+		 * for the life of the file. The `paper` theme is the first
+		 * light one -- white card, grey raised -- and every title bar
+		 * came out in bands of orange and red. That is precisely why
+		 * a light theme ships (RFC 0030): a dark-only set can get the
+		 * elevation order backwards and still look plausible. */
 		float t = 1.0f - (float)y / (float)(h - 1);
+		float cr = (float)NOVI_R(NOVI_BG_CARD);
+		float cg = (float)NOVI_G(NOVI_BG_CARD);
+		float cb = (float)NOVI_B(NOVI_BG_CARD);
 		uint32_t rgb =
-			(((uint32_t)(NOVI_R(NOVI_BG_CARD) +
-				(NOVI_R(top_rgb) - (int)NOVI_R(NOVI_BG_CARD)) * t)) << 16) |
-			(((uint32_t)(NOVI_G(NOVI_BG_CARD) +
-				(NOVI_G(top_rgb) - (int)NOVI_G(NOVI_BG_CARD)) * t)) << 8) |
-			 ((uint32_t)(NOVI_B(NOVI_BG_CARD) +
-				(NOVI_B(top_rgb) - (int)NOVI_B(NOVI_BG_CARD)) * t));
+			((uint32_t)(cr + ((float)NOVI_R(top_rgb) - cr) * t + 0.5f) << 16) |
+			((uint32_t)(cg + ((float)NOVI_G(top_rgb) - cg) * t + 0.5f) << 8) |
+			 (uint32_t)(cb + ((float)NOVI_B(top_rgb) - cb) * t + 0.5f);
 		/* The hairline that separates chrome from content. */
 		if (y == h - 1) {
 			rgb = NOVI_BORDER_SUBTLE;
@@ -562,6 +578,50 @@ void novi_decor_set_title(struct novi_decor *d, const char *title) {
 		return;
 	}
 	snprintf(d->title, sizeof(d->title), "%s", title);
+	refresh(d);
+}
+
+/* A THEME SWITCH, which is the one thing that changes every colour
+ * under the decoration's feet without changing anything it caches
+ * (RFC 0030 roadmap 1). refresh() skips the bar redraw when width,
+ * focus and title are all as drawn -- correct, and exactly wrong here,
+ * because the palette is not one of the three. Invalidating
+ * drawn_width is what makes the next refresh() actually draw.
+ *
+ * The DOT SPRITES are shared and bake their colour in at creation, so
+ * they have to be remade globally rather than per window; the shadow
+ * sprites are black-with-alpha and carry no palette, so they are left
+ * alone. Remade into locals first and swapped in only if both
+ * succeed: a half-swapped pair would leave one control drawn in the
+ * old palette and, worse, a NULL sprite for the other -- the same
+ * commit-on-success rule the theme loader itself follows. */
+void novi_decor_retheme_shared(void) {
+	struct wlr_buffer *rest = make_dot(NOVI_TEXT_MUTED);
+	struct wlr_buffer *hover = make_dot(NOVI_TEXT_SECONDARY);
+	if (rest == NULL || hover == NULL) {
+		if (rest != NULL) {
+			wlr_buffer_drop(rest);
+		}
+		if (hover != NULL) {
+			wlr_buffer_drop(hover);
+		}
+		return;
+	}
+	if (dot_sprite[0] != NULL) {
+		wlr_buffer_drop(dot_sprite[0]);
+	}
+	if (dot_sprite[1] != NULL) {
+		wlr_buffer_drop(dot_sprite[1]);
+	}
+	dot_sprite[0] = rest;
+	dot_sprite[1] = hover;
+}
+
+void novi_decor_repaint(struct novi_decor *d) {
+	if (d == NULL) {
+		return;
+	}
+	d->drawn_width = -1;
 	refresh(d);
 }
 
