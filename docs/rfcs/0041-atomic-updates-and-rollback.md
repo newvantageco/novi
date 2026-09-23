@@ -219,7 +219,47 @@ get that far comes back on the old slot by itself. What counts as
 make, because `novi-state health` already answers it (RFC 0014) — but
 that is a decision for the implementing RFC, not an assumption here.
 
-### 5. `pkg` should not learn about slots.
+### 5. The layout has to be laid out ONCE, so items 1 and 3 are one item.
+
+A partition table is written at install time and changed by
+reinstalling. Splitting state out *without* also reserving the second
+slot produces a machine that can never gain A/B without a reinstall —
+which is the same as not having done it. So "split state out" and "two
+slots at install time" are one change, and the roadmap below says so.
+
+Working the layout through end to end then produced the useful part:
+**the A/B shape is RFC 0018's encrypted shape with the encryption
+removed**, and most of the bootloader work that looked new is already
+done.
+
+| | MBR/BIOS | GPT/UEFI |
+|---|---|---|
+| p1 | `/boot`, shared | ESP, shared |
+| p2 | root slot A | root slot A |
+| p3 | root slot B | root slot B |
+| p4 | state, shared | state, shared |
+
+A **shared boot partition is what makes rollback work at all**, and it
+is not an optimisation: `grub.cfg`, `grubenv` and *both* slots' kernels
+have to live somewhere that either slot can boot from. Put `/boot`
+inside a slot and rolling back to A means A's `grub.cfg` has to already
+list B's kernel — a coupling that breaks the first time the two slots
+disagree about what a kernel is called.
+
+On BIOS that shape already exists and already has its bootloader
+image: `mkiso.sh` generates **`core-boot.img` with the prefix
+`(hd0,msdos1)/grub`** beside the ordinary `core.img`, precisely because
+RFC 0018's encrypted layout needs a separate `/boot`. An A/B install
+uses it unchanged. On UEFI the ESP is already the shared boot area and
+already holds `grub.cfg` (RFC 0008). So the only genuinely new
+bootloader work is decision 4's `loadenv`.
+
+MBR gives exactly four primary partitions and this uses all four. That
+is a real ceiling — no room for a fifth thing later without an extended
+partition or a move to GPT everywhere — and it is worth stating now
+rather than discovering it.
+
+### 6. `pkg` should not learn about slots.
 
 It already has everything: it installs into a root it is `chroot`ed
 into, it resolves from a signed index, and it verifies every archive
@@ -254,7 +294,11 @@ here would smuggle in the model decision this RFC just declined.
 
 ## Roadmap
 
-1. **Split state out of the root**, by NAMED SUBTREE rather than by
+1. **Lay out the whole thing at once** — shared `/boot` or ESP, two
+   root slots, shared state — because a partition table is written once
+   (decision 5). The second slot stays empty and the machine boots from
+   the first, so this is one bootable, verifiable change that does not
+   yet update anything. State splits by NAMED SUBTREE rather than by
    top-level directory — see decision 2. `/home`, `/var/log`,
    `/var/lib/novi-state`, `/var/lib/alsa` and `/var/cache/pkg` onto a
    shared partition mounted at `/state` with `bind` entries in fstab;
@@ -281,8 +325,8 @@ here would smuggle in the model decision this RFC just declined.
 2. **`loadenv` in `core.img` and in `bootx64.efi`**, and a `grubenv`
    the installed system can write. Small, and nothing else can start
    until a boot can be steered from userland.
-3. **Two slots at install time**, with the second left empty. Still one
-   bootable system; the layout is just ready.
+3. *(folded into item 1 — see decision 5. A partition table is written
+   once, so reserving the second slot cannot be a later step.)*
 4. **`chroot <inactive> pkg update`**, then a switch, then a boot from
    the new slot, then a switch back — watched on a booted machine,
    because a rollback nobody has performed is a rollback nobody has.
