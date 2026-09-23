@@ -348,6 +348,30 @@ CONFIG_X86_AMD_PSTATE=y
 CONFIG_INTEL_IDLE=y
 CONFIG_X86_ACPI_CPUFREQ=m
 
+# THE REAL-TIME CLOCK. This config named no RTC symbol at all for the
+# life of the project, so `CONFIG_RTC_CLASS` defaulted to n and there
+# was no `/dev/rtc0` -- which is subtle rather than obvious, because
+# x86 reads the CMOS clock at boot through `CONFIG_RTC_MC146818_LIB`
+# (selected by the architecture, not by this file) and the machine
+# comes up with a plausible wall clock. What was missing is everything
+# after that: `hwclock` could not write a corrected time BACK to
+# hardware, so a correction was lost at the next reboot, and `rtcwake`
+# had no alarm to set, so RFC 0035's suspend has no timed wake source.
+# Both shipped as commands that could not work until RFC 0040 roadmap
+# 3's sweep removed them (kernel/dead-applets), and turning these on
+# is what brings them back -- the removal is derived from this file's
+# generated output, so no list needs editing.
+#
+# Three symbols, because each is a separate thing that can be absent:
+# the class (which is what defaults to n here), the character-device
+# interface that actually creates /dev/rtcN, and the PC driver that
+# binds to the CMOS chip. `RTC_HCTOSYS` is deliberately left to its
+# own default -- on x86 the early CMOS read has already set the clock
+# by the time it would run.
+CONFIG_RTC_CLASS=y
+CONFIG_RTC_INTF_DEV=y
+CONFIG_RTC_DRV_CMOS=y
+
 # ─────────────────────────────────────────────
 # SECTION 9: USB
 # ─────────────────────────────────────────────
