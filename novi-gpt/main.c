@@ -1,10 +1,11 @@
 /*
- * novi-gpt — write a two-partition GPT for a Novi installation.
+ * novi-gpt — write the GPT a Novi installation needs.
  *
- *     novi-gpt <device> [--esp-mib N]
+ *     novi-gpt <device> [--esp-mib N] [--slot-mib N]
  *
- * Partition 1: EFI System, N MiB (default 512)
- * Partition 2: Linux filesystem, the rest of the disk
+ * Default (two partitions):
+ *   1  EFI System, --esp-mib MiB (default 512)
+ *   2  Linux filesystem, the rest of the disk
  *
  * Why this exists: BusyBox's fdisk can only create MBR labels. It can
  * READ a GPT ("nor Sun, SGI, OSF or GPT disklabel") and cannot write
@@ -25,9 +26,24 @@
  * checked by tools that did not write it (util-linux's partx and
  * blkid), which is how it was verified.
  *
- * Deliberately NOT a general partitioner. It writes one layout, the
- * one novi-install needs. A tool that can express every layout is a
- * tool that can express the wrong one.
+ * Deliberately NOT a general partitioner. It writes the layouts
+ * novi-install needs and no others. A tool that can express every
+ * layout is a tool that can express the wrong one.
+ *
+ * THAT CONTRACT USED TO SAY "ONE LAYOUT" AND NOW SAYS TWO, which is a
+ * change worth making as deliberately as the original rule was.
+ * `--slot-mib N` writes RFC 0041's A/B layout instead:
+ *
+ *     1 NOVI_ESP     EFI System, --esp-mib MiB (default 512)
+ *     2 NOVI_ROOT_A  Linux, N MiB      root slot A
+ *     3 NOVI_ROOT_B  Linux, N MiB      root slot B, left empty
+ *     4 NOVI_STATE   Linux, the rest   shared state
+ *
+ * Still not general: the caller chooses two sizes and nothing else --
+ * not the count, not the order, not the types, not the names. The
+ * second layout exists because a partition table is written ONCE, so a
+ * machine installed without the second slot could never gain one
+ * without a reinstall.
  */
 
 #include <stdio.h>
@@ -193,17 +209,26 @@ int main(int argc, char **argv)
 {
     const char *path = NULL;
     uint64_t esp_mib = 512;
+    uint64_t slot_mib = 0;      /* 0 = the original two-partition layout */
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--esp-mib") && i + 1 < argc) {
             esp_mib = strtoull(argv[++i], NULL, 10);
+        } else if (!strcmp(argv[i], "--slot-mib") && i + 1 < argc) {
+            slot_mib = strtoull(argv[++i], NULL, 10);
         } else if (argv[i][0] == '-') {
             fprintf(stderr,
-                "usage: novi-gpt <device> [--esp-mib N]\n"
+                "usage: novi-gpt <device> [--esp-mib N] [--slot-mib N]\n"
                 "\n"
-                "Writes a GPT with an EFI System partition of N MiB\n"
-                "(default 512) and a Linux filesystem partition filling\n"
-                "the rest. Everything already on the device is lost.\n");
+                "Writes a GPT with an EFI System partition of --esp-mib\n"
+                "MiB (default 512) and a Linux filesystem partition\n"
+                "filling the rest.\n"
+                "\n"
+                "With --slot-mib N it writes RFC 0041's A/B layout\n"
+                "instead: the ESP, TWO Linux root slots of N MiB each,\n"
+                "and a Linux state partition filling the rest.\n"
+                "\n"
+                "Everything already on the device is lost.\n");
             return 2;
         } else if (!path) {
             path = argv[i];
@@ -212,11 +237,13 @@ int main(int argc, char **argv)
         }
     }
     if (!path) {
-        fprintf(stderr, "usage: novi-gpt <device> [--esp-mib N]\n");
+        fprintf(stderr, "usage: novi-gpt <device> [--esp-mib N] [--slot-mib N]\n");
         return 2;
     }
     if (esp_mib < 33)
         die("--esp-mib must be at least 33 (a FAT32 filesystem needs the room)");
+    if (slot_mib != 0 && slot_mib < 2048)
+        die("--slot-mib must be at least 2048 (the OS alone is about 800 MB)");
 
     crc_init();
 
@@ -237,13 +264,44 @@ int main(int argc, char **argv)
     uint64_t root_first = ((esp_last + 1 + ALIGN_LBAS - 1) / ALIGN_LBAS) * ALIGN_LBAS;
     uint64_t root_last  = last_usable;
 
+    /* RFC 0041's A/B layout. Each slot start is rounded up to the same
+     * 1 MiB boundary the ESP and the root use: a partition that
+     * straddles an erase block on flash is invisible until somebody
+     * measures write latency.
+     *
+     * THE ROUNDING IS CURRENTLY A NO-OP AND IS KEPT ANYWAY. --slot-mib
+     * is whole MiB, so slot_lbas is always a multiple of ALIGN_LBAS
+     * and `a_last + 1` is already aligned -- which the host test found
+     * the hard way: replacing this expression with `a_last + 1`
+     * changed nothing and the alignment assertion stayed green. It
+     * takes a real misalignment (`a_last + 3`) to make it fire, and it
+     * does. The line stays because it is what keeps the invariant true
+     * if the granularity ever stops being MiB, and the comment stays
+     * because a line that cannot currently change the answer should
+     * say so rather than look load-bearing. */
+    uint64_t slot_lbas  = slot_mib * (1024 * 1024 / SECTOR);
+    uint64_t a_first = root_first;
+    uint64_t a_last  = a_first + slot_lbas - 1;
+    uint64_t b_first = ((a_last + 1 + ALIGN_LBAS - 1) / ALIGN_LBAS) * ALIGN_LBAS;
+    uint64_t b_last  = b_first + slot_lbas - 1;
+    uint64_t st_first = ((b_last + 1 + ALIGN_LBAS - 1) / ALIGN_LBAS) * ALIGN_LBAS;
+    uint64_t st_last  = last_usable;
+
     if (esp_first < first_usable || root_first >= root_last)
         die("the device is too small for this layout");
+    if (slot_mib != 0 && (b_last >= last_usable || st_first >= st_last))
+        die("the device is too small for two root slots and a state partition");
 
     unsigned char entries[ENTRY_COUNT * ENTRY_SIZE];
     memset(entries, 0, sizeof entries);
-    make_entry(entries + 0 * ENTRY_SIZE, GUID_ESP,   esp_first,  esp_last,  "NOVI_ESP");
-    make_entry(entries + 1 * ENTRY_SIZE, GUID_LINUX, root_first, root_last, "NOVI_ROOT");
+    make_entry(entries + 0 * ENTRY_SIZE, GUID_ESP, esp_first, esp_last, "NOVI_ESP");
+    if (slot_mib != 0) {
+        make_entry(entries + 1 * ENTRY_SIZE, GUID_LINUX, a_first,  a_last,  "NOVI_ROOT_A");
+        make_entry(entries + 2 * ENTRY_SIZE, GUID_LINUX, b_first,  b_last,  "NOVI_ROOT_B");
+        make_entry(entries + 3 * ENTRY_SIZE, GUID_LINUX, st_first, st_last, "NOVI_STATE");
+    } else {
+        make_entry(entries + 1 * ENTRY_SIZE, GUID_LINUX, root_first, root_last, "NOVI_ROOT");
+    }
     uint32_t entries_crc = crc32b(entries, sizeof entries);
 
     unsigned char disk_guid[16];
@@ -284,8 +342,20 @@ int main(int argc, char **argv)
     printf("  1  NOVI_ESP    %10llu..%-10llu  %llu MiB  EFI System\n",
            (unsigned long long)esp_first, (unsigned long long)esp_last,
            (unsigned long long)esp_mib);
-    printf("  2  NOVI_ROOT   %10llu..%-10llu  %llu MiB  Linux filesystem\n",
-           (unsigned long long)root_first, (unsigned long long)root_last,
-           (unsigned long long)((root_last - root_first + 1) / 2048));
+    if (slot_mib != 0) {
+        printf("  2  NOVI_ROOT_A %10llu..%-10llu  %llu MiB  Linux filesystem\n",
+               (unsigned long long)a_first, (unsigned long long)a_last,
+               (unsigned long long)((a_last - a_first + 1) / 2048));
+        printf("  3  NOVI_ROOT_B %10llu..%-10llu  %llu MiB  Linux filesystem (empty slot)\n",
+               (unsigned long long)b_first, (unsigned long long)b_last,
+               (unsigned long long)((b_last - b_first + 1) / 2048));
+        printf("  4  NOVI_STATE  %10llu..%-10llu  %llu MiB  Linux filesystem (shared)\n",
+               (unsigned long long)st_first, (unsigned long long)st_last,
+               (unsigned long long)((st_last - st_first + 1) / 2048));
+    } else {
+        printf("  2  NOVI_ROOT   %10llu..%-10llu  %llu MiB  Linux filesystem\n",
+               (unsigned long long)root_first, (unsigned long long)root_last,
+               (unsigned long long)((root_last - root_first + 1) / 2048));
+    }
     return 0;
 }

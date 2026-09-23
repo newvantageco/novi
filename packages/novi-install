@@ -162,7 +162,7 @@ Options:
                       BACK YET. It exists now because a partition table
                       is written once: a layout without the second slot
                       could never gain one without a reinstall.
-                      BIOS only, and refused with --encrypt.
+                      Refused with --encrypt (RFC 0041 decision 3).
   --slot-mib N        size of EACH root slot with --ab (default 4096)
   --profile P         desktop (default) or console. `desktop` installs the
                       desktop packages from the repository on this medium
@@ -449,6 +449,36 @@ partition_bios_encrypted() {
 # exists. Verified as a four-partition sequence against this repo's own
 # static BusyBox on a 16 GB sparse file before it went near a disk --
 # 512M boot, two 4096M slots, the rest state, boot flag on p1.
+# RFC 0041's layout on GPT. Same shape as the BIOS one, with the ESP
+# standing in for the shared /boot: the ESP already holds grub.cfg and
+# the kernel on a UEFI install (RFC 0008), so it is already the boot
+# area both slots share, and nothing new is needed there.
+partition_uefi_ab() {
+    local disk="$1"
+
+    msg "Partitioning $disk (GPT: ESP + two root slots + state)"
+    ROOT_LABEL="$SLOT_A_LABEL"
+    unmount_everything_on "$disk"
+    wipe_disk_ends "$disk"
+
+    command -v novi-gpt >/dev/null 2>&1 ||
+        die "novi-gpt not found; cannot write a GPT (BusyBox fdisk cannot)"
+    novi-gpt "$disk" --esp-mib "$ESP_MIB" --slot-mib "$SLOT_MIB" >&2 ||
+        die "novi-gpt failed on $disk"
+
+    partprobe "$disk" 2>/dev/null || true
+    sync
+
+    ESP_PART="$(partition_of "$disk" 1)"
+    ROOT_PART="$(partition_of "$disk" 2)"
+    SLOT_B_PART="$(partition_of "$disk" 3)"
+    STATE_PART="$(partition_of "$disk" 4)"
+    for p in "$ESP_PART" "$ROOT_PART" "$SLOT_B_PART" "$STATE_PART"; do
+        wait_for_partition "$p" "$disk"
+    done
+    info "ESP $ESP_PART, slot A $ROOT_PART, slot B $SLOT_B_PART, state $STATE_PART"
+}
+
 partition_bios_ab() {
     local disk="$1" boot_end a_start a_end b_start b_end s_start
 
@@ -515,15 +545,13 @@ partition_bios() {
 
 partition_disk() {
     if [ "$AB" -eq 1 ]; then
-        # BIOS only for now. The UEFI path needs novi-gpt to write a
-        # fourth entry, and the encrypted path has no answer at all
-        # until the LUKS question is settled -- RFC 0041 decision 3.
-        # Refusing is the honest outcome: a layout that cannot later
-        # grow slots would be worse than not offering one.
+        # The encrypted path still has no answer -- RFC 0041 decision 3
+        # -- and is refused in validate_options, before anything looks
+        # at a disk.
         case "$FIRMWARE" in
-            uefi) die "--ab is not implemented for UEFI yet (RFC 0041 decision 3): novi-gpt writes two partitions and this layout needs four" ;;
+            uefi) partition_uefi_ab "$1" ;;
+            *)    partition_bios_ab "$1" ;;
         esac
-        partition_bios_ab "$1"
         return 0
     fi
     case "$FIRMWARE" in

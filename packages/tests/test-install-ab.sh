@@ -159,6 +159,52 @@ has "core-boot.img keyed on the fact" \
     "$(sed -n '/^install_bootloader_bios() {/,/^}/p' "$INSTALL")" \
     "if separate_boot; then"
 
+echo "== novi-gpt writes four entries for --slot-mib, and still two without"
+# Built for the HOST and run against a sparse file, then read back with
+# util-linux -- a tool that did not write it, which is how RFC 0008
+# verified the original layout and the only check worth much about a
+# structure this rigid.
+if command -v gcc >/dev/null 2>&1 && command -v partx >/dev/null 2>&1; then
+    if gcc -O2 -o "$W/novi-gpt" "${REPO_ROOT}/novi-gpt/main.c" 2>"$W/cc.log"; then
+        truncate -s 20G "$W/g.img" 2>/dev/null
+        "$W/novi-gpt" "$W/g.img" --slot-mib 4096 >/dev/null 2>&1
+        tbl="$(partx -s "$W/g.img" 2>/dev/null)"
+        check "four partitions" "$(printf '%s\n' "$tbl" | grep -c '^ *[0-9]')" "4"
+        for want in NOVI_ESP NOVI_ROOT_A NOVI_ROOT_B NOVI_STATE; do
+            has "gpt has $want" "$tbl" "$want"
+        done
+        hasnt "no plain NOVI_ROOT in the A/B layout" "$tbl" "NOVI_ROOT "
+        # 1 MiB alignment on every partition: a start that is not a
+        # multiple of 2048 sectors straddles an erase block on flash,
+        # which is invisible until somebody measures write latency.
+        #
+        # Provoking this found the PROVOCATION was wrong rather than
+        # the check: deleting novi-gpt's round-up left every partition
+        # aligned anyway, because --slot-mib is whole MiB so the slot
+        # length is already a multiple of 2048. It takes a real
+        # misalignment to make it fire, and then it does.
+        badalign=0
+        for st in $(printf '%s\n' "$tbl" | awk '/^ *[0-9]/{print $2}'); do
+            [ $(( st % 2048 )) -eq 0 ] || badalign=$((badalign+1))
+        done
+        check "every partition is 1 MiB aligned" "$badalign" "0"
+        # The two-partition layout is untouched.
+        truncate -s 20G "$W/g2.img" 2>/dev/null
+        "$W/novi-gpt" "$W/g2.img" >/dev/null 2>&1
+        tbl2="$(partx -s "$W/g2.img" 2>/dev/null)"
+        check "still two without --slot-mib" "$(printf '%s\n' "$tbl2" | grep -c '^ *[0-9]')" "2"
+        has "and the plain root label" "$tbl2" "NOVI_ROOT"
+        # A slot size the disk cannot hold is refused, not truncated.
+        truncate -s 3G "$W/g3.img" 2>/dev/null
+        out="$("$W/novi-gpt" "$W/g3.img" --slot-mib 4096 2>&1)"
+        has "too-small disk refused" "$out" "too small"
+    else
+        bad "novi-gpt did not compile: $(head -1 "$W/cc.log")"
+    fi
+else
+    echo "  (no gcc or no partx -- skipping the novi-gpt checks)"
+fi
+
 echo ""
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
