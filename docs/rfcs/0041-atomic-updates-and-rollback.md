@@ -174,13 +174,15 @@ tree, it is not:
   partition is three more lines — with RFC 0018's warning still
   standing, that BusyBox `fdisk`'s default first sector is 63 and
   every sector must be given explicitly.
-- **UEFI/GPT** needs `novi-gpt` to write a third entry. That is a
+- **UEFI/GPT** needs `novi-gpt` to write a fourth entry. That is a
   modest change to a small, well-specified program — but it changes
   the tool's stated contract, which is *"Deliberately NOT a general
   partitioner. It writes one layout, the one novi-install needs. A tool
   that can express every layout is a tool that can express the wrong
   one."* (RFC 0008). The new contract is "two layouts", and it should
-  be written down as deliberately as the first was.
+  be written down as deliberately as the first was. **Done**:
+  `--slot-mib N` selects the second, the header says so, and the
+  program still refuses to express anything else.
 - **Encrypted (RFC 0018)** has no answer here at all, and this is the
   finding. The layout is a plain `/boot` plus a LUKS root. Under A/B
   the two slots AND the shared state must all be inside encryption —
@@ -325,7 +327,8 @@ here would smuggle in the model decision this RFC just declined.
    needs and what would otherwise have been a race nobody saw until
    syslog wrote to the wrong filesystem.
 
-   **DONE FOR BIOS, AND VERIFIED BY AN INSTALL AND A REBOOT.**
+   **DONE FOR BIOS AND FOR UEFI, EACH VERIFIED BY AN INSTALL AND A
+   REBOOT.**
    `novi-install --ab` is opt-in: without it every layout is exactly
    what it was. On a 20 GB disk it produced `NOVI_BOOT`,
    `NOVI_ROOT_A`, `NOVI_ROOT_B` and `NOVI_STATE` on vda1..vda4, and
@@ -360,8 +363,40 @@ here would smuggle in the model decision this RFC just declined.
    starts at sector 63 — RFC 0018's trap, and the reason every sector
    is given explicitly.
 
-   **Still to do here:** UEFI (a fourth `novi-gpt` entry), the
-   encrypted layout (decision 3), and `/etc`.
+   **UEFI is the same layout with the ESP in place of `/boot`**, and
+   `novi-gpt --slot-mib N` writes the fourth entry. The tool's contract
+   is now "two layouts" and says so in its own header — the change
+   decision 3 asked to be written down as deliberately as the first
+   one. On the same 20 GB disk, under OVMF:
+
+   ```
+   /dev/vda2 on /          ext4     <- slot A, 3.9G
+   /dev/vda1 on /boot/efi  vfat     <- the ESP, shared
+   /dev/vda4 on /state     ext4     <- shared state, 11.2G
+   /dev/vda4 on /home      ext4     <- bind
+   /dev/vda4 on /var/log   ext4     <- bind
+   ```
+
+   `NOVI_ESP`, `NOVI_ROOT_A`, `NOVI_ROOT_B` and `NOVI_STATE` on
+   vda1..vda4; `root=LABEL=NOVI_ROOT_A` on the command line; slot B
+   formatted and unmounted; `mount | grep -c /state/var/lib/pkg` is
+   **0** again. `BOOTX64.EFI` and `grub.cfg` are on the ESP, which is
+   the whole bootloader half here: the removable-media path needs no
+   NVRAM entry and no second `core.img`, so unlike BIOS there is no
+   prefix to get wrong (RFC 0008).
+
+   **The harness lost that boot before it found it, and the failure
+   read as a machine that would not come up.** The reboot phase
+   searched the whole serial log from byte zero for `login:`, which the
+   LIVE medium had printed an hour earlier — so it matched instantly,
+   typed `root` into GRUB, and reported a timeout waiting for a shell
+   on a system that had in fact booted and was sitting at its prompt in
+   the same log. Every wait takes a byte offset now. Same class as the
+   QEMU harness discarding `send-key` errors: **an instrument that
+   reads stale output answers a question about the past**, and the
+   answer looks like a finding about the present.
+
+   **Still to do here:** the encrypted layout (decision 3), and `/etc`.
 2. **`loadenv` in `core.img` and in `bootx64.efi`**, and a `grubenv`
    the installed system can write. Small, and nothing else can start
    until a boot can be steered from userland.

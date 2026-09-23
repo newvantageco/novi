@@ -5140,9 +5140,9 @@ no link. `pick_interface()` requires `/sys/class/net/*/type` to be 1
 ## Architecture: two root slots, and a condition that tested the reason
 
 RFC 0041 (`docs/rfcs/0041-atomic-updates-and-rollback.md`).
-`novi-install --ab` lays out a shared `/boot`, TWO root slots and a
+`novi-install --ab` lays out a shared boot area, TWO root slots and a
 shared state partition. **Nothing updates or rolls back yet** -- the
-machine boots from slot A and slot B is empty. BIOS only, opt-in.
+machine boots from slot A and slot B is empty. BIOS and UEFI, opt-in.
 
 - **A PARTITION TABLE IS WRITTEN ONCE, which is why the empty slot
   exists now.** Splitting state out without reserving slot B would give
@@ -5197,6 +5197,27 @@ machine boots from slot A and slot B is empty. BIOS only, opt-in.
   `NOVI_ROOT_B`/`NOVI_STATE`, root on vda2, `/boot` on vda1, `/state`
   on vda4 with `/home` and `/var/log` bound out of it and writable, and
   **`mount | grep -c /state/var/lib/pkg` = 0**.
+- **UEFI IS THE SAME LAYOUT WITH THE ESP IN PLACE OF `/boot`, and it
+  needed NO bootloader work at all.** `novi-gpt --slot-mib N` writes
+  the fourth entry -- the "two layouts" contract decision 3 asked to be
+  written down -- and everything else follows: the removable-media path
+  puts `BOOTX64.EFI` and `grub.cfg` on the ESP, which is already
+  shared, so unlike BIOS there is no second `core.img` and no prefix to
+  get wrong. Separately installed and rebooted under OVMF, same disk
+  size, same verdict: `NOVI_ESP`/`NOVI_ROOT_A`/`NOVI_ROOT_B`/
+  `NOVI_STATE`, `root=LABEL=NOVI_ROOT_A`, `/state` on vda4 with the
+  binds live and writable, slot B unmounted, and the pkg count 0 again.
+- **A THIRD HARNESS BUG, AND IT REPORTED A WORKING MACHINE AS DEAD.**
+  The UEFI reboot phase searched the whole serial log from byte zero
+  for `login:` -- which the LIVE medium had printed an hour earlier --
+  so it matched instantly, typed `root` into GRUB's menu, and then
+  timed out waiting for a shell prompt that was ten lines further down
+  the same file. The installed system had booted, resolved
+  `LABEL=NOVI_ROOT_A` to `/dev/vda2` and printed its login prompt while
+  the harness declared it broken. **An instrument that reads stale
+  output answers a question about the past**, and the answer arrives
+  looking like a finding about the present. Every wait takes a byte
+  offset.
 - **TWO HARNESS BUGS, BOTH THE SAME FAMILY AS EVERY OTHER ONE IN THIS
   FILE.** Waiting for `INSTALL_RC=` matched the console's ECHO of the
   command rather than its output, so the copy was cut off mid-way and
