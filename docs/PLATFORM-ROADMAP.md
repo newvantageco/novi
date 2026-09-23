@@ -175,9 +175,34 @@ split; it needs a matching *on-device* update mechanism.
 - `pkg` itself stays track-agnostic — a package doesn't know which track
   installed it, only the repo it was resolved from differs per track.
 
-**Open:** which rollback mechanism (A/B partitions vs. snapshotting
+~~**Open:** which rollback mechanism (A/B partitions vs. snapshotting
 filesystem) — this decision blocks `mkiso.sh`/`mkinitramfs.sh` changes and
-needs its own RFC since it touches the rootfs layout contract.
+needs its own RFC since it touches the rootfs layout contract.~~
+**Decided: RFC 0041 — A/B root slots on ext4**, updated by
+`chroot <inactive> pkg update` and activated by a bootloader variable.
+**Nothing is implemented yet**; the RFC is a decision and a set of
+measurements, with a roadmap whose first item is the precondition every
+candidate shares and none of them has.
+
+The reason in one line: A/B is the only candidate that leaves `pkg` in
+charge of the base. btrfs snapshots need `btrfs-progs`, an upstream
+this project does not carry, under the one mount that must always
+succeed. Squashfs generations fit the existing machinery better than
+anything else — `/init` already assembles a squashfs+overlay root and
+`mkiso.sh` already builds the image, and a generation would be a 300 MB
+**file** rather than a partition — but a generation can only be made by
+building an image, so either the distribution ships whole images and
+`pkg` stops being how the base is updated, or the target grows
+`mksquashfs`. The first is a real architecture and it is not this one.
+A/B costs 100% of the OS on disk (≈1.6 GB at today's 792 MB) and gives
+exactly two generations, which is what every A/B system accepts.
+
+**The kernel was never the blocker**, which is the fourth time a
+blocking claim in this repository turned out to be about something
+already present: `BTRFS_FS`, `OVERLAY_FS` and `SQUASHFS` are `y`, and
+`DM_VERITY`, `DM_SNAPSHOT` and `BLK_DEV_DM` are `m`. What is missing is
+userland, layout, and one GRUB module (`loadenv` is not in the list
+`grub-mkimage` bakes into `core.img`).
 
 ---
 
