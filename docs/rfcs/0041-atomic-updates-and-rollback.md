@@ -161,7 +161,48 @@ decided, `novi-state` makes the question smaller than it is elsewhere:
 the parts of `/etc` that matter are a document the machine can
 regenerate.
 
-### 3. Activation is a bootloader variable, and GRUB cannot do it today.
+### 3. The three layouts are not three instances of one job, and the encrypted one has no answer yet.
+
+Item 1 originally said *"for all three layouts (UEFI, BIOS,
+encrypted)"*, as though the difference were bookkeeping. Read in the
+tree, it is not:
+
+- **BIOS/MBR** is the easy one: `novi-install` drives BusyBox `fdisk`
+  with the keystrokes a person would type, and a third primary
+  partition is three more lines — with RFC 0018's warning still
+  standing, that BusyBox `fdisk`'s default first sector is 63 and
+  every sector must be given explicitly.
+- **UEFI/GPT** needs `novi-gpt` to write a third entry. That is a
+  modest change to a small, well-specified program — but it changes
+  the tool's stated contract, which is *"Deliberately NOT a general
+  partitioner. It writes one layout, the one novi-install needs. A tool
+  that can express every layout is a tool that can express the wrong
+  one."* (RFC 0008). The new contract is "two layouts", and it should
+  be written down as deliberately as the first was.
+- **Encrypted (RFC 0018)** has no answer here at all, and this is the
+  finding. The layout is a plain `/boot` plus a LUKS root. Under A/B
+  the two slots AND the shared state must all be inside encryption —
+  `/home` on an unencrypted partition would be a silent, serious
+  regression for anybody who typed `--encrypt`. Carving three volumes
+  out of one LUKS container is what LVM is for, and **this system has
+  no LVM and no `dmsetup`**: `34-cryptsetup.sh` builds libdevmapper
+  into a private prefix and links it into exactly one static
+  `cryptsetup` binary, which is all that is installed.
+
+  The candidates are a new LVM2 dependency (and a second thing that
+  must work before root mounts), a second LUKS volume unlocked by a
+  keyfile inside the already-unlocked root (which then lives in a slot,
+  so both slots must carry it and a rollback must not lose it), or a
+  second passphrase prompt. None is obviously right.
+
+  **So encrypted installs get no A/B in the first cut, and the
+  installer should say so rather than produce a layout that cannot
+  later grow one.** That is the same call this project made about
+  `--encrypt` itself, about `libGL` and about DHCPv6: ship where it
+  works, name the gap exactly, and do not let a word imply a capability
+  that is not there.
+
+### 4. Activation is a bootloader variable, and GRUB cannot do it today.
 
 `grubenv` plus `load_env`/`save_env` is the mechanism, and the
 measurement above is that **`loadenv` is not in the module list
@@ -178,7 +219,7 @@ get that far comes back on the old slot by itself. What counts as
 make, because `novi-state health` already answers it (RFC 0014) — but
 that is a decision for the implementing RFC, not an assumption here.
 
-### 4. `pkg` should not learn about slots.
+### 5. `pkg` should not learn about slots.
 
 It already has everything: it installs into a root it is `chroot`ed
 into, it resolves from a signed index, and it verifies every archive
@@ -216,11 +257,27 @@ here would smuggle in the model decision this RFC just declined.
 1. **Split state out of the root**, by NAMED SUBTREE rather than by
    top-level directory — see decision 2. `/home`, `/var/log`,
    `/var/lib/novi-state`, `/var/lib/alsa` and `/var/cache/pkg` onto a
-   shared partition; **`/var/lib/pkg` stays in the slot**, because it
-   is the slot's own manifest. In `novi-install`, `/init` and the fstab
-   it writes, for all three layouts (UEFI, BIOS, encrypted). Bootable
-   and verifiable on its own, and every candidate mechanism needs it.
-   Settle `/etc` here, with the argument written down.
+   shared partition mounted at `/state` with `bind` entries in fstab;
+   **`/var/lib/pkg` stays in the slot**, because it is the slot's own
+   manifest. Bootable and verifiable on its own, and every candidate
+   mechanism needs it. Settle `/etc` here, with the argument written
+   down.
+
+   **BIOS/MBR and UEFI/GPT only** — see decision 3. The encrypted
+   layout keeps today's single root until the LUKS question has an
+   answer, and `novi-install` should refuse `--encrypt` together with
+   whatever flag asks for the new layout rather than quietly producing
+   one that cannot grow slots.
+
+   Two mechanisms were checked against the shipped BusyBox before being
+   relied on, RFC 0018's rule about testing the artifact rather than
+   the idea: **`mount -a` honours a `bind` entry from fstab** and
+   accepts `nofail` (verified in a scratch tree with the static binary
+   this repo builds, watching a marker file appear through the bind),
+   and **`rc.init` runs `mount -a` before `s6-rc-init`**, so the binds
+   are in place before any service starts — which is what `/var/log`
+   needs and what would otherwise have been a race nobody saw until
+   syslog wrote to the wrong filesystem.
 2. **`loadenv` in `core.img` and in `bootx64.efi`**, and a `grubenv`
    the installed system can write. Small, and nothing else can start
    until a boot can be steered from userland.
