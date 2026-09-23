@@ -217,10 +217,18 @@ the question is what a machine installing this will have.
 
 ## What this is not
 
-**It is not util-linux**, which the roadmap names in the same sentence.
-`mount`, `lsblk`, `fdisk` and the rest are a larger port with real musl
-friction, and several of them are things this system deliberately does
-its own way (`novi-mount`, `novi-gpt`). That is its own RFC.
+~~**It is not util-linux**, which the roadmap names in the same
+sentence. `mount`, `lsblk`, `fdisk` and the rest are a larger port with
+real musl friction, and several of them are things this system
+deliberately does its own way (`novi-mount`, `novi-gpt`). That is its
+own RFC.~~ **It is still not util-linux, and there is no separate RFC
+either — roadmap 3 measured it and the answer was no package.** The
+instinct that it was "a larger port" was right about the size and
+wrong about the need: busybox agrees with util-linux on 25 of 31
+comparable cases, the one loud gap is `flock -w`, and the two missing
+programs anybody would reach for are already answered by `novi-agent
+describe`. Struck through rather than deleted, because the reasoning
+was sound and only a number could settle it.
 
 **It is not `sed`, `grep`, `awk`, `tar` or `gzip`.** Those are separate
 GNU packages and separate decisions; BusyBox's versions of all five are
@@ -349,7 +357,82 @@ applet. `--disable-nls` stands — there are no translations.
    while sections 5 and 7 are copied unconditionally, because `mdoc`,
    `roff`, `tbl` and `man.conf` are formats rather than programs and
    are the pages this package exists to let somebody read.
-3. **util-linux**, the third name in §5's sentence.
+3. ~~**util-linux**, the third name in §5's sentence.~~ **Measured
+   (`tests/utillinux-gap/`), and the answer is no package.** The item
+   assumed a port; the numbers say busybox already covers this one,
+   which is not what it said about `sed`.
+
+   util-linux installs **91 programs**; busybox provides **48 of those
+   names** and lacks **43**. Those are two questions and they get two
+   instruments. `probe.sh` runs **31 comparable cases** over the
+   overlapping 48 — everything that does not need root, a block device
+   or a real console, because a probe that cannot run is not evidence
+   — and gets **25 agree, 6 differ**. `inventory.sh` classifies the
+   missing 43 against the GENERATED kernel config and the image:
+   **GAP 26, COVERED 12, CANNOT 5**.
+
+   **Exactly one LOUD difference, and it is the whole finding:
+   `flock -w <timeout>` does not exist in busybox.** There is no
+   workaround — `timeout N flock …` releases the lock when it kills
+   flock — so a script written elsewhere that waits for a lock fails
+   here. It fails *loudly*, which by roadmap 4's own rule is the
+   cheap kind.
+
+   **Five differences classed SILENT, and only two are a wrong
+   ANSWER.** `blkid` omits `BLOCK_SIZE=`; `mountpoint` exits 32 where
+   busybox exits 1 on the same verdict, so every `if mountpoint -q`
+   works and only `[ $? -eq 32 ]` breaks. The other three —
+   `getopt` on an unknown option, `fallocate -l 0` — differ **only in
+   the wording of the error**, with both sides refusing. So the
+   harness's classifier is cruder than the finding: LOUD versus SILENT
+   is the right axis and it cannot tell a different *message* from a
+   different *answer*. Read the rows; do not count them.
+
+   **Two of the 26 GAPs are the ones anybody would reach for —
+   `lsblk` and `lscpu` — and `novi-agent describe` already answers
+   both.** CPU model and count, memory, firmware, and every block
+   device with size and removable flag, from `/proc` and `/sys` with
+   nothing forked. What `lsblk` adds is the partition TREE with
+   mountpoints and filesystem types, which is "extend
+   `describe_hardware()`", not "port 91 programs".
+   `partx`/`addpart`/`delpart`/`resizepart` look like an installer gap
+   and are not one: busybox ships `partprobe` and `novi-install`
+   already calls it. Of the rest, 5 CANNOT work on this kernel at all
+   (`ipcmk`, `lsipc`, `mkfs.bfs`, `mkfs.cramfs`, `fsck.cramfs`) and 12
+   are COVERED by something already here.
+
+   **And the cost is not only size.** util-linux would put a SECOND
+   implementation of "what is mounted" and "what is on this block
+   device" beside busybox's and beside `novi-mount`'s — the parallel
+   truth this project writes tests to prevent. **Re-opening this needs
+   a new NUMBER, not a new opinion** (RFC 0027's rule for the mbedTLS
+   collapse): somebody hitting `flock -w` in a real script, or a
+   partition tree something on this machine actually needs.
+
+   **What the measurement found instead was not about util-linux.**
+   Sixteen busybox applets on this image name kernel features this
+   kernel does not have, twelve of them installed as commands that
+   could never work: `ipcs` answered *"kernel not configured for
+   message queues"* and `ipcrm` *"unknown errror in id (1)"* for the
+   life of the project, beside `hwclock`, `rtcwake`, `nbd-client`,
+   five `ubi*` and `vconfig`. A command that cannot work is worse than
+   one that is absent — RFC 0026's `idle3`, this RFC's own `bashbug`,
+   and roadmap 2's busybox `man`, which is the same defect one layer
+   up. `kernel/dead-applets` is a table of `<applet> <CONFIG_SYMBOL>`;
+   `scripts/prune-dead-applets.sh` reads the **generated** config and
+   removes only what the kernel cannot support, so turning a symbol on
+   restores the command with no edit to the table.
+   `05-kernel.sh` runs it where the answer first exists and
+   `16-s6-rc-db.sh` runs it again, because `03-base.sh` recreates every
+   symlink — the `/sbin/init` hazard exactly.
+
+   **`CONFIG_RTC_CLASS is not set`**, which is why `hwclock` is on
+   that list. This kernel reads the CMOS clock at boot through
+   `CONFIG_RTC_MC146818_LIB` and has no `/dev/rtc0` — so nothing can
+   write the system time back to hardware, and there is no RTC alarm
+   to wake a suspended machine (RFC 0035). That is a decision to take
+   on purpose rather than a typo to fix in passing; it is filed as
+   roadmap 6.
 4. ~~**`sed`, `grep`, `awk` and `tar`.**~~ **Measured**
    (`tests/textutils-gap/`), and **the item was wrong to name the four
    in one breath** — they are not alike, and only one of them earns a
@@ -458,3 +541,34 @@ applet. `--disable-nls` stands — there are no translations.
    `/usr/share/man` settles it alone — the base image's 79 alsa-utils
    pages live there, so a db built when the `man` package was made
    would be stale about pages no package owns.
+
+6. **`CONFIG_RTC_CLASS`, and a clock this machine cannot write back.**
+   Filed by roadmap 3's dead-applet sweep, and it is a kernel decision
+   rather than a userland one, so it is stated here and not taken in
+   passing.
+
+   The generated config says `# CONFIG_RTC_CLASS is not set`, and the
+   curated `kernel/config-x86_64` has never mentioned RTC at all — so
+   there is no `/dev/rtc0` and never has been. What survives is
+   `CONFIG_RTC_MC146818_LIB`, the early x86 CMOS read, which is why
+   the machine boots with a plausible wall clock and nothing looks
+   wrong. What does not survive: `hwclock` cannot write a corrected
+   time back to hardware, so a correction is lost at the next reboot;
+   `rtcwake` has no alarm to set, so there is no timed wake source for
+   RFC 0035's suspend; and both shipped as commands that could not
+   work, which is what made the absence visible at all.
+
+   `CONFIG_RTC_CLASS` + `CONFIG_RTC_DRV_CMOS` is what every
+   distribution sets and is small, so the likely answer is yes — but
+   it is a kernel rebuild and a booted verification (does the time
+   survive a reboot; does `hwclock` read and write), and RFC 0039's
+   sweep is the standing reminder that a `CONFIG_X=y` line is a claim
+   somebody has to check rather than a wish. Until then the two
+   commands are removed by `kernel/dead-applets`, which is derived, so
+   turning the symbol on brings them back with no edit to that table.
+
+   Two neighbours are in the same category and deliberately not
+   bundled in: `CONFIG_AUDIT` (which `CONFIG_SECURITY_SELINUX` needs,
+   and which `SECCOMP_RET_LOG` needs to log anything — RFC 0039) and
+   `CONFIG_ZRAM` (already `m`, with no `zramctl` to drive it). Each is
+   its own decision with its own verification.

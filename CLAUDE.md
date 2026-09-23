@@ -51,7 +51,11 @@ below for why `/build` is hardcoded and unrelated to the repo checkout path.
 - `bash build/02-toolchain.sh` — cross-compiler: binutils → gcc → musl (7 phases, order matters — see below)
 - `bash build/03-base.sh` — static BusyBox + rootfs hierarchy
 - `bash build/04-s6.sh` — skalibs → execline → s6 → s6-rc → s6-linux-init
-- `bash build/05-kernel.sh` — Linux kernel using `kernel/config-x86_64`
+- `bash build/05-kernel.sh` — Linux kernel using `kernel/config-x86_64`.
+  It also runs `scripts/prune-dead-applets.sh`, which removes busybox
+  applet symlinks this kernel cannot support (`kernel/dead-applets`) —
+  here rather than in 03, because the answer comes from the GENERATED
+  config and that does not exist until this stage
 - `bash scripts/mkinitramfs.sh --output <path>` — build the boot initramfs
 - `bash scripts/mkiso.sh` — squash rootfs + GRUB hybrid ISO. Takes no
   arguments: its defaults are `${ROOTFS}` and
@@ -2061,6 +2065,101 @@ opinion"*. The number says they are not alike.
   first shim was `#!/bin/sh` with `"${@:2}"`, which dash expands to
   nothing -- so the check that proves the harness can report agreement
   reported 0/52.
+
+## Architecture: util-linux, and the commands that could never run
+
+RFC 0040 roadmap 3, `tests/utillinux-gap/`. The item named util-linux
+beside coreutils and bash and RFC 0040 scoped it out as *"its own
+RFC"*. The measurement says there is no RFC to write.
+
+- **91 util-linux programs; busybox provides 48 of those names and
+  lacks 43.** Two questions, two instruments. `probe.sh` runs **31
+  comparable cases** over the overlapping 48 -- **25 agree, 6 differ**;
+  `inventory.sh` classifies the missing 43 against the GENERATED
+  kernel config and the image -- **GAP 26, COVERED 12, CANNOT 5**.
+- **EXACTLY ONE LOUD DIFFERENCE: `flock -w <timeout>` does not exist
+  in busybox**, and there is no workaround (`timeout N flock …`
+  releases the lock when it kills flock). Nothing in Novi's own code
+  uses flock at all -- novi-state and novi-mount both take an `mkdir`
+  lock precisely because busybox has none.
+- **FIVE ARE CLASSED SILENT AND ONLY TWO ARE A WRONG ANSWER.** `blkid`
+  omits `BLOCK_SIZE=`; `mountpoint` exits **32** where busybox exits
+  **1** on the same verdict, so every `if mountpoint -q` works and only
+  `[ $? -eq 32 ]` breaks. The other three differ **only in the wording
+  of the error**, with both sides refusing. LOUD-versus-SILENT is the
+  right axis (roadmap 4) and the classifier cannot tell a different
+  *message* from a different *answer* -- read the rows, do not count
+  them.
+- **THE TWO GAPS ANYBODY WOULD REACH FOR ARE ALREADY ANSWERED.**
+  `lsblk` and `lscpu` are both "what is this machine", and
+  `novi-agent describe` reports CPU model and count, memory, firmware
+  and every block device with size and removable flag, from `/proc`
+  and `/sys` with nothing forked. What `lsblk` adds is the partition
+  TREE, which is "extend `describe_hardware()`".
+  `partx`/`addpart`/`delpart`/`resizepart` look like an installer gap
+  and are not: busybox ships `partprobe` and `novi-install` calls it.
+- **The cost was never only size**: util-linux would put a SECOND
+  implementation of "what is mounted" and "what is on this block
+  device" beside busybox's and beside novi-mount's. **Re-opening this
+  needs a new NUMBER, not a new opinion** -- RFC 0027's rule for the
+  mbedTLS collapse.
+- **THE MEASUREMENT'S MOST USEFUL OUTPUT WAS NOT ABOUT util-linux.**
+  Sixteen busybox applets here name kernel features this kernel does
+  not have, twelve installed as commands that could never work: `ipcs`
+  answered *"kernel not configured for message queues"* and `ipcrm`
+  *"unknown errror in id (1)"* for the life of the project, beside
+  `hwclock`, `rtcwake`, `nbd-client`, five `ubi*` and `vconfig`.
+  Same complaint as `idle3`, `bashbug` and busybox's own `man`.
+- **THE REMOVAL IS DERIVED, WHICH IS THE ONLY REASON IT IS SAFE.**
+  `kernel/dead-applets` is a table of `<applet> <CONFIG_SYMBOL>
+  <reason>`; `scripts/prune-dead-applets.sh` reads the **generated**
+  config and removes an applet only when its symbol is absent, so
+  turning a symbol on restores the command with no edit to the table.
+  A list of removals would need editing by whoever next changes the
+  kernel, with nothing to tell them.
+- **IT RUNS IN `05-kernel.sh`, NOT `03-base.sh`, AND THEN AGAIN IN
+  16.** 03 installs the symlinks but the answer comes from the
+  generated config, which does not exist until 05 on a clean build --
+  and re-running 03 afterwards puts every one of them back, which is
+  the `/sbin/init` hazard exactly, so `16-s6-rc-db.sh` runs the same
+  script as part of the repair it already does. One implementation,
+  two callers.
+- **NO GENERATED CONFIG IS NOT A LICENCE TO DELETE.** The script exits
+  0 having done nothing when there is no `.config` yet: removing
+  commands on no evidence is the curated-config trap one step earlier.
+- **A NAME BUSYBOX DOES NOT BUILD IS DEAD WEIGHT IN A TABLE ABOUT DEAD
+  WEIGHT**, and the test's first run found four -- `flashcp`,
+  `flash_eraseall`, `flash_lock`, `flash_unlock` are MTD tools this
+  busybox config does not compile, so those rows would have sat there
+  forever doing nothing. The check is derived from the shipped binary.
+- **`CONFIG_RTC_CLASS is not set`**, which is why `hwclock` is on the
+  list. The early x86 CMOS read (`CONFIG_RTC_MC146818_LIB`) gives a
+  plausible wall clock at boot so nothing looks wrong -- but there is
+  no `/dev/rtc0`, so a corrected time cannot be written back to
+  hardware and there is no RTC alarm to wake a suspended machine (RFC
+  0035). A decision, not a typo: RFC 0040 roadmap 6.
+- **THE CURATED KERNEL CONFIG IS A SUBSET, AND ANSWERING FROM IT GAVE
+  THREE WRONG LABELS.** `kernel/config-x86_64` is ~280 options, so a
+  symbol it does not mention is NOT thereby off -- `CONFIG_SWAP` and
+  `CONFIG_HOTPLUG_CPU` are both unmentioned and both `y`, and swap
+  really works on a booted machine. Read
+  `/build/sources/linux-*/.config`, or ask the running kernel.
+- **THE FIRST pid NORMALISER ATE AN EXIT STATUS.** `chrt -p $$` prints
+  `pid 2179's …`, noise the two runs cannot share, so the harness
+  normalises it -- and the first version was `s/\b[0-9]{2,7}'?s?\b/`,
+  any two-to-seven-digit number, which turned `mountpoint`'s `rc=32`
+  into `rc=<pid>`: the one field the comparison turns on. It still
+  reported a difference only because busybox's `rc=1` is one digit; a
+  busybox exiting 33 would have compared EQUAL. **A normaliser wide
+  enough to hide the noise is wide enough to hide the finding** --
+  match the SHAPE the noise comes in, not "a number".
+- **AND THE DEAD-APPLET TEST'S OWN FIXTURE COULD NOT FAIL.** It seeded
+  symlinks pointing at a busybox that was never created, and the check
+  was `[ -e ]` -- which FOLLOWS a symlink and is false for a broken
+  one, so every applet read as "gone" whether or not the script had
+  run. Seventh time in this file that the probe, rather than the thing
+  probed, was the broken part. Both halves fixed: a real target, and
+  `[ -L ] || [ -e ]`.
 
 ## Architecture: a `man` that could never have worked
 

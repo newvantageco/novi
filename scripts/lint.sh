@@ -165,6 +165,17 @@ fi
 # `power.lid`, `power.button` and `agent.enabled` live in the shipped
 # document and absent from that reference.
 #
+# test-dead-applets.sh is the ninth, and its subject is a table of
+# CLAIMS about a kernel. `kernel/dead-applets` says which busybox
+# applets need which CONFIG_ symbol, and the removal is derived from
+# the GENERATED config so that turning a symbol on restores the
+# command -- which means a typo'd applet name sits there forever doing
+# nothing, and a broken "the symbol is set" branch deletes a working
+# command on every build. Neither shows up in a diff. Its first run
+# found four rows naming MTD tools this busybox config does not
+# compile at all, and its own fixture left every symlink dangling, so
+# `[ -e ]` read "gone" whether or not the script had run.
+#
 # test-pkg-conflicts.sh is the eighth, and it guards the other half of
 # what `pkg install` does as root: not "is this archive what the index
 # says", but "is this path somebody else's". It extracted over the root
@@ -213,6 +224,7 @@ for t in packages/tests/test-lib-json.sh packages/tests/test-agent-verbs.sh \
          packages/tests/test-state-document.sh \
          packages/tests/test-agent-sandbox.sh \
          packages/tests/test-pkg-conflicts.sh \
+         packages/tests/test-dead-applets.sh \
          packages/tests/test-pkg-lifecycle.sh \
          packages/tests/test-pkg-cache-hash.sh; do
     echo ">>> ${t##*/}"

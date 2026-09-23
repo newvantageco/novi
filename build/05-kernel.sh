@@ -132,6 +132,29 @@ cp .config "${ROOTFS}/boot/config-${LINUX_VERSION}"
 
 make ARCH=x86_64 CROSS_COMPILE="${CROSS}" INSTALL_MOD_PATH="${ROOTFS}" modules_install
 
+# ==> DROP THE COMMANDS THIS KERNEL CANNOT SUPPORT.
+#
+# busybox is one binary under ~400 names and the names are chosen at
+# BUSYBOX config time, while what they NEED is decided here. Nothing
+# connected the two, so the base image shipped `ipcs` and `ipcrm` --
+# which answer "kernel not configured for message queues" and "unknown
+# errror in id (1)" -- for the life of the project, plus `hwclock`,
+# `rtcwake`, `nbd-client`, five `ubi*` and `vconfig`. A command that
+# cannot work is worse than one that is absent (RFC 0026's `idle3`,
+# RFC 0040's `bashbug`, RFC 0040 roadmap 2's busybox `man`).
+#
+# It runs HERE rather than in `03-base.sh`, which installs those
+# symlinks, because the answer comes from the GENERATED config and on
+# a clean build that file does not exist until this stage. Re-running
+# 03 afterwards puts them back -- the /sbin/init hazard exactly -- so
+# `16-s6-rc-db.sh` runs the same script again as part of the repair it
+# already does.
+#
+# Found while measuring the util-linux gap (RFC 0040 roadmap 3,
+# tests/utillinux-gap/).
+echo "==> Removing applets this kernel cannot support"
+bash "${REPO_ROOT}/scripts/prune-dead-applets.sh" "${ROOTFS}" .config
+
 echo ""
 echo "Kernel built: ${ROOTFS}/boot/vmlinuz-${LINUX_VERSION}"
 ls -lh "${ROOTFS}/boot/"

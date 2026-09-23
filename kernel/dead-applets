@@ -1,0 +1,56 @@
+# APPLETS THIS KERNEL CANNOT SUPPORT.
+#
+# busybox is one binary under ~400 names, and the names are chosen at
+# BUSYBOX config time while what they need is decided at KERNEL config
+# time. Nothing connects the two, so the base image shipped commands
+# that could not work: `ipcs` answered "kernel not configured for
+# message queues" and `ipcrm` answered "unknown errror in id (1)"
+# (busybox's typo) for the life of the project, because
+# CONFIG_SYSVIPC is n. A command that cannot work is worse than one
+# that is absent -- RFC 0026's argument for deleting `idle3`, RFC
+# 0040's for `bashbug`, and RFC 0040 roadmap 2's for busybox's own
+# `man`, which is the same defect one layer up.
+#
+# Format:  <applet>  <CONFIG_SYMBOL>  <one line: what it needs the symbol for>
+#
+# The DECISION is derived, not written here: scripts/prune-dead-applets.sh
+# reads the GENERATED kernel config and removes an applet's symlink only
+# when its symbol is absent. So turning a symbol on restores the command
+# on the next build with no edit to this file -- which is the whole
+# reason it is a table of dependencies rather than a list of removals.
+#
+# NEVER answer this question from kernel/config-x86_64. That file is a
+# ~280-option SUBSET, so a symbol it does not mention is not thereby
+# off: CONFIG_SWAP and CONFIG_HOTPLUG_CPU are both unmentioned there
+# and both `y` in the generated config, and swap really works on a
+# booted machine. Three of this table's first four entries were wrong
+# for exactly that reason before the generated config was consulted.
+#
+# The APPLET stays in the binary either way; only its claim on a name
+# in PATH goes, exactly as with /sbin/init. `busybox ipcs` still runs
+# for anyone who wants to watch it fail.
+#
+# Found while measuring the util-linux gap (RFC 0040 roadmap 3,
+# tests/utillinux-gap/) -- the question "what can this machine actually
+# run" has two halves, and this is the half nobody had asked.
+#
+# A NAME THIS BUSYBOX DOES NOT BUILD IS DEAD WEIGHT IN A TABLE ABOUT
+# DEAD WEIGHT, and the test checks that against the shipped binary.
+# Its first run caught four: `flashcp`, `flash_eraseall`, `flash_lock`
+# and `flash_unlock` are MTD tools this busybox config does not
+# compile at all, so the rows would have sat here forever doing
+# nothing. They are out; if the busybox config ever turns them on,
+# CONFIG_MTD is what they would need.
+
+ipcs            CONFIG_SYSVIPC          System V message queues, semaphores and shared memory
+ipcrm           CONFIG_SYSVIPC          removes the System V objects ipcs lists
+hwclock         CONFIG_RTC_CLASS        /dev/rtc0, which only the RTC class driver creates
+rtcwake         CONFIG_RTC_CLASS        an RTC alarm as a wake source for suspend
+nbd-client      CONFIG_BLK_DEV_NBD      the network block device
+ubiattach       CONFIG_MTD_UBI          UBI volumes on raw flash
+ubidetach       CONFIG_MTD_UBI          UBI volumes on raw flash
+ubimkvol        CONFIG_MTD_UBI          UBI volumes on raw flash
+ubirmvol        CONFIG_MTD_UBI          UBI volumes on raw flash
+ubirename       CONFIG_MTD_UBI          UBI volumes on raw flash
+ubiupdatevol    CONFIG_MTD_UBI          UBI volumes on raw flash
+vconfig         CONFIG_VLAN_8021Q       802.1q VLAN interfaces
