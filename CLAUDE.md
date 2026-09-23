@@ -2141,12 +2141,32 @@ RFC"*. The measurement says there is no RFC to write.
   `flash_eraseall`, `flash_lock`, `flash_unlock` are MTD tools this
   busybox config does not compile, so those rows would have sat there
   forever doing nothing. The check is derived from the shipped binary.
-- **`CONFIG_RTC_CLASS is not set`**, which is why `hwclock` is on the
-  list. The early x86 CMOS read (`CONFIG_RTC_MC146818_LIB`) gives a
-  plausible wall clock at boot so nothing looks wrong -- but there is
-  no `/dev/rtc0`, so a corrected time cannot be written back to
-  hardware and there is no RTC alarm to wake a suspended machine (RFC
-  0035). A decision, not a typo: RFC 0040 roadmap 6.
+- **`CONFIG_RTC_CLASS` WAS NOT SET, WHICH IS WHY `hwclock` WAS ON THE
+  LIST -- AND IT IS SET NOW** (RFC 0040 roadmap 6). The early x86 CMOS
+  read (`CONFIG_RTC_MC146818_LIB`) gives a plausible wall clock at boot
+  so nothing looked wrong, and that is exactly what hid it: there was
+  no `/dev/rtc0`, so a corrected time could not be written back to
+  hardware and there was no RTC alarm to wake a suspended machine (RFC
+  0035). Three symbols -- `RTC_CLASS`, `RTC_INTF_DEV` (what creates
+  the device node) and `RTC_DRV_CMOS` -- because each is a separate
+  thing that can be absent.
+- **THE PROOF IS A WRITE THAT SURVIVES A REBOOT, not that `hwclock`
+  printed a time.** With no `/dev/rtc0` it prints an error; on a
+  read-only path it prints what a correct machine prints. Only a
+  correction still there after a reboot tells the two apart. Watched:
+  `date -u -s "2031-03-07 …"`, `hwclock -u -w`, `/proc/driver/rtc`
+  reading `rtc_date: 2031-03-07`, and after a reboot `date -u` reading
+  **Fri Mar 7 04:06:17 UTC 2031**.
+- **busybox's `rtcwake` HAS NO `-m no` AND NO `-m disable`, and only a
+  machine with an RTC could have shown it.** `-m no` arms the alarm
+  and then writes the mode to `/sys/power/state` unconditionally, so
+  the alarm IS set and the command exits 1 with `write error: Invalid
+  argument`; `-m disable` prints the usage text. The remedy is checked
+  rather than assumed -- `echo 0 > /sys/class/rtc/rtc0/wakealarm`
+  disarms and writing an epoch second there arms. **A util-linux delta
+  the host probe could not have found**, and not for the reason its
+  exclusions name: it needs hardware neither the guest nor this build
+  host had.
 - **THE CURATED KERNEL CONFIG IS A SUBSET, AND ANSWERING FROM IT GAVE
   THREE WRONG LABELS.** `kernel/config-x86_64` is ~280 options, so a
   symbol it does not mention is NOT thereby off -- `CONFIG_SWAP` and

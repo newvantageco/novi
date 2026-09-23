@@ -152,12 +152,31 @@ roadmap 2's busybox `man`). `kernel/dead-applets` and
 DERIVED from the generated kernel config so turning a symbol on
 restores the command.
 
-**`CONFIG_RTC_CLASS is not set`**, which is why `hwclock` is on that
-list. This kernel reads the CMOS clock at boot through
-`CONFIG_RTC_MC146818_LIB` and has no `/dev/rtc0`, so nothing can
-write the system time back to hardware and there is no RTC alarm to
-wake a suspended machine (RFC 0035). That is a decision to take on
-purpose rather than a typo, and it is filed as one.
+**`CONFIG_RTC_CLASS` was not set**, which is why `hwclock` was on that
+list: the kernel read the CMOS clock at boot through
+`CONFIG_RTC_MC146818_LIB` and had no `/dev/rtc0`, so nothing could
+write the system time back to hardware and there was no RTC alarm to
+wake a suspended machine (RFC 0035). It is set now — RFC 0040 roadmap
+6, verified by a correction that survives a reboot.
+
+**And that closed a hole in THIS measurement.** `rtcwake` is one of
+the 48 overlapping names and `probe.sh` has no case for it, which the
+harness's stated exclusions do not cover: it needs an RTC, and at the
+time neither the guest nor this build host had one (`/dev/rtc*` is
+still absent here). With the guest's RTC enabled the answer arrived
+from a booted machine instead: **busybox's `rtcwake` has no `-m no`**
+— it arms the alarm and then writes the mode to `/sys/power/state`
+unconditionally, so the alarm IS set and the command exits 1 with
+`write error: Invalid argument` — **and no `-m disable` at all**,
+where it prints its usage. Both are real util-linux deltas, and both
+are worked around from sysfs (`echo 0 >
+/sys/class/rtc/rtc0/wakealarm` disarms; writing an epoch second arms).
+
+So the 31 comparable cases are a floor, not a ceiling: a case this
+harness cannot run is a case it says nothing about, and "nothing to
+compare" is not the same answer as "they agree". Neither finding
+changes the recommendation — both are loud, and `rtcwake -m no` still
+arms the alarm.
 
 ## Two probe bugs worth not repeating
 

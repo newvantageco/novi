@@ -542,7 +542,7 @@ applet. `--disable-nls` stands — there are no translations.
    pages live there, so a db built when the `man` package was made
    would be stale about pages no package owns.
 
-6. **`CONFIG_RTC_CLASS`, and a clock this machine cannot write back.**
+6. ~~**`CONFIG_RTC_CLASS`, and a clock this machine cannot write back.**~~ **Done, and verified on a booted machine.**
    Filed by roadmap 3's dead-applet sweep, and it is a kernel decision
    rather than a userland one, so it is stated here and not taken in
    passing.
@@ -558,17 +558,58 @@ applet. `--disable-nls` stands — there are no translations.
    RFC 0035's suspend; and both shipped as commands that could not
    work, which is what made the absence visible at all.
 
-   `CONFIG_RTC_CLASS` + `CONFIG_RTC_DRV_CMOS` is what every
-   distribution sets and is small, so the likely answer is yes — but
-   it is a kernel rebuild and a booted verification (does the time
-   survive a reboot; does `hwclock` read and write), and RFC 0039's
-   sweep is the standing reminder that a `CONFIG_X=y` line is a claim
-   somebody has to check rather than a wish. Until then the two
-   commands are removed by `kernel/dead-applets`, which is derived, so
-   turning the symbol on brings them back with no edit to that table.
+   **Three symbols, because each is a separate thing that can be
+   absent**: `CONFIG_RTC_CLASS` (the one that defaulted to n),
+   `CONFIG_RTC_INTF_DEV` (what actually creates `/dev/rtcN`) and
+   `CONFIG_RTC_DRV_CMOS` (the driver that binds the chip).
+   `RTC_HCTOSYS` is left to its own default — on x86 the early CMOS
+   read has already set the clock by the time it would run — and it,
+   `RTC_SYSTOHC`, `RTC_INTF_SYSFS` and `RTC_INTF_PROC` came in with
+   theirs. All three stated symbols survive `olddefconfig`, checked by
+   `05-kernel.sh`'s own derived diff rather than by reading the file.
+
+   **THE PROOF IS A WRITE THAT SURVIVES A REBOOT, not that `hwclock`
+   printed a time.** With no `/dev/rtc0` it prints an error, and on a
+   read-only path it prints exactly what a correct machine prints — so
+   the only observable that distinguishes this change from the CMOS
+   read the machine already had is a correction that is still there
+   after a reboot. Measured on the booted guest: `/dev/rtc0` is
+   `crw-rw---- 253,0`; the kernel logs `rtc_cmos 00:03: registered as
+   rtc0` and `alarms up to one day, y3k, 242 bytes nvram, hpet irqs`;
+   `date -u -s "2031-03-07 04:05:06"` then `hwclock -u -w` returns 0,
+   `/proc/driver/rtc` reads `rtc_date: 2031-03-07` — the HARDWARE
+   holding it — and **after a reboot `date -u` reads `Fri Mar 7
+   04:06:17 UTC 2031`**. `/sys/class/rtc/rtc0/hctosys` is `1`, so that
+   is the device the boot read it back from.
+
+   **The wake source RFC 0035 lacked is real.** `alarm_IRQ` goes from
+   `no` to `yes` and `alrm_time` to the exact second `rtcwake` printed.
+
+   **But busybox's `rtcwake` cannot express two things util-linux's
+   can, and only a machine with an RTC could have shown it.** It has
+   no `-m no`: it arms the alarm and then writes the mode to
+   `/sys/power/state` unconditionally, so the alarm IS set and the
+   command exits 1 with `write error: Invalid argument`. And it has no
+   `-m disable` at all — it prints its usage. The remedy is checked
+   rather than assumed: `echo 0 > /sys/class/rtc/rtc0/wakealarm`
+   disarms (`alarm_IRQ: no`) and writing an epoch second there arms.
+   **That is a util-linux delta roadmap 3's probe could not have
+   found**, and not for the reason its exclusions name: it needs
+   hardware, and neither the guest (at the time) nor this build host
+   has an RTC at all.
 
    Two neighbours are in the same category and deliberately not
    bundled in: `CONFIG_AUDIT` (which `CONFIG_SECURITY_SELINUX` needs,
    and which `SECCOMP_RET_LOG` needs to log anything — RFC 0039) and
    `CONFIG_ZRAM` (already `m`, with no `zramctl` to drive it). Each is
    its own decision with its own verification.
+
+   **And enabling it found a bug in roadmap 3's own fix, one commit
+   old.** `kernel/dead-applets` claimed that turning a symbol on
+   restores the command — true of a FULL build only, because
+   `03-base.sh` creates the symlinks and `--from 05` never reaches it.
+   So this change produced a working RTC and no `hwclock`.
+   `scripts/prune-dead-applets.sh` converges both ways now, taking the
+   install path from `busybox --list-full` rather than from a rule
+   somebody wrote down, and the real build printed `restored
+   /sbin/hwclock` and `restored /usr/sbin/rtcwake`.
