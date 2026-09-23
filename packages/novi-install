@@ -196,22 +196,43 @@ USAGE
 # ---------------------------------------------------------------------------
 # Cleanup
 # ---------------------------------------------------------------------------
+# EVERYTHING MOUNTED INSIDE THE TARGET, INNERMOST FIRST -- and ONE
+# implementation of that list, because there are two callers and they
+# had already drifted.
+#
+# `cleanup` (the exit trap) knew about the state partition; the SUCCESS
+# path did not, so every `--ab` install ended with
+# `umount: can't unmount /mnt/novi-target: Resource busy` and a warning
+# about an unmount that had no business failing. The trap then tidied up
+# behind it, which is exactly why it went unnoticed: the machine was
+# fine and the installer's last words were a complaint.
+#
+# $1 is "warn" to report a failure or empty to be silent -- the trap
+# runs on paths where half of these were never mounted.
+unmount_inside_target() {
+    local mode="${1:-}" m
+    # The repository bind mount lives under $MNT, so it comes off first
+    # or everything below it fails with EBUSY.
+    umount "$MNT/mnt/novi-repo" 2>/dev/null || true
+    # Deepest first: /boot/efi is inside /boot on an encrypted install.
+    for m in "$MNT/boot/efi" "$MNT/boot" "$MNT/state"; do
+        case "$m" in
+            */boot/efi) [ "$ESP_MOUNTED" -eq 1 ] || continue ;;
+            */boot)     [ "$BOOT_MOUNTED" -eq 1 ] || continue ;;
+            */state)    [ "$STATE_MOUNTED" -eq 1 ] || continue ;;
+        esac
+        if [ "$mode" = warn ]; then
+            umount "$m" || warn "could not unmount ${m#"$MNT"} cleanly"
+        else
+            umount "$m" 2>/dev/null || true
+        fi
+    done
+    ESP_MOUNTED=0; BOOT_MOUNTED=0; STATE_MOUNTED=0
+}
+
 cleanup() {
     if [ "$MOUNTED" -eq 1 ]; then
-        # The repository bind mount lives under $MNT, so it has to come
-        # off first or the unmount below fails with EBUSY and leaves the
-        # target filesystem mounted after a failed install.
-        umount "$MNT/mnt/novi-repo" 2>/dev/null || true
-        # The ESP is mounted inside the target, so it comes off before
-        # the root does or the unmount below fails with EBUSY.
-        umount "$MNT/boot/efi" 2>/dev/null || true
-        ESP_MOUNTED=0
-        umount "$MNT/boot" 2>/dev/null || true
-        BOOT_MOUNTED=0
-        # The state partition is mounted inside the target too, and for
-        # the same reason comes off before the root (RFC 0041).
-        umount "$MNT/state" 2>/dev/null || true
-        STATE_MOUNTED=0
+        unmount_inside_target
         umount "$MNT" 2>/dev/null || true
         MOUNTED=0
     fi
@@ -1691,14 +1712,7 @@ cmd_install() {
     warn_if_root_passwordless
 
     sync
-    if [ "$ESP_MOUNTED" -eq 1 ]; then
-        umount "$MNT/boot/efi" || warn "could not unmount the ESP cleanly"
-        ESP_MOUNTED=0
-    fi
-    if [ "$BOOT_MOUNTED" -eq 1 ]; then
-        umount "$MNT/boot" || warn "could not unmount /boot cleanly"
-        BOOT_MOUNTED=0
-    fi
+    unmount_inside_target warn
     umount "$MNT" || warn "could not unmount $MNT cleanly"
     MOUNTED=0
     # Closing the container is what flushes dm-crypt's own state. An

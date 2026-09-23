@@ -168,6 +168,27 @@ has "core-boot.img keyed on the fact" \
     "$(sed -n '/^install_bootloader_bios() {/,/^}/p' "$INSTALL")" \
     "if separate_boot; then"
 
+echo "== ONE list of what is mounted inside the target, not two"
+# The exit trap knew about the state partition and the SUCCESS path did
+# not, so every --ab install ended with "can't unmount
+# /mnt/novi-target: Resource busy" and a warning about an unmount that
+# had no business failing. The trap then tidied up behind it, which is
+# exactly why it went unnoticed: the machine was fine and the
+# installer's last words were a complaint. Watched on a booted machine.
+check "there is one implementation" \
+    "$(grep -c '^unmount_inside_target() {' "$INSTALL")" "1"
+check "the trap calls it"    "$(grep -c '^        unmount_inside_target$' "$INSTALL")" "1"
+check "the success path too" "$(grep -c '^    unmount_inside_target warn$' "$INSTALL")" "1"
+# Nothing else may unmount these by hand, or the second list is back.
+check "no hand-rolled ESP unmount" \
+    "$(grep -c 'umount "\$MNT/boot/efi"' "$INSTALL")" "0"
+check "no hand-rolled state unmount" \
+    "$(grep -c 'umount "\$MNT/state"' "$INSTALL")" "0"
+# Deepest first: /boot/efi is inside /boot on an encrypted install, and
+# /state is inside the root.
+check "innermost first" \
+    "$(grep -c 'for m in "\$MNT/boot/efi" "\$MNT/boot" "\$MNT/state"' "$INSTALL")" "1"
+
 echo "== novi-gpt writes four entries for --slot-mib, and still two without"
 # Built for the HOST and run against a sparse file, then read back with
 # util-linux -- a tool that did not write it, which is how RFC 0008
