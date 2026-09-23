@@ -5407,6 +5407,22 @@ RFC 0041 roadmap 4. `novi-slot` — `status`, `sync`, `install`,
   exceed the running system, so "both slots are the same size,
   therefore the copy fits" -- which the small-disk measurement had
   just confirmed at 1.8G into 1.9G -- stops being true.
+- **AND THE WIPE WAS WATCHED ON A BOOTED MACHINE, which the host
+  demonstration could not do.** Sync, plant `usr/bin/ghost-pkg` in the
+  inactive slot, sync again: `emptying NOVI_ROOT_A (a slot is a copy,
+  not an accumulation)`, then `ghost-pkg: No such file or directory`
+  -- **with `busybox` present, the mark written and `status` reporting
+  `ready (1.8G)`**. That control is the half that matters: the ghost
+  being gone proves nothing if the wipe merely left an empty slot.
+- **THE HARNESS HARDCODED `/dev/vda3` AS THE INACTIVE SLOT AND WOULD
+  HAVE PLANTED ITS MARKER IN THE RUNNING ROOT.** The previous run had
+  left the machine SWITCHED, so it booted into vda3 and the inactive
+  slot was vda2. Caught by reading the boot log before the run
+  produced a result, not by the result looking wrong -- it would have
+  looked like the wipe failing. It asks `novi-slot status` now. Which
+  slot is running is a thing to ASK on every boot, never a thing to
+  write down: this is the same family as every other harness bug in
+  this file.
 - **THE WIPE ASKS `/proc/mounts`, NOT THIS PROGRAM'S OWN VARIABLES.**
   It is an `rm -rf` running as root and the one mistake it must not be
   able to make is deleting the RUNNING system -- and what would have

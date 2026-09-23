@@ -1,13 +1,15 @@
 # RFC 0041 — atomic root updates, and a way back
 
 **Status:** **Implemented and verified on booted machines** (QEMU/TCG;
-**no physical hardware**) — roadmap items 1, 2, 4 and 5. A machine
-installed with `novi-install --ab` has two root slots and a shared
-state partition; `novi-slot` updates the one that is not running;
-`novi-grubenv` points the bootloader at it; and a slot that does not
-reach a userland is abandoned on the boot after it, with nobody
-touching anything. **Still open:** the encrypted layout, which needs
-the LUKS question in decision 3 answered, and `/etc`. Every number
+**no physical hardware**) — **every roadmap item below** (3 folded
+into 1). A machine installed with `novi-install --ab` has two root
+slots and a shared state partition; `novi-slot` updates the one that
+is not running; `novi-grubenv` points the bootloader at it; a slot
+that does not reach a userland is abandoned on the boot after it,
+with nobody touching anything; and what the whole arrangement costs
+on a 6 GiB disk is measured rather than assumed. **Still open:** the
+encrypted layout, which needs the LUKS question in decision 3
+answered, and `/etc`. Every number
 below was measured on this build; every claim about what exists was
 checked in the tree rather than remembered.
 **Depends on:** RFC 0003 (installation and the `/init` boot paths),
@@ -674,6 +676,19 @@ here would smuggle in the model decision this RFC just declined.
    `/proc/mounts` what is mounted there rather than trusting this
    program's own variables — it is an `rm -rf` as root, and what
    would have gone wrong is those variables.
+
+   **And the fix was then watched on the booted machine**, which is
+   what the host demonstration could not do. The machine had been
+   left switched by the previous run, so it came up on slot B and the
+   inactive slot was A — the harness asks `novi-slot status` for that
+   rather than writing a device down, after a first version hardcoded
+   `/dev/vda3` and would have planted its marker in the RUNNING root.
+   Sync, plant `usr/bin/ghost-pkg` in the inactive slot, sync again:
+   `emptying NOVI_ROOT_A (a slot is a copy, not an accumulation)`,
+   then `ghost-pkg: No such file or directory` — with `busybox`
+   present, the mark written and `status` reporting `ready (1.8G)`.
+   That control is the half that matters: the ghost being gone proves
+   nothing if the wipe merely left an empty slot.
 
    **What a full `/state` costs is a loud, safe refusal**, which is
    the answer this item asked for. The package cache is shared
