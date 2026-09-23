@@ -187,14 +187,97 @@ check "there is one cmd_switch"     "$(grep -c '^cmd_switch() {' "$TOOL")" "1"
 # Somebody whose machine has just booted a bad update types `rollback`.
 # A verb that is absent because it would be a synonym is a verb
 # somebody gives up looking for.
-check "rollback is in the usage text" "$($SH_BIN "$TOOL" help 2>&1 | grep -c 'rollback')" "1"
-check "and says it is the same operation" \
-    "$($SH_BIN "$TOOL" help 2>&1 | grep -c 'same operation')" "1"
+check "rollback is in the usage text" \
+    "$($SH_BIN "$TOOL" help 2>&1 | grep -c '^  novi-slot rollback ')" "1"
+# And the help states the one way they differ, which is the trial.
+check "and says how it differs" \
+    "$($SH_BIN "$TOOL" help 2>&1 | grep -c 'a decision, not')" "1"
 
-part "it does not claim to know whether the update worked"
-# RFC 0041 item 5. A tool that implied it had a trial-boot rule when it
-# has none would be the overclaim RFC 0025 warns about with "Mesa".
-check "the help says so" "$($SH_BIN "$TOOL" help 2>&1 | grep -c 'not built yet')" "1"
+part "THE TRIAL BOOT -- a flag, because GRUB script has no arithmetic"
+# `set n=$((n + 1))` is "error: Incorrect command." in GRUB, measured on
+# a booted machine by a probe that failed on it before reaching the
+# save_env it was written to test. Two states are all this needs.
+AB="$WORK/ab2.cfg"
+FN2="$WORK/fn2.sh"
+awk '/^write_grub_cfg\(\) \{/{p=1} p{print} p&&/^GRUBCFG$/{g=1} g&&/^\}$/{exit}' \
+    "$INSTALLER" > "$FN2"
+cat > "$WORK/drv2.sh" <<DRV
+set -u
+ENCRYPT=0; AB=1; ROOT_LABEL=NOVI_ROOT_A; FIRMWARE=bios
+SLOT_A_LABEL=NOVI_ROOT_A; SLOT_B_LABEL=NOVI_ROOT_B
+BOOT_PART=/dev/vda1; LUKS_NAME=x; LUKS_UUID=y
+separate_boot() { [ -n "\$BOOT_PART" ]; }
+kernel_on_esp() { false; }
+kernel_grub_prefix() { printf ""; }
+. "$FN2"
+write_grub_cfg "$AB" ""
+DRV
+$SH_BIN "$WORK/drv2.sh"
+# Excluding comment lines: the generated file CARRIES a comment saying
+# `set n=$((n + 1))` is an error in GRUB, which is the note this check
+# exists to keep true. Grepping the whole file finds that note and
+# reports the bug it warns about.
+check "no arithmetic in the code"  "$(grep -v '^#' "$AB" | grep -c '\$((')" "0"
+check "and the note explaining why is there" "$(grep -ci 'no arithmetic' "$AB")" "1"
+# `sleep` is a MODULE. Without it in core.img the "going back" line is
+# followed by "error: Incorrect command." instead of a pause somebody
+# can read. Found by reading the generated menu, not by booting it.
+check "sleep is baked into core.img" \
+    "$(awk '/-o "\$\{NOVI_BOOT_DIR\}\/core.img"/{f=1} f&&/ sleep$/{print "yes"; exit} f&&/^$/{exit}' scripts/mkiso.sh)" "yes"
+check "and into bootx64.efi" \
+    "$(awk '/-o "\$\{NOVI_BOOT_DIR\}\/bootx64.efi"/{f=1} f&&/ sleep$/{print "yes"; exit} f&&/^$/{exit}' scripts/mkiso.sh)" "yes"
+check "armed becomes taken"     "$(grep -c 'set novi_try=taken' "$AB")" "1"
+check "and is saved at once"    "$(grep -A1 'set novi_try=taken' "$AB" | grep -c 'save_env novi_try')" "1"
+check "taken flips the slot"    "$(grep -c 'elif \[ "\${novi_try}" = "taken" \]' "$AB")" "1"
+# Both halves of the flip have to be persisted: the slot, or the next
+# boot goes back to the bad one; and the flag, or it flips forever.
+check "and saves both"          "$(grep -c 'save_env novi_slot novi_try' "$AB")" "1"
+check "and says so on screen"   "$(grep -c 'did not complete' "$AB")" "1"
+check "novi_try is loaded"      "$(grep -c 'load_env novi_slot novi_try' "$AB")" "1"
+check "and defaulted first"     "$(grep -c '^set novi_try=$' "$AB")" "1"
+
+part "switch arms a trial; ROLLBACK MUST NOT"
+# Arming on a rollback means a boot that fails to confirm sends you
+# back to the slot you were escaping. A rollback is a decision, not an
+# experiment.
+check "switch passes 1"     "$(grep -c 'cmd_switch "switched" 1' "$TOOL")" "1"
+check "rollback passes 0"   "$(grep -c 'cmd_switch "rolled back" 0' "$TOOL")" "1"
+check "armed is written"    "$(grep -c '"novi_try=armed"' "$TOOL")" "1"
+# And a rollback CLEARS any armed trial, or the bootloader would undo
+# the decision on the next boot.
+check "rollback clears it"  "$(awk '/^cmd_switch\(\) \{/,/^}/' "$TOOL" | grep -c '"novi_try="')" "1"
+
+part "what clears a trial, and what deliberately does not"
+check "confirm exists"      "$(grep -c '^cmd_confirm() {' "$TOOL")" "1"
+check "and is dispatched"   "$(grep -c 'confirm)  cmd_confirm' "$TOOL")" "1"
+# NOT novi-state health. A machine degraded for a reason unrelated to
+# the update would roll it back, and the rollback would look like the
+# update's fault. The file has to say so, because the next person will
+# reach for health as the obvious signal.
+check "health is not consulted" \
+    "$(awk '/^cmd_confirm\(\) \{/,/^}/' "$TOOL" | grep -c 'novi-state health')" "0"
+check "and the reason is written down" "$(grep -c 'novi-state health' "$TOOL")" "1"
+# NO WRITE ON A NORMAL BOOT: this runs from rc.init every time, and
+# rewriting the block the bootloader depends on at every start is churn.
+check "returns early with no trial" \
+    "$(awk '/^cmd_confirm\(\) \{/,/^}/' "$TOOL" | grep -c '\*) return 0 ;;')" "1"
+RD="$(awk '/^cmd_confirm\(\) \{/,/^}/' "$TOOL" | grep -n 'novi-grubenv get' | head -1 | cut -d: -f1)"
+WR="$(awk '/^cmd_confirm\(\) \{/,/^}/' "$TOOL" | grep -n 'novi-grubenv set' | head -1 | cut -d: -f1)"
+check "and reads before it writes" "$([ "$RD" -lt "$WR" ] && echo yes)" "yes"
+# rc.init is where it runs, because reaching that line means s6-rc
+# brought the default bundle up and convergence ran.
+check "rc.init calls it"    "$(grep -c 'novi-slot confirm' init/skel/rc.init)" "1"
+check "and cannot fail a boot" "$(grep -c 'novi-slot confirm || true' init/skel/rc.init)" "1"
+check "guarded by command -v"  "$(grep -B1 'novi-slot confirm || true' init/skel/rc.init | grep -c 'command -v novi-slot')" "1"
+
+part "a confirmed trial claims a userland, not a good update"
+# The bar is "this slot booted", which is what the mechanism can
+# observe. Letting the word imply more would be the overclaim RFC 0025
+# warns about with the word "Mesa".
+check "the help says what it claims" \
+    "$($SH_BIN "$TOOL" help 2>&1 | grep -c 'reached a working')" "1"
+check "and what it does not"  \
+    "$($SH_BIN "$TOOL" help 2>&1 | grep -c 'is a judgement')" "1"
 
 part "the kernel goes on the ESP when the root is not the boot area"
 # RFC 0041 item 1 had this wrong for UEFI A/B: the test was `$ENCRYPT`,

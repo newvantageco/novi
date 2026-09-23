@@ -169,6 +169,31 @@ if command -v novi-state >/dev/null 2>&1; then
     novi-state boot || true
 fi
 
+### 4b. Disarm a trial boot (RFC 0041 item 5).
+###
+### `novi-slot switch` arms a flag in GRUB's environment block; the
+### bootloader marks it taken on the way in, and if nothing clears it
+### the NEXT boot goes back to the other slot on its own. This is the
+### thing that clears it.
+###
+### HERE, AND ON PURPOSE: reaching this line means s6-rc brought the
+### default bundle up and boot convergence ran. That is the whole of
+### what a confirmed trial claims -- this slot has a working userland
+### -- and it is deliberately NOT a health verdict. `novi-state health`
+### was the obvious candidate and is the trap the RFC names: a machine
+### degraded for a reason unrelated to the update (a radio with no
+### firmware, a service somebody turned off) would roll the update back,
+### and the rollback would look like the update's fault.
+###
+### It writes NOTHING on a boot with no trial in flight, which is every
+### boot on every machine that has not just switched slots -- a grubenv
+### rewritten on every start would be churn on the one file the
+### bootloader depends on. `|| true` for the same reason as above:
+### nothing about this may turn into a failed boot.
+if command -v novi-slot >/dev/null 2>&1; then
+    novi-slot confirm || true
+fi
+
 ### 5. Live boot only: install the desktop from the medium (RFC 0007).
 ###
 ### The base image is console-only -- the desktop is packages, and the

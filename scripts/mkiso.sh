@@ -320,7 +320,7 @@ if [[ -d "${GRUB_LIB_DIR}" ]] && command -v grub-mkimage &>/dev/null; then
         -o "${NOVI_BOOT_DIR}/core.img" \
         -p '(hd0,msdos1)/boot/grub' \
         biosdisk part_msdos ext2 normal linux configfile search \
-        search_fs_uuid search_label echo test ls boot loadenv
+        search_fs_uuid search_label echo test ls boot loadenv sleep
 
     # A SECOND core.img, for the encrypted layout (RFC 0018).
     #
@@ -338,7 +338,7 @@ if [[ -d "${GRUB_LIB_DIR}" ]] && command -v grub-mkimage &>/dev/null; then
         -o "${NOVI_BOOT_DIR}/core-boot.img" \
         -p '(hd0,msdos1)/grub' \
         biosdisk part_msdos ext2 normal linux configfile search \
-        search_fs_uuid search_label echo test ls boot loadenv
+        search_fs_uuid search_label echo test ls boot loadenv sleep
 
     mkdir -p "${NOVI_BOOT_DIR}/i386-pc"
     cp "${GRUB_LIB_DIR}"/*.mod "${GRUB_LIB_DIR}"/*.lst "${NOVI_BOOT_DIR}/i386-pc/" 2>/dev/null || true
@@ -367,7 +367,7 @@ if [[ -d "${GRUB_LIB_DIR}" ]] && command -v grub-mkimage &>/dev/null; then
             part_gpt part_msdos fat ext2 normal linux configfile \
             search search_fs_uuid search_label search_fs_file \
             echo test ls boot gzio all_video efi_gop efi_uga \
-            serial terminal minicmd reboot halt loadenv
+            serial terminal minicmd reboot halt loadenv sleep
         echo ">>> UEFI boot artifact: bootx64.efi $(stat -c%s "${NOVI_BOOT_DIR}/bootx64.efi")B"
 
         # ── Secure Boot ──────────────────────────────────────────────

@@ -546,6 +546,72 @@ here would smuggle in the model decision this RFC just declined.
    is the obvious candidate and the obvious trap: a machine that is
    degraded for an unrelated reason must not roll back an update that
    was fine.
+
+   **DONE, AND WATCHED FIRING.** `novi-slot switch` arms a flag in the
+   environment block; GRUB marks it taken on the way in; `rc.init`
+   clears it. A boot that never reaches `rc.init` leaves it reading
+   "taken", and the next boot goes back with nobody touching anything.
+   Both halves were driven on a real disk:
+
+   - **The failing trial.** Slot B's `rc.init` was replaced with `exec
+     sleep 100000` — the one failure this rule exists for, a slot that
+     mounts and never reaches a userland. Boot 2 showed *"Novi Linux
+     (slot B)"*, resolved `LABEL=NOVI_ROOT_B` and never reached a
+     login; the machine was then powered off, which is what an
+     unattended machine in that state gets. Boot 3, untouched, printed
+     **"The last boot of slot b did not complete. Going back."** and
+     came up on `NOVI_ROOT_A` with `novi_try` cleared.
+   - **The succeeding trial.** Slot B repaired, switched again: boot 2
+     reached a shell on `/dev/vda3` with `novi_try=` already empty, and
+     boot 3 stayed on slot B. A rule that undid good updates on the
+     boot after them would be a net that catches what it was meant to
+     let through.
+
+   **A FLAG, NOT A COUNTER, BECAUSE GRUB SCRIPT HAS NO ARITHMETIC.**
+   `set n=$((n + 1))` is *"error: Incorrect command."* — measured, by a
+   probe that failed on it before reaching the `save_env` it was
+   written to test. Two states are all an A/B system needs: one trial.
+
+   **`save_env` WORKS HERE, AND THAT IS THE GATING FACT.** GRUB's ext2
+   driver is read-only except for this one call, which rewrites the
+   block in place through the file's block list. Whether it works is a
+   question about the filesystem and the build, so it was measured: a
+   grub.cfg that set a value and saved it left `probe=written_by_grub`
+   for the running system to read back. Without it the rule could only
+   notice failures that reached a shell — the ones a person can already
+   fix.
+
+   **WHAT CLEARS IT IS NOT `novi-state health`.** That was this item's
+   own suggestion and it is the trap the item names: a machine degraded
+   for a reason unrelated to the update — a radio with no firmware, a
+   service somebody turned off, a mirror that is down — would roll the
+   update back, and the rollback would then look like the update's
+   fault. A signal that fires for unrelated reasons turns a safety net
+   into a source of mystery reboots. What `rc.init` claims instead is
+   exactly what it can observe: **this slot reached a userland that got
+   as far as boot convergence.** "The update is good" is a larger claim
+   and nothing here makes it; a person who boots the new slot and does
+   not like it still types `rollback`.
+
+   **`rollback` DOES NOT ARM A TRIAL, and that is the one place the two
+   names are more than synonyms.** Arming one on the way back means a
+   boot that fails to confirm sends you to the slot you were escaping.
+   A rollback is a decision, not an experiment — and it clears any
+   armed flag too, or the bootloader would undo the decision on the
+   next boot. Somebody on a bad slot may well type `switch` meaning
+   rollback; that costs nothing, because the trial is armed on the good
+   slot and the good slot confirms.
+
+   **IT WRITES NOTHING ON A BOOT WITH NO TRIAL IN FLIGHT**, which is
+   every boot on every machine that has not just switched slots. A
+   grubenv rewritten 1024 bytes at a time on every start would be churn
+   on the one file the bootloader depends on.
+
+   **`sleep` IS A MODULE.** The "going back" line is held on screen for
+   three seconds so a person sees the explanation rather than watching
+   the machine change its mind; without `sleep` in `core.img` GRUB
+   answers *"error: Incorrect command."* right after it. Caught by
+   reading the generated menu, not by booting it.
 6. **What it costs on a small disk**, measured rather than assumed —
    including what happens when the shared partition is full and the
    inactive slot cannot be written.

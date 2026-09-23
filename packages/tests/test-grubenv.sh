@@ -217,7 +217,7 @@ check "no env logic without --ab" \
 check "and a plain title"        "$(grep -c '^menuentry "Novi Linux" ' "$WORK/plain.cfg")" "1"
 check "and three entries"        "$(grep -c '^menuentry ' "$WORK/plain.cfg")" "3"
 
-check "--ab loads the env"       "$(grep -c '^    load_env novi_slot$' "$WORK/ab.cfg")" "1"
+check "--ab loads the env"       "$(grep -c '^    load_env novi_slot' "$WORK/ab.cfg")" "1"
 # load_env NAMES the variables it accepts. Bare, it imports everything
 # in the file into GRUB's environment -- `prefix` and `root` included
 # -- so a block somebody appended to could redirect the bootloader.

@@ -5394,6 +5394,58 @@ RFC 0041 roadmap 4. `novi-slot` — `status`, `sync`, `install`,
   found` and zero packages -- and `/var/log/carry`, written from slot
   B, still readable, which is the shared state partition doing the job
   item 1 built it for.
+- **THE TRIAL BOOT IS A FLAG, AND IT HAS BEEN WATCHED FIRING** (RFC
+  0041 item 5). `switch` arms it, GRUB marks it taken on the way in,
+  `rc.init` clears it -- so a boot that never reaches a userland leaves
+  it reading "taken" and the NEXT boot goes back with nobody touching
+  anything. Driven both ways on a real disk: slot B's `rc.init`
+  replaced with `exec sleep 100000` gave a boot that mounted and never
+  reached a login, and the boot after it printed **"The last boot of
+  slot b did not complete. Going back."** and came up on slot A with
+  the flag cleared; with slot B repaired, the same switch reached a
+  shell with `novi_try=` already empty and STAYED there on the next
+  boot. A rule that undid good updates would be a net catching what it
+  was meant to let through.
+- **GRUB SCRIPT HAS NO ARITHMETIC.** `set n=$((n + 1))` is "error:
+  Incorrect command." -- measured, by a probe that failed on it before
+  reaching the `save_env` it had been written to test. Hence a flag
+  with two states rather than a counter, which is all an A/B system
+  needs.
+- **`save_env` WORKS ON THIS ext4, AND THAT IS THE GATING FACT.**
+  GRUB's ext2 driver is read-only except for that one call, which
+  rewrites the block in place through the file's block list -- so
+  whether it works is a question about the filesystem and the build,
+  not about the documentation. Measured: a grub.cfg that set a value
+  and saved it left `probe=written_by_grub` for the running system to
+  read back. Without it the rule could only ever notice failures that
+  reached a shell, which are the ones a person can already fix.
+- **WHAT CLEARS A TRIAL IS NOT `novi-state health`**, which was the
+  RFC's own suggestion and is the trap it names in the same breath. A
+  machine degraded for a reason unrelated to the update -- a radio with
+  no firmware, a service somebody turned off, a mirror that is down --
+  would roll the update back, and the rollback would then look like the
+  update's fault. A signal that fires for unrelated reasons turns a
+  safety net into a source of mystery reboots. What `rc.init` claims is
+  exactly what it can observe: this slot reached a userland that got as
+  far as boot convergence. "The update is good" is a larger claim and
+  nothing makes it.
+- **`rollback` DOES NOT ARM A TRIAL, and that is the one place the two
+  names are more than synonyms.** Arming one on the way back means a
+  boot that fails to confirm sends you to the slot you were escaping.
+  It also CLEARS an armed flag, or the bootloader would undo the
+  decision on the next boot. Somebody on a bad slot typing `switch`
+  when they meant rollback costs nothing: the trial is armed on the
+  good slot and the good slot confirms.
+- **`confirm` WRITES NOTHING ON A BOOT WITH NO TRIAL IN FLIGHT**, which
+  is every boot on every machine that has not just switched. It runs
+  from `rc.init` every time, and a grubenv rewritten 1024 bytes at a
+  time on every start would be churn on the one file the bootloader
+  depends on.
+- **`sleep` IS A GRUB MODULE.** The "going back" line is held for three
+  seconds so a person sees the explanation instead of watching the
+  machine change its mind -- and without `sleep` in `core.img` GRUB
+  answers "error: Incorrect command." right after it. Caught by reading
+  the generated menu, not by booting it.
 - **THE HARNESS PRODUCED TWO FALSE FINDINGS BEFORE IT PRODUCED A TRUE
   ONE**, both from one mistake, and it is one this file already
   records. `echo ---X-DONE---` puts the marker in the line the console

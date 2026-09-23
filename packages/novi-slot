@@ -305,6 +305,11 @@ cmd_status() {
     else
         echo "inactive slot:  could not be mounted read-only to look inside"
     fi
+    local try; try="$(novi-grubenv get novi_try 2>/dev/null || echo "")"
+    case "$try" in
+        armed) echo "trial:          ARMED -- the next boot of slot $(grubenv_says) is on trial" ;;
+        taken) echo "trial:          IN FLIGHT -- this boot has not confirmed yet" ;;
+    esac
     local want; want="$(grubenv_says)"
     if [ "$want" = "$RUNNING_SLOT" ] || [ "$want" = "(unset)" ]; then
         echo "next boot:      this slot (${RUNNING_SLOT})"
@@ -313,12 +318,21 @@ cmd_status() {
     fi
 }
 
-# One implementation, two names. `switch` does not care which direction
-# it is going, and neither does a rollback: both mean "boot the other
-# one", and a machine that has just booted a bad update is a machine
-# whose other slot is the good one.
+# One implementation, two names -- and ONE PARAMETER, which is the
+# place the two situations genuinely differ (RFC 0041 item 5).
+#
+# `switch` goes to a slot you have just prepared, so it ARMS A TRIAL: if
+# that slot never reaches a userland, the next boot comes back on its
+# own. `rollback` goes to the slot you came FROM, so it must not --
+# arming a trial there means a boot that fails to confirm sends you back
+# to the slot you were escaping. A rollback is a decision, not an
+# experiment.
+#
+# Somebody on a bad slot may well type `switch` meaning rollback. That
+# costs nothing: the trial is armed on the good slot, that slot
+# confirms, and the flag clears.
 cmd_switch() {
-    local verb="$1" want
+    local verb="$1" trial="$2" want
     need_root
     resolve_slots
     want="$(other_slot_letter)"
@@ -334,11 +348,55 @@ cmd_switch() {
     else
         warn "could not mount ${OTHER_DEV} to check it is populated"
     fi
-    novi-grubenv set "novi_slot=${want}" >/dev/null ||
-        die "could not write the GRUB environment block"
+    if [ "$trial" -eq 1 ]; then
+        novi-grubenv set "novi_slot=${want}" "novi_try=armed" >/dev/null ||
+            die "could not write the GRUB environment block"
+    else
+        # Clear any armed trial as well: rolling back is the answer to
+        # a trial that is going badly, and leaving the flag set would
+        # let the bootloader undo the decision on the next boot.
+        novi-grubenv set "novi_slot=${want}" "novi_try=" >/dev/null ||
+            die "could not write the GRUB environment block"
+    fi
     msg "${verb}: the next boot is slot ${want} (${OTHER_LABEL})"
     info "running slot ${RUNNING_SLOT} is untouched; reboot to change over"
+    if [ "$trial" -eq 1 ]; then
+        info "it is a TRIAL boot: if it does not reach a userland, the boot"
+        info "after it comes back here on its own"
+    fi
     info "at the boot menu, \"the other root slot\" reaches either one"
+}
+
+# WHAT CLEARS A TRIAL, which is the half of item 5 that is a judgement
+# rather than a mechanism.
+#
+# NOT `novi-state health`, which is the obvious candidate and the
+# obvious trap: a machine degraded for a reason that has nothing to do
+# with the update -- a radio with no firmware, a service somebody
+# turned off, a mirror that is down -- would roll the update back, and
+# the rollback would then look like the update's fault. A signal that
+# fires for unrelated reasons turns a safety net into a source of
+# mystery reboots.
+#
+# What this claims instead is exactly what it can observe: THIS SLOT
+# REACHED A USERLAND THAT GOT AS FAR AS BOOT CONVERGENCE. That is the
+# bar `rc.init` represents, and it is the failure an A/B system exists
+# for -- the one a person cannot fix without a rescue medium. "The
+# update is good" is a larger claim and nothing here makes it; a person
+# who boots the new slot and does not like it still types `rollback`.
+cmd_confirm() {
+    local st
+    st="$(novi-grubenv get novi_try 2>/dev/null || true)"
+    # NO WRITE ON A NORMAL BOOT. This runs from rc.init on every boot,
+    # and a grubenv rewritten 1024 bytes at a time on every start would
+    # be churn on the one file the bootloader depends on.
+    case "$st" in
+        armed|taken) ;;
+        *) return 0 ;;
+    esac
+    need_root
+    novi-grubenv set "novi_try=" >/dev/null 2>&1 || return 0
+    msg "trial boot confirmed; this slot is now the plain default"
 }
 
 cmd_pkg() {
@@ -392,16 +450,22 @@ ${PROG} — the other root filesystem (RFC 0041)
   ${PROG} install <pkg>...      install into the inactive slot
   ${PROG} update                update the inactive slot
   ${PROG} switch                boot the inactive slot next time
-  ${PROG} rollback              the same operation, named for going back
+  ${PROG} rollback              go back, permanently, with no trial
+  ${PROG} confirm               clear a trial (rc.init does this for you)
 
 A change is applied to the slot that is NOT running and becomes live at
 the next reboot, so nothing is ever modified underneath a running
 system and undoing it costs one reboot. Needs a machine installed with
 \`novi-install --ab\`: a partition table is written once.
 
-Whether the new slot actually worked is not decided here -- that is
-RFC 0041's trial-boot rule and is not built yet. What this gives you is
-something to go back to.
+\`switch\` arms a TRIAL boot: a slot that does not reach a userland is
+abandoned by the bootloader on the boot after it, with no help from
+anybody. \`rollback\` does not arm one -- going back is a decision, not
+an experiment.
+
+What a confirmed trial claims is that the slot reached a working
+userland, and no more. Whether the update was any GOOD is a judgement
+nothing here makes; if you boot it and do not like it, roll back.
 USAGE
 }
 
@@ -413,8 +477,9 @@ case "$cmd" in
     sync)     cmd_sync ;;
     install)  cmd_pkg install "$@" ;;
     update)   cmd_pkg update ;;
-    switch)   cmd_switch "switched" ;;
-    rollback) cmd_switch "rolled back" ;;
+    switch)   cmd_switch "switched" 1 ;;
+    rollback) cmd_switch "rolled back" 0 ;;
+    confirm)  cmd_confirm ;;
     -h|--help|help|'') usage ;;
     *) usage >&2; die "unknown command: ${cmd}" ;;
 esac

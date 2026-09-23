@@ -1087,9 +1087,44 @@ write_grub_cfg() {
 # RFC 0041: which slot boots is a variable, not a constant. It is set
 # by \`novi-grubenv set novi_slot=<a|b>\` on the running system.
 set novi_slot=a
+set novi_try=
 if [ -s \${prefix}/grubenv ]; then
-    load_env novi_slot
+    load_env novi_slot novi_try
 fi
+
+# RFC 0041 item 5: THE TRIAL BOOT. \`novi-slot switch\` arms it; this
+# boot takes it; a userland that gets as far as boot convergence
+# disarms it (\`novi-slot confirm\`, from rc.init). A boot that never
+# gets that far leaves the flag reading "taken", and the NEXT boot --
+# this code, before anything else runs -- goes back on its own.
+#
+# A FLAG AND NOT A COUNTER, because GRUB SCRIPT HAS NO ARITHMETIC.
+# \`set n=\$((n + 1))\` is "error: Incorrect command." -- measured on a
+# booted machine, by a probe that failed on it before reaching the
+# save_env it was written to test. Two states are enough: one trial is
+# what an A/B system gives you.
+#
+# \`save_env\` REWRITES THE BLOCK IN PLACE through the file's block
+# list, which is the one thing GRUB's ext2 driver can write. That it
+# works here is measured, not assumed: a grub.cfg that set a value and
+# saved it left \`probe=written_by_grub\` for the running system to read
+# back. Without that this rule could only ever notice failures that
+# reached a shell, which are the ones a person can already fix.
+if [ "\${novi_try}" = "armed" ]; then
+    set novi_try=taken
+    save_env novi_try
+elif [ "\${novi_try}" = "taken" ]; then
+    echo "The last boot of slot \${novi_slot} did not complete. Going back."
+    if [ "\${novi_slot}" = "b" ]; then
+        set novi_slot=a
+    else
+        set novi_slot=b
+    fi
+    set novi_try=
+    save_env novi_slot novi_try
+    sleep 3
+fi
+
 if [ "\${novi_slot}" = "b" ]; then
     set novi_root=LABEL=${SLOT_B_LABEL}
     set novi_other=LABEL=${SLOT_A_LABEL}
