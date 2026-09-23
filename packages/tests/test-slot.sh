@@ -279,6 +279,43 @@ check "the help says what it claims" \
 check "and what it does not"  \
     "$($SH_BIN "$TOOL" help 2>&1 | grep -c 'is a judgement')" "1"
 
+part "novi-agent describes the slots, and READS to do it"
+AGENT="packages/novi-agent"
+check "there is a slots section"   "$(grep -c '^describe_slots() {' "$AGENT")" "1"
+check "it is in the text document" "$(grep -c '^        describe_slots$' "$AGENT")" "1"
+check "and in the JSON one"        "$(grep -c '"slots": %s' "$AGENT")" "1"
+# RFC 0029 decision 1: describing is free because it is a view of files
+# any user can already read. `novi-slot status` MOUNTS the other slot,
+# so describe must not call it -- and the sandbox section made exactly
+# this call for the same reason (RFC 0039 item 5).
+# MATCH THE INVOCATION, NOT THE MENTION -- for the second time in this
+# repository, and caught the same way. The function's own comments name
+# novi-grubenv (to say it is deliberately NOT shelled out to), so a
+# grep over the body reported the tool as being run by the code that
+# explains why it is not. Comment lines are dropped first.
+SLOTFN="$(awk '/^describe_slots\(\) \{/,/^}/' "$AGENT" | grep -v '^[[:space:]]*#')"
+check "it does not run novi-slot"   "$(printf '%s' "$SLOTFN" | grep -c 'novi-slot')" "0"
+check "nor novi-grubenv"            "$(printf '%s' "$SLOTFN" | grep -c 'novi-grubenv')" "0"
+check "nor blkid, which needs root" "$(printf '%s' "$SLOTFN" | grep -c 'blkid')" "0"
+check "nor mount"                   "$(printf '%s' "$SLOTFN" | grep -c 'mount ')" "0"
+# It reads the two files it can: the kernel command line and the
+# environment block. Getting from /dev/vda2 to a LABEL means opening
+# the block device, which is root's -- a description that only works
+# for root is not the free read decision 1 describes.
+check "it reads /proc/cmdline"      "$(printf '%s' "$SLOTFN" | grep -c '/proc/cmdline')" "1"
+check "and the environment block"   "$(printf '%s' "$SLOTFN" | grep -c '/boot/grub/grubenv')" "1"
+# A machine with one slot says so rather than reporting zeros, which is
+# describe_idle's rule about an instrument that is not there.
+check "absent is its own answer"    "$(printf '%s' "$SLOTFN" | grep -c '"present": false')" "1"
+# And the two readers disagree about their source ON PURPOSE, so the
+# file has to say why or somebody will "fix" one of them.
+# The two readers disagree about their SOURCE on purpose -- novi-slot
+# reads the mount, this reads the command line -- so the reason has to
+# be written down beside the function or somebody will "fix" one of
+# them into agreement with the other.
+check "the disagreement is written down" \
+    "$(grep -B30 '^describe_slots() {' "$AGENT" | grep -c 'RFC 0014')" "1"
+
 part "the kernel goes on the ESP when the root is not the boot area"
 # RFC 0041 item 1 had this wrong for UEFI A/B: the test was `$ENCRYPT`,
 # so the kernel went into SLOT A's /boot while grub.cfg searched for

@@ -402,6 +402,22 @@ here would smuggle in the model decision this RFC just declined.
    answer looks like a finding about the present.
 
    **Still to do here:** the encrypted layout (decision 3), and `/etc`.
+
+   **`novi-agent describe` REPORTS THE SLOTS**, which is not on this
+   roadmap and belongs with it: `describe` is the document that says
+   what a machine is, and on an A/B machine the running slot, the next
+   boot and any trial in flight are among the first facts about it —
+   the same argument RFC 0039 item 5 made for the sandbox section.
+   **It READS and does not run**: `novi-slot status` mounts the other
+   slot to look inside it, so `describe` cannot call it, and the two
+   deliberately differ about their source. `novi-slot` reads the mount
+   and asks `blkid` for its label (RFC 0014's argument: what GRUB was
+   asked for and what the machine got are different questions, and it
+   is root acting on the answer). `describe` reads `/proc/cmdline`,
+   because getting from `/dev/vda2` to a label means opening the block
+   device — and a description that only works for root is not the free
+   read RFC 0029 decision 1 describes. A machine with one slot answers
+   `{"present": false}` rather than zeros.
 2. **`loadenv` in `core.img` and in `bootx64.efi`**, and a `grubenv`
    the installed system can write. Small, and nothing else can start
    until a boot can be steered from userland.

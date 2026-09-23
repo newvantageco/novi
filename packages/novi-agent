@@ -714,6 +714,82 @@ describe_packages() {
 # -- the drift `keybindings.h` and pkgsplit's derived depends both
 # exist to prevent. The test is the wrapper's own text: a /bin/sh
 # script on PATH that invokes novi-sandbox.
+# RFC 0041: which root slot this machine is running, and what boots
+# next. `describe` is the document that says what a machine IS, and on
+# an A/B machine that is one of the first facts about it -- the same
+# argument that put the sandbox section here (RFC 0039 item 5).
+#
+# IT READS FILES AND RUNS NOTHING, which `novi-slot status` cannot
+# claim: that mounts the other slot to look inside it, and RFC 0029
+# decision 1 is that describing is free because it is a view of files
+# any user can already read. So the two disagree about their source on
+# purpose:
+#
+#   novi-slot  reads the MOUNT and asks blkid for its label, because
+#              RFC 0014's argument is that what GRUB was asked for and
+#              what the machine got are different questions -- and it
+#              is root, acting on the answer.
+#   here       reads /proc/cmdline, because getting from /dev/vda2 to
+#              a LABEL needs to open the block device, which is root's.
+#              A description that only works for root is not the free
+#              read decision 1 describes.
+#
+# They agree on every correct boot. The one they would differ on is a
+# machine booted with root= naming a device rather than a label, where
+# this says "not an A/B machine" -- which is the safe direction: an
+# absent section claims nothing.
+describe_slots() {
+    local cmdline=/proc/cmdline env=/boot/grub/grubenv
+    local label='' running='' next='' trial=''
+
+    if [ -r "$cmdline" ]; then
+        label="$(sed -n 's/.*root=LABEL=\([A-Za-z0-9_.-]*\).*/\1/p' "$cmdline" | head -1)"
+    fi
+    case "$label" in
+        NOVI_ROOT_A) running=a ;;
+        NOVI_ROOT_B) running=b ;;
+    esac
+
+    if [ -z "$running" ]; then
+        if [ "$FMT" = text ]; then
+            t_head slots
+            t_row layout 'one root slot -- installed without --ab'
+            return 0
+        fi
+        printf '{"present": false}'
+        return 0
+    fi
+
+    # The environment block is a plain file: `# GRUB Environment
+    # Block`, then name=value lines, then `#` padding. Reading it here
+    # rather than shelling out to novi-grubenv keeps this a read -- and
+    # the parse is the same two rules GRUB's own envblk.c applies.
+    if [ -r "$env" ]; then
+        next="$(sed -e '/^#/d' -n -e 's/^novi_slot=//p' "$env" | head -1)"
+        trial="$(sed -e '/^#/d' -n -e 's/^novi_try=//p' "$env" | head -1)"
+    fi
+    [ -n "$next" ] || next="$running"
+
+    if [ "$FMT" = text ]; then
+        t_head slots
+        t_row running "$running (${label})"
+        t_row 'next boot' "$next"
+        case "$trial" in
+            armed) t_row trial 'armed -- the next boot is on trial' ;;
+            taken) t_row trial 'in flight -- this boot has not confirmed yet' ;;
+            *)     t_row trial 'none' ;;
+        esac
+        return 0
+    fi
+    # `null` and not the empty string for "no trial": a reader
+    # branching on truthiness gets the right answer either way, and a
+    # reader printing it gets "null" rather than a blank that looks
+    # like a field somebody forgot to fill in.
+    printf '{"present": true, "running": %s, "label": %s, "next_boot": %s, "trial": %s}' \
+        "$(json_str "$running")" "$(json_str "$label")" "$(json_str "$next")" \
+        "$( [ -n "$trial" ] && json_str "$trial" || printf 'null' )"
+}
+
 describe_sandbox() {
     local bindir=/usr/bin
     local f name joined line real filter net first=1
@@ -869,6 +945,7 @@ cmd_describe() {
         describe_network
         describe_idle
         describe_packages
+        describe_slots
         describe_sandbox
         describe_agent
         # NOT re-rendered here. novi-state owns the human form of each
@@ -898,13 +975,14 @@ cmd_describe() {
     # `schema` stays 1 for an ADDED key -- a consumer written against
     # 1 still reads every field it knew. Renaming or removing one is
     # what would make it 2.
-    printf '{"schema": 1, "identity": %s, "hardware": %s, "network": %s, "idle": %s, "state": %s, "drift": %s, "health": %s, "packages": %s, "sandbox": %s, "agent": %s}\n' \
+    printf '{"schema": 1, "identity": %s, "hardware": %s, "network": %s, "idle": %s, "state": %s, "drift": %s, "health": %s, "packages": %s, "slots": %s, "sandbox": %s, "agent": %s}\n' \
         "$(describe_identity)" \
         "$(describe_hardware)" \
         "$(describe_network)" \
         "$(describe_idle)" \
         "$state" "$diff" "$health" \
         "$(describe_packages)" \
+        "$(describe_slots)" \
         "$(describe_sandbox)" \
         "$(describe_agent)"
 }

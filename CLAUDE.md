@@ -5394,6 +5394,28 @@ RFC 0041 roadmap 4. `novi-slot` — `status`, `sync`, `install`,
   found` and zero packages -- and `/var/log/carry`, written from slot
   B, still readable, which is the shared state partition doing the job
   item 1 built it for.
+- **`novi-agent describe` HAS A `slots` SECTION, AND IT READS WHERE
+  `novi-slot` MEASURES.** `describe` is the document that says what a
+  machine IS, and on an A/B machine "which root am I running, what
+  boots next" is one of the first facts about it -- the same argument
+  that put the sandbox section there (RFC 0039 item 5). The two readers
+  disagree about their SOURCE on purpose, and the file says so or
+  somebody will make them agree: `novi-slot` reads the MOUNT and asks
+  `blkid` for its label, because RFC 0014's argument is that what GRUB
+  was asked for and what the machine got are different questions, and
+  it is root acting on the answer; `describe` reads `/proc/cmdline`,
+  because getting from `/dev/vda2` to a LABEL means opening the block
+  device, and a description that only works for root is not the free
+  read RFC 0029 decision 1 describes. They differ only on a machine
+  booted with `root=` naming a device, where `describe` says "not an
+  A/B machine" -- the safe direction, since an absent section claims
+  nothing.
+- **MATCH THE INVOCATION, NOT THE MENTION, for the second time.** The
+  check that `describe_slots` does not shell out to `novi-grubenv`
+  grepped the function body -- which CONTAINS the comment explaining
+  that it deliberately does not. The code that explains why a tool is
+  not run was reported as running it. RFC 0039's wrapper reader learned
+  this first; comment lines are dropped before the grep now.
 - **THE TRIAL BOOT IS A FLAG, AND IT HAS BEEN WATCHED FIRING** (RFC
   0041 item 5). `switch` arms it, GRUB marks it taken on the way in,
   `rc.init` clears it -- so a boot that never reaches a userland leaves
