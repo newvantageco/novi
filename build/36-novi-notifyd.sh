@@ -17,8 +17,8 @@
 # feature with one wire format between them, and a format defined in
 # two files that are built apart is a format that drifts.
 #
-# The stage number puts it after the desktop clients (06..14) and
-# well before packaging (40+): novi-notifyd is a desktop binary and
+# The stage number puts it after the desktop clients and
+# well before packaging (50+): novi-notifyd is a desktop binary and
 # pkgsplit has to see it in the rootfs to move it out.
 # ============================================================
 set -euo pipefail

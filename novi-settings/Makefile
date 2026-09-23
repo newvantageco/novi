@@ -38,8 +38,15 @@ xdg-shell-client-protocol.h: $(XDG_SHELL_XML)
 xdg-shell-protocol.c: $(XDG_SHELL_XML)
 	$(WAYLAND_SCANNER) private-code $< $@
 
-novi-settings: main.c ../common/text.c xdg-shell-protocol.c xdg-shell-client-protocol.h
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ main.c ../common/text.c xdg-shell-protocol.c $(LDLIBS)
+# ../common/keys.c for the Keys panel (RFC 0037 roadmap 1). It is the
+# loader novi-shell dispatches from and the launcher's sheet displays,
+# and now also the writer -- so the panel shows what will fire and
+# writes what the loader will read back, rather than holding a third
+# opinion about the file. xkbcommon was already in PKGS for this
+# client's own keyboard handling, so this is a new SOURCE and not a new
+# dependency.
+novi-settings: main.c ../common/keys.c ../common/text.c ../common/theme.c xdg-shell-protocol.c xdg-shell-client-protocol.h
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ main.c ../common/keys.c ../common/text.c ../common/theme.c xdg-shell-protocol.c $(LDLIBS)
 
 install: novi-settings
 	install -D -m 755 novi-settings "$(DESTDIR)$(PREFIX)/bin/novi-settings"

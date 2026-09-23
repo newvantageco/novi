@@ -90,6 +90,21 @@ void novi_decor_destroy(struct novi_decor *d);
 void novi_decor_set_size(struct novi_decor *d, int width, int height);
 void novi_decor_set_title(struct novi_decor *d, const char *title);
 void novi_decor_set_focused(struct novi_decor *d, bool focused);
+
+/* Re-render after a theme switch (RFC 0030 roadmap 1).
+ *
+ * `novi_decor_retheme_shared()` remakes the control-dot sprites, which
+ * are shared between every window and bake their colour in at
+ * creation; call it ONCE, before repainting the windows. The shadow
+ * sprites are black-with-alpha and carry no palette, so they are not
+ * touched.
+ *
+ * `novi_decor_repaint()` forces one window's bar to be redrawn.
+ * refresh() normally skips that when width, focus and title are all as
+ * drawn -- which is right, and exactly wrong here: the palette is not
+ * one of the three things it compares. */
+void novi_decor_retheme_shared(void);
+void novi_decor_repaint(struct novi_decor *d);
 void novi_decor_set_hover(struct novi_decor *d, enum novi_deco_control control);
 
 /* Which control `node` is, for a caller that has already resolved the

@@ -86,9 +86,9 @@ ${BUILD_DIR}/openssl-target      headers + libraries, for LINKING
 ${BUILD_DIR}/stage-devtools/openssl   the package
 ```
 
-Never `${ROOTFS}`, per decision 1. `38-python.sh` points
+Never `${ROOTFS}`, per decision 1. `43-python.sh` points
 `--with-openssl` at the first, and the second is published by
-`43-devtools-repo.sh` with no change to that stage — it already globs
+`53-devtools-repo.sh` with no change to that stage — it already globs
 every staged directory carrying a `MANIFEST`.
 
 The stage number is **32**, beside `31-mbedtls.sh`: two TLS
@@ -134,7 +134,7 @@ same reason. After the fix: `{'x509': 143, 'crl': 0, 'x509_ca': 143}`.
 
 ### 5. A missing `_ssl` is a hard build failure now.
 
-RFC 0026 built `38-python.sh`'s missing-module check as a *warning*,
+RFC 0026 built `43-python.sh`'s missing-module check as a *warning*,
 because CPython's optional-module list shifts between point releases
 and a build that stops over `_dbm` would be worse than one that says
 so. `_ssl` and `_hashlib` are the exception: they are the entire reason
@@ -202,13 +202,118 @@ repository:
    machine made, which proves the code path and not the CA set. The
    first boot on a network should fetch a real https URL and check that
    the 143-certificate store is the reason it succeeded.
-2. **Rebuild curl against OpenSSL, or not.** There is now a duplicate:
-   two TLS libraries in the package set doing the same job for
-   different consumers. mbedTLS is 10x smaller and curl works today, so
-   this is a question about the package set's size rather than a bug —
-   but it should be answered on purpose, not left as sediment.
-3. **`pip`.** RFC 0026 refused it because it fetches over https and
-   there was none. That objection is gone; the remaining ones (no
-   compiler in the `python` package, so no source wheels; the
-   `x86_64-linux-gnu` SOABI mislabel, so no binary wheels) are real and
-   belong in their own RFC.
+2. ~~**Rebuild curl against OpenSSL, or not.**~~ **Answered on
+   purpose: NOT.** The item asked for a decision rather than a build,
+   and guessed the ratio almost right — it said 10x; measured, it is
+   **8.2x**.
+
+   **Installed on the target: mbedTLS 972 KB** (libmbedcrypto 597 KB,
+   libmbedtls 295 KB, libmbedx509 85 KB) **against OpenSSL 8.0 MB**
+   (libcrypto 6.1 MB, libssl 1.0 MB, the legacy provider 142 KB).
+
+   Who pays is settled by the dependency graph, not by taste. `git`
+   depends on `curl` depends on `mbedtls`, and on nothing else that
+   carries TLS — so **a machine with git and no Python would go from
+   972 KB of TLS to 8.0 MB, +7 MB, for no capability it did not
+   already have.** The saving is under 1 MB and lands only where
+   OpenSSL is already present for another reason: `netsurf` (which
+   depends on both) and `python`.
+
+   | machine | today | curl on OpenSSL | delta |
+   |---|---|---|---|
+   | `git` | 972 KB | 8.0 MB | **+7.0 MB** |
+   | `netsurf` | 8.97 MB | 8.0 MB | −972 KB |
+   | `python` | 8.0 MB | 8.0 MB | 0 |
+
+   The maintenance argument — one upstream to bump, one CVE watch-list
+   — is real and small, and its second half cuts the other way: **the
+   smaller stack is the one on the HTTPS fetch path.** 972 KB parsing
+   certificates off the internet is a better place to be than 8 MB of
+   it, which is RFC 0020's original reasoning intact.
+
+   And the choice was always one-sided: **OpenSSL can never leave**,
+   because CPython's `ssl` accepts nothing else. The only question
+   available was whether mbedTLS goes, and at 972 KB on the path that
+   matters most it earns its place. This is sediment no longer; it is
+   a decision, and re-opening it needs a new number rather than a new
+   opinion.
+3. ~~**`pip`.**~~ **Done — RFC 0026 roadmap 4 and 5, and BOTH of the
+   objections listed here were already answerable when this item was
+   written.** It named three: https (gone, this RFC), no compiler in
+   the `python` package (true, and irrelevant — the compiler is a
+   PACKAGE, `novi-devel`, and `pip install --no-binary :all:
+   MarkupSafe` now builds a wheel with the machine's own gcc), and the
+   `x86_64-linux-gnu` SOABI mislabel (a real bug, and a **one-word**
+   one: CPython's configure corrects the triplet for musl by testing
+   `build_os` where it should test `host_os`, so a native musl build
+   is corrected and a cross build is not).
+
+   pip also **shipped in the package the whole time**:
+   `--with-ensurepip=no` decides whether pip is INSTALLED, not whether
+   it is present, and `ensurepip`'s bundled wheels are part of the
+   standard library. What the work actually needed was that one word,
+   `/etc/pip.conf` (pip verifies against a vendored certifi bundle, so
+   on a machine whose operator added a CA `pip install` fails while
+   `urllib` succeeds against the same host — measured), and nothing
+   else. **Tenth roadmap item in this repository found to be wrong
+   about what is already built or already possible.**
+4. ~~**Trim the OpenSSL build.**~~ **Done, and the number is smaller
+   than the item implied.** Measured, stripped, like for like:
+
+   | | before | after |
+   |---|---|---|
+   | `libcrypto.so.3` | 6,137,328 | 5,915,568 |
+   | `libssl.so.3` | 1,061,376 | 728,960 |
+   | `openssl` | 957,192 | 913,704 |
+   | `ossl-modules/legacy.so` | 142,120 | — |
+   | **total** | **8,298,016** | **7,558,232** |
+
+   **739 KB, 8.9%** — and the package on disk goes 8.0M → 7.3M. The
+   item said this "helps every machine that has OpenSSL", which is
+   true and is nine percent. **libcrypto barely moves (3.6%)**: its
+   weight is bignum, elliptic curve and provider machinery, not the
+   algorithm tables, so removing ciphers takes hundreds of kilobytes
+   off the thing that was already small. A third of `libssl` goes,
+   which is DTLS, QUIC and the PSK/SRP suites.
+
+   **WHAT IT COSTS IS EXACTLY THE PSK AND SRP SUITES, and that was
+   enumerated rather than reasoned about.** `openssl ciphers -v` goes
+   from **60 suites to 30** on a booted machine, which sounds alarming
+   until the two lists are diffed: all thirty removed are `*-PSK-*` or
+   `SRP-*`, which need an out-of-band shared secret and appear nowhere
+   on the public web. The thirty that remain are the ECDHE/DHE/RSA set
+   with AES-GCM, AES-CBC and ChaCha20, including all three TLS 1.3
+   suites.
+
+   **`hashlib` is unchanged at 19 algorithms**, `ripemd160` included —
+   it moved back into the default provider in 3.0.7, so `no-legacy`
+   does not cost it. And the legacy provider was **unreachable
+   anyway**: the shipped `openssl.cnf` activates `default` and nothing
+   else, so 142 KB shipped that could not be used without editing a
+   config file nobody edits. RFC 0007's rule about dead weight, in the
+   TLS stack.
+
+   **`no-deprecated` was NOT taken.** It is the one entry that could
+   break CPython's `_ssl` and `_hashlib`, and folding it into a size
+   trim would make a build failure look like a packaging change. It is
+   its own question.
+
+   **The first probe could not tell the two builds apart.** `openssl
+   s_client -ssl3` answers "Unknown option" in BOTH, because upstream
+   already builds without the SSLv3 method — so the check that looked
+   like it proved `no-ssl3` proved nothing. The cipher-list diff is
+   what distinguishes them. Same shape as every other unfalsifiable
+   probe this project has caught itself writing.
+
+   **NetSurf needed no rebuild**, established by comparing its 57
+   undefined OpenSSL symbols against what the trimmed libraries still
+   export — all present. That comparison was itself wrong twice
+   before it was right: `nm -D` prints `SYMBOL@VERSION` on the
+   undefined side and `SYMBOL@@VERSION` on the defined side, so the
+   first two runs reported every symbol missing.
+
+   Verified on a booted machine: `openssl version`, the 143-certificate
+   store intact, and **RFC 0020's verification triple from Python** —
+   an untrusted self-signed certificate refused, the same certificate
+   accepted once its CA is trusted (TLSv1.3, `TLS_AES_256_GCM_SHA384`),
+   and the right CA with the wrong hostname refused again.

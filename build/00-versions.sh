@@ -73,6 +73,21 @@ JETBRAINS_MONO_VERSION="2.304"
 # and explicitly deferred adding it; this is that follow-up. OFL-1.1,
 # the same licence family as JetBrains Mono, so no new review.
 INTER_VERSION="4.1"
+# Source Serif 4, the browser's serif (RFC 0031's roadmap item). OFL-1.1,
+# like the other two, so no new licence review -- but unlike the other
+# two its release asset carries NO licence file, so 01-fetch.sh pulls
+# the OFL text separately and 09-foot.sh installs it beside the faces.
+#
+# 4.004 rather than something newer because that is the newest tag with
+# a release ASSET: this environment can download a release asset and
+# cannot download a source archive, which is the same constraint that
+# decided how Inter and JetBrains Mono are fetched.
+#
+# Chosen over Noto Serif and the Google Fonts families because it is a
+# screen serif designed alongside a sans of the same metrics tradition,
+# it ships static TTFs (this build deliberately avoids variable fonts --
+# see 09-foot.sh), and it has the four faces a browser actually needs.
+SOURCE_SERIF_VERSION="4.004"
 
 # e2fsprogs: real mke2fs and e2fsck. BusyBox's mke2fs writes ext2 with
 # no journal, which on real hardware turns an unclean shutdown into a
@@ -111,6 +126,14 @@ CACERT_SHA256="ab3ee3651977a4178a702b0b828a4ee7b2bbb9127235b0ab740e2e15974bf5db"
 OPENSSH_VERSION="9.9p2"
 GIT_VERSION="2.47.1"
 
+# NetSurf (RFC 0032). A web browser, and until it there was no way to
+# view a web page on this system at all. `netsurf-all` bundles its
+# thirteen own libraries; everything it needs from outside -- libcurl,
+# OpenSSL, libpng, zlib, expat, libwayland -- this project already
+# ships as packages, two of them only because RFC 0020 and RFC 0027
+# put them there.
+NETSURF_VERSION="3.11"
+
 # OpenSSL (RFC 0027). A PACKAGE, never the base image, and never on
 # the package-verification path -- novi-verify stays static, ~10 KB and
 # OpenSSL-free, which is what RFC 0006's rule actually protects. 3.5 is
@@ -134,6 +157,76 @@ OPENSSL_VERSION="3.5.8"
 # not have means building a native CPython first, which is a second
 # multi-minute build for no gain.
 PYTHON_VERSION="3.11.16"
+
+# ncurses and readline (RFC 0026 roadmap 2), for the Python REPL and
+# for `curses`. Packages, like everything else a developer installs.
+#
+# THE TERMINFO DATABASE IS NOT SHIPPED. Upstream's is ~7 MB of entries
+# for terminals nobody here has ever seen; `--with-fallbacks` compiles a
+# named few straight into the library, so a lookup needs no files at
+# all. See build/40-ncurses.sh for which names and why each one.
+#
+# readline is GPL-3.0-or-later where CPython's own licence is
+# permissive, so it ships as its own shared library with its COPYING
+# beside it and CPython's `readline` module links it dynamically --
+# the arrangement every distribution uses, and the same obligation
+# RFC 0031 had to learn about the OFL fonts: the licence travels with
+# the thing.
+NCURSES_VERSION="6.5"
+READLINE_VERSION="8.2"
+
+# SQLite (RFC 0026 roadmap 3) -- "what most local-state Python assumes
+# exists", and the reason `import sqlite3` is a package's business
+# rather than a program's. The amalgamation tarball, not the source
+# tree: it is one .c file plus a shell, which is why this is the
+# cheapest database anybody ships. Public domain, so unlike readline
+# there is no licence to travel with it -- but the CLI links readline
+# for its line editing, so the BINARY is a combined work and readline's
+# COPYING travels in the package it depends on.
+#
+# The URL carries a year directory that does NOT follow from the
+# version number, so it is spelled out rather than derived.
+# GNU coreutils and bash (RFC 0040) -- the CLI gap this project's own
+# platform roadmap named in §5 and never built: "Full GNU
+# coreutils/util-linux/bash become an ordinary `pkg install` for any
+# real interactive system". BusyBox is the right base userland and is
+# a SUBSET; the difference is a papercut a developer meets several
+# times a day.
+#
+# NOT `BASH_VERSION`, AND THAT IS NOT STYLE. `BASH_VERSION` is a
+# variable BASH ITSELF SETS, and this file is SOURCED by every build
+# stage -- all of which are `#!/bin/bash`. Assigning it would make
+# `$BASH_VERSION` report "5.3" inside a bash that is some other
+# version, silently, in a file whose whole job is to be sourced.
+# Nothing here reads it today, which is exactly the kind of "harmless
+# until somebody uses it" this repository has been caught by before.
+# 5.2.37 AND NOT 5.3, AND THAT IS A PAIRING RATHER THAN CAUTION.
+# GNU releases bash X.Y alongside readline (X+3).Y, and bash 5.3 uses
+# two symbols that arrived in readline 8.3 -- `rl_completion_rewrite_hook`
+# and `rl_full_quoting_desired`. This system pins readline 8.2 for
+# CPython (RFC 0026 roadmap 2), and build/46-gnu.sh links bash against
+# THAT copy rather than the one bash bundles, so the pair has to match.
+# Found by the linker, not by reading a NEWS file. Bumping readline to
+# 8.3 is the other way to close it and is a change to the package
+# CPython depends on, which is a decision for the day something needs
+# 8.3 rather than a side effect of adding a shell.
+# mandoc (RFC 0040 roadmap 2) -- a formatter, because the base image
+# has shipped a `man` that could never display a page. busybox's applet
+# shells out to `tbl`, `nroff` and `col`, none of which exist here, so
+# `man ls` has always printed two "not found" lines and nothing else.
+#
+# mandoc rather than groff: one self-contained C program with no
+# dependencies against groff's ~4 MB and a Perl requirement for parts
+# of it, and mandoc is what Alpine, OpenBSD and Void ship for exactly
+# this reason. ISC-licensed.
+MANDOC_VERSION="1.14.6"
+
+GNU_BASH_VERSION="5.2.37"
+COREUTILS_VERSION="9.12"
+
+SQLITE_VERSION="3.53.4"
+SQLITE_TARBALL="sqlite-autoconf-3530400.tar.gz"
+SQLITE_URL="https://sqlite.org/2026/${SQLITE_TARBALL}"
 
 # Full-disk encryption (RFC 0018). The kernel has had CONFIG_DM_CRYPT
 # since the config was written and nothing could create a container.
@@ -241,15 +334,15 @@ harden_flags() {
 # ── require_desktop_headers ───────────────────────────────────────────
 #
 # Every stage that cross-compiles a Wayland client needs the headers and
-# .pc files that 06-wayland.sh put in the rootfs. 41-desktop-split.sh
+# .pc files that 06-wayland.sh put in the rootfs. 51-desktop-split.sh
 # takes them out again (RFC 0015 made them a package), so in a tree
 # where a full build has already run, rebuilding one client stops with
 # four "No such file or directory" lines from four different headers and
 # no indication of why or what to do.
 #
-# That is not a hypothetical. Chaining a rebuild into 40-repo.sh without
+# That is not a hypothetical. Chaining a rebuild into 50-repo.sh without
 # checking it succeeded packaged a rootfs with no desktop in it, and
-# 41-desktop-split.sh then deleted from the base exactly what that empty
+# 51-desktop-split.sh then deleted from the base exactly what that empty
 # manifest described -- leaving no desktop in the image AND none in the
 # repository. Recovering meant re-running the stages, which is the
 # documented mechanism and took fifteen minutes. One clear line at the
@@ -260,13 +353,13 @@ require_desktop_headers() {
     fi
     echo "ERROR: the desktop headers are not in ${ROOTFS}." >&2
     echo "" >&2
-    echo "  41-desktop-split.sh has removed them (they ship as the" >&2
+    echo "  51-desktop-split.sh has removed them (they ship as the" >&2
     echo "  novi-headers package). Put them back before building a" >&2
     echo "  client against them:" >&2
     echo "" >&2
     echo "      bash scripts/restore-build-inputs.sh" >&2
     echo "" >&2
-    echo "  Then re-run this stage, and re-run 40-repo.sh and" >&2
-    echo "  41-desktop-split.sh before making an image." >&2
+    echo "  Then re-run this stage, and re-run 50-repo.sh and" >&2
+    echo "  51-desktop-split.sh before making an image." >&2
     exit 1
 }

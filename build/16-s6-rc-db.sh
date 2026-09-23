@@ -88,6 +88,15 @@ cp -a "${BUILD_DIR}/s6-linux-init-gen/env" \
       "${ROOTFS}/etc/s6-linux-init/"
 rm -rf "${BUILD_DIR}/s6-linux-init-gen"
 
+# The same repair, for the other thing busybox's `make install`
+# recreates: applet symlinks this kernel cannot support
+# (kernel/dead-applets). `05-kernel.sh` removes them, and a re-run of
+# `03-base.sh` puts every one of them back -- so this stage, which
+# already exists to undo exactly that class of damage, runs the same
+# script again. It reads the generated config the kernel build left in
+# ${ROOTFS}/boot and does nothing at all if there is not one yet.
+bash "${REPO_ROOT}/scripts/prune-dead-applets.sh" "${ROOTFS}"
+
 echo ""
 echo "Services in the compiled database:"
 ls "${REPO_ROOT}/init/services"

@@ -66,7 +66,7 @@ cd "${SOURCES}"
 
 # ── Base rootfs directory layout ─────────────────────────
 echo "==> Creating rootfs hierarchy"
-mkdir -p "${ROOTFS}"/{boot,dev,etc,home,lib,mnt,opt,proc,root,run,srv,sys,tmp,usr/{bin,lib,share},var/{empty,log,run,tmp}}
+mkdir -p "${ROOTFS}"/{boot,dev,etc,home,lib,mnt,opt,proc,root,run,srv,state,sys,tmp,usr/{bin,lib,share},var/{empty,log,run,tmp}}
 chmod 1777 "${ROOTFS}/tmp"
 chmod 700  "${ROOTFS}/root"
 # /var/empty is sshd's privilege-separation chroot (RFC 0022). It must
@@ -77,6 +77,14 @@ chmod 700  "${ROOTFS}/root"
 # directory's ownership and mode are baked into the squashed image, so
 # they are build-time facts, not install-time ones.
 chmod 755  "${ROOTFS}/var/empty"
+
+# /state is the mount point for RFC 0041's shared state partition, and
+# it is base content for the same reason /var/empty is: a directory's
+# mode is baked into the squashed image, so it is a build-time fact.
+# It stays an EMPTY DIRECTORY on every machine that does not have such
+# a partition -- a live boot, and every install made before `--ab`
+# existed -- which costs nothing and is what makes the fstab entry that
+# uses it safe to add later.
 
 # ── User/group database ──────────────────────────────────
 # Nothing ever created /etc/passwd or /etc/group -- confirmed via a
@@ -111,6 +119,16 @@ install -D -m 600 "${REPO_ROOT}/rootfs/etc/shadow" "${ROOTFS}/etc/shadow"
 # even though /sbin/ip is the same BusyBox binary as /bin/ls. See the
 # file's own comments.
 install -D -m 644 "${REPO_ROOT}/rootfs/etc/profile" "${ROOTFS}/etc/profile"
+# Port numbers and their names. BusyBox ships none, so getservbyport(3)
+# answered nothing on this system and every tool that looks a port up
+# printed a bare number -- `novi-recon ports` most visibly, which is a
+# tool whose entire job is saying what is listening (RFC 0028's roadmap
+# item 3). Curated rather than IANA's whole registry, for the reason
+# kernel/config-x86_64 is curated: a list somebody chose beats a list
+# nobody has read. musl reads it in both directions, with two silent
+# limits on line and name length that packages/tests/test-services.sh
+# asserts -- see the file's own header.
+install -D -m 644 "${REPO_ROOT}/rootfs/etc/services" "${ROOTFS}/etc/services"
 
 # The generic driver loader (RFC 0011). Base image, not a package: a
 # machine that cannot load the driver for its own disk or NIC cannot
@@ -181,6 +199,27 @@ install -D -m 755 "${REPO_ROOT}/rootfs/etc/acpi/LID/00000080"  "${ROOTFS}/etc/ac
 # be told to sleep, is not usable enough to go install something that
 # fixes that.
 install -D -m 755 "${REPO_ROOT}/packages/novi-power" "${ROOTFS}/usr/bin/novi-power"
+
+# GRUB's environment block, read and written (RFC 0041 roadmap 2).
+# /usr/sbin, not /usr/bin: reading is harmless but every write is to a
+# file the bootloader reads, so it belongs beside the other things only
+# root does. Base content rather than a package for the reason RFC 0041
+# gives -- a machine whose update went wrong is exactly the machine
+# that cannot install a package to fix it.
+#
+# This is the half of `grub-editenv` an installed Novi needs. The GRUB
+# userland is not on this system and is not wanted: RFC 0003 already
+# splits `grub-install` into "generate on the build host" and "place on
+# the target", and this is the same split for the environment block.
+install -D -m 755 "${REPO_ROOT}/packages/novi-grubenv" "${ROOTFS}/usr/sbin/novi-grubenv"
+
+# The other root filesystem (RFC 0041 item 4). Applies a change to the
+# slot that is NOT running and makes it live at the next reboot. Base
+# content and /usr/sbin for the same two reasons as novi-grubenv: it is
+# entirely root's, and the machine that most needs it is the one that
+# cannot install anything.
+install -D -m 755 "${REPO_ROOT}/packages/novi-slot" "${ROOTFS}/usr/sbin/novi-slot"
+
 mkdir -p "${ROOTFS}/etc/profile.d"
 
 # ── Copy musl libc into rootfs ────────────────────────────

@@ -87,6 +87,42 @@ BOOT_PART=""
 BOOT_LABEL="${NOVI_BOOT_LABEL:-NOVI_BOOT}"
 BOOT_MIB=512
 BOOT_MOUNTED=0
+# A/B root slots and a shared state partition (RFC 0041). OPT-IN while
+# it is new: without --ab the layouts below are exactly what they were.
+#
+#   AB            --ab was given
+#   SLOT_MIB      the size of EACH root slot. The OS is ~800 MB today;
+#                 4 GiB leaves room for packages installed into a slot
+#                 and still fits two slots plus /boot on a 16 GB disk.
+#   SLOT_B_PART   the second slot. Formatted and labelled at install
+#                 time and then left alone -- the machine boots from A.
+#                 It exists now because A PARTITION TABLE IS WRITTEN
+#                 ONCE: a layout without it could never grow slots
+#                 without a reinstall (RFC 0041 decision 5).
+#   STATE_PART    the shared partition. Holds the subtrees that must
+#                 outlive a slot switch -- and NOT /var/lib/pkg, which
+#                 is the slot's own manifest (RFC 0041 decision 2).
+AB=0
+SLOT_MIB="${NOVI_SLOT_MIB:-4096}"
+SLOT_A_LABEL="${NOVI_SLOT_A_LABEL:-NOVI_ROOT_A}"
+SLOT_B_LABEL="${NOVI_SLOT_B_LABEL:-NOVI_ROOT_B}"
+STATE_LABEL="${NOVI_STATE_LABEL:-NOVI_STATE}"
+SLOT_B_PART=""
+STATE_PART=""
+STATE_MOUNTED=0
+
+# The subtrees that move off the slot. Named individually rather than
+# as `/var`, because `/var/lib/pkg` is the install database and
+# describes THIS slot's contents -- sharing it would give the running
+# system a database about the other slot (RFC 0041 decision 2).
+STATE_SUBTREES="home var/log var/lib/novi-state var/lib/alsa var/cache/pkg"
+# The file that says "this slot holds a complete system". Written last
+# by both the thing that fills a slot -- this installer, and
+# `novi-slot sync` -- and read by `novi-slot` before it will let the
+# bootloader be pointed at one. Both spellings must agree; the host
+# test checks that they do.
+SLOT_SYNC_MARK="etc/novi/slot-synced"
+
 PROFILE="desktop"
 TARGET_MIRROR=""
 NEW_USER=""
@@ -123,6 +159,17 @@ Options:
                       someone who takes the disk; it is not protection
                       against someone who can write to it and hand it
                       back. See RFC 0018.
+  --ab                lay the disk out for atomic updates (RFC 0041):
+                      a shared /boot, TWO root slots and a shared state
+                      partition holding /home, /var/log,
+                      /var/lib/novi-state, /var/lib/alsa and
+                      /var/cache/pkg. The machine boots from slot A and
+                      slot B is left empty -- NOTHING UPDATES OR ROLLS
+                      BACK YET. It exists now because a partition table
+                      is written once: a layout without the second slot
+                      could never gain one without a reinstall.
+                      Refused with --encrypt (RFC 0041 decision 3).
+  --slot-mib N        size of EACH root slot with --ab (default 4096)
   --profile P         desktop (default) or console. `desktop` installs the
                       desktop packages from the repository on this medium
                       and declares them, so the installed machine boots
@@ -149,18 +196,43 @@ USAGE
 # ---------------------------------------------------------------------------
 # Cleanup
 # ---------------------------------------------------------------------------
+# EVERYTHING MOUNTED INSIDE THE TARGET, INNERMOST FIRST -- and ONE
+# implementation of that list, because there are two callers and they
+# had already drifted.
+#
+# `cleanup` (the exit trap) knew about the state partition; the SUCCESS
+# path did not, so every `--ab` install ended with
+# `umount: can't unmount /mnt/novi-target: Resource busy` and a warning
+# about an unmount that had no business failing. The trap then tidied up
+# behind it, which is exactly why it went unnoticed: the machine was
+# fine and the installer's last words were a complaint.
+#
+# $1 is "warn" to report a failure or empty to be silent -- the trap
+# runs on paths where half of these were never mounted.
+unmount_inside_target() {
+    local mode="${1:-}" m
+    # The repository bind mount lives under $MNT, so it comes off first
+    # or everything below it fails with EBUSY.
+    umount "$MNT/mnt/novi-repo" 2>/dev/null || true
+    # Deepest first: /boot/efi is inside /boot on an encrypted install.
+    for m in "$MNT/boot/efi" "$MNT/boot" "$MNT/state"; do
+        case "$m" in
+            */boot/efi) [ "$ESP_MOUNTED" -eq 1 ] || continue ;;
+            */boot)     [ "$BOOT_MOUNTED" -eq 1 ] || continue ;;
+            */state)    [ "$STATE_MOUNTED" -eq 1 ] || continue ;;
+        esac
+        if [ "$mode" = warn ]; then
+            umount "$m" || warn "could not unmount ${m#"$MNT"} cleanly"
+        else
+            umount "$m" 2>/dev/null || true
+        fi
+    done
+    ESP_MOUNTED=0; BOOT_MOUNTED=0; STATE_MOUNTED=0
+}
+
 cleanup() {
     if [ "$MOUNTED" -eq 1 ]; then
-        # The repository bind mount lives under $MNT, so it has to come
-        # off first or the unmount below fails with EBUSY and leaves the
-        # target filesystem mounted after a failed install.
-        umount "$MNT/mnt/novi-repo" 2>/dev/null || true
-        # The ESP is mounted inside the target, so it comes off before
-        # the root does or the unmount below fails with EBUSY.
-        umount "$MNT/boot/efi" 2>/dev/null || true
-        ESP_MOUNTED=0
-        umount "$MNT/boot" 2>/dev/null || true
-        BOOT_MOUNTED=0
+        unmount_inside_target
         umount "$MNT" 2>/dev/null || true
         MOUNTED=0
     fi
@@ -206,12 +278,18 @@ list_disks() {
     done
 }
 
-disk_size_human() {
-    local name="$1" sectors
+# /sys/block/*/size is always in 512-byte sectors regardless of the
+# device's real logical block size. Integer MiB is plenty here, and ONE
+# implementation of "how big is this disk" is the point: the --ab
+# preflight check and the listing must not be able to disagree.
+disk_size_mib() {
+    local name="${1##*/}" sectors
     sectors="$(cat "/sys/block/${name}/size" 2>/dev/null || echo 0)"
-    # /sys/block/*/size is always in 512-byte sectors regardless of the
-    # device's real logical block size. Integer MiB is plenty here.
-    printf '%s MiB\n' "$(( sectors / 2048 ))"
+    printf '%s\n' "$(( sectors / 2048 ))"
+}
+
+disk_size_human() {
+    printf '%s MiB\n' "$(disk_size_mib "$1")"
 }
 
 disk_model() {
@@ -380,6 +458,88 @@ partition_bios_encrypted() {
     info "boot $BOOT_PART, encrypted root $ROOT_PART"
 }
 
+# RFC 0041's layout: a shared /boot, two root slots, and a shared state
+# partition. Four primary partitions, which is exactly what MBR allows
+# -- the ceiling is real and is stated in the RFC rather than
+# discovered later.
+#
+# THE SHARED /boot IS WHAT MAKES ROLLBACK POSSIBLE, not an
+# optimisation: grub.cfg, grubenv and BOTH slots' kernels have to live
+# somewhere either slot can boot from. That is also why this reuses
+# `core-boot.img` -- mkiso.sh already generates it with the prefix
+# `(hd0,msdos1)/grub` for RFC 0018's encrypted layout, which is this
+# shape with the encryption removed.
+#
+# EVERY SECTOR IS GIVEN EXPLICITLY, for the reason RFC 0018 records:
+# BusyBox fdisk's default first sector for a new partition is 63, the
+# start of the disk, not the first free sector after what already
+# exists. Verified as a four-partition sequence against this repo's own
+# static BusyBox on a 16 GB sparse file before it went near a disk --
+# 512M boot, two 4096M slots, the rest state, boot flag on p1.
+# RFC 0041's layout on GPT. Same shape as the BIOS one, with the ESP
+# standing in for the shared /boot: the ESP already holds grub.cfg and
+# the kernel on a UEFI install (RFC 0008), so it is already the boot
+# area both slots share, and nothing new is needed there.
+partition_uefi_ab() {
+    local disk="$1"
+
+    msg "Partitioning $disk (GPT: ESP + two root slots + state)"
+    ROOT_LABEL="$SLOT_A_LABEL"
+    unmount_everything_on "$disk"
+    wipe_disk_ends "$disk"
+
+    command -v novi-gpt >/dev/null 2>&1 ||
+        die "novi-gpt not found; cannot write a GPT (BusyBox fdisk cannot)"
+    novi-gpt "$disk" --esp-mib "$ESP_MIB" --slot-mib "$SLOT_MIB" >&2 ||
+        die "novi-gpt failed on $disk"
+
+    partprobe "$disk" 2>/dev/null || true
+    sync
+
+    ESP_PART="$(partition_of "$disk" 1)"
+    ROOT_PART="$(partition_of "$disk" 2)"
+    SLOT_B_PART="$(partition_of "$disk" 3)"
+    STATE_PART="$(partition_of "$disk" 4)"
+    for p in "$ESP_PART" "$ROOT_PART" "$SLOT_B_PART" "$STATE_PART"; do
+        wait_for_partition "$p" "$disk"
+    done
+    info "ESP $ESP_PART, slot A $ROOT_PART, slot B $SLOT_B_PART, state $STATE_PART"
+}
+
+partition_bios_ab() {
+    local disk="$1" boot_end a_start a_end b_start b_end s_start
+
+    msg "Partitioning $disk (MBR: /boot + two root slots + state)"
+    # Slot A's label, and every generated artifact downstream follows:
+    # fstab, grub.cfg's `root=LABEL=` and the recovery hint all read
+    # $ROOT_LABEL, so setting it here is the whole of it.
+    ROOT_LABEL="$SLOT_A_LABEL"
+    unmount_everything_on "$disk"
+    wipe_disk_ends "$disk"
+
+    boot_end=$(( 2048 + BOOT_MIB * 2048 - 1 ))
+    a_start=$(( boot_end + 1 )); a_end=$(( a_start + SLOT_MIB * 2048 - 1 ))
+    b_start=$(( a_end + 1 ));    b_end=$(( b_start + SLOT_MIB * 2048 - 1 ))
+    s_start=$(( b_end + 1 ))
+
+    printf 'o\nn\np\n1\n2048\n%s\nn\np\n2\n%s\n%s\nn\np\n3\n%s\n%s\nn\np\n4\n%s\n\na\n1\nw\n' \
+        "$boot_end" "$a_start" "$a_end" "$b_start" "$b_end" "$s_start" |
+        fdisk -u "$disk" >/dev/null 2>&1 || true
+
+    partprobe "$disk" 2>/dev/null || true
+    sync
+
+    ESP_PART=""
+    BOOT_PART="$(partition_of "$disk" 1)"
+    ROOT_PART="$(partition_of "$disk" 2)"
+    SLOT_B_PART="$(partition_of "$disk" 3)"
+    STATE_PART="$(partition_of "$disk" 4)"
+    for p in "$BOOT_PART" "$ROOT_PART" "$SLOT_B_PART" "$STATE_PART"; do
+        wait_for_partition "$p" "$disk"
+    done
+    info "boot $BOOT_PART, slot A $ROOT_PART, slot B $SLOT_B_PART, state $STATE_PART"
+}
+
 partition_bios() {
     local disk="$1"
 
@@ -411,6 +571,16 @@ partition_bios() {
 }
 
 partition_disk() {
+    if [ "$AB" -eq 1 ]; then
+        # The encrypted path still has no answer -- RFC 0041 decision 3
+        # -- and is refused in validate_options, before anything looks
+        # at a disk.
+        case "$FIRMWARE" in
+            uefi) partition_uefi_ab "$1" ;;
+            *)    partition_bios_ab "$1" ;;
+        esac
+        return 0
+    fi
     case "$FIRMWARE" in
         uefi) partition_uefi "$1" ;;
         *)    if [ "$ENCRYPT" -eq 1 ]; then
@@ -529,6 +699,37 @@ make_boot_fs() {
     sync
 }
 
+# Slot B is formatted and labelled now and then left alone. An empty,
+# labelled partition is what makes the later switch a bootloader change
+# rather than a repartition -- and `blkid` showing it is how a person
+# finds out the machine has a second slot at all.
+make_slot_b_fs() {
+    local part="$1"
+    msg "Creating an ext4 filesystem on $part (label $SLOT_B_LABEL, empty slot)"
+    if command -v mke2fs.e2fsprogs >/dev/null 2>&1; then
+        mke2fs.e2fsprogs -q -t ext4 -L "$SLOT_B_LABEL" -F "$part" ||
+            die "mke2fs failed on $part"
+    else
+        mke2fs -F -L "$SLOT_B_LABEL" "$part" >/dev/null 2>&1 ||
+            die "mke2fs failed on $part"
+    fi
+    sync
+}
+
+make_state_fs() {
+    local part="$1"
+    msg "Creating an ext4 filesystem on $part (label $STATE_LABEL)"
+    if command -v mke2fs.e2fsprogs >/dev/null 2>&1; then
+        mke2fs.e2fsprogs -q -t ext4 -L "$STATE_LABEL" -F "$part" ||
+            die "mke2fs failed on $part"
+    else
+        warn "e2fsprogs mke2fs not found -- the state filesystem will have NO JOURNAL"
+        mke2fs -F -L "$STATE_LABEL" "$part" >/dev/null 2>&1 ||
+            die "mke2fs failed on $part"
+    fi
+    sync
+}
+
 format_partitions() {
     # ROOT_DEV, not ROOT_PART: on an encrypted install the filesystem
     # goes inside the container, and formatting the partition would
@@ -536,6 +737,8 @@ format_partitions() {
     make_root_fs "$ROOT_DEV"
     [ -n "$ESP_PART" ] && make_esp "$ESP_PART"
     [ -n "$BOOT_PART" ] && make_boot_fs "$BOOT_PART"
+    [ -n "$SLOT_B_PART" ] && make_slot_b_fs "$SLOT_B_PART"
+    [ -n "$STATE_PART" ] && make_state_fs "$STATE_PART"
     return 0
 }
 
@@ -598,6 +801,64 @@ copy_system() {
         info "ESP mounted at /boot/efi"
     fi
 
+    # RFC 0041: the subtrees that must outlive a slot switch move off
+    # the slot now, and fstab binds them back at every boot.
+    #
+    # AFTER the copy, not before: the tree has to exist before anything
+    # can be moved out of it, and the live session's own /home and logs
+    # are part of what an installer is for (the same argument as
+    # copying from `/` rather than from the squashfs).
+    #
+    # Each subtree is MOVED and an empty directory left behind as the
+    # bind target. A symlink would have been less work and is wrong: a
+    # boot where the state partition does not mount would leave
+    # /var/log pointing into nothing, where an empty directory just
+    # means an empty directory.
+    if [ -n "$STATE_PART" ]; then
+        mkdir -p "$MNT/state"
+        mount "$STATE_PART" "$MNT/state" ||
+            die "could not mount the state partition at $MNT/state"
+        STATE_MOUNTED=1
+        for sub in $STATE_SUBTREES; do
+            mkdir -p "$MNT/state/${sub%/*}"
+            if [ -d "$MNT/$sub" ]; then
+                mv "$MNT/$sub" "$MNT/state/$sub" ||
+                    die "could not move /$sub onto the state partition"
+            else
+                mkdir -p "$MNT/state/$sub"
+            fi
+            mkdir -p "$MNT/$sub"
+        done
+        # /home is 0755 root:root and /var/log 0755; the moves preserve
+        # what was there, and the empty bind targets are created with
+        # the default, which is what they had.
+        sync
+        info "state partition holds:$(printf ' /%s' $STATE_SUBTREES)"
+    fi
+
+    # RFC 0041: the same completion marker `novi-slot sync` writes.
+    #
+    # WITHOUT IT THE MACHINE CANNOT ROLL BACK TO THE SLOT IT WAS
+    # INSTALLED INTO, which is the one slot a rollback is most likely
+    # to want. `novi-slot` refuses to point the bootloader at a slot
+    # with no marker, because a copy interrupted half way leaves a tree
+    # that looks complete -- and the installer's slot is a complete
+    # copy whose completion nothing had recorded. Watched live: update
+    # slot B, switch, boot it, and `novi-slot rollback` answered "slot a
+    # is not ready: no completed copy" about the slot the machine had
+    # booted from twenty minutes earlier. The check was right; what was
+    # missing was the installer making the same claim about its own
+    # work.
+    #
+    # Only on an --ab install: a machine with one root slot has nothing
+    # to switch to, and a marker there would be a claim nobody reads.
+    if [ "$AB" -eq 1 ]; then
+        mkdir -p "$MNT/etc/novi"
+        printf 'installed by novi-install at %s\n' \
+            "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "$MNT/$SLOT_SYNC_MARK"
+        info "slot marked complete (${SLOT_SYNC_MARK})"
+    fi
+
     sync
     info "system copied"
 }
@@ -637,6 +898,28 @@ FSTAB
 # boots to a prompt where that can be fixed.
 LABEL=${ESP_LABEL}    /boot/efi vfat  rw,noatime,nofail  0 2
 FSTAB
+    fi
+
+    if [ -n "$STATE_PART" ]; then
+        cat >> "$MNT/etc/fstab" <<FSTAB
+
+# RFC 0041: the shared state partition, and the subtrees bound out of
+# it. These have to outlive a root-slot switch, so they do not live in
+# the slot -- but /var/lib/pkg deliberately DOES, because it is this
+# slot's own package manifest and sharing it would give the running
+# system a database describing the other slot.
+#
+# Order matters and fstab is processed in order: /state mounts first
+# and the binds follow. rc.init runs \`mount -a\` BEFORE s6-rc-init, so
+# all of this is in place before any service starts -- which is what
+# /var/log needs, and what would otherwise be a race nobody saw until
+# syslog wrote to the wrong filesystem.
+LABEL=${STATE_LABEL}  /state  ext4  rw,noatime,nofail  0 2
+FSTAB
+        for sub in $STATE_SUBTREES; do
+            printf '/state/%-22s /%-22s none  bind,nofail  0 0\n' "$sub" "$sub" \
+                >> "$MNT/etc/fstab"
+        done
     fi
 
     cat >> "$MNT/etc/fstab" <<'FSTAB'
@@ -683,8 +966,48 @@ set_hostname() {
 # unencrypted filesystem, so the path GRUB uses is /vmlinuz, not
 # /boot/vmlinuz. That is the whole reason mkiso.sh generates a second
 # core.img with a different prefix.
+# Is partition 1 the boot partition, rather than the root filesystem?
+#
+# ONE PREDICATE FOR THE FACT, because three places used to test
+# `$ENCRYPT` -- the REASON -- and RFC 0018's encrypted layout was the
+# only reason there had ever been. RFC 0041's --ab is the second: it
+# also puts /boot on its own partition, with no encryption anywhere.
+# With the old test, an --ab install would have written `core.img`,
+# whose prefix is `(hd0,msdos1)/boot/grub`, onto a disk whose partition
+# 1 IS /boot -- so GRUB would have looked for /boot/boot/grub and the
+# machine would not have booted. Caught by reading, before any install.
+#
+# A condition that tests why instead of what breaks the moment a second
+# why turns up.
+separate_boot() { [ -n "$BOOT_PART" ]; }
+
+# WHETHER THE KERNEL GOES ON THE ESP, and this is the second time the
+# same question has been asked with the wrong condition.
+#
+# The rule is: the kernel must live in the BOOT AREA, meaning whatever
+# both the bootloader and every root can reach. On a plain install that
+# is the root filesystem itself; on a BIOS install with a separate
+# /boot it is that partition; on a UEFI install where the root
+# filesystem is not the boot area it is the ESP.
+#
+# RFC 0018's encrypted UEFI layout was the first case where the root is
+# not the boot area, so the test was written as `ENCRYPT`. RFC 0041's
+# A/B layout is the second -- and with the old condition the kernel
+# went into SLOT A's /boot while grub.cfg searched for slot A's label,
+# so both slots would have booted slot A's kernel out of slot A's
+# filesystem. A slot switch that cannot change the kernel is not an
+# A/B system, and a slot B that cannot boot when slot A's filesystem is
+# damaged is not a rollback.
+#
+# `separate_boot()` was corrected from `$ENCRYPT` to the fact for
+# exactly this reason and this is the same correction one layer up:
+# ask whether the root IS the boot area, not why it is not.
+kernel_on_esp() {
+    [ "$FIRMWARE" = "uefi" ] && { [ "$ENCRYPT" -eq 1 ] || [ "$AB" -eq 1 ]; }
+}
+
 kernel_dest_dir() {
-    if [ "$ENCRYPT" -eq 1 ] && [ "$FIRMWARE" = "uefi" ]; then
+    if kernel_on_esp; then
         printf '%s' "$MNT/boot/efi"
     else
         printf '%s' "$MNT/boot"
@@ -694,7 +1017,7 @@ kernel_dest_dir() {
 # The same location as GRUB names it: relative to whatever partition
 # GRUB will have set as its root.
 kernel_grub_prefix() {
-    if [ "$ENCRYPT" -eq 1 ]; then
+    if kernel_on_esp || separate_boot; then
         printf ''          # the kernel is at the root of the ESP or of /boot
     else
         printf '/boot'
@@ -750,7 +1073,8 @@ install_kernel() {
 # baked-in prefix) or /boot/efi/EFI/BOOT/grub.cfg for UEFI (bootx64.efi's).
 write_grub_cfg() {
     local dest="$1" search_line="$2"
-    local kroot rootspec cryptline=""
+    local kroot rootspec cryptline="" envblock="" otherentry=""
+    local maintitle="Novi Linux"
 
     # Where the kernel is, from GRUB's point of view, and what to tell
     # the kernel its root is. On an encrypted install the root is the
@@ -762,6 +1086,99 @@ write_grub_cfg() {
         cryptline="novi.luks=UUID=${LUKS_UUID}"
     else
         rootspec="LABEL=${ROOT_LABEL}"
+    fi
+
+    # RFC 0041 roadmap 2: on an A/B machine the root is not a constant.
+    # `novi_slot` in GRUB's environment block decides it, and
+    # novi-grubenv writes that block from the running system.
+    #
+    # `load_env` NAMES THE VARIABLES IT WILL ACCEPT. Called bare it
+    # imports everything in the file into GRUB's environment, `prefix`
+    # and `root` included -- so a block somebody appended to could
+    # redirect the bootloader itself. The whitelist form reads
+    # novi_slot and nothing else.
+    #
+    # The `-s` guard is not decoration either: `load_env` on a missing
+    # or truncated file prints an error and leaves novi_slot unset,
+    # which the `else` below reads as slot A. Booting slot A is the
+    # right answer to "I cannot tell"; the guard is so the person does
+    # not get an error message about it on a machine that is fine.
+    if [ "$AB" -eq 1 ]; then
+        envblock="$(cat <<ENVBLOCK
+# RFC 0041: which slot boots is a variable, not a constant. It is set
+# by \`novi-grubenv set novi_slot=<a|b>\` on the running system.
+set novi_slot=a
+set novi_try=
+if [ -s \${prefix}/grubenv ]; then
+    load_env novi_slot novi_try
+fi
+
+# RFC 0041 item 5: THE TRIAL BOOT. \`novi-slot switch\` arms it; this
+# boot takes it; a userland that gets as far as boot convergence
+# disarms it (\`novi-slot confirm\`, from rc.init). A boot that never
+# gets that far leaves the flag reading "taken", and the NEXT boot --
+# this code, before anything else runs -- goes back on its own.
+#
+# A FLAG AND NOT A COUNTER, because GRUB SCRIPT HAS NO ARITHMETIC.
+# \`set n=\$((n + 1))\` is "error: Incorrect command." -- measured on a
+# booted machine, by a probe that failed on it before reaching the
+# save_env it was written to test. Two states are enough: one trial is
+# what an A/B system gives you.
+#
+# \`save_env\` REWRITES THE BLOCK IN PLACE through the file's block
+# list, which is the one thing GRUB's ext2 driver can write. That it
+# works here is measured, not assumed: a grub.cfg that set a value and
+# saved it left \`probe=written_by_grub\` for the running system to read
+# back. Without that this rule could only ever notice failures that
+# reached a shell, which are the ones a person can already fix.
+if [ "\${novi_try}" = "armed" ]; then
+    set novi_try=taken
+    save_env novi_try
+elif [ "\${novi_try}" = "taken" ]; then
+    echo "The last boot of slot \${novi_slot} did not complete. Going back."
+    if [ "\${novi_slot}" = "b" ]; then
+        set novi_slot=a
+    else
+        set novi_slot=b
+    fi
+    set novi_try=
+    save_env novi_slot novi_try
+    sleep 3
+fi
+
+if [ "\${novi_slot}" = "b" ]; then
+    set novi_root=LABEL=${SLOT_B_LABEL}
+    set novi_other=LABEL=${SLOT_A_LABEL}
+    set novi_this_name="B"
+    set novi_other_name="A"
+else
+    set novi_root=LABEL=${SLOT_A_LABEL}
+    set novi_other=LABEL=${SLOT_B_LABEL}
+    set novi_this_name="A"
+    set novi_other_name="B"
+fi
+ENVBLOCK
+)"
+        rootspec='${novi_root}'
+        # On a machine with one slot the name would render empty --
+        # "Novi Linux (slot )" -- so the title is a variable too.
+        maintitle='Novi Linux (slot ${novi_this_name})'
+
+        # THE OTHER SLOT NEEDS A MENU ENTRY, not just a variable. If
+        # the slot grubenv names will not boot, the person at the
+        # keyboard has no userland to run novi-grubenv in -- so
+        # without this the recovery path for a failed update would be
+        # a rescue medium. One keypress instead.
+        otherentry="$(cat <<OTHERENTRY
+
+menuentry "Novi Linux (the other root slot: \${novi_other_name})" --class linux {
+    linux  ${kroot}/vmlinuz root=\${novi_other} rw \\
+           loglevel=7 \\
+           console=tty0 console=ttyS0,115200n8
+    initrd ${kroot}/initramfs.cpio.gz
+}
+OTHERENTRY
+)"
     fi
 
     mkdir -p "$(dirname "$dest")"
@@ -787,8 +1204,9 @@ terminal_input console serial
 terminal_output console serial
 
 ${search_line}
+${envblock}
 
-menuentry "Novi Linux" --class linux {
+menuentry "${maintitle}" --class linux {
     linux  ${kroot}/vmlinuz root=${rootspec} ${cryptline} rw \\
            quiet loglevel=3 \\
            console=tty0 console=ttyS0,115200n8 \\
@@ -811,7 +1229,45 @@ menuentry "Novi Linux (skip declared-state convergence)" --class linux {
            console=tty0 console=ttyS0,115200n8
     initrd ${kroot}/initramfs.cpio.gz
 }
+${otherentry}
 GRUBCFG
+}
+
+# GRUB's environment block, written beside grub.cfg (RFC 0041 roadmap
+# 2). This is what lets a running system say "boot the other slot next
+# time" -- `load_env` in the menu reads exactly this file.
+#
+# IT GOES THROUGH novi-grubenv RATHER THAN A HEREDOC HERE. The format
+# is a fixed 1024 bytes with a byte-exact signature and `#` padding,
+# and a second implementation of it in the installer would be a second
+# thing to get wrong -- with the failure being a block GRUB rejects
+# silently on a machine nobody can log into yet. Same argument as
+# `/usr/lib/novi/json.sh` being the one escaper and `/usr/lib/novi/
+# resolv.sh` the one resolver writer.
+#
+# It is written on EVERY install, not only `--ab` ones. The block costs
+# 1 KiB, `novi-grubenv` then works the same everywhere, and a machine
+# that gains a use for it later does not need the file to appear from
+# somewhere. Only an --ab grub.cfg reads `novi_slot`.
+write_grubenv() {
+    local dir="$1"
+
+    command -v novi-grubenv >/dev/null 2>&1 || {
+        warn "novi-grubenv not found; no GRUB environment block written."
+        warn "the system boots, but a slot switch will have nothing to write to."
+        return 0
+    }
+    mkdir -p "$dir"
+    if [ "$AB" -eq 1 ]; then
+        NOVI_GRUBENV_DIR="$dir" novi-grubenv create >/dev/null &&
+        NOVI_GRUBENV_DIR="$dir" novi-grubenv set "novi_slot=a" >/dev/null ||
+            { warn "could not write ${dir}/grubenv"; return 0; }
+        info "grubenv written: novi_slot=a (slot ${SLOT_A_LABEL})"
+    else
+        NOVI_GRUBENV_DIR="$dir" novi-grubenv create >/dev/null ||
+            { warn "could not write ${dir}/grubenv"; return 0; }
+        info "grubenv written (empty; this machine has one root slot)"
+    fi
 }
 
 install_bootloader_uefi() {
@@ -844,13 +1300,19 @@ install_bootloader_uefi() {
     #              the root label
     #   encrypted  GRUB cannot read the root filesystem at all, so the
     #              kernel is on the ESP and search finds the ESP
-    if [ "$ENCRYPT" -eq 1 ]; then
+    #   A/B        there are two root filesystems and the kernel may
+    #              not live in either, or a slot switch could not
+    #              change it -- so the ESP again, for a different
+    #              reason. kernel_on_esp() is the one predicate.
+    if kernel_on_esp; then
         write_grub_cfg "$MNT/boot/efi/EFI/BOOT/grub.cfg" \
             "search --no-floppy --label ${ESP_LABEL} --set=root"
     else
         write_grub_cfg "$MNT/boot/efi/EFI/BOOT/grub.cfg" \
             "search --no-floppy --label ${ROOT_LABEL} --set=root"
     fi
+
+    write_grubenv "$MNT/boot/efi/EFI/BOOT"
 
     sync
     info "bootx64.efi and grub.cfg installed on the ESP"
@@ -872,13 +1334,14 @@ install_bootloader_bios() {
     # $MNT/boot is the boot partition's mountpoint in the encrypted
     # case, so $MNT/boot/grub is (hd0,msdos1)/grub. The two lines below
     # look identical and mean different things.
-    if [ "$ENCRYPT" -eq 1 ]; then
+    if separate_boot; then
         core="core-boot.img"
     fi
 
     # No search either way: the kernel is on the same partition
     # core.img's prefix already points at.
     write_grub_cfg "$grubdir/grub.cfg" ""
+    write_grubenv "$grubdir"
 
     if [ ! -d "$src" ]; then
         warn "no staged GRUB artifacts at $src"
@@ -1199,6 +1662,21 @@ cmd_install() {
             die "missing required tool for --encrypt: cryptsetup"
     fi
 
+    if [ "$AB" -eq 1 ]; then
+        # /boot + two slots + something for state. A disk that cannot
+        # hold the layout is refused here rather than half partitioned.
+        # This one needs $TARGET_DISK, so it stays; the checks that do
+        # not need a disk moved out to `validate_options` -- being told
+        # that two flags contradict each other should not depend on
+        # having named a real disk first.
+        local need_mib avail_mib
+        need_mib=$(( BOOT_MIB + 2 * SLOT_MIB + 1024 ))
+        avail_mib="$(disk_size_mib "$TARGET_DISK")"
+        if [ "$avail_mib" -gt 0 ] && [ "$avail_mib" -lt "$need_mib" ]; then
+            die "$TARGET_DISK is ${avail_mib} MiB: --ab needs at least ${need_mib} MiB (/boot ${BOOT_MIB} + two ${SLOT_MIB} slots + 1024 for state)"
+        fi
+    fi
+
     msg "Firmware: ${FIRMWARE}"
 
     confirm_destruction "$TARGET_DISK"
@@ -1234,14 +1712,7 @@ cmd_install() {
     warn_if_root_passwordless
 
     sync
-    if [ "$ESP_MOUNTED" -eq 1 ]; then
-        umount "$MNT/boot/efi" || warn "could not unmount the ESP cleanly"
-        ESP_MOUNTED=0
-    fi
-    if [ "$BOOT_MOUNTED" -eq 1 ]; then
-        umount "$MNT/boot" || warn "could not unmount /boot cleanly"
-        BOOT_MOUNTED=0
-    fi
+    unmount_inside_target warn
     umount "$MNT" || warn "could not unmount $MNT cleanly"
     MOUNTED=0
     # Closing the container is what flushes dm-crypt's own state. An
@@ -1283,6 +1754,8 @@ while [ $# -gt 0 ]; do
         --firmware)  FIRMWARE="${2:-}"; shift 2 ;;
         --esp-mib)   ESP_MIB="${2:-}"; shift 2 ;;
         --encrypt)   ENCRYPT=1; shift ;;
+        --ab)        AB=1; shift ;;
+        --slot-mib)  SLOT_MIB="${2:-}"; shift 2 ;;
         --profile)   PROFILE="${2:-}"; shift 2 ;;
         --mirror)    TARGET_MIRROR="${2:-}"; shift 2 ;;
         --user)          NEW_USER="${2:-}"; shift 2 ;;
@@ -1296,6 +1769,38 @@ while [ $# -gt 0 ]; do
         *) die "unknown option '$1'" ;;
     esac
 done
+
+# Options that contradict each other, checked before anything looks at
+# a disk. The first version of this lived inside cmd_install, after the
+# "is that a block device" test -- so `--ab --encrypt` answered
+# "/dev/null is not a block device", which is true and is not the
+# problem the person has. Found by a host test that had no disk to
+# give it.
+validate_options() {
+    # RFC 0041 decision 3. Under A/B the two slots AND the shared state
+    # all have to be inside encryption -- /home on an unencrypted
+    # partition would be a silent, serious regression for somebody who
+    # typed --encrypt -- and carving three volumes out of one LUKS
+    # container is what LVM is for. This system has no LVM and no
+    # dmsetup: 34-cryptsetup.sh links libdevmapper into exactly one
+    # static cryptsetup binary, which is all that is installed.
+    #
+    # Refusing is the honest outcome. Producing the layout anyway with
+    # /home in the clear, or producing one that cannot later grow
+    # slots, would both be worse than saying no.
+    if [ "$AB" -eq 1 ] && [ "$ENCRYPT" -eq 1 ]; then
+        die "--ab and --encrypt cannot be combined yet (RFC 0041 decision 3): the state partition would have to be inside the LUKS container, and this system has no LVM"
+    fi
+    if [ "$AB" -eq 1 ]; then
+        case "$SLOT_MIB" in
+            ''|*[!0-9]*) die "--slot-mib must be a number of MiB" ;;
+        esac
+        [ "$SLOT_MIB" -ge 2048 ] ||
+            die "--slot-mib $SLOT_MIB is too small: the OS alone is about 800 MB and a slot has to hold packages installed into it"
+    fi
+}
+
+validate_options
 
 case "$ACTION" in
     list)              cmd_list ;;

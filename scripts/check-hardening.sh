@@ -39,16 +39,38 @@ command -v "${READELF}" >/dev/null 2>&1 || READELF=readelf
 PROGRAMS=(
     usr/bin/novi-shell usr/bin/novi-panel usr/bin/novi-launcher
     usr/bin/novi-settings usr/bin/novi-lockscreen usr/bin/novi-screenshot
-    usr/bin/novi-edit usr/bin/novi-files usr/bin/novi-view
+    usr/bin/novi-edit usr/bin/novi-files
+    # novi-view's ELF lives in /usr/libexec since RFC 0039 roadmap 4 put
+    # a sandbox wrapper on its name. The path had to move with it: what
+    # sits at usr/bin/novi-view now is a shell script, and readelf says
+    # nothing about a shell script -- so this checker reported it as
+    # `not-PIE no-RELRO no-BIND_NOW no-stack-protector`, four
+    # fabricated findings about a file that cannot have any of them.
+    usr/libexec/novi-view
 )
 
 fail=0
+stale=0
 checked=0
 for rel in "${PROGRAMS[@]}"; do
     f="${ROOT}/${rel}"
     if [[ ! -f "${f}" ]]; then
         # The desktop split moves these into packages; not finding one
         # is not a failure, it is a rootfs that has already been split.
+        continue
+    fi
+    # A LISTED PATH THAT IS NOT AN ELF IS A STALE LIST, NOT AN
+    # UNHARDENED BINARY, and the difference matters because readelf
+    # answers nothing for both and the four checks below then all
+    # "fail". Skipping it quietly would hide a binary genuinely
+    # replaced by something else, so it is its own error naming its own
+    # fix. (`printf '\177ELF'` -- `file` is not on every build host.)
+    if [[ "$(head -c 4 "${f}" | od -An -c | tr -d ' ')" != "177ELF" ]]; then
+        echo "${rel}: not an ELF file" >&2
+        echo "  If this became a wrapper script, point PROGRAMS at the" >&2
+        echo "  real binary instead of deleting the entry." >&2
+        fail=1
+        stale=1
         continue
     fi
     checked=$(( checked + 1 ))
@@ -75,9 +97,15 @@ if (( checked == 0 )); then
 fi
 if (( fail )); then
     echo "" >&2
-    echo "ERROR: the above lost their hardening. harden_flags() in" >&2
-    echo "build/00-versions.sh sets it; a Makefile that links without" >&2
-    echo "\$(LDFLAGS) silently drops every linker flag in it." >&2
+    if (( stale )); then
+        # A trailer that names the wrong cause is the bug this file
+        # keeps finding in other people's checks.
+        echo "ERROR: PROGRAMS names a path that is not a binary." >&2
+    else
+        echo "ERROR: the above lost their hardening. harden_flags() in" >&2
+        echo "build/00-versions.sh sets it; a Makefile that links without" >&2
+        echo "\$(LDFLAGS) silently drops every linker flag in it." >&2
+    fi
     exit 1
 fi
 echo "check-hardening: ${checked} program(s) OK (PIE, RELRO, BIND_NOW, stack protector, no exec stack)"

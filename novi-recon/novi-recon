@@ -1,0 +1,1455 @@
+#!/usr/bin/env python3
+# ============================================================
+# novi-recon — network reconnaissance, with nothing but the standard
+# library
+#
+# RFC 0028. This exists because RFC 0026/0027 put a Python with working
+# TLS on the machine and nothing yet used it, and because the obvious
+# thing to reach for could not be shipped: the "God's Eye" information
+# gathering tool on GitHub is `Copyright ... All rights reserved` with
+# no redistribution grant, so it cannot go in a signed repository this
+# project hands to other people. The capability is worth having; the
+# code is not ours to give away. So this covers the same ground from
+# scratch.
+#
+# THE HARD RULE HERE IS: STANDARD LIBRARY ONLY.
+#
+# Not a preference. The tool it replaces needs requests, dnspython,
+# python-nmap, folium, opencage and phonenumbers -- six PyPI packages,
+# two of which want an API key and one of which pulls a numeric stack
+# in behind it -- plus the nmap and httpie binaries. This system has no
+# pip (RFC 0026) and packaging six third-party trees to run one script
+# is not a trade anybody would make. Everything below is written
+# against `socket`, `struct`, `ssl`, `urllib`, `hashlib` and
+# `concurrent.futures`, all of which are already in the `python`
+# package.
+#
+# It also means the DNS and WHOIS clients are written out longhand.
+# That is a feature: `dns_lookup` in the tool this replaces is a
+# dnspython call, and dnspython is 25k lines to ask one question.
+#
+# AUTHORISED USE. `ports` is a TCP connect scan and `pwned` sends a
+# hash prefix to a third party. Both are ordinary, both are things a
+# person should only point at systems they are allowed to test, and the
+# --help says so rather than leaving it implied.
+# ============================================================
+
+import argparse
+import concurrent.futures
+import hashlib
+import json
+import random
+import re
+import socket
+import ssl
+import struct
+# The chain and the DER encoding live on `_ssl`, not on `ssl`:
+# `getpeercert()` decodes the leaf and nothing else, which is why "the
+# intermediates are not there" was never a gap in this file. Imported
+# defensively -- every use is behind a getattr, so a Python built
+# without it degrades to a report that says the chain is unavailable.
+try:
+    import _ssl
+except ImportError:                           # pragma: no cover
+    _ssl = None
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+VERSION = "0.1.0"
+UA = f"novi-recon/{VERSION}"
+
+# ─────────────────────────────────────────────────────────────────────
+# Output
+#
+# Every subcommand returns a plain dict/list, and exactly one place
+# decides whether that becomes a human table or JSON. The alternative --
+# each command printing its own text and a --json branch beside it --
+# is how the two drift until the JSON is missing a field the table
+# shows. Same argument as novi-wifi's `scan --tsv` being a separate
+# rendering of the same data rather than a second scan.
+# ─────────────────────────────────────────────────────────────────────
+
+class Fail(Exception):
+    """Something the user needs to know about, printed without a traceback."""
+
+
+def emit(obj, as_json, render):
+    if as_json:
+        json.dump(obj, sys.stdout, indent=2, sort_keys=False)
+        sys.stdout.write("\n")
+    else:
+        render(obj)
+
+
+def kv(key, value, width=22):
+    print(f"{key:<{width}} {value}")
+
+
+# ─────────────────────────────────────────────────────────────────────
+# DNS — a resolver client, written out
+#
+# RFC 1035 wire format. The parts that are easy to get wrong and are
+# therefore done explicitly:
+#
+#   * NAME COMPRESSION. A name in an answer may end in a 2-byte pointer
+#     (top two bits set) to an earlier offset in the SAME message, and
+#     pointers may chain. A parser that does not follow them reads
+#     garbage on almost every real response, because servers compress
+#     the question name into every answer. The chain is bounded here --
+#     a malicious server can point a name at itself, and an unbounded
+#     follower hangs forever on a packet it was handed.
+#
+#   * TRUNCATION. If the response has TC set, the answer did not fit in
+#     512 bytes and the query must be retried over TCP, where the
+#     message is preceded by a 2-byte length. Skipping this silently
+#     loses records for exactly the domains with the most of them.
+#
+#   * The ID must be random and must be checked on the way back, or
+#     any host on the path can answer first. This is not a secure
+#     resolver -- there is no DNSSEC here -- but an unchecked ID is
+#     free to exploit and free to prevent.
+#
+#   * DNSSEC IS NOT VALIDATED HERE, and the honest thing is to say so
+#     in the output rather than only in a comment. This client does no
+#     signature checking whatsoever: it cannot, without a trust anchor,
+#     a clock it believes, and a chain walk, none of which belong in a
+#     recon tool's DNS client. What it CAN do is ask the resolver
+#     whether IT validated, which is one bit in each direction:
+#
+#       - the query sets AD (0x0020) as well as RD. RFC 6840 §5.7: a
+#         client sets AD to say it understands the bit and would like
+#         an answer about it. Without it many validating resolvers
+#         leave AD clear in the response and the tool would report
+#         "not validated" about a validated answer;
+#       - the response's AD says the resolver validated the chain.
+#
+#     CD (0x0010) is deliberately NOT set: setting it tells the
+#     resolver to skip validation, which is the opposite of the
+#     question being asked.
+#
+#     AD IS ONLY WORTH THE PATH TO THE RESOLVER. It is a claim made by
+#     a machine over an unauthenticated UDP hop -- anyone who can spoof
+#     the answer can spoof the bit. `dns` says that in its own output
+#     rather than leaving a reader to infer that "validated" means
+#     validated here.
+# ─────────────────────────────────────────────────────────────────────
+
+QTYPES = {
+    "A": 1, "NS": 2, "CNAME": 5, "SOA": 6, "PTR": 12,
+    "MX": 15, "TXT": 16, "AAAA": 28, "SRV": 33, "CAA": 257,
+}
+QTYPE_NAME = {v: k for k, v in QTYPES.items()}
+RCODES = {
+    0: "NOERROR", 1: "FORMERR", 2: "SERVFAIL", 3: "NXDOMAIN",
+    4: "NOTIMP", 5: "REFUSED",
+}
+
+
+def dns_encode_name(name):
+    out = b""
+    for label in name.rstrip(".").split("."):
+        if not label:
+            continue
+        b = label.encode("idna") if any(ord(c) > 127 for c in label) else label.encode()
+        if len(b) > 63:
+            raise Fail(f"DNS label too long: {label}")
+        out += bytes([len(b)]) + b
+    return out + b"\x00"
+
+
+def dns_read_name(msg, off):
+    """Return (name, offset_after). Follows compression pointers."""
+    labels = []
+    jumped = False
+    end = off
+    hops = 0
+    while True:
+        if off >= len(msg):
+            raise Fail("truncated DNS name")
+        n = msg[off]
+        if n & 0xC0 == 0xC0:
+            if off + 1 >= len(msg):
+                raise Fail("truncated DNS pointer")
+            ptr = ((n & 0x3F) << 8) | msg[off + 1]
+            if not jumped:
+                end = off + 2
+                jumped = True
+            off = ptr
+            hops += 1
+            # A server may point a name back at itself. Bounded rather
+            # than trusted: an unbounded follower spins forever on a
+            # packet somebody chose.
+            if hops > 64:
+                raise Fail("DNS name compression loop")
+            continue
+        off += 1
+        if n == 0:
+            break
+        labels.append(msg[off:off + n].decode("utf-8", "replace"))
+        off += n
+    if not jumped:
+        end = off
+    # The root is the empty label list, and its presentation form is a
+    # single dot -- not the empty string. A null MX (RFC 7505) is
+    # exactly `0 .`, and rendering it as `0 ` reads as a parse failure.
+    # Seen live before this line existed.
+    return ".".join(labels) if labels else ".", end
+
+
+# RD (0x0100) recursion desired, plus AD (0x0020) -- see the header
+# comment. CD (0x0010) stays clear on purpose: it would tell the
+# resolver not to validate.
+DNS_FLAG_RD = 0x0100
+DNS_FLAG_AD = 0x0020
+DNS_FLAG_CD = 0x0010
+DNS_FLAG_TC = 0x0200
+DNS_FLAG_AA = 0x0400
+
+
+def dns_build_query(name, qtype, qid):
+    header = struct.pack(">HHHHHH", qid, DNS_FLAG_RD | DNS_FLAG_AD, 1, 0, 0, 0)
+    return header + dns_encode_name(name) + struct.pack(">HH", qtype, 1)
+
+
+def dns_parse_rdata(msg, rtype, off, rdlen):
+    if rtype == 1 and rdlen == 4:
+        return socket.inet_ntop(socket.AF_INET, msg[off:off + 4])
+    if rtype == 28 and rdlen == 16:
+        return socket.inet_ntop(socket.AF_INET6, msg[off:off + 16])
+    if rtype in (2, 5, 12):
+        return dns_read_name(msg, off)[0]
+    if rtype == 15:
+        pref = struct.unpack(">H", msg[off:off + 2])[0]
+        return f"{pref} {dns_read_name(msg, off + 2)[0]}"
+    if rtype == 16:
+        # TXT rdata is one or more length-prefixed strings, and a long
+        # record (SPF, DKIM) is ALWAYS split into 255-byte chunks that
+        # must be concatenated with nothing between them. Reading only
+        # the first chunk is the classic bug and silently truncates.
+        out, p = [], off
+        while p < off + rdlen:
+            ln = msg[p]
+            out.append(msg[p + 1:p + 1 + ln].decode("utf-8", "replace"))
+            p += 1 + ln
+        return "".join(out)
+    if rtype == 6:
+        mname, p = dns_read_name(msg, off)
+        rname, p = dns_read_name(msg, p)
+        serial, refresh, retry, expire, minimum = struct.unpack(">IIIII", msg[p:p + 20])
+        return f"{mname} {rname} {serial} {refresh} {retry} {expire} {minimum}"
+    if rtype == 33:
+        pri, weight, port = struct.unpack(">HHH", msg[off:off + 6])
+        return f"{pri} {weight} {port} {dns_read_name(msg, off + 6)[0]}"
+    if rtype == 257:
+        flags = msg[off]
+        tlen = msg[off + 1]
+        tag = msg[off + 2:off + 2 + tlen].decode("ascii", "replace")
+        val = msg[off + 2 + tlen:off + rdlen].decode("utf-8", "replace")
+        return f"{flags} {tag} {val}"
+    return msg[off:off + rdlen].hex()
+
+
+def dns_parse(msg, qid):
+    if len(msg) < 12:
+        raise Fail("short DNS response")
+    rid, flags, qdcount, ancount, nscount, arcount = struct.unpack(">HHHHHH", msg[:12])
+    if rid != qid:
+        raise Fail("DNS response ID does not match the query -- discarded")
+    rcode = flags & 0x0F
+    off = 12
+    for _ in range(qdcount):
+        _, off = dns_read_name(msg, off)
+        off += 4
+    answers = []
+    for _ in range(ancount):
+        name, off = dns_read_name(msg, off)
+        rtype, rclass, ttl, rdlen = struct.unpack(">HHIH", msg[off:off + 10])
+        off += 10
+        answers.append({
+            "name": name,
+            "type": QTYPE_NAME.get(rtype, str(rtype)),
+            "ttl": ttl,
+            "data": dns_parse_rdata(msg, rtype, off, rdlen),
+        })
+        off += rdlen
+    return {
+        "rcode": RCODES.get(rcode, str(rcode)),
+        "truncated": bool(flags & DNS_FLAG_TC),
+        "authoritative": bool(flags & DNS_FLAG_AA),
+        # What the RESOLVER says about the chain. Not a verdict this
+        # tool reached, and reported as such everywhere it appears.
+        "authentic_data": bool(flags & DNS_FLAG_AD),
+        "answers": answers,
+    }
+
+
+def system_resolvers():
+    """Resolvers from /etc/resolv.conf.
+
+    On Novi that file is a symlink to /run/novi/resolv.conf, which the
+    DHCP hook writes (RFC 0004) -- so this reads the lease's answer and
+    does not invent one."""
+    out = []
+    try:
+        with open("/etc/resolv.conf") as fh:
+            for line in fh:
+                parts = line.split()
+                if len(parts) >= 2 and parts[0] == "nameserver":
+                    out.append(parts[1])
+    except OSError:
+        pass
+    return out
+
+
+def split_server(spec, default_port=53):
+    """`1.2.3.4`, `1.2.3.4:5353`, `::1`, or `[::1]:5353`.
+
+    A bare IPv6 literal is full of colons, so the port can only be told
+    apart when the address is bracketed -- which is why the bracket
+    form exists and why splitting on the last colon unconditionally
+    turns `2606:4700::1111` into host `2606:4700:` port nonsense."""
+    spec = spec.strip()
+    if spec.startswith("["):
+        host, _, rest = spec[1:].partition("]")
+        if rest.startswith(":"):
+            return host, int(rest[1:])
+        return host, default_port
+    if spec.count(":") == 1:
+        host, _, port = spec.partition(":")
+        return host, int(port)
+    return spec, default_port
+
+
+def dns_query(name, qtype, server, timeout=5.0, tcp=False):
+    server, port = split_server(server)
+    qid = random.SystemRandom().randrange(0, 65536)
+    packet = dns_build_query(name, qtype, qid)
+    family = socket.AF_INET6 if ":" in server else socket.AF_INET
+    if tcp:
+        with socket.socket(family, socket.SOCK_STREAM) as s:
+            s.settimeout(timeout)
+            s.connect((server, port))
+            s.sendall(struct.pack(">H", len(packet)) + packet)
+            head = s.recv(2)
+            if len(head) < 2:
+                raise Fail("no response from resolver over TCP")
+            want = struct.unpack(">H", head)[0]
+            buf = b""
+            while len(buf) < want:
+                chunk = s.recv(want - len(buf))
+                if not chunk:
+                    break
+                buf += chunk
+        return dns_parse(buf, qid)
+    with socket.socket(family, socket.SOCK_DGRAM) as s:
+        s.settimeout(timeout)
+        s.sendto(packet, (server, port))
+        data, _ = s.recvfrom(4096)
+    result = dns_parse(data, qid)
+    if result["truncated"]:
+        # Not an error and not a partial answer to report: TC means
+        # "ask again over TCP", and a tool that reports the truncated
+        # half is worse than one that asks.
+        return dns_query(name, qtype, server, timeout, tcp=True)
+    return result
+
+
+def cmd_dns(args):
+    servers = [args.server] if args.server else system_resolvers()
+    if not servers:
+        raise Fail("no resolver: /etc/resolv.conf names none and --server was not given")
+    types = args.type.upper().split(",") if args.type else ["A", "AAAA", "MX", "NS", "TXT", "SOA"]
+    result = {"name": args.name, "resolver": servers[0], "records": [], "errors": [],
+              "dnssec": dnssec_verdict([])}
+    ad = []
+    for t in types:
+        if t not in QTYPES:
+            raise Fail(f"unknown record type {t}; known: {', '.join(sorted(QTYPES))}")
+        try:
+            r = dns_query(args.name, QTYPES[t], servers[0], args.timeout)
+        except (OSError, Fail) as e:
+            result["errors"].append({"type": t, "error": str(e)})
+            continue
+        if r["rcode"] != "NOERROR" and not r["answers"]:
+            result["errors"].append({"type": t, "error": r["rcode"]})
+            continue
+        # Only a response that CARRIED an answer votes. A NODATA reply
+        # for AAAA has nothing to validate, and a resolver that leaves
+        # AD clear on it is not telling you the zone is unsigned --
+        # counting it would turn one absent record type into "not
+        # validated" for a domain that is.
+        ad.append(r["authentic_data"])
+        result["records"].extend(r["answers"])
+    result["dnssec"] = dnssec_verdict(ad)
+    return result
+
+
+# THREE ANSWERS, not two, and the third is the one a boolean cannot
+# carry: "nothing came back, so nobody said anything about it". Same
+# shape as the clickjacking verdict, and for the same reason -- a
+# tool that reports `false` for "we did not find out" is a tool that
+# tells you something untrue about a machine.
+def dnssec_verdict(flags):
+    if not flags:
+        return {"validated": None, "note": "no answer to validate"}
+    if all(flags):
+        return {"validated": True,
+                "note": "the resolver says it validated; this tool did not"}
+    if any(flags):
+        # Some types validated and some did not, which is a real state:
+        # a signed zone with an unsigned delegation under it, or a
+        # resolver that validated one and fell back on another.
+        return {"validated": False,
+                "note": "some answers carried AD and some did not"}
+    return {"validated": False,
+            "note": "the resolver did not claim validation (unsigned zone, or it does not validate)"}
+
+
+def render_dns(r):
+    kv("name", r["name"])
+    kv("resolver", r["resolver"])
+    # Said on every run, not only when it is interesting. A caveat
+    # printed only sometimes is a caveat a reader learns to expect and
+    # then stops seeing -- and the whole point of this line is that
+    # "validated" here never means validated BY THIS TOOL.
+    d = r["dnssec"]
+    if d["validated"] is None:
+        kv("dnssec", f"unknown -- {d['note']}")
+    elif d["validated"]:
+        kv("dnssec", f"AD set -- {d['note']}")
+    else:
+        kv("dnssec", f"AD clear -- {d['note']}")
+    if not r["records"]:
+        print("\nno records")
+    else:
+        print()
+        print(f"{'TYPE':<6} {'TTL':>7}  DATA")
+        for rec in r["records"]:
+            print(f"{rec['type']:<6} {rec['ttl']:>7}  {rec['data']}")
+    for e in r["errors"]:
+        print(f"  ! {e['type']}: {e['error']}")
+
+
+# ─────────────────────────────────────────────────────────────────────
+# WHOIS — TCP port 43, and the referral that makes it useful
+#
+# The protocol is one line in, text out, close. What makes a naive
+# client useless is that whois.iana.org knows almost nothing: it answers
+# with `refer:` naming the registry that actually holds the record. One
+# hop of referral is the difference between "organisation: IANA" and the
+# registrant. Bounded at 3 hops -- registries do point at each other.
+#
+# The tool this replaces shells out to a `whois` binary. There is no
+# such binary on this system and there does not need to be.
+# ─────────────────────────────────────────────────────────────────────
+
+def whois_ask(server, query, timeout=10.0):
+    # Name the server in the error. socket.create_connection tries every
+    # address getaddrinfo returns and re-raises only the LAST failure --
+    # so on a host with no IPv6 route, a v4 connection that timed out is
+    # reported as "Address family not supported by protocol" from the v6
+    # attempt that came after it. Seen exactly that way against
+    # whois.iana.org from a sandbox with port 43 blocked, and the
+    # message sends you looking at the wrong thing.
+    try:
+        return _whois_ask(server, query, timeout)
+    except OSError as e:
+        raise Fail(f"whois {server}:43: {e} "
+                   f"(the message names the last address tried, not "
+                   f"necessarily the reason)")
+
+
+def _whois_ask(server, query, timeout=10.0):
+    with socket.create_connection((server, 43), timeout) as s:
+        s.sendall(query.encode("idna" if any(ord(c) > 127 for c in query) else "ascii") + b"\r\n")
+        chunks = []
+        while True:
+            b = s.recv(4096)
+            if not b:
+                break
+            chunks.append(b)
+    return b"".join(chunks).decode("utf-8", "replace")
+
+
+def whois_referral(text):
+    for line in text.splitlines():
+        m = re.match(r"^\s*(?:refer|whois|Registrar WHOIS Server):\s*(\S+)\s*$", line, re.I)
+        if m:
+            host = m.group(1).strip().rstrip(".")
+            if host.startswith("http"):
+                continue
+            return host
+    return None
+
+
+# The chase is a separate function from the socket so it can be tested
+# with a fake `ask`. Without that split the only way to exercise "IANA
+# refers you to the registry, which refers you to the registrar" is to
+# have the internet, and the VM this is verified in does not.
+def whois_chain(target, first_server, ask, follow=True, hops=3):
+    chain, seen, text = [], set(), ""
+    server = first_server
+    for _ in range(hops):
+        if server in seen:
+            break               # registries do point back at each other
+        seen.add(server)
+        text = ask(server, target)
+        chain.append(server)
+        if not follow:
+            break
+        nxt = whois_referral(text)
+        if not nxt:
+            break
+        server = nxt
+    return chain, text
+
+
+def cmd_whois(args):
+    chain, text = whois_chain(
+        args.target,
+        args.server or "whois.iana.org",
+        lambda srv, tgt: whois_ask(srv, tgt, args.timeout),
+        follow=not args.server)
+    return {"target": args.target, "servers": chain, "text": text}
+
+
+def render_whois(r):
+    kv("target", r["target"])
+    kv("servers", " -> ".join(r["servers"]))
+    print()
+    print(r["text"].rstrip())
+
+
+# ─────────────────────────────────────────────────────────────────────
+# TLS — what certificate is this, and would it have been believed
+#
+# `--insecure` still REPORTS the verification failure rather than
+# hiding it. Showing a certificate you could not verify, while saying
+# so, is the useful behaviour; showing it silently is how a person
+# concludes a host is fine when it is not.
+# ─────────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────────
+# A DER walk, for two facts OpenSSL will not hand over
+#
+# `_ssl.Certificate.get_info()` returns subject, issuer, validity,
+# serial, SAN and version -- and NO extensions. Certificate
+# Transparency lives in an extension (OID 1.3.6.1.4.1.11129.2.4.2,
+# a SignedCertificateTimestampList embedded in the leaf), so the one
+# question a recon tool wants to ask about CT cannot be answered from
+# anything the standard library exposes. Checked rather than assumed:
+# `ssl` has no CT option and `_ssl` has no SCT attribute of any kind.
+#
+# So this walks the certificate's own DER. Three things about that:
+#
+#   * IT IS A PARSE, NOT A SEARCH. Finding the OID's bytes somewhere
+#     inside a certificate would be a heuristic wearing a fact's
+#     clothes -- the sequence could occur inside a key or a serial,
+#     and a tool whose value is not lying to you does not get to say
+#     "unlikely". The walk goes Certificate -> TBSCertificate ->
+#     [3] extensions -> the Extension whose OID matches, and finds
+#     nothing anywhere else.
+#
+#   * IT IS FOR DISPLAY, NEVER FOR TRUST. OpenSSL decided whether this
+#     chain verifies, before any of this runs. Nothing here votes on
+#     that, and nothing here may: a hand-written parser in the trust
+#     path is the thing `novi-verify` being static TweetNaCl exists to
+#     avoid.
+#
+#   * PRESENCE IS NOT VALIDITY. An SCT is a log's signed promise, and
+#     checking one needs that log's public key and an inclusion proof.
+#     This tool holds no log keys and says so on every run -- the rule
+#     the DNSSEC verdict already follows.
+
+SCT_OID_DER = bytes((0x2B, 0x06, 0x01, 0x04, 0x01, 0xD6, 0x79, 0x02, 0x04, 0x02))
+
+
+class DERError(ValueError):
+    """A certificate this walker cannot read. Never fatal to a report."""
+
+
+def der_tlv(buf, i):
+    """One tag-length-value at offset i -> (tag, body_start, body_end, next).
+
+    Bounds are checked at every step rather than left to IndexError:
+    the input is a certificate a stranger served, and the difference
+    between "this field is malformed" and a traceback is the whole
+    reason this returns a typed error.
+    """
+    if i + 2 > len(buf):
+        raise DERError("truncated tag")
+    tag = buf[i]
+    n = buf[i + 1]
+    i += 2
+    if n == 0x80:
+        # Indefinite length is BER and forbidden in DER. Accepting it
+        # would mean guessing where the value ends.
+        raise DERError("indefinite length")
+    if n & 0x80:
+        count = n & 0x7F
+        if count == 0 or count > 4 or i + count > len(buf):
+            raise DERError("bad long-form length")
+        n = int.from_bytes(buf[i:i + count], "big")
+        i += count
+    end = i + n
+    if end > len(buf):
+        raise DERError("length runs past the end")
+    return tag, i, end, end
+
+
+def der_children(buf, start, end):
+    i = start
+    while i < end:
+        tag, bs, be, nxt = der_tlv(buf, i)
+        yield tag, bs, be
+        if nxt <= i:
+            raise DERError("zero-width element")   # cannot happen; not assumed
+        i = nxt
+
+
+def cert_extensions(der):
+    """{oid_bytes: value_bytes} for the certificate's extensions.
+
+    Empty when the certificate carries none -- which is legal, and is
+    a different answer from "this certificate could not be read".
+    """
+    tag, bs, be, _ = der_tlv(der, 0)
+    if tag != 0x30:
+        raise DERError("certificate is not a SEQUENCE")
+    tbs = next(der_children(der, bs, be), None)
+    if tbs is None or tbs[0] != 0x30:
+        raise DERError("no TBSCertificate")
+    _, tbs_start, tbs_end = tbs
+    out = {}
+    for ctag, cbs, cbe in der_children(der, tbs_start, tbs_end):
+        if ctag != 0xA3:                     # [3] EXPLICIT extensions
+            continue
+        seq = next(der_children(der, cbs, cbe), None)
+        if seq is None or seq[0] != 0x30:
+            raise DERError("extensions is not a SEQUENCE")
+        for etag, ebs, ebe in der_children(der, seq[1], seq[2]):
+            if etag != 0x30:
+                raise DERError("extension is not a SEQUENCE")
+            oid = value = None
+            for ftag, fbs, fbe in der_children(der, ebs, ebe):
+                if ftag == 0x06 and oid is None:
+                    oid = der[fbs:fbe]
+                elif ftag == 0x04:
+                    value = der[fbs:fbe]     # the OCTET STRING wrapper
+            if oid is not None and value is not None:
+                out.setdefault(oid, value)
+        break
+    return out
+
+
+def count_scts(der):
+    """Embedded SCTs in a leaf certificate: an int, or None.
+
+    None means "this certificate has no CT extension", which is a real
+    answer and not zero: zero would say the list was there and empty,
+    which is a different and much stranger thing for a CA to have done.
+    """
+    try:
+        ext = cert_extensions(der)
+    except DERError:
+        return None
+    raw = ext.get(SCT_OID_DER)
+    if raw is None:
+        return None
+    # The extension's value is itself a DER OCTET STRING wrapping the
+    # TLS SignedCertificateTimestampList: uint16 total length, then
+    # repeated (uint16 length, SCT).
+    try:
+        tag, bs, be, _ = der_tlv(raw, 0)
+    except DERError:
+        return None
+    if tag != 0x04:
+        return None
+    body = raw[bs:be]
+    if len(body) < 2:
+        return None
+    total = int.from_bytes(body[0:2], "big")
+    if total != len(body) - 2:
+        return None                          # not the list we expected
+    i, n = 2, 0
+    while i + 2 <= len(body):
+        size = int.from_bytes(body[i:i + 2], "big")
+        i += 2 + size
+        if size == 0 or i > len(body):
+            return None                      # malformed; do not guess
+        n += 1
+    return n
+
+
+def _flatten_name(rdns):
+    out = {}
+    for rdn in rdns or ():
+        for k, v in rdn:
+            out.setdefault(k, v)
+    return out
+
+
+def cmd_tls(args):
+    host, _, port = args.target.partition(":")
+    port = int(port or 443)
+    server_name = args.servername or host
+    result = {"host": host, "port": port, "server_name": server_name}
+
+    ctx = ssl.create_default_context()
+    verified = None
+    error = None
+    try:
+        with socket.create_connection((host, port), args.timeout) as raw:
+            with ctx.wrap_socket(raw, server_hostname=server_name) as s:
+                verified = True
+                result.update(_tls_facts(s))
+    except ssl.SSLCertVerificationError as e:
+        verified = False
+        # getattr, because `verify_message` is set by OpenSSL's own
+        # raise and by nothing else: a re-raised or wrapped
+        # SSLCertVerificationError reaching here without it would turn
+        # a reported verification failure into an AttributeError
+        # traceback -- the one outcome worse than the failure itself,
+        # since this runs inside a sweep. Found by a host test that
+        # raises the exception directly.
+        error = f"{e.__class__.__name__}: {getattr(e, 'verify_message', None) or e}"
+    except (OSError, ssl.SSLError) as e:
+        raise Fail(f"{host}:{port}: {e}")
+
+    if verified is False:
+        result["verify_error"] = error
+        if not args.insecure:
+            result["verified"] = False
+            # THE FAILED HANDSHAKE LEFT NO SOCKET TO ASK. The chain and
+            # the certificate's own bytes are exactly what somebody
+            # wants at this moment -- "which certificate did it hand
+            # me, and who claims to have issued it" -- and neither is
+            # reachable without connecting again, which is what -k
+            # does. Said out loud rather than left as an empty field:
+            # a report that silently omits the interesting half reads
+            # as a tool that found nothing. (Found on a booted machine,
+            # where the guest does not trust this network's CA: the
+            # chain section was simply absent and `ct` printed the bare
+            # word "unknown".)
+            result["chain"] = None
+            result["chain_note"] = ("not read -- the handshake failed, so "
+                                    "there was no connection left to ask; "
+                                    "-k connects again and lists it")
+            result["sct_count"] = None
+            result["sct_note"] = ("not read -- no certificate was accepted; "
+                                  "-k connects again and reads it")
+            return result
+        ctx2 = ssl.create_default_context()
+        ctx2.check_hostname = False
+        ctx2.verify_mode = ssl.CERT_NONE
+        with socket.create_connection((host, port), args.timeout) as raw:
+            with ctx2.wrap_socket(raw, server_hostname=server_name) as s:
+                result.update(_tls_facts(s, unverified=True))
+    result["verified"] = bool(verified)
+    return result
+
+
+def _cert_summary(cert):
+    """One chain entry, from OpenSSL's own parse -- never a hand-written one."""
+    info = cert.get_info()
+    subject = _flatten_name(info.get("subject"))
+    issuer = _flatten_name(info.get("issuer"))
+    der = cert.public_bytes(_ssl.ENCODING_DER)
+    return {
+        "subject_cn": subject.get("commonName"),
+        "subject_o": subject.get("organizationName"),
+        "issuer_cn": issuer.get("commonName"),
+        "issuer_o": issuer.get("organizationName"),
+        "not_before": info.get("notBefore"),
+        "not_after": info.get("notAfter"),
+        "serial": info.get("serialNumber"),
+        "fingerprint_sha256": hashlib.sha256(der).hexdigest(),
+        "self_signed": subject == issuer and bool(subject),
+    }
+
+
+def _chain(s, verified):
+    """The certificates the server sent, leaf first.
+
+    REACHED THROUGH A PRIVATE ATTRIBUTE, and that is the whole risk in
+    this function. `getpeercert()` decodes the LEAF and nothing else --
+    so "the intermediates are not there" was not an oversight in this
+    tool, it is all the public API offers. `get_verified_chain()` lives
+    on `_ssl._SSLSocket` and was undocumented until CPython 3.13, so
+    everything here is behind `getattr`: a Python that does not have it
+    gets `(None, why)` and a report that says so, never a traceback
+    from a recon tool three checks into a sweep.
+    """
+    obj = getattr(s, "_sslobj", None)
+    if obj is None:
+        return None, "this Python does not expose the peer chain"
+    getter = getattr(obj, "get_verified_chain" if verified
+                     else "get_unverified_chain", None)
+    if getter is None:
+        return None, "this Python does not expose the peer chain"
+    if _ssl is None or not hasattr(_ssl, "ENCODING_DER"):
+        return None, "this Python cannot hand back a certificate's DER"
+    try:
+        certs = getter()
+    except (ValueError, OSError, AttributeError) as e:
+        return None, f"chain unavailable: {e}"
+    return [_cert_summary(c) for c in certs or ()], None
+
+
+def _tls_facts(s, unverified=False):
+    facts = {"protocol": s.version(), "cipher": s.cipher()[0] if s.cipher() else None}
+    if unverified:
+        # getpeercert() returns {} on an unverified connection; the DER
+        # is still there, and this is the only way to say anything at
+        # all about a certificate that did not verify.
+        der = s.getpeercert(binary_form=True)
+        facts["fingerprint_sha256"] = hashlib.sha256(der).hexdigest() if der else None
+        facts["certificate"] = "not parsed (connection was not verified)"
+        # The chain is still worth listing when verification FAILED --
+        # "which certificate did it hand me, and who claims to have
+        # issued it" is most of the question at that point. It comes
+        # from get_UNverified_chain here, and the caller has already
+        # recorded verified: false beside it.
+        facts["chain"], note = _chain(s, verified=False)
+        if note:
+            facts["chain_note"] = note
+        facts.update(_ct_facts(der))
+        return facts
+    cert = s.getpeercert() or {}
+    subject = _flatten_name(cert.get("subject"))
+    issuer = _flatten_name(cert.get("issuer"))
+    facts.update({
+        "subject_cn": subject.get("commonName"),
+        "subject_o": subject.get("organizationName"),
+        "issuer_cn": issuer.get("commonName"),
+        "issuer_o": issuer.get("organizationName"),
+        "not_before": cert.get("notBefore"),
+        "not_after": cert.get("notAfter"),
+        "san": [v for k, v in cert.get("subjectAltName", ()) if k in ("DNS", "IP Address")],
+        "serial": cert.get("serialNumber"),
+    })
+    der = s.getpeercert(binary_form=True)
+    facts["fingerprint_sha256"] = hashlib.sha256(der).hexdigest() if der else None
+    facts["chain"], note = _chain(s, verified=True)
+    if note:
+        facts["chain_note"] = note
+    facts.update(_ct_facts(der))
+    return facts
+
+
+def _ct_facts(der):
+    """Embedded SCTs in the leaf, and the caveat that always goes with them.
+
+    PRESENCE IS NOT VALIDITY, and the note says so on every run rather
+    than only when it is interesting -- the rule the DNSSEC verdict
+    already follows, for the same reason. An SCT is a log's signed
+    promise that it has seen this certificate; checking one needs that
+    log's public key and an inclusion proof, and this tool holds no log
+    keys. What it can honestly report is that the CA put some there.
+
+    None is not zero. "No CT extension" and "a CT extension containing
+    an empty list" are different things a CA did, and folding the first
+    into the second would report a number nobody wrote.
+    """
+    if not der:
+        return {"sct_count": None,
+                "sct_note": "no certificate to read"}
+    n = count_scts(der)
+    if n is None:
+        return {"sct_count": None,
+                "sct_note": "no embedded SCTs (this says nothing about "
+                            "SCTs delivered in the handshake or by OCSP)"}
+    return {"sct_count": n,
+            "sct_note": "embedded by the CA; NOT verified against any log -- "
+                        "this tool holds no log keys"}
+
+
+def render_tls(r):
+    kv("host", f"{r['host']}:{r['port']}")
+    kv("verified", "yes" if r.get("verified") else "NO")
+    if r.get("verify_error"):
+        kv("verify error", r["verify_error"])
+    for k in ("protocol", "cipher", "subject_cn", "subject_o",
+              "issuer_cn", "issuer_o", "not_before", "not_after", "serial"):
+        if r.get(k):
+            kv(k.replace("_", " "), r[k])
+    if r.get("fingerprint_sha256"):
+        kv("sha256", r["fingerprint_sha256"])
+    if r.get("san"):
+        kv("names", ", ".join(r["san"][:12]) + (" ..." if len(r["san"]) > 12 else ""))
+
+    # Said on every run, like the DNSSEC line, and for the same reason:
+    # a caveat printed only sometimes is one a reader stops seeing, and
+    # the whole point of this one is that "SCTs present" never means
+    # "SCTs checked".
+    if r.get("sct_count") is None:
+        # Never a bare word. Every path that can reach here sets a note
+        # saying WHY there is no count; this fallback exists so that a
+        # future one which forgets says something a reader can act on
+        # rather than "unknown".
+        kv("ct", r.get("sct_note") or "not read (no reason recorded)")
+    else:
+        kv("ct", f"{r['sct_count']} embedded SCT(s) -- {r['sct_note']}")
+
+    if r.get("chain_note"):
+        kv("chain", r["chain_note"])
+    elif r.get("chain"):
+        print()
+        print(f"CHAIN ({len(r['chain'])} certificate(s), leaf first)")
+        for i, c in enumerate(r["chain"]):
+            who = c.get("subject_cn") or c.get("subject_o") or "(no name)"
+            by = c.get("issuer_cn") or c.get("issuer_o") or "(no issuer name)"
+            tail = " [self-signed]" if c.get("self_signed") else ""
+            print(f"  {i}  {who}{tail}")
+            print(f"     issued by  {by}")
+            if c.get("not_after"):
+                print(f"     valid      {c.get('not_before')} .. {c['not_after']}")
+            if c.get("fingerprint_sha256"):
+                print(f"     sha256     {c['fingerprint_sha256']}")
+
+
+# ─────────────────────────────────────────────────────────────────────
+# HTTP headers, and the clickjacking question folded into them
+#
+# The tool this replaces has a `ClickJacking` check and an
+# `HttpHeadersGrabber` as two separate things, and the first is a
+# subset of the second: whether a page can be framed is decided by
+# X-Frame-Options and CSP frame-ancestors, both of which are headers.
+# One request, one report.
+#
+# CSP `frame-ancestors` OVERRIDES X-Frame-Options where both are
+# present -- that is the spec, and a checker that reads only XFO calls
+# a protected site vulnerable and a `frame-ancestors 'none'` site
+# unprotected.
+# ─────────────────────────────────────────────────────────────────────
+
+SECURITY_HEADERS = [
+    ("strict-transport-security", "HSTS"),
+    ("content-security-policy", "CSP"),
+    ("x-frame-options", "clickjacking (legacy)"),
+    ("x-content-type-options", "MIME sniffing"),
+    ("referrer-policy", "referrer leakage"),
+    ("permissions-policy", "feature access"),
+]
+
+
+def csp_frame_ancestors(csp):
+    if not csp:
+        return None
+    for directive in csp.split(";"):
+        parts = directive.strip().split()
+        if parts and parts[0].lower() == "frame-ancestors":
+            return " ".join(parts[1:]) or "(empty)"
+    return None
+
+
+def clickjacking_verdict(headers):
+    """Return (framable, why). `headers` is a lowercase-keyed dict."""
+    fa = csp_frame_ancestors(headers.get("content-security-policy"))
+    if fa is not None:
+        if fa.lower() in ("'none'", "none"):
+            return False, "CSP frame-ancestors 'none'"
+        return None, f"CSP frame-ancestors {fa} (framable by those origins)"
+    xfo = (headers.get("x-frame-options") or "").strip().lower()
+    if xfo in ("deny",):
+        return False, "X-Frame-Options: DENY"
+    if xfo in ("sameorigin",):
+        return False, "X-Frame-Options: SAMEORIGIN"
+    if xfo.startswith("allow-from"):
+        return None, f"X-Frame-Options: {xfo} (obsolete; ignored by current browsers)"
+    return True, "neither CSP frame-ancestors nor X-Frame-Options is set"
+
+
+def http_fetch(url, timeout, method="GET", max_redirects=5):
+    """Follow redirects by hand so the chain can be reported.
+
+    urllib follows them silently, and 'which hop set the header' is
+    most of what this command is for."""
+    chain = []
+    for _ in range(max_redirects + 1):
+        req = urllib.request.Request(url, method=method, headers={"User-Agent": UA})
+        opener = urllib.request.build_opener(_NoRedirect)
+        try:
+            resp = opener.open(req, timeout=timeout)
+            status, headers, body_url = resp.status, resp.headers, resp.url
+            body = resp.read(65536)
+        except urllib.error.HTTPError as e:
+            status, headers, body_url = e.code, e.headers, url
+            body = e.read(65536)
+        chain.append({"url": url, "status": status})
+        if status in (301, 302, 303, 307, 308) and headers.get("location"):
+            url = urllib.parse.urljoin(url, headers["location"])
+            continue
+        return chain, status, headers, body, body_url
+    raise Fail(f"more than {max_redirects} redirects")
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *a, **k):
+        return None
+
+
+def cmd_headers(args):
+    url = args.url if "://" in args.url else "https://" + args.url
+    chain, status, headers, _, final = http_fetch(url, args.timeout)
+    low = {k.lower(): v for k, v in headers.items()}
+    framable, why = clickjacking_verdict(low)
+    present = []
+    for name, what in SECURITY_HEADERS:
+        present.append({"header": name, "protects": what, "value": low.get(name)})
+    return {
+        "url": url,
+        "final_url": final,
+        "status": status,
+        "redirects": chain[:-1],
+        "server": low.get("server"),
+        "clickjacking": {"framable": framable, "reason": why},
+        "security_headers": present,
+        "headers": dict(low),
+    }
+
+
+def render_headers(r):
+    kv("url", r["url"])
+    for hop in r["redirects"]:
+        kv("  redirect", f"{hop['status']} {hop['url']}")
+    kv("status", r["status"])
+    if r["server"]:
+        kv("server", r["server"])
+    cj = r["clickjacking"]
+    verdict = {True: "FRAMABLE", False: "protected", None: "partial"}[cj["framable"]]
+    kv("clickjacking", f"{verdict} -- {cj['reason']}")
+    print()
+    print(f"{'HEADER':<32} {'':1} VALUE")
+    for h in r["security_headers"]:
+        mark = " " if h["value"] else "!"
+        print(f"{h['header']:<32} {mark} {h['value'] or '(absent) -- ' + h['protects']}")
+
+
+# ─────────────────────────────────────────────────────────────────────
+# robots.txt
+#
+# Parsed rather than printed, because the interesting thing in a
+# robots.txt is the list of paths somebody asked crawlers to stay out
+# of, grouped by which agent it applies to. A `cat` gives you the file.
+# ─────────────────────────────────────────────────────────────────────
+
+def parse_robots(text):
+    groups = []
+    current = None
+    sitemaps = []
+    for raw in text.splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line or ":" not in line:
+            continue
+        field, _, value = line.partition(":")
+        field = field.strip().lower()
+        value = value.strip()
+        if field == "user-agent":
+            # Consecutive User-agent lines share one group of rules.
+            if current is None or current["rules"]:
+                current = {"agents": [], "rules": []}
+                groups.append(current)
+            current["agents"].append(value)
+        elif field == "sitemap":
+            sitemaps.append(value)
+        elif field in ("disallow", "allow", "crawl-delay") and current is not None:
+            current["rules"].append({"field": field, "value": value})
+    return {"groups": groups, "sitemaps": sitemaps}
+
+
+def cmd_robots(args):
+    base = args.url if "://" in args.url else "https://" + args.url
+    url = base.rstrip("/") + "/robots.txt"
+    chain, status, headers, body, final = http_fetch(url, args.timeout)
+    if status != 200:
+        return {"url": url, "status": status, "groups": [], "sitemaps": [],
+                "note": "no robots.txt served"}
+    parsed = parse_robots(body.decode("utf-8", "replace"))
+    parsed.update({"url": url, "status": status})
+    return parsed
+
+
+def render_robots(r):
+    kv("url", r["url"])
+    kv("status", r["status"])
+    if r.get("note"):
+        print(r["note"])
+        return
+    for g in r["groups"]:
+        print()
+        print("User-agent: " + ", ".join(g["agents"]))
+        for rule in g["rules"]:
+            print(f"  {rule['field']:<12} {rule['value'] or '(everything allowed)'}")
+    for sm in r["sitemaps"]:
+        print(f"\nSitemap: {sm}")
+
+
+# ─────────────────────────────────────────────────────────────────────
+# pwned — Have I Been Pwned, k-anonymity
+#
+# THE PASSWORD NEVER LEAVES THIS MACHINE. What goes out is the first
+# five hex characters of its SHA-1; the service returns every suffix it
+# holds under that prefix (tens of thousands) and the match is made
+# here. That is HIBP's documented range API and it is the only form of
+# this check worth shipping.
+#
+# The password is read from STDIN or a terminal prompt, NEVER from
+# argv: /proc/<pid>/cmdline is world-readable for as long as the
+# process lives, which is the same rule RFC 0017 applies to a WiFi
+# passphrase.
+#
+# Add-Padding asks the service to pad the response to a constant size,
+# so an observer cannot infer the prefix from the response length.
+# ─────────────────────────────────────────────────────────────────────
+
+def pwned_count(suffix, body):
+    for line in body.splitlines():
+        got, _, count = line.strip().partition(":")
+        if got.upper() == suffix:
+            try:
+                return int(count)
+            except ValueError:
+                return 0
+    return 0
+
+
+def cmd_pwned(args):
+    if sys.stdin.isatty():
+        import getpass
+        password = getpass.getpass("password (not echoed): ")
+    else:
+        password = sys.stdin.readline().rstrip("\n")
+    if not password:
+        raise Fail("no password given")
+    digest = hashlib.sha1(password.encode("utf-8")).hexdigest().upper()
+    prefix, suffix = digest[:5], digest[5:]
+    url = f"https://api.pwnedpasswords.com/range/{prefix}"
+    req = urllib.request.Request(url, headers={"User-Agent": UA, "Add-Padding": "true"})
+    with urllib.request.urlopen(req, timeout=args.timeout) as resp:
+        body = resp.read().decode("ascii", "replace")
+    count = pwned_count(suffix, body)
+    return {"prefix_sent": prefix, "suffixes_returned": body.count("\n"),
+            "breached": count > 0, "count": count}
+
+
+def render_pwned(r):
+    kv("prefix sent", r["prefix_sent"] + " (of a 40-character SHA-1)")
+    kv("suffixes returned", r["suffixes_returned"])
+    if r["breached"]:
+        print(f"\nBREACHED -- seen {r['count']} times in known breaches. Do not use it.")
+    else:
+        print("\nNot found in the breach corpus. That is not the same as strong.")
+
+
+# ─────────────────────────────────────────────────────────────────────
+# ports — a TCP connect scan
+#
+# connect(2) and nothing else: no raw sockets, no SYN scan, no timing
+# games, no OS fingerprinting. It answers "is something listening" the
+# same way any client would, which is the only question this needs to
+# answer and the only one that works without CAP_NET_RAW.
+#
+# POINT IT AT MACHINES YOU ARE ALLOWED TO TEST.
+# ─────────────────────────────────────────────────────────────────────
+
+COMMON_PORTS = [
+    21, 22, 23, 25, 53, 80, 110, 111, 123, 135, 139, 143, 161, 389,
+    443, 445, 465, 514, 587, 631, 636, 993, 995, 1080, 1433, 1521,
+    3000, 3306, 3389, 5432, 5900, 6379, 8000, 8080, 8443, 9200, 27017,
+]
+
+
+def parse_ports(spec):
+    out = []
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            a, _, b = part.partition("-")
+            lo, hi = int(a), int(b)
+            if lo < 1 or hi > 65535 or lo > hi:
+                raise Fail(f"bad port range: {part}")
+            out.extend(range(lo, hi + 1))
+        else:
+            p = int(part)
+            if not 1 <= p <= 65535:
+                raise Fail(f"bad port: {part}")
+            out.append(p)
+    return sorted(set(out))
+
+
+def probe(host, port, timeout):
+    try:
+        with socket.create_connection((host, port), timeout):
+            return True
+    except (OSError, socket.timeout):
+        return False
+
+
+def cmd_ports(args):
+    ports = parse_ports(args.ports) if args.ports else COMMON_PORTS
+    try:
+        addr = socket.getaddrinfo(args.host, None)[0][4][0]
+    except OSError as e:
+        raise Fail(f"cannot resolve {args.host}: {e}")
+    open_ports = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=args.concurrency) as pool:
+        futures = {pool.submit(probe, addr, p, args.timeout): p for p in ports}
+        for fut in concurrent.futures.as_completed(futures):
+            if fut.result():
+                open_ports.append(futures[fut])
+    return {"host": args.host, "address": addr, "scanned": len(ports),
+            "open": sorted(open_ports)}
+
+
+def render_ports(r):
+    kv("host", f"{r['host']} ({r['address']})")
+    kv("scanned", r["scanned"])
+    if not r["open"]:
+        print("\nnothing listening on the ports scanned")
+        return
+    print()
+    print(f"{'PORT':>6}  SERVICE")
+    for p in r["open"]:
+        try:
+            name = socket.getservbyport(p, "tcp")
+        except OSError:
+            # /etc/services is curated (RFC 0028 roadmap 3), so this
+            # answers for the ports people meet and not for the rest.
+            # A number is a fine answer for the rest: inventing a name
+            # for a port nobody registered would be the tool guessing.
+            name = "-"
+        print(f"{p:>6}  {name}")
+
+
+# ─────────────────────────────────────────────────────────────────────
+# all — the sweep
+#
+# RFC 0028 roadmap 1. Every other subcommand answers one question about
+# one target; "run everything against this domain" is the shape the
+# original tool actually had, and doing it by hand is five invocations
+# whose arguments have to be derived correctly each time.
+#
+# Three decisions, and the first is the one that matters:
+#
+#   * `ports` IS NOT IN THE SWEEP. Every check here asks a third party
+#     about the target -- a resolver, a WHOIS server, the site's own
+#     TLS and HTTP endpoints, which is what a browser does. A port scan
+#     is the one thing this tool does that reaches for a machine's
+#     OTHER services, and this tool's own epilog says to point it only
+#     at systems you are authorised to test. A subcommand called "all"
+#     that quietly scanned would turn a decision the person makes per
+#     target into one the tool makes on their behalf, at the moment
+#     they are least likely to be thinking about it. `--ports` opts in,
+#     and then it is a scan somebody typed.
+#
+#   * `pwned` is not in it either, and that is not a judgement call: it
+#     takes a PASSWORD on stdin and knows nothing about a domain. There
+#     is nothing for a sweep to pass it.
+#
+#   * ONE CHECK FAILING IS A FIELD, NOT THE END. Each runs inside its
+#     own guard and a failure becomes `ok: false` with the reason,
+#     because the whole value of a sweep is the parts that answered --
+#     a WHOIS server being down must not throw away the DNS, TLS,
+#     header and robots findings gathered before it. Same shape as
+#     novi-state running each converge in a subshell so that one
+#     impossible key does not abandon the rest of the document.
+#
+# The renderer COMPOSES the existing ones. A second formatting of any
+# check would be exactly the drift `novi-agent describe --text` avoids
+# by having one gatherer and two printers; here there is one printer
+# per check already, and this mode only decides which of them to call.
+
+# Each entry says how to build that check's argument namespace from the
+# sweep's own target, so "what does `all` run, and with what" has one
+# answer rather than five inline guesses.
+SWEEP = (
+    ("dns", lambda t, a: argparse.Namespace(
+        name=t, type=None, server=a.server, timeout=a.timeout)),
+    ("whois", lambda t, a: argparse.Namespace(
+        target=t, server=None, timeout=a.timeout)),
+    ("tls", lambda t, a: argparse.Namespace(
+        target=t, servername=None, insecure=a.insecure, timeout=a.timeout)),
+    ("headers", lambda t, a: argparse.Namespace(
+        url=t, timeout=a.timeout)),
+    ("robots", lambda t, a: argparse.Namespace(
+        url=t, timeout=a.timeout)),
+)
+
+
+def sweep_host(target):
+    """The hostname inside whatever was typed.
+
+    A sweep is about a domain, but somebody who has just run
+    `headers https://example.com/path` will type the same thing here.
+    Refusing it is unhelpful and passing it straight through is worse:
+    the DNS client would look up a name containing a slash and report
+    NXDOMAIN about a domain that plainly exists. Take the host out, and
+    have `render_all` SAY so when the answer was derived, rather than
+    silently rewriting what somebody typed.
+    """
+    t = target.strip()
+    if "://" in t:
+        t = t.split("://", 1)[1]
+    t = t.split("/", 1)[0]
+    if "@" in t:                        # user:pass@host, as a URL may carry
+        t = t.rsplit("@", 1)[1]
+    if t.startswith("["):               # [v6]:port
+        close = t.find("]")
+        if close > 0:
+            t = t[1:close]
+    elif t.count(":") == 1:
+        # ONE colon is host:port. Two or more is a bare IPv6 address,
+        # where splitting at the first colon produces a fragment that
+        # is not an address and not an error either -- it would just
+        # resolve to nothing, about a host that answers.
+        t = t.split(":", 1)[0]
+    if not t:
+        raise Fail(f"no host in {target!r}")
+    return t
+
+
+def cmd_all(args):
+    host = sweep_host(args.target)
+    checks = [name for name, _ in SWEEP]
+    if args.ports:
+        checks.append("ports")
+    builders = dict(SWEEP)
+
+    result = {"target": host, "given": args.target, "checks": checks,
+              "results": {}, "failed": []}
+    for name in checks:
+        if name == "ports":
+            ns = argparse.Namespace(host=host, ports=None,
+                                    concurrency=args.concurrency,
+                                    timeout=args.timeout)
+        else:
+            ns = builders[name](host, args)
+        try:
+            result["results"][name] = {"ok": True, "result": COMMANDS[name][0](ns)}
+        except Fail as e:
+            result["results"][name] = {"ok": False, "error": str(e)}
+            result["failed"].append(name)
+        except (OSError, urllib.error.URLError, ssl.SSLError) as e:
+            result["results"][name] = {"ok": False, "error": str(e)}
+            result["failed"].append(name)
+    return result
+
+
+def render_all(r):
+    kv("target", r["target"])
+    if r["given"] != r["target"]:
+        kv("from", r["given"])
+    answered = len(r["checks"]) - len(r["failed"])
+    kv("checks", f"{answered} of {len(r['checks'])} answered")
+    for name in r["checks"]:
+        entry = r["results"][name]
+        print()
+        print(f"── {name} " + "─" * max(0, 62 - len(name)))
+        if not entry["ok"]:
+            print(f"failed: {entry['error']}")
+            continue
+        COMMANDS[name][1](entry["result"])
+
+
+# ─────────────────────────────────────────────────────────────────────
+
+COMMANDS = {
+    "dns": (cmd_dns, render_dns),
+    "whois": (cmd_whois, render_whois),
+    "tls": (cmd_tls, render_tls),
+    "headers": (cmd_headers, render_headers),
+    "robots": (cmd_robots, render_robots),
+    "pwned": (cmd_pwned, render_pwned),
+    "ports": (cmd_ports, render_ports),
+    # Last, and after the checks it dispatches: `cmd_all` looks its
+    # sub-checks up in this same table, so there is one list of what
+    # this tool can do rather than a second one inside the sweep.
+    "all": (cmd_all, render_all),
+}
+
+
+def build_parser():
+    p = argparse.ArgumentParser(
+        prog="novi-recon",
+        description="Network reconnaissance, standard library only.",
+        epilog="Point `ports` only at systems you are authorised to test.")
+    p.add_argument("--version", action="version", version=f"novi-recon {VERSION}")
+    p.add_argument("--json", action="store_true", help="machine-readable output")
+    p.add_argument("--timeout", type=float, default=8.0, metavar="S")
+    sub = p.add_subparsers(dest="command", required=True)
+
+    d = sub.add_parser("dns", help="DNS records (own resolver client, no dnspython)")
+    d.add_argument("name")
+    d.add_argument("-t", "--type", help="comma-separated; default A,AAAA,MX,NS,TXT,SOA")
+    d.add_argument("-s", "--server",
+                   help="resolver to ask, host or host:port ([v6]:port); "
+                        "default /etc/resolv.conf")
+
+    w = sub.add_parser("whois", help="WHOIS over TCP 43, following IANA's referral")
+    w.add_argument("target", help="domain or IP")
+    w.add_argument("-s", "--server", help="ask this server only, no referral")
+
+    t = sub.add_parser("tls", help="certificate and protocol of a TLS server")
+    t.add_argument("target", help="host or host:port (default port 443)")
+    t.add_argument("--servername", help="SNI name, if different from the host")
+    t.add_argument("-k", "--insecure", action="store_true",
+                   help="still connect when verification fails (the failure is reported)")
+
+    h = sub.add_parser("headers", help="HTTP headers, with a clickjacking verdict")
+    h.add_argument("url")
+
+    r = sub.add_parser("robots", help="fetch and parse robots.txt")
+    r.add_argument("url")
+
+    sub.add_parser("pwned", help="check a password against HIBP (only a hash prefix leaves)")
+
+    o = sub.add_parser("ports", help="TCP connect scan (authorised targets only)")
+    o.add_argument("host")
+    o.add_argument("-p", "--ports", help="e.g. 22,80,443 or 1-1024; default a common set")
+    o.add_argument("-c", "--concurrency", type=int, default=64)
+
+    a = sub.add_parser("all", help="dns, whois, tls, headers and robots for one domain")
+    a.add_argument("target", help="domain (a URL is accepted; the host is taken out)")
+    a.add_argument("-s", "--server", help="resolver for the DNS check")
+    a.add_argument("-k", "--insecure", action="store_true",
+                   help="TLS check: connect anyway when verification fails")
+    # Opt-in, never implied by the word "all": see the SWEEP comment.
+    a.add_argument("--ports", action="store_true",
+                   help="also run the port scan (authorised targets only)")
+    a.add_argument("-c", "--concurrency", type=int, default=64)
+    return p
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    run, render = COMMANDS[args.command]
+    try:
+        result = run(args)
+        emit(result, args.json, render)
+        if args.command == "all" and len(result["failed"]) == len(result["checks"]):
+            # A partial sweep is a real answer and exits 0 -- the point
+            # of running everything is the parts that worked, and a
+            # non-zero status for "WHOIS was down" would make this
+            # unusable from a script. Nothing at all answering is a
+            # different thing: usually the name does not resolve, and
+            # reporting success for it would be the tool agreeing that
+            # it found out something.
+            return 1
+    except Fail as e:
+        print(f"novi-recon: {e}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        return 130
+    except (OSError, urllib.error.URLError, ssl.SSLError) as e:
+        print(f"novi-recon: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

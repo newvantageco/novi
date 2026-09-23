@@ -1,0 +1,564 @@
+#!/bin/sh
+# ============================================================
+# novi-slot — the other root filesystem (RFC 0041).
+#
+#   novi-slot status                what is running, what is next
+#   novi-slot sync                  make the inactive slot a copy of this one
+#   novi-slot install <pkg>...      install into the inactive slot
+#   novi-slot update                update the inactive slot
+#   novi-slot switch                boot the inactive slot next time
+#   novi-slot rollback              the same thing, named for the direction
+#
+# An `--ab` install (RFC 0041 item 1) gives a machine two root slots and
+# a shared state partition; `novi-grubenv` (item 2) lets userland say
+# which one boots next. This is what makes those worth having: a change
+# is applied to the slot that is NOT running, and it becomes live by
+# rebooting. Nothing is ever modified underneath a running system, and
+# undoing it is one reboot rather than a restore.
+#
+# `switch` AND `rollback` ARE ONE OPERATION AND THERE IS ONE
+# IMPLEMENTATION. They are two words because they are two situations --
+# "I have prepared an update" and "the update I booted is wrong" -- and
+# somebody in the second one will type `rollback`. A verb that is not
+# there because it would be a synonym is a verb somebody gives up
+# looking for.
+#
+# WHAT THIS IS NOT. It does not decide whether the new slot worked; the
+# trial-boot rule is RFC 0041 item 5 and is deliberately not here yet,
+# because "did that update break the machine" is a judgement and this
+# file is a mechanism. What it gives is a machine where that judgement
+# is worth making, because there is something to go back to.
+# ============================================================
+set -u
+
+PROG="novi-slot"
+SLOT_A_LABEL="${NOVI_SLOT_A_LABEL:-NOVI_ROOT_A}"
+SLOT_B_LABEL="${NOVI_SLOT_B_LABEL:-NOVI_ROOT_B}"
+# Must match novi-install's list. These are bound out of /state at
+# boot, so they are not part of a slot and must not be copied into one
+# -- a `tar` through a live bind would copy the shared data into the
+# slot, where it would then be shadowed by the bind and take up space
+# nothing can ever read.
+STATE_SUBTREES="home var/log var/lib/novi-state var/lib/alsa var/cache/pkg"
+
+MNT="/run/novi/slot"
+# Written LAST by `sync` and removed FIRST, so its presence means a
+# copy that finished. See slot_is_populated().
+SYNC_MARK="etc/novi/slot-synced"
+MOUNTED=0
+BOUND=""
+
+msg()  { echo "==> $*"; }
+info() { echo "  -> $*"; }
+warn() { echo "WARNING: $*" >&2; }
+die()  { echo "ERROR: $*" >&2; cleanup; exit 1; }
+
+cleanup() {
+    # In reverse order, and never fatal: a failed unmount must not stop
+    # the rest from being undone.
+    for m in $BOUND; do umount "$m" 2>/dev/null || umount -l "$m" 2>/dev/null; done
+    BOUND=""
+    if [ "$MOUNTED" -eq 1 ]; then
+        umount "$MNT" 2>/dev/null || umount -l "$MNT" 2>/dev/null
+        MOUNTED=0
+    fi
+}
+trap cleanup EXIT INT TERM
+
+need_root() { [ "$(id -u)" -eq 0 ] || die "This operation requires root."; }
+
+# ---------------------------------------------------------------------------
+# Which slot is this?
+# ---------------------------------------------------------------------------
+
+# THE ANSWER COMES FROM THE MOUNT, NOT FROM /proc/cmdline. The command
+# line says what GRUB was ASKED for; the mount says what the machine
+# actually got, and RFC 0014's whole argument is that those are
+# different questions. They agree on every correct boot, which is
+# exactly why reading the wrong one is invisible until the day it
+# matters.
+root_dev() {
+    awk '$2 == "/" { print $1 }' /proc/mounts | head -1
+}
+
+label_of() {
+    [ -n "$1" ] || return 1
+    blkid "$1" 2>/dev/null | sed -n 's/.*[[:space:]]LABEL="\([^"]*\)".*/\1/p' | head -1
+}
+
+dev_with_label() {
+    # busybox findfs understands LABEL=, and is the one thing here that
+    # does not need the label to appear in a `blkid` listing that may
+    # be ordered or filtered differently on another machine.
+    findfs "LABEL=$1" 2>/dev/null
+}
+
+RUNNING_DEV=""; RUNNING_LABEL=""; OTHER_LABEL=""; OTHER_DEV=""; RUNNING_SLOT=""
+
+resolve_slots() {
+    RUNNING_DEV="$(root_dev)"
+    [ -n "$RUNNING_DEV" ] || die "cannot tell what / is mounted from"
+    RUNNING_LABEL="$(label_of "$RUNNING_DEV")"
+    case "$RUNNING_LABEL" in
+        "$SLOT_A_LABEL") RUNNING_SLOT=a; OTHER_LABEL="$SLOT_B_LABEL" ;;
+        "$SLOT_B_LABEL") RUNNING_SLOT=b; OTHER_LABEL="$SLOT_A_LABEL" ;;
+        *)
+            die "this machine has one root slot.
+       / is ${RUNNING_DEV} labelled '${RUNNING_LABEL:-<none>}', which is
+       neither ${SLOT_A_LABEL} nor ${SLOT_B_LABEL}. Two slots are laid
+       down by \`novi-install --ab\` and a partition table is written
+       once (RFC 0041 decision 5), so this cannot be added to a machine
+       that was installed without it."
+            ;;
+    esac
+    OTHER_DEV="$(dev_with_label "$OTHER_LABEL")"
+    [ -n "$OTHER_DEV" ] ||
+        die "no partition labelled ${OTHER_LABEL}. This machine claims to be
+       slot ${RUNNING_SLOT} and has no other slot to switch to."
+    # A slot that is somehow the running one is a machine about to eat
+    # itself: everything below writes to OTHER_DEV.
+    [ "$OTHER_DEV" != "$RUNNING_DEV" ] ||
+        die "${OTHER_LABEL} resolves to ${OTHER_DEV}, which is the running root"
+}
+
+# A `case`, not `[ x = a ] && echo b || echo a`. That shape is correct
+# here only because `echo b` cannot fail, and it is the shape this
+# repository has been caught by often enough not to write again.
+other_slot_letter() {
+    case "$RUNNING_SLOT" in
+        a) echo b ;;
+        *) echo a ;;
+    esac
+}
+
+grubenv_says() { novi-grubenv get novi_slot 2>/dev/null || echo "(unset)"; }
+
+# ---------------------------------------------------------------------------
+# Mounting the inactive slot
+# ---------------------------------------------------------------------------
+
+mount_other() {
+    mkdir -p "$MNT"
+    mountpoint -q "$MNT" && die "$MNT is already a mountpoint; another ${PROG} may be running"
+    mount "$OTHER_DEV" "$MNT" || die "could not mount ${OTHER_DEV} at ${MNT}"
+    MOUNTED=1
+}
+
+# What a chroot needs, and no more. Each of these is here for a reason
+# that can be stated, because a bind list is a claim about what a
+# program needs (RFC 0039).
+bind_for_chroot() {
+    local src dst
+
+    for d in /dev /proc /sys; do
+        dst="${MNT}${d}"
+        mkdir -p "$dst"
+        mount --bind "$d" "$dst" || die "could not bind ${d}"
+        BOUND="$dst $BOUND"
+    done
+
+    # The package cache is SHARED STATE on an A/B machine, which is the
+    # point of it being shared: an update downloads once and both slots
+    # have it. /var/lib/pkg is deliberately NOT bound -- it is the
+    # slot's own manifest, and binding it would make an install into
+    # the inactive slot register in the running one's database.
+    if [ -d /state/var/cache/pkg ]; then
+        dst="${MNT}/var/cache/pkg"
+        mkdir -p "$dst"
+        mount --bind /state/var/cache/pkg "$dst" || die "could not bind the package cache"
+        BOUND="$dst $BOUND"
+    fi
+
+    # /etc/resolv.conf is a symlink to /run/novi/resolv.conf, and the
+    # slot's /run is an empty directory on disk until it boots. Bind
+    # the one file rather than the whole of /run: everything else in
+    # there is the running system's private runtime state and a package
+    # script has no business reading it.
+    src=/run/novi/resolv.conf
+    if [ -f "$src" ]; then
+        mkdir -p "${MNT}/run/novi"
+        : > "${MNT}${src}"
+        mount --bind "$src" "${MNT}${src}" || die "could not bind the resolver"
+        BOUND="${MNT}${src} $BOUND"
+    else
+        warn "no ${src}; the chroot has no resolver and a mirror named by hostname will fail"
+    fi
+}
+
+in_other() {
+    chroot "$MNT" /bin/sh -c "$*"
+}
+
+# ---------------------------------------------------------------------------
+# sync
+# ---------------------------------------------------------------------------
+
+# THE FIRST UPDATE HAS TO SEED THE SLOT, because `novi-install --ab`
+# leaves slot B formatted and empty on purpose -- it reserves the
+# partition, which is the thing that cannot be done later, and copies
+# nothing. So this is not an optimisation step somebody can skip.
+# EMPTY THE SLOT, AND REFUSE UNLESS IT IS CERTAIN WHAT IT IS EMPTYING.
+# This is an `rm -rf` running as root, and the one mistake it must not
+# be able to make is deleting the RUNNING system. Three facts are
+# checked against /proc/mounts rather than against this program's own
+# variables, because what went wrong would be those variables:
+#   - $MNT is a mount point at all;
+#   - what is mounted there is $OTHER_DEV, the slot resolve_slots
+#     picked -- not the root, not something a stale mount left behind;
+#   - $OTHER_DEV is not the device carrying /.
+# The contents go, never the directory: $MNT is the mount point.
+wipe_other() {
+    local dev
+    [ -n "$MNT" ] && [ "$MNT" != / ] || die "refusing to wipe '${MNT}'"
+    mountpoint -q "$MNT" || die "${MNT} is not a mountpoint; refusing to wipe it"
+    dev="$(awk -v m="$MNT" '$2 == m { d = $1 } END { print d }' /proc/mounts)"
+    [ "$dev" = "$OTHER_DEV" ] ||
+        die "${MNT} holds ${dev:-nothing}, not ${OTHER_DEV}; refusing to wipe it"
+    [ "$OTHER_DEV" != "$RUNNING_DEV" ] ||
+        die "the inactive slot resolved to the running root ${RUNNING_DEV}; refusing to wipe it"
+    info "emptying ${OTHER_LABEL} (a slot is a copy, not an accumulation)"
+    # `lost+found` stays: mke2fs created it for e2fsck to reconnect
+    # orphaned inodes into, and the tar excludes it, so removing it
+    # would leave the slot's filesystem differing from a freshly
+    # made one in a way nothing here puts back.
+    find "$MNT" -mindepth 1 -maxdepth 1 ! -name 'lost+found' \
+        -exec rm -rf {} + || die "could not empty ${OTHER_LABEL}"
+}
+
+sync_other() {
+    msg "Copying the running system into ${OTHER_LABEL} (${OTHER_DEV})"
+
+    # The exclusions are the kernel-owned mounts, the shared partitions
+    # and the slot mount itself. /boot and /boot/efi are the SHARED
+    # boot area: copying them would put a second kernel inside the slot
+    # where nothing reads it, and on a machine where /boot is its own
+    # partition tar would be copying a mounted filesystem into a
+    # directory on the one it is writing.
+    #
+    # /state is excluded and so is every subtree bound out of it --
+    # both, not either: excluding /state alone still copies /home
+    # THROUGH its bind, and excluding the binds alone still copies the
+    # whole of /state under /state.
+    local ex="--exclude=./proc --exclude=./sys --exclude=./dev --exclude=./run"
+    ex="$ex --exclude=./tmp --exclude=./mnt --exclude=./lost+found"
+    ex="$ex --exclude=./state --exclude=./boot"
+    for sub in $STATE_SUBTREES; do ex="$ex --exclude=./$sub"; done
+
+    # REMOVED FIRST, so that a copy interrupted half way leaves a slot
+    # that reports itself unfinished rather than one carrying a stale
+    # mark from the copy before it.
+    rm -f "$MNT/$SYNC_MARK"
+    sync
+
+    # AND THE SLOT IS EMPTIED, because `tar -xf` OVERWRITES AND NEVER
+    # DELETES. Without this a slot is not a copy of the running system
+    # -- it is the UNION of every sync ever made into it. Demonstrated
+    # on the host: remove a file from the source, re-sync, and it is
+    # still in the target.
+    #
+    # Two things follow, and the second is why this is not cosmetic.
+    # `pkg remove` something, sync, and the slot keeps that package's
+    # files while the install database copied beside them (slot-local,
+    # RFC 0041 item 1) says it is gone -- a slot that lies to pkg, the
+    # exact hazard /var/lib/pkg is kept slot-local to avoid, arriving
+    # from the other direction. And the copy can then be LARGER than
+    # the running system, so "both slots are the same size, therefore
+    # it fits" stops being true.
+    #
+    # A slot is disposable by definition -- the whole design is that
+    # nothing here is the running system -- so emptying it costs
+    # nothing an interrupted copy did not already cost: the mark is
+    # already gone by this line, so what a failure leaves reports
+    # itself unfinished either way.
+    wipe_other
+
+    # shellcheck disable=SC2086
+    ( cd / && tar -cf - $ex . ) | ( cd "$MNT" && tar -xf - ) ||
+        die "copying the system into the slot failed"
+
+    mkdir -p "$MNT/proc" "$MNT/sys" "$MNT/dev" "$MNT/run" "$MNT/mnt" \
+             "$MNT/boot" "$MNT/state"
+    mkdir -p "$MNT/tmp" && chmod 1777 "$MNT/tmp"
+    for sub in $STATE_SUBTREES; do mkdir -p "$MNT/$sub"; done
+
+    rewrite_fstab
+
+    # AND WRITTEN LAST. A slot is only usable if the whole copy landed,
+    # and "the whole copy landed" is not something the result can be
+    # asked afterwards -- a tree with a busybox and an /etc in it looks
+    # exactly the same whether it is 760 MB or the first 300.
+    mkdir -p "$(dirname "$MNT/$SYNC_MARK")"
+    printf 'from %s at %s\n' "$RUNNING_LABEL" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+        > "$MNT/$SYNC_MARK"
+    sync
+    info "copied; $(du -sh "$MNT" 2>/dev/null | cut -f1) in ${OTHER_LABEL}"
+}
+
+# THE COPIED fstab NAMES THE OTHER SLOT AS ROOT, and nothing else in
+# the system would ever have said so. `/init` mounts the root from the
+# kernel command line, so a wrong `/` line in fstab does not stop the
+# machine booting -- it sits there being wrong, and the first thing to
+# read it (a `mount -o remount`, an fsck, a person) gets slot A's label
+# on a machine running slot B. A file that is wrong and inert is a file
+# that is wrong on the day something starts reading it.
+rewrite_fstab() {
+    local f="$MNT/etc/fstab" tmp
+    [ -f "$f" ] || { warn "no /etc/fstab in the slot"; return 0; }
+    tmp="${f}.new.$$"
+    awk -v want="LABEL=${OTHER_LABEL}" '
+        $2 == "/" && $1 ~ /^LABEL=/ { $1 = want; print; next }
+        { print }
+    ' "$f" > "$tmp" || { rm -f "$tmp"; die "could not rewrite the slot's fstab"; }
+    # awk's default OFS is a space, so the rewritten line loses the
+    # column alignment of the original. That is cosmetic and the
+    # alternative -- a sed that has to match the whole line -- is a
+    # regex against a file a person is encouraged to edit.
+    grep -q "^LABEL=${OTHER_LABEL}[[:space:]]" "$tmp" ||
+        { rm -f "$tmp"; die "the slot's fstab has no LABEL= root line to rewrite"; }
+    mv "$tmp" "$f" || { rm -f "$tmp"; die "could not replace the slot's fstab"; }
+    info "the slot's fstab now names ${OTHER_LABEL} as /"
+}
+
+# A HALF-COPIED SLOT LOOKS EXACTLY LIKE A WHOLE ONE, which is why this
+# asks for a marker rather than for evidence. `tar` writes in directory
+# order, so an interrupted copy has a /bin/busybox and an /etc long
+# before it has everything -- and the machine that produces one is not
+# hypothetical: a power cut during `sync`, or anything that kills it,
+# leaves precisely that. Watched live, from a test harness that killed
+# its own sync at 311 MB of 762 and then let `switch` point the next
+# boot at the result.
+slot_is_populated() {
+    [ -f "$MNT/$SYNC_MARK" ] && [ -x "$MNT/bin/busybox" ] && [ -d "$MNT/etc" ]
+}
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+cmd_status() {
+    resolve_slots
+    echo "running slot:   ${RUNNING_SLOT}  (${RUNNING_LABEL}, ${RUNNING_DEV})"
+    echo "inactive slot:  $(other_slot_letter)  (${OTHER_LABEL}, ${OTHER_DEV})"
+    echo "grubenv says:   novi_slot=$(grubenv_says)"
+    mkdir -p "$MNT"
+    if mount -o ro "$OTHER_DEV" "$MNT" 2>/dev/null; then
+        MOUNTED=1
+        if slot_is_populated; then
+            echo "inactive slot:  ready ($(du -sh "$MNT" 2>/dev/null | cut -f1)) -- $(cat "$MNT/$SYNC_MARK" 2>/dev/null)"
+        elif [ -x "$MNT/bin/busybox" ]; then
+            echo "inactive slot:  UNFINISHED -- a copy into it did not complete."
+            echo "                \`${PROG} sync\` starts again; nothing will boot it as it is."
+        else
+            echo "inactive slot:  EMPTY -- \`${PROG} sync\` seeds it"
+        fi
+        cleanup
+    else
+        echo "inactive slot:  could not be mounted read-only to look inside"
+    fi
+    local try; try="$(novi-grubenv get novi_try 2>/dev/null || echo "")"
+    case "$try" in
+        armed) echo "trial:          ARMED -- the next boot of slot $(grubenv_says) is on trial" ;;
+        taken) echo "trial:          IN FLIGHT -- this boot has not confirmed yet" ;;
+    esac
+    local want; want="$(grubenv_says)"
+    if [ "$want" = "$RUNNING_SLOT" ] || [ "$want" = "(unset)" ]; then
+        echo "next boot:      this slot (${RUNNING_SLOT})"
+    else
+        echo "next boot:      slot ${want} -- \`${PROG} switch\` again to undo"
+    fi
+}
+
+# One implementation, two names -- and ONE PARAMETER, which is the
+# place the two situations genuinely differ (RFC 0041 item 5).
+#
+# `switch` goes to a slot you have just prepared, so it ARMS A TRIAL: if
+# that slot never reaches a userland, the next boot comes back on its
+# own. `rollback` goes to the slot you came FROM, so it must not --
+# arming a trial there means a boot that fails to confirm sends you back
+# to the slot you were escaping. A rollback is a decision, not an
+# experiment.
+#
+# Somebody on a bad slot may well type `switch` meaning rollback. That
+# costs nothing: the trial is armed on the good slot, that slot
+# confirms, and the flag clears.
+cmd_switch() {
+    local verb="$1" trial="$2" want
+    need_root
+    resolve_slots
+    want="$(other_slot_letter)"
+    mkdir -p "$MNT"
+    if mount -o ro "$OTHER_DEV" "$MNT" 2>/dev/null; then
+        MOUNTED=1
+        slot_is_populated ||
+            die "slot ${want} (${OTHER_LABEL}) is not ready: no completed copy.
+       It is empty, or a copy into it was interrupted -- either way
+       booting it would reach the initramfs and stop there. Run
+       \`${PROG} sync\` first."
+        cleanup
+    else
+        warn "could not mount ${OTHER_DEV} to check it is populated"
+    fi
+    if [ "$trial" -eq 1 ]; then
+        novi-grubenv set "novi_slot=${want}" "novi_try=armed" >/dev/null ||
+            die "could not write the GRUB environment block"
+    else
+        # Clear any armed trial as well: rolling back is the answer to
+        # a trial that is going badly, and leaving the flag set would
+        # let the bootloader undo the decision on the next boot.
+        novi-grubenv set "novi_slot=${want}" "novi_try=" >/dev/null ||
+            die "could not write the GRUB environment block"
+    fi
+    msg "${verb}: the next boot is slot ${want} (${OTHER_LABEL})"
+    info "running slot ${RUNNING_SLOT} is untouched; reboot to change over"
+    if [ "$trial" -eq 1 ]; then
+        info "it is a TRIAL boot: if it does not reach a userland, the boot"
+        info "after it comes back here on its own"
+    fi
+    info "at the boot menu, \"the other root slot\" reaches either one"
+}
+
+# WHAT CLEARS A TRIAL, which is the half of item 5 that is a judgement
+# rather than a mechanism.
+#
+# NOT `novi-state health`, which is the obvious candidate and the
+# obvious trap: a machine degraded for a reason that has nothing to do
+# with the update -- a radio with no firmware, a service somebody
+# turned off, a mirror that is down -- would roll the update back, and
+# the rollback would then look like the update's fault. A signal that
+# fires for unrelated reasons turns a safety net into a source of
+# mystery reboots.
+#
+# What this claims instead is exactly what it can observe: THIS SLOT
+# REACHED A USERLAND THAT GOT AS FAR AS BOOT CONVERGENCE. That is the
+# bar `rc.init` represents, and it is the failure an A/B system exists
+# for -- the one a person cannot fix without a rescue medium. "The
+# update is good" is a larger claim and nothing here makes it; a person
+# who boots the new slot and does not like it still types `rollback`.
+cmd_confirm() {
+    local st
+    st="$(novi-grubenv get novi_try 2>/dev/null || true)"
+    # NO WRITE ON A NORMAL BOOT. This runs from rc.init on every boot,
+    # and a grubenv rewritten 1024 bytes at a time on every start would
+    # be churn on the one file the bootloader depends on.
+    case "$st" in
+        armed|taken) ;;
+        *) return 0 ;;
+    esac
+    need_root
+    novi-grubenv set "novi_try=" >/dev/null 2>&1 || return 0
+    msg "trial boot confirmed; this slot is now the plain default"
+}
+
+# A PACKAGE NAME REACHES A ROOT `sh -c` INSIDE THE SLOT, so it is
+# checked by class before it gets there. The caller is already root at
+# a shell, so this is not a privilege boundary -- but `novi-slot
+# install "foo; rm -rf /"` running that in a chroot is a surprise
+# nobody asked for, and the set of characters a package name may
+# contain is the one `pkg` and RFC 0029's `pkg.install` verb already
+# agree on.
+valid_pkg_name() {
+    case "$1" in
+        ''|-*) return 1 ;;
+        *[!A-Za-z0-9._+-]*) return 1 ;;
+    esac
+    return 0
+}
+
+cmd_pkg() {
+    local what="$1" p; shift
+    need_root
+
+    # EVERY REFUSAL BEFORE ANY WORK. `install` with no arguments used
+    # to mount the slot, seed it -- 47 seconds and 760 MB -- bind three
+    # filesystems into it and THEN print a usage line. Same lesson as
+    # the `--ab --encrypt` refusal that lived after the "is that a
+    # block device" test and answered about /dev/null.
+    if [ "$what" = install ]; then
+        [ $# -gt 0 ] || die "usage: ${PROG} install <package>..."
+        for p in "$@"; do
+            valid_pkg_name "$p" ||
+                die "not a usable package name: '${p}'
+       (letters, digits and . _ + - , not starting with -)"
+        done
+    fi
+
+    resolve_slots
+    command -v chroot >/dev/null 2>&1 || die "no chroot on this system"
+    mount_other
+
+    if ! slot_is_populated; then
+        info "slot $(other_slot_letter) is empty; seeding it first"
+        sync_other
+    fi
+
+    bind_for_chroot
+
+    case "$what" in
+        update)
+            msg "Updating slot $(other_slot_letter) (${OTHER_LABEL})"
+            in_other "pkg sync" || warn "pkg sync failed in the slot; using the index it has"
+            in_other "pkg update" || die "pkg update failed in the slot; nothing was switched"
+            ;;
+        install)
+            msg "Installing into slot $(other_slot_letter) (${OTHER_LABEL}): $*"
+            in_other "pkg sync" || warn "pkg sync failed in the slot; using the index it has"
+            in_other "pkg install $*" || die "pkg install failed in the slot; nothing was switched"
+            ;;
+    esac
+
+    sync
+    cleanup
+    msg "slot $(other_slot_letter) changed; the running system is untouched"
+    info "\`${PROG} switch\` makes it the next boot"
+}
+
+cmd_sync() {
+    need_root
+    resolve_slots
+    mount_other
+    sync_other
+    cleanup
+}
+
+usage() {
+    cat <<USAGE
+${PROG} — the other root filesystem (RFC 0041)
+
+  ${PROG} status                what is running, what boots next
+  ${PROG} sync                  copy the running system into the inactive slot
+  ${PROG} install <pkg>...      install into the inactive slot
+  ${PROG} update                update the inactive slot
+  ${PROG} switch                boot the inactive slot next time
+  ${PROG} rollback              go back, permanently, with no trial
+  ${PROG} confirm               clear a trial (rc.init does this for you)
+
+A change is applied to the slot that is NOT running and becomes live at
+the next reboot, so nothing is ever modified underneath a running
+system and undoing it costs one reboot. Needs a machine installed with
+\`novi-install --ab\`: a partition table is written once.
+
+\`switch\` arms a TRIAL boot: a slot that does not reach a userland is
+abandoned by the bootloader on the boot after it, with no help from
+anybody. \`rollback\` does not arm one -- going back is a decision, not
+an experiment.
+
+What a confirmed trial claims is that the slot reached a working
+userland, and no more. Whether the update was any GOOD is a judgement
+nothing here makes; if you boot it and do not like it, roll back.
+USAGE
+}
+
+cmd="${1:-}"
+[ $# -gt 0 ] && shift
+
+case "$cmd" in
+    status)   cmd_status ;;
+    sync)     cmd_sync ;;
+    install)  cmd_pkg install "$@" ;;
+    update)   cmd_pkg update ;;
+    switch)   cmd_switch "switched" 1 ;;
+    rollback) cmd_switch "rolled back" 0 ;;
+    confirm)  cmd_confirm ;;
+    -h|--help|help|'') usage ;;
+    *) usage >&2; die "unknown command: ${cmd}" ;;
+esac

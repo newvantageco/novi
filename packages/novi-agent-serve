@@ -1,0 +1,105 @@
+#!/bin/sh
+# ============================================================
+# novi-agent-serve — one connection, one request
+#
+# RFC 0032. s6-ipcserver runs this per connection with the socket on
+# stdin and stdout, so the whole protocol is: read one line, do the
+# thing, write one JSON line back, exit.
+#
+# WHY A SOCKET AT ALL. `novi-agent do` needs root, because the tools
+# under it do. That means the program driving this machine has to be
+# root -- and the program driving this machine is the LARGEST and
+# least reviewable thing on it. The verb list already bounds what may
+# be done; what it cannot bound is a bug in the caller itself.
+#
+# So: the big untrusted program runs as nobody in particular, and a
+# small reviewed one holds the privilege. The verb list is unchanged
+# either way -- this does not widen or narrow what an agent may do, it
+# moves where the privilege lives.
+#
+# THE SOCKET IS THE BOUNDARY, which is the sentence RFC 0029 used to
+# defer this and it is still the whole design. Who can connect is who
+# can act, so the gate is the filesystem: /run/novi/agent is 0750
+# root:agent, and membership of `agent` IS the grant. Not a fourth
+# policy key -- unix already has this mechanism and a second one would
+# be a second thing to disagree with the first.
+#
+# IDENTITY COMES FROM THE KERNEL. IPCREMOTEEUID is filled from
+# SO_PEERCRED by s6-ipcserver -p; it is what the kernel knows about
+# the process on the other end, not something the client says about
+# itself. A protocol where the caller states its own uid would be a
+# log that lies on request.
+# ============================================================
+set -eu
+
+AGENT="${NOVI_AGENT:-novi-agent}"
+
+# Refuse and say so in the same shape novi-agent's own refusals take,
+# so a caller parses one format whichever side produced the answer.
+# Every refusal from here is a malformed REQUEST rather than a
+# rejected verb, so there is no verb to name: the reason is always one
+# of this file's own literals, which is why it needs no escaping.
+deny() {
+    printf '{"ok": false, "verb": "unknown", "reason": %s, "status": 1}\n' "\"$1\""
+    exit 1
+}
+
+# PROTO=IPC is set by s6-ipcserver. Running this by hand at a shell
+# would otherwise read a line from the terminal and look like a hang.
+[ "${PROTO:-}" = "IPC" ] || {
+    printf 'novi-agent-serve: this is s6-ipcserver'"'"'s per-connection handler,\n' >&2
+    printf '                  not a command. See RFC 0032.\n' >&2
+    exit 1
+}
+
+# No credentials means s6-ipcserver was started without -p, and the
+# audit would silently record the wrong actor. Refuse rather than
+# guess: a boundary that cannot name who crossed it is not one.
+case "${IPCREMOTEEUID:-}" in
+    ''|*[!0-9]*) deny "no peer credentials (s6-ipcserver needs -p)" ;;
+esac
+
+# One line. A read that never returns is a connection slot held open,
+# so the server side bounds the number of them (-c) rather than
+# trying to time out here: s6-ipcserver already owns that problem and
+# solving it twice is how the two answers disagree.
+IFS= read -r line || deny "empty request"
+
+# Length before anything else. This is the first thing that touches
+# text from a possibly-unprivileged caller, and everything downstream
+# is a shell.
+[ "${#line}" -le 512 ] || deny "request too long"
+
+case "$line" in
+    *[![:print:][:space:]]*) deny "control characters in request" ;;
+esac
+
+# GLOBBING OFF BEFORE WORD SPLITTING. `set -- $line` is how a request
+# becomes arguments, and unquoted expansion in a shell also expands
+# globs -- so a request of `state.set hostname *` would arrive as the
+# contents of the current directory rather than an asterisk. `set -f`
+# turns that off for the rest of this process. Word splitting on IFS
+# is what we want and is kept.
+set -f
+# shellcheck disable=SC2086
+set -- $line
+set +f
+
+[ "$#" -ge 1 ] || deny "empty request"
+
+# THERE IS NO POLICY HERE, and that is deliberate. Everything above
+# this line rejects a request that is not a request -- no credentials,
+# no line, too long, control characters. Which verbs exist, which are
+# permitted, how fast they may come, and which are unreachable over
+# this transport are all novi-agent's to decide, so that every refusal
+# lands in the one audit log. wifi.join is refused for the socket in
+# `cmd_do` for exactly that reason: it was refused here first, and a
+# refusal the log never sees is the boundary RFC 0016 warns about.
+
+# The peer's uid reaches the audit through the environment, so the log
+# names the process that ASKED rather than the root daemon that acted.
+# novi-agent still applies agent.enabled, agent.allow and agent.rate
+# itself -- the policy has one reader, and this is not it.
+NOVI_AGENT_PEER_UID="${IPCREMOTEEUID}" \
+NOVI_AGENT_VIA=socket \
+exec "$AGENT" do "$@"
