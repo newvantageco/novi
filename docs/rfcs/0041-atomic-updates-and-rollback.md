@@ -126,6 +126,32 @@ contract, which is exactly what §3 predicted would block
 installed and booted **before** any A/B machinery exists, and it is
 worth having on its own.
 
+**`/var` CANNOT MOVE WHOLESALE, and this RFC said it could.** The
+sentence above and roadmap item 1 below originally read *"`/var` and
+`/home` onto their own partition"*, which was written from the shape of
+the problem rather than from the tree. `/var/lib/pkg/installed` is the
+install database — **it describes the slot's own contents**, and under
+A/B the two slots legitimately hold different package sets, because
+updating the inactive one is the entire point. Share it and the running
+system's database claims the versions in the *other* slot while its
+files are its own. That is worse than having no rollback: it is a
+machine that lies about what it has, to `pkg`, to `novi-state
+diff`, and to `novi-agent describe`.
+
+Checked in the tree rather than remembered (`packages/pkg` lines 31-49,
+and `/var` on the built image), `/var` is three different things:
+
+| | |
+|---|---|
+| **slot-local** | `/var/lib/pkg` — the slot's own manifest and index |
+| **shared state** | `/var/log`, `/var/lib/novi-state` (RFC 0002's generations are machine history and must outlive a switch), `/var/lib/alsa`, and `/home` |
+| **shared cache** | `/var/cache/pkg` — safe to share precisely because RFC 0006 hashes every archive against the signed index before unpacking it, so a shared cache cannot be a shared vulnerability, and not sharing it would mean re-downloading an update the other slot already fetched |
+| **neither** | `/var/tmp`, `/var/run` — ephemeral, and `/var/run` is already a symlink into the `/run` tmpfs |
+
+So the split is by named subtree, not by top-level directory. That is
+more work than the original sentence implied and it is the actual
+shape of the problem.
+
 `/etc` is the hard case and is deliberately left open here. It is
 per-machine configuration that a person edits (`system.conf`,
 `keys.conf`, `wifi.conf`), so it looks like state — and it is also
@@ -187,11 +213,14 @@ here would smuggle in the model decision this RFC just declined.
 
 ## Roadmap
 
-1. **Split state out of the root.** `/var` and `/home` onto their own
-   partition, in `novi-install`, `/init` and the fstab it writes, for
-   all three layouts (UEFI, BIOS, encrypted). Bootable and verifiable
-   on its own, and every candidate mechanism needs it. Settle `/etc`
-   here, with the argument written down.
+1. **Split state out of the root**, by NAMED SUBTREE rather than by
+   top-level directory — see decision 2. `/home`, `/var/log`,
+   `/var/lib/novi-state`, `/var/lib/alsa` and `/var/cache/pkg` onto a
+   shared partition; **`/var/lib/pkg` stays in the slot**, because it
+   is the slot's own manifest. In `novi-install`, `/init` and the fstab
+   it writes, for all three layouts (UEFI, BIOS, encrypted). Bootable
+   and verifiable on its own, and every candidate mechanism needs it.
+   Settle `/etc` here, with the argument written down.
 2. **`loadenv` in `core.img` and in `bootx64.efi`**, and a `grubenv`
    the installed system can write. Small, and nothing else can start
    until a boot can be steered from userland.

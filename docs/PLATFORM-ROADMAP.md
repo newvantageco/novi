@@ -197,6 +197,14 @@ building an image, so either the distribution ships whole images and
 A/B costs 100% of the OS on disk (≈1.6 GB at today's 792 MB) and gives
 exactly two generations, which is what every A/B system accepts.
 
+**`/var` does not move wholesale**, which the RFC got wrong in its own
+first draft and corrected the same day: `/var/lib/pkg/installed` is the
+slot's manifest, so sharing it would give the running system a database
+describing the *other* slot — a machine that lies about what it has.
+The split is by named subtree (`/home`, `/var/log`,
+`/var/lib/novi-state`, `/var/lib/alsa` and the hash-verified
+`/var/cache/pkg` shared; `/var/lib/pkg` slot-local).
+
 **The kernel was never the blocker**, which is the fourth time a
 blocking claim in this repository turned out to be about something
 already present: `BTRFS_FS`, `OVERLAY_FS` and `SQUASHFS` are `y`, and
