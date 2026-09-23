@@ -217,8 +217,12 @@ wipe_other() {
     [ "$OTHER_DEV" != "$RUNNING_DEV" ] ||
         die "the inactive slot resolved to the running root ${RUNNING_DEV}; refusing to wipe it"
     info "emptying ${OTHER_LABEL} (a slot is a copy, not an accumulation)"
-    find "$MNT" -mindepth 1 -maxdepth 1 -exec rm -rf {} + ||
-        die "could not empty ${OTHER_LABEL}"
+    # `lost+found` stays: mke2fs created it for e2fsck to reconnect
+    # orphaned inodes into, and the tar excludes it, so removing it
+    # would leave the slot's filesystem differing from a freshly
+    # made one in a way nothing here puts back.
+    find "$MNT" -mindepth 1 -maxdepth 1 ! -name 'lost+found' \
+        -exec rm -rf {} + || die "could not empty ${OTHER_LABEL}"
 }
 
 sync_other() {

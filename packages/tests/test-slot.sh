@@ -314,6 +314,11 @@ check "mindepth 1 keeps the mount point" \
     "$(printf '%s' "$WFN" | grep -c 'mindepth 1')" "1"
 check "no bare rm -rf of the mount" \
     "$(printf '%s' "$WFN" | grep -c 'rm -rf "\$MNT"')" "0"
+# mke2fs made lost+found for e2fsck, and the tar excludes it, so
+# removing it leaves the slot differing from a fresh filesystem with
+# nothing here to put it back.
+check "lost+found survives the wipe" \
+    "$(printf '%s' "$WFN" | grep -c "name 'lost+found'")" "1"
 
 part "a package name reaches a root sh -c, so it is checked by class"
 # `in_other` runs `chroot "$MNT" /bin/sh -c "pkg install $*"`. The
