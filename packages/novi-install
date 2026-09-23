@@ -116,6 +116,12 @@ STATE_MOUNTED=0
 # describes THIS slot's contents -- sharing it would give the running
 # system a database about the other slot (RFC 0041 decision 2).
 STATE_SUBTREES="home var/log var/lib/novi-state var/lib/alsa var/cache/pkg"
+# The file that says "this slot holds a complete system". Written last
+# by both the thing that fills a slot -- this installer, and
+# `novi-slot sync` -- and read by `novi-slot` before it will let the
+# bootloader be pointed at one. Both spellings must agree; the host
+# test checks that they do.
+SLOT_SYNC_MARK="etc/novi/slot-synced"
 
 PROFILE="desktop"
 TARGET_MIRROR=""
@@ -809,6 +815,29 @@ copy_system() {
         info "state partition holds:$(printf ' /%s' $STATE_SUBTREES)"
     fi
 
+    # RFC 0041: the same completion marker `novi-slot sync` writes.
+    #
+    # WITHOUT IT THE MACHINE CANNOT ROLL BACK TO THE SLOT IT WAS
+    # INSTALLED INTO, which is the one slot a rollback is most likely
+    # to want. `novi-slot` refuses to point the bootloader at a slot
+    # with no marker, because a copy interrupted half way leaves a tree
+    # that looks complete -- and the installer's slot is a complete
+    # copy whose completion nothing had recorded. Watched live: update
+    # slot B, switch, boot it, and `novi-slot rollback` answered "slot a
+    # is not ready: no completed copy" about the slot the machine had
+    # booted from twenty minutes earlier. The check was right; what was
+    # missing was the installer making the same claim about its own
+    # work.
+    #
+    # Only on an --ab install: a machine with one root slot has nothing
+    # to switch to, and a marker there would be a claim nobody reads.
+    if [ "$AB" -eq 1 ]; then
+        mkdir -p "$MNT/etc/novi"
+        printf 'installed by novi-install at %s\n' \
+            "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "$MNT/$SLOT_SYNC_MARK"
+        info "slot marked complete (${SLOT_SYNC_MARK})"
+    fi
+
     sync
     info "system copied"
 }
@@ -931,8 +960,33 @@ set_hostname() {
 # why turns up.
 separate_boot() { [ -n "$BOOT_PART" ]; }
 
+# WHETHER THE KERNEL GOES ON THE ESP, and this is the second time the
+# same question has been asked with the wrong condition.
+#
+# The rule is: the kernel must live in the BOOT AREA, meaning whatever
+# both the bootloader and every root can reach. On a plain install that
+# is the root filesystem itself; on a BIOS install with a separate
+# /boot it is that partition; on a UEFI install where the root
+# filesystem is not the boot area it is the ESP.
+#
+# RFC 0018's encrypted UEFI layout was the first case where the root is
+# not the boot area, so the test was written as `ENCRYPT`. RFC 0041's
+# A/B layout is the second -- and with the old condition the kernel
+# went into SLOT A's /boot while grub.cfg searched for slot A's label,
+# so both slots would have booted slot A's kernel out of slot A's
+# filesystem. A slot switch that cannot change the kernel is not an
+# A/B system, and a slot B that cannot boot when slot A's filesystem is
+# damaged is not a rollback.
+#
+# `separate_boot()` was corrected from `$ENCRYPT` to the fact for
+# exactly this reason and this is the same correction one layer up:
+# ask whether the root IS the boot area, not why it is not.
+kernel_on_esp() {
+    [ "$FIRMWARE" = "uefi" ] && { [ "$ENCRYPT" -eq 1 ] || [ "$AB" -eq 1 ]; }
+}
+
 kernel_dest_dir() {
-    if [ "$ENCRYPT" -eq 1 ] && [ "$FIRMWARE" = "uefi" ]; then
+    if kernel_on_esp; then
         printf '%s' "$MNT/boot/efi"
     else
         printf '%s' "$MNT/boot"
@@ -942,7 +996,7 @@ kernel_dest_dir() {
 # The same location as GRUB names it: relative to whatever partition
 # GRUB will have set as its root.
 kernel_grub_prefix() {
-    if [ "$ENCRYPT" -eq 1 ] || separate_boot; then
+    if kernel_on_esp || separate_boot; then
         printf ''          # the kernel is at the root of the ESP or of /boot
     else
         printf '/boot'
@@ -1190,7 +1244,11 @@ install_bootloader_uefi() {
     #              the root label
     #   encrypted  GRUB cannot read the root filesystem at all, so the
     #              kernel is on the ESP and search finds the ESP
-    if [ "$ENCRYPT" -eq 1 ]; then
+    #   A/B        there are two root filesystems and the kernel may
+    #              not live in either, or a slot switch could not
+    #              change it -- so the ESP again, for a different
+    #              reason. kernel_on_esp() is the one predicate.
+    if kernel_on_esp; then
         write_grub_cfg "$MNT/boot/efi/EFI/BOOT/grub.cfg" \
             "search --no-floppy --label ${ESP_LABEL} --set=root"
     else

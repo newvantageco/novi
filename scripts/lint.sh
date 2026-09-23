@@ -176,6 +176,20 @@ fi
 # the OTHER slot. That is a one-word edit somebody could make in good
 # faith with nothing else in the tree complaining.
 #
+# test-slot.sh is the twelfth, and it checks the TEXTUAL half of a tool
+# whose other half needs a disk and three boots. Textual is where this
+# feature's two worst bugs live, and both are silent: the fstab copied
+# into the inactive slot names the OTHER slot as root -- which does not
+# stop the machine booting, because /init mounts root from the kernel
+# command line, so it just sits there being wrong until something reads
+# it -- and the copy's exclusion list runs through live bind mounts, so
+# excluding /state alone still copies /home THROUGH its bind while
+# excluding the binds alone still copies the whole of /state under
+# /state. Either produces a slot that boots perfectly and is quietly
+# two copies of everything. The shortest check is still worth the most:
+# `var/lib/pkg` must never be shared and never be bound into the
+# chroot, because it is the slot's own manifest.
+#
 # test-grubenv.sh is the eleventh, and its oracle is GRUB's own
 # tools. RFC 0041 needs a boot that can be steered from userland, which
 # means writing GRUB's environment block -- a fixed 1024 bytes with a
@@ -254,6 +268,7 @@ for t in packages/tests/test-lib-json.sh packages/tests/test-agent-verbs.sh \
          packages/tests/test-dead-applets.sh \
          packages/tests/test-install-ab.sh \
          packages/tests/test-grubenv.sh \
+         packages/tests/test-slot.sh \
          packages/tests/test-pkg-lifecycle.sh \
          packages/tests/test-pkg-cache-hash.sh; do
     echo ">>> ${t##*/}"

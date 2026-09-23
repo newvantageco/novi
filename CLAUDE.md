@@ -5197,6 +5197,19 @@ machine boots from slot A and slot B is empty. BIOS and UEFI, opt-in.
   `NOVI_ROOT_B`/`NOVI_STATE`, root on vda2, `/boot` on vda1, `/state`
   on vda4 with `/home` and `/var/log` bound out of it and writable, and
   **`mount | grep -c /state/var/lib/pkg` = 0**.
+- **THE KERNEL WAS IN THE WRONG PLACE ON UEFI A/B, and the condition
+  that put it there tested the reason again.** `kernel_dest_dir()`
+  asked `$ENCRYPT`, because RFC 0018's encrypted UEFI layout had been
+  the only case where the root filesystem is not the boot area -- so an
+  `--ab` UEFI install put the kernel in SLOT A's `/boot` while grub.cfg
+  searched for slot A's label, and both slots would have booted slot
+  A's kernel out of slot A's filesystem. A slot switch that cannot
+  change the kernel is not an A/B system, and a slot B that cannot boot
+  when slot A's filesystem is damaged is not a rollback.
+  `kernel_on_esp()` is the one predicate now, and the grub.cfg search
+  follows it. **Third time the same correction has been made in this
+  one file** (`separate_boot()` was the second): ask what is true, not
+  why it is true.
 - **UEFI IS THE SAME LAYOUT WITH THE ESP IN PLACE OF `/boot`, and it
   needed NO bootloader work at all.** `novi-gpt --slot-mib N` writes
   the fourth entry -- the "two layouts" contract decision 3 asked to be
@@ -5312,6 +5325,84 @@ RFC 0041 roadmap 2. `loadenv` is baked into all three GRUB images, an
   on the other end. The grubenv is still written, so `novi-grubenv`
   behaves the same everywhere -- 1 KiB, and a machine that later gains
   a use for it does not need the file to appear from somewhere.
+
+## Architecture: the other root filesystem
+
+RFC 0041 roadmap 4. `novi-slot` — `status`, `sync`, `install`,
+`update`, `switch`, `rollback`. Base content, `/usr/sbin`.
+`packages/tests/test-slot.sh`, 57 checks.
+
+- **A CHANGE IS APPLIED TO THE SLOT THAT IS NOT RUNNING.** Nothing is
+  ever modified underneath a running system, and undoing it is one
+  reboot rather than a restore. That is the whole of what items 1 and 2
+  were for.
+- **`switch` AND `rollback` ARE ONE OPERATION WITH ONE
+  IMPLEMENTATION.** Two words because they are two situations -- "I
+  have prepared an update" and "the update I booted is wrong" -- and
+  somebody in the second one types `rollback`. A verb that is absent
+  because it would be a synonym is a verb somebody gives up looking
+  for; same argument as the shortcut sheet being in the Apps grid.
+- **THE COPIED fstab NAMES THE OTHER SLOT AS ROOT**, and nothing else
+  in the system would ever have said so. `/init` mounts the root from
+  the kernel command line, so a wrong `/` line does not stop the
+  machine booting -- it sits there being wrong until a `mount -o
+  remount`, an fsck or a person reads it. Only that line is rewritten:
+  the ESP, `/state` and the bind lines are SHARED and must point at the
+  same partitions from both slots.
+- **A HALF-COPIED SLOT LOOKS EXACTLY LIKE A WHOLE ONE.** `tar` writes
+  in directory order, so an interrupted copy has a `/bin/busybox` and
+  an `/etc` long before it has everything. Not hypothetical -- watched
+  live, when a harness bug killed a sync at 311 MB of 762, `switch`
+  accepted the result and the next boot reached s6-linux-init and
+  stopped. "Is it populated" cannot be answered by looking, so
+  `etc/novi/slot-synced` is written LAST and removed FIRST (a re-sync
+  that is itself interrupted must not inherit the previous mark).
+- **AND THAT MARKER IMMEDIATELY REFUSED A ROLLBACK, correctly, about
+  the slot the machine was installed into.** `novi-install` made no
+  such claim, so the first full cycle answered *"slot a is not ready:
+  no completed copy"* about the slot it had booted from twenty minutes
+  earlier. The check was right; the installer was not making the same
+  claim about its own work. It writes the same marker now, on `--ab`
+  installs only, and BOTH spellings of the path are checked against
+  each other by the host test.
+- **THE INSTALL DATABASE IS THE SLOT'S OWN; THE PACKAGE CACHE IS
+  SHARED.** The chroot binds `/state/var/cache/pkg` so an update
+  downloads once, and deliberately does NOT bind `/var/lib/pkg` --
+  binding it would make an install into the inactive slot register in
+  the running one's database. `/etc/resolv.conf` is a symlink into
+  `/run`, so the ONE FILE is bound and not the directory: everything
+  else in there is the running system's private runtime state.
+- **THE COPY EXCLUDES /state AND EVERY SUBTREE BOUND OUT OF IT, both
+  and not either.** Excluding `/state` alone still copies `/home`
+  THROUGH its bind; excluding the binds alone still copies the whole of
+  `/state` under `/state`. Either mistake gives a slot that boots
+  perfectly and is quietly two copies of everything. `/boot` is
+  excluded too -- it is the shared boot area, and on BIOS it is a
+  mounted partition that tar would copy into the filesystem it is
+  writing.
+- **IT DOES NOT DECIDE WHETHER THE UPDATE WORKED**, and the help text
+  says so. That is item 5; letting the word "rollback" imply a
+  trial-boot rule would be the overclaim RFC 0025 warns about with the
+  word "Mesa".
+- **Verified by one install and three boots** (QEMU/TCG; no physical
+  hardware), against a signed repository over HTTP: `novi-slot install
+  sqlite man` seeded the empty slot (766 MB in 47 s) and installed five
+  packages into it while slot A kept zero and no `/usr/bin/sqlite3`;
+  boot 2 came up on `/dev/vda3` with its own fstab naming
+  `NOVI_ROOT_B`, `sqlite3` answering `select 1+1` and mandoc present;
+  `rollback` and boot 3 returned to `/dev/vda2` with `sqlite3: not
+  found` and zero packages -- and `/var/log/carry`, written from slot
+  B, still readable, which is the shared state partition doing the job
+  item 1 built it for.
+- **THE HARNESS PRODUCED TWO FALSE FINDINGS BEFORE IT PRODUCED A TRUE
+  ONE**, both from one mistake, and it is one this file already
+  records. `echo ---X-DONE---` puts the marker in the line the console
+  ECHOES BACK, so every wait matched instantly, every step "finished"
+  before it started, and the poweroff meant for the end of the run
+  killed the sync half way -- which then read as a 30-minute hang in
+  `pkg` inside the chroot. Measured afterwards: the copy is 47 seconds
+  and the chroot install is 4. The marker is composed at runtime now
+  (`printf '<<%s>>' X-DONE`), so what is echoed is not what is printed.
 
 ## Architecture: two firmware paths, one installer
 

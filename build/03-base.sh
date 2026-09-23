@@ -213,6 +213,13 @@ install -D -m 755 "${REPO_ROOT}/packages/novi-power" "${ROOTFS}/usr/bin/novi-pow
 # the target", and this is the same split for the environment block.
 install -D -m 755 "${REPO_ROOT}/packages/novi-grubenv" "${ROOTFS}/usr/sbin/novi-grubenv"
 
+# The other root filesystem (RFC 0041 item 4). Applies a change to the
+# slot that is NOT running and makes it live at the next reboot. Base
+# content and /usr/sbin for the same two reasons as novi-grubenv: it is
+# entirely root's, and the machine that most needs it is the one that
+# cannot install anything.
+install -D -m 755 "${REPO_ROOT}/packages/novi-slot" "${ROOTFS}/usr/sbin/novi-slot"
+
 mkdir -p "${ROOTFS}/etc/profile.d"
 
 # ── Copy musl libc into rootfs ────────────────────────────

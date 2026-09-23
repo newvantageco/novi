@@ -145,15 +145,24 @@ echo "== a separate /boot is a FACT, not a reason"
 # have booted.
 {
     sed -n '/^separate_boot() /p' "$INSTALL"
+    sed -n '/^kernel_on_esp() {/,/^}/p' "$INSTALL"
     sed -n '/^kernel_grub_prefix() {/,/^}/p' "$INSTALL"
     echo 'printf "prefix=[%s]\n" "$(kernel_grub_prefix)"'
 } > "$W/pfx.sh"
-out="$(ENCRYPT=0 BOOT_PART=/dev/vda1 sh "$W/pfx.sh" 2>&1)"
-check "unencrypted, separate /boot" "$out" "prefix=[]"
-out="$(ENCRYPT=1 BOOT_PART=/dev/vda1 sh "$W/pfx.sh" 2>&1)"
-check "encrypted, separate /boot"   "$out" "prefix=[]"
-out="$(ENCRYPT=0 BOOT_PART="" sh "$W/pfx.sh" 2>&1)"
-check "plain single-root install"   "$out" "prefix=[/boot]"
+P() { ENCRYPT=${1} BOOT_PART="${2}" FIRMWARE="${3}" AB=${4} sh "$W/pfx.sh" 2>&1; }
+check "unencrypted, separate /boot" "$(P 0 /dev/vda1 bios 0)" "prefix=[]"
+check "encrypted, separate /boot"   "$(P 1 /dev/vda1 bios 0)" "prefix=[]"
+check "plain single-root install"   "$(P 0 "" bios 0)"        "prefix=[/boot]"
+# UEFI A/B: the kernel is on the ESP, so the prefix is the ESP's root.
+# With the old `$ENCRYPT` test this answered /boot and the kernel went
+# into slot A's filesystem -- both slots booting slot A's kernel, which
+# is not an A/B system.
+check "plain single-root, UEFI"     "$(P 0 "" uefi 0)"        "prefix=[/boot]"
+check "UEFI A/B"                    "$(P 0 "" uefi 1)"        "prefix=[]"
+check "UEFI encrypted"              "$(P 1 "" uefi 0)"        "prefix=[]"
+# BIOS A/B keeps its kernel on the shared /boot partition, so the ESP
+# predicate must not fire there.
+check "BIOS A/B"                    "$(P 0 /dev/vda1 bios 1)" "prefix=[]"
 # And the bootloader picks its core.img from the same predicate.
 has "core-boot.img keyed on the fact" \
     "$(sed -n '/^install_bootloader_bios() {/,/^}/p' "$INSTALL")" \

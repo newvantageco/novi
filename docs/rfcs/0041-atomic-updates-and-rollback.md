@@ -465,6 +465,83 @@ here would smuggle in the model decision this RFC just declined.
 4. **`chroot <inactive> pkg update`**, then a switch, then a boot from
    the new slot, then a switch back — watched on a booted machine,
    because a rollback nobody has performed is a rollback nobody has.
+
+   **DONE, AND PERFORMED.** `novi-slot` is base content in `/usr/sbin`:
+   `status`, `sync`, `install`, `update`, `switch`, `rollback`. One
+   disk, one install, three boots, against a signed repository over
+   HTTP:
+
+   | | boot 1 (slot A) | boot 2 (slot B) | boot 3 (slot A) |
+   |---|---|---|---|
+   | `/` | `/dev/vda2` | `/dev/vda3` | `/dev/vda2` |
+   | the slot's own fstab | `LABEL=NOVI_ROOT_A` | `LABEL=NOVI_ROOT_B` | `LABEL=NOVI_ROOT_A` |
+   | `sqlite3` | not found | `select 1+1` → 2 | not found |
+   | packages | 0 | 5 | 0 |
+   | `/var/log/carry` | — | written | **still readable** |
+
+   `novi-slot install sqlite man` seeded the empty slot (766 MB, 47 s)
+   and installed into it while slot A kept 0 packages and no
+   `/usr/bin/sqlite3`. The file written to `/var/log` from slot B is
+   readable from slot A afterwards, which is the shared state partition
+   doing the job item 1 built it for.
+
+   **`switch` AND `rollback` ARE ONE OPERATION AND THERE IS ONE
+   IMPLEMENTATION.** They are two words because they are two
+   situations — "I have prepared an update" and "the update I booted is
+   wrong" — and somebody in the second one types `rollback`. A verb
+   that is absent because it would be a synonym is a verb somebody
+   gives up looking for.
+
+   **THE COPIED fstab NAMES THE OTHER SLOT AS ROOT**, and nothing else
+   in the system would ever have said so. `/init` mounts the root from
+   the kernel command line, so a wrong `/` line does not stop the
+   machine booting; it sits there being wrong until a `mount -o
+   remount`, an fsck or a person reads it. `novi-slot sync` rewrites
+   that one line and leaves every other — the ESP, `/state` and the
+   binds are SHARED and must point at the same partitions from both
+   slots.
+
+   **A HALF-COPIED SLOT LOOKS EXACTLY LIKE A WHOLE ONE.** `tar` writes
+   in directory order, so an interrupted copy has a `/bin/busybox` and
+   an `/etc` long before it has everything — and the machine that
+   produces one is not hypothetical. It happened here: a harness bug
+   killed a sync at 311 MB of 762, `switch` accepted the result, and
+   the next boot reached s6-linux-init and stopped. So a slot is ready
+   only if it carries a marker written LAST by the thing that filled
+   it, and removed FIRST so an interrupted re-sync cannot inherit the
+   one before it.
+
+   **AND THE MARKER IMMEDIATELY REFUSED THE ROLLBACK.** Slot A was
+   written by `novi-install`, which made no such claim — so the first
+   run of the full cycle answered *"slot a is not ready: no completed
+   copy"* about the slot the machine had booted from twenty minutes
+   earlier. The check was right; what was missing was the installer
+   making the same claim about its own work. It writes the same marker
+   now, on `--ab` installs only.
+
+   **THE INSTALL DATABASE IS THE SLOT'S OWN AND THE PACKAGE CACHE IS
+   SHARED**, and the chroot's bind list is where that is enforced:
+   `/state/var/cache/pkg` is bound in so an update downloads once, and
+   `/var/lib/pkg` deliberately is not, because binding it would make an
+   install into the inactive slot register in the running one's
+   database. `/etc/resolv.conf` is a symlink into `/run`, so the one
+   file is bound rather than the directory — everything else in `/run`
+   is the running system's private runtime state.
+
+   **WHAT IT STILL DOES NOT DO is decide whether the new slot worked.**
+   That is item 5, and the help text says so rather than letting the
+   word "rollback" imply it.
+
+   **THE HARNESS PRODUCED TWO FALSE FINDINGS BEFORE IT PRODUCED A TRUE
+   ONE**, both from one mistake: `echo ---X-DONE---` puts the marker in
+   the line the console ECHOES, so every wait matched instantly, every
+   step "finished" before it started, and the poweroff meant for the
+   end of the run killed the sync half way through — which then looked
+   like a 30-minute hang in `pkg`. Measured afterwards, the copy is 47
+   seconds and the chroot install is 4. CLAUDE.md had recorded this
+   exact trap from the `INSTALL_RC=` incident and it was made again;
+   the marker is composed at runtime now, so what is echoed is not what
+   is printed.
 5. **The trial-boot rule**, and what clears it. `novi-state health`
    is the obvious candidate and the obvious trap: a machine that is
    degraded for an unrelated reason must not roll back an update that
