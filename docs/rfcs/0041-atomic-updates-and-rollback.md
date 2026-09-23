@@ -1,8 +1,10 @@
 # RFC 0041 — atomic root updates, and a way back
 
-**Status:** Design. **Nothing here is implemented.** Every number below
-was measured on this build; every claim about what exists was checked
-in the tree rather than remembered.
+**Status:** Design, with **roadmap item 1 implemented for BIOS and
+verified on a booted machine** (QEMU/TCG; **no physical hardware**).
+Nothing updates or rolls back yet. Every number below was measured on
+this build; every claim about what exists was checked in the tree
+rather than remembered.
 **Depends on:** RFC 0003 (installation and the `/init` boot paths),
 RFC 0006 (the signed index and the trust path), RFC 0007 (the
 base/desktop split, and `PKG_ROOT` vs a chroot), RFC 0008 (the two
@@ -322,6 +324,44 @@ here would smuggle in the model decision this RFC just declined.
    are in place before any service starts — which is what `/var/log`
    needs and what would otherwise have been a race nobody saw until
    syslog wrote to the wrong filesystem.
+
+   **DONE FOR BIOS, AND VERIFIED BY AN INSTALL AND A REBOOT.**
+   `novi-install --ab` is opt-in: without it every layout is exactly
+   what it was. On a 20 GB disk it produced `NOVI_BOOT`,
+   `NOVI_ROOT_A`, `NOVI_ROOT_B` and `NOVI_STATE` on vda1..vda4, and
+   the machine booted from slot A with:
+
+   ```
+   /dev/vda2 on /          ext4     <- slot A, 3.9G
+   /dev/vda1 on /boot      ext4     <- shared
+   /dev/vda4 on /state     ext4     <- shared state, 11.2G
+   /dev/vda4 on /home      ext4     <- bind
+   /dev/vda4 on /var/log   ext4     <- bind
+   ```
+
+   `/home` and `/var/log` are writable, `/state` holds them, slot B is
+   formatted and not mounted, and the check that matters —
+   `mount | grep -c /state/var/lib/pkg` — is **0**, with the package
+   database in the slot where it belongs.
+
+   **The boot is itself the proof of the bootloader half.** Three
+   places tested `$ENCRYPT` where they meant *"is partition 1 the boot
+   partition"*, because RFC 0018's encrypted layout had been the only
+   reason for a separate `/boot`. With the old condition this install
+   would have written `core.img`, whose prefix is
+   `(hd0,msdos1)/boot/grub`, onto a disk whose partition 1 IS `/boot`
+   — GRUB would have looked for `/boot/boot/grub` and nothing would
+   have booted. `separate_boot()` is one predicate for the fact now.
+   Found by reading, before the install; confirmed by the install.
+
+   30+4 host checks (`packages/tests/test-install-ab.sh`), each
+   provoked. The four-partition sequence is driven through the shipped
+   static BusyBox on a sparse file, and asserts that no partition
+   starts at sector 63 — RFC 0018's trap, and the reason every sector
+   is given explicitly.
+
+   **Still to do here:** UEFI (a fourth `novi-gpt` entry), the
+   encrypted layout (decision 3), and `/etc`.
 2. **`loadenv` in `core.img` and in `bootx64.efi`**, and a `grubenv`
    the installed system can write. Small, and nothing else can start
    until a boot can be steered from userland.

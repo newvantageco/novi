@@ -5137,6 +5137,76 @@ using sit0", then udhcpc broadcasting DISCOVER forever down a tunnel with
 no link. `pick_interface()` requires `/sys/class/net/*/type` to be 1
 (ARPHRD_ETHER).
 
+## Architecture: two root slots, and a condition that tested the reason
+
+RFC 0041 (`docs/rfcs/0041-atomic-updates-and-rollback.md`).
+`novi-install --ab` lays out a shared `/boot`, TWO root slots and a
+shared state partition. **Nothing updates or rolls back yet** -- the
+machine boots from slot A and slot B is empty. BIOS only, opt-in.
+
+- **A PARTITION TABLE IS WRITTEN ONCE, which is why the empty slot
+  exists now.** Splitting state out without reserving slot B would give
+  a machine that can never gain A/B without a reinstall -- the same as
+  not having done it. That is why RFC 0041's roadmap items 1 and 3 are
+  one item.
+- **`/var` DOES NOT MOVE WHOLESALE**, and the RFC said it did before
+  anybody read `packages/pkg`. `/var/lib/pkg/installed` is the install
+  database and **describes the slot's own contents**; sharing it would
+  give the running system a database about the OTHER slot -- a machine
+  that lies to `pkg`, to `novi-state diff` and to `novi-agent
+  describe`. The split is by NAMED SUBTREE: `/home`, `/var/log`,
+  `/var/lib/novi-state`, `/var/lib/alsa` and `/var/cache/pkg` shared;
+  `/var/lib/pkg` slot-local. `/var/cache/pkg` is safe to share
+  precisely because RFC 0006 hashes every archive against the signed
+  index before unpacking.
+- **THE SUBTREES ARE MOVED, WITH AN EMPTY DIRECTORY LEFT AS THE BIND
+  TARGET -- not symlinked.** A boot where the state partition does not
+  mount then leaves `/var/log` as an empty directory rather than a link
+  into nothing.
+- **A SEPARATE `/boot` IS A FACT, NOT A REASON, and three places tested
+  the reason.** `core.img` selection and `kernel_grub_prefix()` both
+  asked `$ENCRYPT`, because RFC 0018's encrypted layout was the only
+  reason there had ever been for a separate `/boot`. `--ab` is the
+  second. With the old condition an `--ab` install writes `core.img`,
+  whose prefix is `(hd0,msdos1)/boot/grub`, onto a disk whose partition
+  1 IS `/boot` -- GRUB looks for `/boot/boot/grub` and the machine does
+  not boot, from an installer that reported success. `separate_boot()`
+  is the one predicate now. **A condition that tests why instead of
+  what breaks the moment a second why turns up.**
+- **THE A/B SHAPE IS RFC 0018's ENCRYPTED SHAPE WITHOUT THE
+  ENCRYPTION**, so most of the bootloader work was already done:
+  `mkiso.sh` already generates `core-boot.img` with the
+  `(hd0,msdos1)/grub` prefix. The only genuinely new GRUB work left is
+  `loadenv`, which is **not** in the module list `grub-mkimage` bakes
+  in -- so a boot cannot be steered from userland at all today.
+- **ENCRYPTED INSTALLS ARE REFUSED, and that is the honest outcome.**
+  Under A/B the slots AND the state must all be inside encryption, and
+  carving three volumes out of one LUKS container is what LVM is for:
+  this system has no LVM and no `dmsetup` (checked -- `34-cryptsetup.sh`
+  links libdevmapper into one static `cryptsetup`). `/home` in the
+  clear for somebody who typed `--encrypt` would be a silent, serious
+  regression.
+- **AN OPTION THAT CONTRADICTS ANOTHER SHOULD NOT NEED A VALID DISK TO
+  SAY SO.** The `--ab --encrypt` refusal first lived inside
+  `cmd_install`, after the "is that a block device" test, so it
+  answered `/dev/null is not a block device` -- true, and not the
+  problem the person has. `validate_options` runs before anything looks
+  at a disk. Found by a host test that had no disk to give it.
+- **Verified by an install and a reboot** (QEMU/TCG; no physical
+  hardware): vda1..vda4 labelled `NOVI_BOOT`/`NOVI_ROOT_A`/
+  `NOVI_ROOT_B`/`NOVI_STATE`, root on vda2, `/boot` on vda1, `/state`
+  on vda4 with `/home` and `/var/log` bound out of it and writable, and
+  **`mount | grep -c /state/var/lib/pkg` = 0**.
+- **TWO HARNESS BUGS, BOTH THE SAME FAMILY AS EVERY OTHER ONE IN THIS
+  FILE.** Waiting for `INSTALL_RC=` matched the console's ECHO of the
+  command rather than its output, so the copy was cut off mid-way and
+  the reboot went into the wreckage -- which presented as "the
+  installed system booted" followed by every probe timing out. Wait for
+  the installer's own last line. And sending credentials on a timer let
+  the probes race the login prompt, producing a column of `Password:`;
+  wait for `root@<hostname>`, which appears in the shell prompt and in
+  nothing else.
+
 ## Architecture: two firmware paths, one installer
 
 RFC 0008 (`docs/rfcs/0008-uefi-and-journalled-root.md`). `novi-install`
