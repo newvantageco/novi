@@ -1,10 +1,15 @@
 # RFC 0041 — atomic root updates, and a way back
 
-**Status:** Design, with **roadmap item 1 implemented for BIOS and
-verified on a booted machine** (QEMU/TCG; **no physical hardware**).
-Nothing updates or rolls back yet. Every number below was measured on
-this build; every claim about what exists was checked in the tree
-rather than remembered.
+**Status:** **Implemented and verified on booted machines** (QEMU/TCG;
+**no physical hardware**) — roadmap items 1, 2, 4 and 5. A machine
+installed with `novi-install --ab` has two root slots and a shared
+state partition; `novi-slot` updates the one that is not running;
+`novi-grubenv` points the bootloader at it; and a slot that does not
+reach a userland is abandoned on the boot after it, with nobody
+touching anything. **Still open:** the encrypted layout, which needs
+the LUKS question in decision 3 answered, and `/etc`. Every number
+below was measured on this build; every claim about what exists was
+checked in the tree rather than remembered.
 **Depends on:** RFC 0003 (installation and the `/init` boot paths),
 RFC 0006 (the signed index and the trust path), RFC 0007 (the
 base/desktop split, and `PKG_ROOT` vs a chroot), RFC 0008 (the two

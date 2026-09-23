@@ -167,11 +167,20 @@ split; it needs a matching *on-device* update mechanism.
               same install base
 ```
 
-- Root filesystem updates apply atomically (new rootfs staged, activated
+- ~~Root filesystem updates apply atomically (new rootfs staged, activated
   on next boot) so a failed or bad update can roll back to the previous
   boot entry — this is the piece that doesn't exist yet and needs design
   work: candidates are an overlay/snapshot rootfs (btrfs subvolumes or
-  dm-verity + A/B slots) layered under the existing `pkg` DB.
+  dm-verity + A/B slots) layered under the existing `pkg` DB.~~
+  **This exists now.** `novi-install --ab` lays down two root slots and
+  a shared state partition; `novi-slot` updates the one that is not
+  running and points the bootloader at it; a slot that does not reach a
+  userland is abandoned on the boot after it. Verified by installs and
+  boots on both firmware paths — milestones 100 to 103, RFC 0041 items
+  1, 2, 4 and 5. The sentence is struck through rather than deleted,
+  because "does not exist yet" was true when it was written and a
+  reader who finds it and believes it is the failure, not the sentence
+  having been written.
 - `pkg` itself stays track-agnostic — a package doesn't know which track
   installed it, only the repo it was resolved from differs per track.
 
@@ -180,9 +189,11 @@ filesystem) — this decision blocks `mkiso.sh`/`mkinitramfs.sh` changes and
 needs its own RFC since it touches the rootfs layout contract.~~
 **Decided: RFC 0041 — A/B root slots on ext4**, updated by
 `chroot <inactive> pkg update` and activated by a bootloader variable.
-**Nothing is implemented yet**; the RFC is a decision and a set of
-measurements, with a roadmap whose first item is the precondition every
-candidate shares and none of them has.
+**Built and verified**: items 1, 2, 4 and 5 of that RFC's roadmap, on
+both firmware paths, by installs and reboots rather than by reasoning.
+What is still open there is the ENCRYPTED layout — under A/B both slots
+and the shared state must be inside the LUKS container, which is what
+LVM is for and this system has neither LVM nor `dmsetup` — and `/etc`.
 
 The reason in one line: A/B is the only candidate that leaves `pkg` in
 charge of the base. btrfs snapshots need `btrfs-progs`, an upstream
