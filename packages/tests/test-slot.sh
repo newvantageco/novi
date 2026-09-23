@@ -285,9 +285,19 @@ part "a package name reaches a root sh -c, so it is checked by class"
 # boundary, but running `foo; rm -rf /` inside a chroot is a surprise
 # nobody asked for.
 check "there is a name check" "$(grep -c '^valid_pkg_name() {' "$TOOL")" "1"
-OUT="$($SH_BIN "$TOOL" install 'foo; rm -rf /' 2>&1)"
+# A DOCTORED COPY, because `cmd_pkg` calls `need_root` FIRST and these
+# four checks RUN the program rather than grepping it. This container
+# is root and a CI runner is not, so they passed here and failed there
+# with `ERROR: This operation requires root.` -- which CLAUDE.md
+# already records from test-state-packages.sh, and which the 96
+# grep-based checks around them could never have hit. What is under
+# test is the name class and the ordering, not the privilege check.
+NOROOT="$WORK/slot-noroot"
+sed 's/^    need_root$/    :/' "$TOOL" > "$NOROOT"
+check "need_root really went"  "$(grep -c '^    need_root$' "$NOROOT")" "0"
+OUT="$($SH_BIN "$NOROOT" install 'foo; rm -rf /' 2>&1)"
 check "a metacharacter is refused" "$(printf '%s' "$OUT" | grep -c 'not a usable package name')" "1"
-OUT="$($SH_BIN "$TOOL" install -- 2>&1)"
+OUT="$($SH_BIN "$NOROOT" install -- 2>&1)"
 check "a leading dash is refused"  "$(printf '%s' "$OUT" | grep -c 'not a usable package name')" "1"
 # EVERY REFUSAL BEFORE ANY WORK. `install` with no arguments used to
 # mount the slot, seed it (47 seconds, 760 MB) and bind three
@@ -296,13 +306,13 @@ check "a leading dash is refused"  "$(printf '%s' "$OUT" | grep -c 'not a usable
 # device" test. These run on a host with no slots at all, so reaching
 # the name check at all proves it comes first: resolve_slots would
 # have died with "one root slot" otherwise.
-OUT="$($SH_BIN "$TOOL" install 2>&1)"
-check "no arguments is refused"    "$(printf '%s' "$OUT" | grep -c 'usage: novi-slot install')" "1"
+OUT="$($SH_BIN "$NOROOT" install 2>&1)"
+check "no arguments is refused"    "$(printf '%s' "$OUT" | grep -c 'install <package>\.\.\.')" "1"
 check "and before resolve_slots"   "$(printf '%s' "$OUT" | grep -c 'one root slot')" "0"
 # A name that is FINE must get past the check and reach the real
 # refusal, or the guard is just rejecting everything (RFC 0031's dead
 # `''` branch, and this file's own newline guard).
-OUT="$($SH_BIN "$TOOL" install sqlite 2>&1)"
+OUT="$($SH_BIN "$NOROOT" install sqlite 2>&1)"
 check "a real name gets through"   "$(printf '%s' "$OUT" | grep -c 'not a usable package name')" "0"
 check "and reaches the slot check" "$(printf '%s' "$OUT" | grep -c 'one root slot')" "1"
 
