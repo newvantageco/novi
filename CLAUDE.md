@@ -5414,6 +5414,14 @@ RFC 0041 roadmap 4. `novi-slot` — `status`, `sync`, `install`,
   -- **with `busybox` present, the mark written and `status` reporting
   `ready (1.8G)`**. That control is the half that matters: the ghost
   being gone proves nothing if the wipe merely left an empty slot.
+- **`git log main..HEAD` ASKS A STALE LOCAL REF.** The PR description
+  said 221 commits; GitHub said 126. Local `main` had not been fetched
+  since before the base moved, so the range counted commits already
+  merged upstream. The count against the PR's real base
+  (`origin/main`, or the base sha the API reports) is the only one that
+  answers the question -- and this was in the paragraph explaining that
+  the description's numbers keep going stale. Same family as every
+  other instrument in this file that answered about the past.
 - **THE HARNESS HARDCODED `/dev/vda3` AS THE INACTIVE SLOT AND WOULD
   HAVE PLANTED ITS MARKER IN THE RUNNING ROOT.** The previous run had
   left the machine SWITCHED, so it booted into vda3 and the inactive
