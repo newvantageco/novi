@@ -47,6 +47,25 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 D="$WORK/grub"; mkdir -p "$D"; : > "$D/grub.cfg"
 export NOVI_GRUBENV_DIR="$D"
+
+# EVERY WRITE HERE NEEDS ROOT AND A CI RUNNER IS NOT. `need_root` guards
+# a file the bootloader reads, which is root's by rights -- and what is
+# under test is the FORMAT, not the privilege check. Locally this ran as
+# root and passed; on the runner all 22 write checks failed at once with
+# "This operation requires root." CLAUDE.md already recorded that shape
+# from the packages test.
+#
+# A SHIM ON PATH RATHER THAN A DOCTORED COPY, so the file that runs is
+# the file that ships. (The doctored copy was tried first and was worse
+# in the way these things usually are: `sed` rewrote the first line of
+# need_root and left its old body behind as top-level code.) The one
+# fact being lied about is the caller's uid, which is irrelevant to
+# every claim below.
+mkdir -p "$WORK/bin"
+printf '#!/bin/sh\ncase "$*" in -u) echo 0 ;; *) exec /usr/bin/id "$@" ;; esac\n' \
+    > "$WORK/bin/id"
+chmod 755 "$WORK/bin/id"
+PATH="$WORK/bin:$PATH"; export PATH
 G() { $SH_BIN "$TOOL" "$@"; }
 
 SIG="# GRUB Environment Block"
