@@ -165,6 +165,17 @@ fi
 # `power.lid`, `power.button` and `agent.enabled` live in the shipped
 # document and absent from that reference.
 #
+# test-install-ab.sh is the tenth, and it checks what a HOST can check
+# about a disk layout: the partition arithmetic (driven through the
+# shipped static BusyBox on a sparse file, RFC 0018's rule), the fstab
+# the installer generates, and the refusals. It cannot check an
+# install -- that needs a disk and a reboot -- and says so. The
+# shortest check in it is the one worth most: `var/lib/pkg` must never
+# join STATE_SUBTREES, because it is the slot's own package manifest
+# and sharing it would give the running system a database describing
+# the OTHER slot. That is a one-word edit somebody could make in good
+# faith with nothing else in the tree complaining.
+#
 # test-dead-applets.sh is the ninth, and its subject is a table of
 # CLAIMS about a kernel. `kernel/dead-applets` says which busybox
 # applets need which CONFIG_ symbol, and the removal is derived from
@@ -225,6 +236,7 @@ for t in packages/tests/test-lib-json.sh packages/tests/test-agent-verbs.sh \
          packages/tests/test-agent-sandbox.sh \
          packages/tests/test-pkg-conflicts.sh \
          packages/tests/test-dead-applets.sh \
+         packages/tests/test-install-ab.sh \
          packages/tests/test-pkg-lifecycle.sh \
          packages/tests/test-pkg-cache-hash.sh; do
     echo ">>> ${t##*/}"

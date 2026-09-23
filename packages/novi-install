@@ -87,6 +87,36 @@ BOOT_PART=""
 BOOT_LABEL="${NOVI_BOOT_LABEL:-NOVI_BOOT}"
 BOOT_MIB=512
 BOOT_MOUNTED=0
+# A/B root slots and a shared state partition (RFC 0041). OPT-IN while
+# it is new: without --ab the layouts below are exactly what they were.
+#
+#   AB            --ab was given
+#   SLOT_MIB      the size of EACH root slot. The OS is ~800 MB today;
+#                 4 GiB leaves room for packages installed into a slot
+#                 and still fits two slots plus /boot on a 16 GB disk.
+#   SLOT_B_PART   the second slot. Formatted and labelled at install
+#                 time and then left alone -- the machine boots from A.
+#                 It exists now because A PARTITION TABLE IS WRITTEN
+#                 ONCE: a layout without it could never grow slots
+#                 without a reinstall (RFC 0041 decision 5).
+#   STATE_PART    the shared partition. Holds the subtrees that must
+#                 outlive a slot switch -- and NOT /var/lib/pkg, which
+#                 is the slot's own manifest (RFC 0041 decision 2).
+AB=0
+SLOT_MIB="${NOVI_SLOT_MIB:-4096}"
+SLOT_A_LABEL="${NOVI_SLOT_A_LABEL:-NOVI_ROOT_A}"
+SLOT_B_LABEL="${NOVI_SLOT_B_LABEL:-NOVI_ROOT_B}"
+STATE_LABEL="${NOVI_STATE_LABEL:-NOVI_STATE}"
+SLOT_B_PART=""
+STATE_PART=""
+STATE_MOUNTED=0
+
+# The subtrees that move off the slot. Named individually rather than
+# as `/var`, because `/var/lib/pkg` is the install database and
+# describes THIS slot's contents -- sharing it would give the running
+# system a database about the other slot (RFC 0041 decision 2).
+STATE_SUBTREES="home var/log var/lib/novi-state var/lib/alsa var/cache/pkg"
+
 PROFILE="desktop"
 TARGET_MIRROR=""
 NEW_USER=""
@@ -123,6 +153,17 @@ Options:
                       someone who takes the disk; it is not protection
                       against someone who can write to it and hand it
                       back. See RFC 0018.
+  --ab                lay the disk out for atomic updates (RFC 0041):
+                      a shared /boot, TWO root slots and a shared state
+                      partition holding /home, /var/log,
+                      /var/lib/novi-state, /var/lib/alsa and
+                      /var/cache/pkg. The machine boots from slot A and
+                      slot B is left empty -- NOTHING UPDATES OR ROLLS
+                      BACK YET. It exists now because a partition table
+                      is written once: a layout without the second slot
+                      could never gain one without a reinstall.
+                      BIOS only, and refused with --encrypt.
+  --slot-mib N        size of EACH root slot with --ab (default 4096)
   --profile P         desktop (default) or console. `desktop` installs the
                       desktop packages from the repository on this medium
                       and declares them, so the installed machine boots
@@ -161,6 +202,10 @@ cleanup() {
         ESP_MOUNTED=0
         umount "$MNT/boot" 2>/dev/null || true
         BOOT_MOUNTED=0
+        # The state partition is mounted inside the target too, and for
+        # the same reason comes off before the root (RFC 0041).
+        umount "$MNT/state" 2>/dev/null || true
+        STATE_MOUNTED=0
         umount "$MNT" 2>/dev/null || true
         MOUNTED=0
     fi
@@ -206,12 +251,18 @@ list_disks() {
     done
 }
 
-disk_size_human() {
-    local name="$1" sectors
+# /sys/block/*/size is always in 512-byte sectors regardless of the
+# device's real logical block size. Integer MiB is plenty here, and ONE
+# implementation of "how big is this disk" is the point: the --ab
+# preflight check and the listing must not be able to disagree.
+disk_size_mib() {
+    local name="${1##*/}" sectors
     sectors="$(cat "/sys/block/${name}/size" 2>/dev/null || echo 0)"
-    # /sys/block/*/size is always in 512-byte sectors regardless of the
-    # device's real logical block size. Integer MiB is plenty here.
-    printf '%s MiB\n' "$(( sectors / 2048 ))"
+    printf '%s\n' "$(( sectors / 2048 ))"
+}
+
+disk_size_human() {
+    printf '%s MiB\n' "$(disk_size_mib "$1")"
 }
 
 disk_model() {
@@ -380,6 +431,58 @@ partition_bios_encrypted() {
     info "boot $BOOT_PART, encrypted root $ROOT_PART"
 }
 
+# RFC 0041's layout: a shared /boot, two root slots, and a shared state
+# partition. Four primary partitions, which is exactly what MBR allows
+# -- the ceiling is real and is stated in the RFC rather than
+# discovered later.
+#
+# THE SHARED /boot IS WHAT MAKES ROLLBACK POSSIBLE, not an
+# optimisation: grub.cfg, grubenv and BOTH slots' kernels have to live
+# somewhere either slot can boot from. That is also why this reuses
+# `core-boot.img` -- mkiso.sh already generates it with the prefix
+# `(hd0,msdos1)/grub` for RFC 0018's encrypted layout, which is this
+# shape with the encryption removed.
+#
+# EVERY SECTOR IS GIVEN EXPLICITLY, for the reason RFC 0018 records:
+# BusyBox fdisk's default first sector for a new partition is 63, the
+# start of the disk, not the first free sector after what already
+# exists. Verified as a four-partition sequence against this repo's own
+# static BusyBox on a 16 GB sparse file before it went near a disk --
+# 512M boot, two 4096M slots, the rest state, boot flag on p1.
+partition_bios_ab() {
+    local disk="$1" boot_end a_start a_end b_start b_end s_start
+
+    msg "Partitioning $disk (MBR: /boot + two root slots + state)"
+    # Slot A's label, and every generated artifact downstream follows:
+    # fstab, grub.cfg's `root=LABEL=` and the recovery hint all read
+    # $ROOT_LABEL, so setting it here is the whole of it.
+    ROOT_LABEL="$SLOT_A_LABEL"
+    unmount_everything_on "$disk"
+    wipe_disk_ends "$disk"
+
+    boot_end=$(( 2048 + BOOT_MIB * 2048 - 1 ))
+    a_start=$(( boot_end + 1 )); a_end=$(( a_start + SLOT_MIB * 2048 - 1 ))
+    b_start=$(( a_end + 1 ));    b_end=$(( b_start + SLOT_MIB * 2048 - 1 ))
+    s_start=$(( b_end + 1 ))
+
+    printf 'o\nn\np\n1\n2048\n%s\nn\np\n2\n%s\n%s\nn\np\n3\n%s\n%s\nn\np\n4\n%s\n\na\n1\nw\n' \
+        "$boot_end" "$a_start" "$a_end" "$b_start" "$b_end" "$s_start" |
+        fdisk -u "$disk" >/dev/null 2>&1 || true
+
+    partprobe "$disk" 2>/dev/null || true
+    sync
+
+    ESP_PART=""
+    BOOT_PART="$(partition_of "$disk" 1)"
+    ROOT_PART="$(partition_of "$disk" 2)"
+    SLOT_B_PART="$(partition_of "$disk" 3)"
+    STATE_PART="$(partition_of "$disk" 4)"
+    for p in "$BOOT_PART" "$ROOT_PART" "$SLOT_B_PART" "$STATE_PART"; do
+        wait_for_partition "$p" "$disk"
+    done
+    info "boot $BOOT_PART, slot A $ROOT_PART, slot B $SLOT_B_PART, state $STATE_PART"
+}
+
 partition_bios() {
     local disk="$1"
 
@@ -411,6 +514,18 @@ partition_bios() {
 }
 
 partition_disk() {
+    if [ "$AB" -eq 1 ]; then
+        # BIOS only for now. The UEFI path needs novi-gpt to write a
+        # fourth entry, and the encrypted path has no answer at all
+        # until the LUKS question is settled -- RFC 0041 decision 3.
+        # Refusing is the honest outcome: a layout that cannot later
+        # grow slots would be worse than not offering one.
+        case "$FIRMWARE" in
+            uefi) die "--ab is not implemented for UEFI yet (RFC 0041 decision 3): novi-gpt writes two partitions and this layout needs four" ;;
+        esac
+        partition_bios_ab "$1"
+        return 0
+    fi
     case "$FIRMWARE" in
         uefi) partition_uefi "$1" ;;
         *)    if [ "$ENCRYPT" -eq 1 ]; then
@@ -529,6 +644,37 @@ make_boot_fs() {
     sync
 }
 
+# Slot B is formatted and labelled now and then left alone. An empty,
+# labelled partition is what makes the later switch a bootloader change
+# rather than a repartition -- and `blkid` showing it is how a person
+# finds out the machine has a second slot at all.
+make_slot_b_fs() {
+    local part="$1"
+    msg "Creating an ext4 filesystem on $part (label $SLOT_B_LABEL, empty slot)"
+    if command -v mke2fs.e2fsprogs >/dev/null 2>&1; then
+        mke2fs.e2fsprogs -q -t ext4 -L "$SLOT_B_LABEL" -F "$part" ||
+            die "mke2fs failed on $part"
+    else
+        mke2fs -F -L "$SLOT_B_LABEL" "$part" >/dev/null 2>&1 ||
+            die "mke2fs failed on $part"
+    fi
+    sync
+}
+
+make_state_fs() {
+    local part="$1"
+    msg "Creating an ext4 filesystem on $part (label $STATE_LABEL)"
+    if command -v mke2fs.e2fsprogs >/dev/null 2>&1; then
+        mke2fs.e2fsprogs -q -t ext4 -L "$STATE_LABEL" -F "$part" ||
+            die "mke2fs failed on $part"
+    else
+        warn "e2fsprogs mke2fs not found -- the state filesystem will have NO JOURNAL"
+        mke2fs -F -L "$STATE_LABEL" "$part" >/dev/null 2>&1 ||
+            die "mke2fs failed on $part"
+    fi
+    sync
+}
+
 format_partitions() {
     # ROOT_DEV, not ROOT_PART: on an encrypted install the filesystem
     # goes inside the container, and formatting the partition would
@@ -536,6 +682,8 @@ format_partitions() {
     make_root_fs "$ROOT_DEV"
     [ -n "$ESP_PART" ] && make_esp "$ESP_PART"
     [ -n "$BOOT_PART" ] && make_boot_fs "$BOOT_PART"
+    [ -n "$SLOT_B_PART" ] && make_slot_b_fs "$SLOT_B_PART"
+    [ -n "$STATE_PART" ] && make_state_fs "$STATE_PART"
     return 0
 }
 
@@ -598,6 +746,41 @@ copy_system() {
         info "ESP mounted at /boot/efi"
     fi
 
+    # RFC 0041: the subtrees that must outlive a slot switch move off
+    # the slot now, and fstab binds them back at every boot.
+    #
+    # AFTER the copy, not before: the tree has to exist before anything
+    # can be moved out of it, and the live session's own /home and logs
+    # are part of what an installer is for (the same argument as
+    # copying from `/` rather than from the squashfs).
+    #
+    # Each subtree is MOVED and an empty directory left behind as the
+    # bind target. A symlink would have been less work and is wrong: a
+    # boot where the state partition does not mount would leave
+    # /var/log pointing into nothing, where an empty directory just
+    # means an empty directory.
+    if [ -n "$STATE_PART" ]; then
+        mkdir -p "$MNT/state"
+        mount "$STATE_PART" "$MNT/state" ||
+            die "could not mount the state partition at $MNT/state"
+        STATE_MOUNTED=1
+        for sub in $STATE_SUBTREES; do
+            mkdir -p "$MNT/state/${sub%/*}"
+            if [ -d "$MNT/$sub" ]; then
+                mv "$MNT/$sub" "$MNT/state/$sub" ||
+                    die "could not move /$sub onto the state partition"
+            else
+                mkdir -p "$MNT/state/$sub"
+            fi
+            mkdir -p "$MNT/$sub"
+        done
+        # /home is 0755 root:root and /var/log 0755; the moves preserve
+        # what was there, and the empty bind targets are created with
+        # the default, which is what they had.
+        sync
+        info "state partition holds:$(printf ' /%s' $STATE_SUBTREES)"
+    fi
+
     sync
     info "system copied"
 }
@@ -637,6 +820,28 @@ FSTAB
 # boots to a prompt where that can be fixed.
 LABEL=${ESP_LABEL}    /boot/efi vfat  rw,noatime,nofail  0 2
 FSTAB
+    fi
+
+    if [ -n "$STATE_PART" ]; then
+        cat >> "$MNT/etc/fstab" <<FSTAB
+
+# RFC 0041: the shared state partition, and the subtrees bound out of
+# it. These have to outlive a root-slot switch, so they do not live in
+# the slot -- but /var/lib/pkg deliberately DOES, because it is this
+# slot's own package manifest and sharing it would give the running
+# system a database describing the other slot.
+#
+# Order matters and fstab is processed in order: /state mounts first
+# and the binds follow. rc.init runs \`mount -a\` BEFORE s6-rc-init, so
+# all of this is in place before any service starts -- which is what
+# /var/log needs, and what would otherwise be a race nobody saw until
+# syslog wrote to the wrong filesystem.
+LABEL=${STATE_LABEL}  /state  ext4  rw,noatime,nofail  0 2
+FSTAB
+        for sub in $STATE_SUBTREES; do
+            printf '/state/%-22s /%-22s none  bind,nofail  0 0\n' "$sub" "$sub" \
+                >> "$MNT/etc/fstab"
+        done
     fi
 
     cat >> "$MNT/etc/fstab" <<'FSTAB'
@@ -1199,6 +1404,21 @@ cmd_install() {
             die "missing required tool for --encrypt: cryptsetup"
     fi
 
+    if [ "$AB" -eq 1 ]; then
+        # /boot + two slots + something for state. A disk that cannot
+        # hold the layout is refused here rather than half partitioned.
+        # This one needs $TARGET_DISK, so it stays; the checks that do
+        # not need a disk moved out to `validate_options` -- being told
+        # that two flags contradict each other should not depend on
+        # having named a real disk first.
+        local need_mib avail_mib
+        need_mib=$(( BOOT_MIB + 2 * SLOT_MIB + 1024 ))
+        avail_mib="$(disk_size_mib "$TARGET_DISK")"
+        if [ "$avail_mib" -gt 0 ] && [ "$avail_mib" -lt "$need_mib" ]; then
+            die "$TARGET_DISK is ${avail_mib} MiB: --ab needs at least ${need_mib} MiB (/boot ${BOOT_MIB} + two ${SLOT_MIB} slots + 1024 for state)"
+        fi
+    fi
+
     msg "Firmware: ${FIRMWARE}"
 
     confirm_destruction "$TARGET_DISK"
@@ -1283,6 +1503,8 @@ while [ $# -gt 0 ]; do
         --firmware)  FIRMWARE="${2:-}"; shift 2 ;;
         --esp-mib)   ESP_MIB="${2:-}"; shift 2 ;;
         --encrypt)   ENCRYPT=1; shift ;;
+        --ab)        AB=1; shift ;;
+        --slot-mib)  SLOT_MIB="${2:-}"; shift 2 ;;
         --profile)   PROFILE="${2:-}"; shift 2 ;;
         --mirror)    TARGET_MIRROR="${2:-}"; shift 2 ;;
         --user)          NEW_USER="${2:-}"; shift 2 ;;
@@ -1296,6 +1518,38 @@ while [ $# -gt 0 ]; do
         *) die "unknown option '$1'" ;;
     esac
 done
+
+# Options that contradict each other, checked before anything looks at
+# a disk. The first version of this lived inside cmd_install, after the
+# "is that a block device" test -- so `--ab --encrypt` answered
+# "/dev/null is not a block device", which is true and is not the
+# problem the person has. Found by a host test that had no disk to
+# give it.
+validate_options() {
+    # RFC 0041 decision 3. Under A/B the two slots AND the shared state
+    # all have to be inside encryption -- /home on an unencrypted
+    # partition would be a silent, serious regression for somebody who
+    # typed --encrypt -- and carving three volumes out of one LUKS
+    # container is what LVM is for. This system has no LVM and no
+    # dmsetup: 34-cryptsetup.sh links libdevmapper into exactly one
+    # static cryptsetup binary, which is all that is installed.
+    #
+    # Refusing is the honest outcome. Producing the layout anyway with
+    # /home in the clear, or producing one that cannot later grow
+    # slots, would both be worse than saying no.
+    if [ "$AB" -eq 1 ] && [ "$ENCRYPT" -eq 1 ]; then
+        die "--ab and --encrypt cannot be combined yet (RFC 0041 decision 3): the state partition would have to be inside the LUKS container, and this system has no LVM"
+    fi
+    if [ "$AB" -eq 1 ]; then
+        case "$SLOT_MIB" in
+            ''|*[!0-9]*) die "--slot-mib must be a number of MiB" ;;
+        esac
+        [ "$SLOT_MIB" -ge 2048 ] ||
+            die "--slot-mib $SLOT_MIB is too small: the OS alone is about 800 MB and a slot has to hold packages installed into it"
+    fi
+}
+
+validate_options
 
 case "$ACTION" in
     list)              cmd_list ;;

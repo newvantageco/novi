@@ -66,7 +66,7 @@ cd "${SOURCES}"
 
 # ── Base rootfs directory layout ─────────────────────────
 echo "==> Creating rootfs hierarchy"
-mkdir -p "${ROOTFS}"/{boot,dev,etc,home,lib,mnt,opt,proc,root,run,srv,sys,tmp,usr/{bin,lib,share},var/{empty,log,run,tmp}}
+mkdir -p "${ROOTFS}"/{boot,dev,etc,home,lib,mnt,opt,proc,root,run,srv,state,sys,tmp,usr/{bin,lib,share},var/{empty,log,run,tmp}}
 chmod 1777 "${ROOTFS}/tmp"
 chmod 700  "${ROOTFS}/root"
 # /var/empty is sshd's privilege-separation chroot (RFC 0022). It must
@@ -77,6 +77,14 @@ chmod 700  "${ROOTFS}/root"
 # directory's ownership and mode are baked into the squashed image, so
 # they are build-time facts, not install-time ones.
 chmod 755  "${ROOTFS}/var/empty"
+
+# /state is the mount point for RFC 0041's shared state partition, and
+# it is base content for the same reason /var/empty is: a directory's
+# mode is baked into the squashed image, so it is a build-time fact.
+# It stays an EMPTY DIRECTORY on every machine that does not have such
+# a partition -- a live boot, and every install made before `--ab`
+# existed -- which costs nothing and is what makes the fstab entry that
+# uses it safe to add later.
 
 # ── User/group database ──────────────────────────────────
 # Nothing ever created /etc/passwd or /etc/group -- confirmed via a
