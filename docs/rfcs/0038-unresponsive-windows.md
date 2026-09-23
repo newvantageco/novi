@@ -448,13 +448,64 @@ perfectly.
 
 ## Roadmap
 
-1. **A verdict that survives a workspace switch being wrong.** A
-   window on an inactive workspace gets no frame callbacks, so a
-   well-behaved client stops drawing there — and stops burning CPU with
-   it, which is why this does not misfire today. A client that
-   legitimately computes in the background while hidden would be
-   judged wedged, and the fix is to know whether the client has *asked*
-   to draw (a pending frame callback) rather than only whether it did.
+1. ~~**A verdict that survives a workspace switch being wrong.**~~
+   **Done, and the item was wrong about one thing: it said "this does
+   not misfire today".** It does, and a base-image client is enough to
+   show it — no browser, nothing exotic.
+
+   The reasoning in the item was right: a window on an inactive
+   workspace gets no frame callbacks, because `switch_workspace()`
+   calls `wlr_scene_node_set_enabled(node, false)` and a disabled node
+   never reaches `wlr_scene_output_commit()`, so nothing calls
+   `wlr_surface_send_frame_done()` for it. What the item got wrong is
+   the consequence. It assumed a hidden client stops burning CPU along
+   with drawing. A client that throttles on frame callbacks — nearly
+   all of them — renders once more, requests a callback and waits
+   forever; whether its process then goes quiet is entirely up to what
+   that process is *doing*, and a terminal emulator with output to
+   parse keeps working.
+
+   **Reproduced before it was fixed**, on the booted desktop:
+   `foot -e sh -c yes` reads `unresponsive 0` while visible and
+   **`window 10418 75 28 foot`** twenty-four seconds after Super+2, at
+   75% of a processor. foot is doing its job perfectly.
+
+   The fix is the one this item named: ask whether the client has
+   **asked** to draw rather than only whether it did.
+   `wlr_surface_state.frame_callback_list` holds the callbacks a client
+   has requested and the compositor has not fired; non-empty means the
+   client is waiting on **us**, so whatever else is true it is not
+   stuck.
+
+   **ONE RULE RATHER THAN A WORKSPACE BRANCH**, deliberately. The same
+   reasoning covers minimize, and it stays correct for a VISIBLE window
+   because a genuinely wedged client has already CONSUMED its callback
+   — we fired it, its handler never returned, and the list is empty.
+   Being on screen is not what makes the verdict valid; being answered
+   is. It is bounded in the direction that matters too: for a visible
+   surface the list is emptied at every output commit, i.e. at refresh
+   rate, so it cannot stay non-empty across the five consecutive ticks
+   a verdict needs — except while the outputs are off, which
+   `server->blanked` already handles for the same reason.
+
+   **BOTH HALVES WERE VERIFIED, and the second is what makes the first
+   mean anything** — a change that silenced the watchdog entirely would
+   have passed the first on its own:
+
+   - *hidden and fine:* foot alive at pid 10419 thirty seconds after
+     Super+2, `utime+stime` moving 2973+1248 → 3241+1389 over five
+     seconds (409 ticks, ~82% of a processor), and the verdict
+     **`unresponsive 0`**.
+   - *visible and genuinely stuck:* NetSurf on `unclosed-tags.html`
+     served off the guest's own loopback, **`unresponsive 1` /
+     `window 12132 100 52 NetSurf`**, still there at 84 seconds.
+
+   **THE VERDICT ALONE COULD NOT HAVE ANSWERED THE FIRST.**
+   `/run/novi/windows` lists only wedged windows, so `unresponsive 0`
+   is also what a desktop with no windows at all says — a foot that had
+   simply exited would have read as a pass. The pid and the moving tick
+   counts are what make it evidence, and an earlier run that lacked
+   them was discarded rather than believed.
 2. **Something that can say "it is thinking".** Everything above is
    the outside view. The inside view is one line of client cooperation
    — a frame committed per layout pass, or a protocol that says so —

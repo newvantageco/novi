@@ -1864,6 +1864,45 @@ least half a processor" for ten seconds running.
   live: a window wedged for 74 seconds still read 74 after 25 seconds
   of blanking, then 78 and 102 once a keypress brought the screen
   back, with the CPU percentage moving throughout.
+- **A HIDDEN WINDOW IS NOT A WEDGED WINDOW, and the roadmap item that
+  filed this said it "does not misfire today".** It did, and a
+  base-image client was enough to show it. `switch_workspace()` calls
+  `wlr_scene_node_set_enabled(node, false)`, a disabled node never
+  reaches `wlr_scene_output_commit()`, so nothing calls
+  `wlr_surface_send_frame_done()` for it -- and a client that throttles
+  on frame callbacks (nearly all of them) renders once more, requests a
+  callback and waits forever. **Whether its process then goes quiet is
+  up to what that process is DOING**, which is the step the item
+  skipped: a terminal emulator with output to parse keeps working.
+  Reproduced on the booted desktop -- `foot -e sh -c yes` reads
+  `unresponsive 0` visible and **`window 10418 75 28 foot`**
+  twenty-four seconds after Super+2, doing its job perfectly.
+- **THE FIX IS "DID IT ASK TO DRAW", NOT "DID IT DRAW".**
+  `wlr_surface_state.frame_callback_list` holds the callbacks a client
+  has requested and this compositor has not fired; non-empty means the
+  client is waiting on US, so whatever else is true it is not stuck.
+  **One rule rather than a workspace branch**: the same reasoning
+  covers minimize, and it stays correct for a VISIBLE window because a
+  genuinely wedged client has already CONSUMED its callback -- we fired
+  it, its handler never returned, the list is empty. Being on screen is
+  not what makes the verdict valid; being answered is. Bounded, too:
+  for a visible surface the list empties at every output commit, so it
+  cannot survive the five consecutive ticks a verdict needs -- except
+  while the outputs are off, which `server->blanked` already covers.
+- **BOTH HALVES HAD TO BE WATCHED, because a change that silenced the
+  watchdog entirely would have passed the first alone.** Hidden and
+  fine: foot alive at pid 10419, `utime+stime` moving 2973+1248 ->
+  3241+1389 over five seconds (~82% of a processor), verdict
+  `unresponsive 0`. Visible and genuinely stuck: NetSurf on
+  `unclosed-tags.html` off the guest's own loopback, `unresponsive 1 /
+  window 12132 100 52 NetSurf`, still there at 84 seconds.
+- **`/run/novi/windows` COULD NOT HAVE ANSWERED THE FIRST HALF ON ITS
+  OWN.** It lists only WEDGED windows, so `unresponsive 0` is also what
+  a desktop with no windows says -- a foot that had simply exited would
+  have read as a pass, and one run did exactly that before the pid and
+  tick counts were added. This file already records the same shape from
+  the panel's side ("an absent file and one saying `unresponsive 0`
+  draw the same nothing"); it bites a TEST just as hard.
 - **`long-line.html` WAS JUDGED WEDGED AND THEN RECOVERED FOUR SECONDS
   LATER**, live, which is decision 2 happening rather than being
   argued: it was slow, not stuck, and this said the wrong thing about
