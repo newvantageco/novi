@@ -888,6 +888,21 @@ set_hostname() {
 # unencrypted filesystem, so the path GRUB uses is /vmlinuz, not
 # /boot/vmlinuz. That is the whole reason mkiso.sh generates a second
 # core.img with a different prefix.
+# Is partition 1 the boot partition, rather than the root filesystem?
+#
+# ONE PREDICATE FOR THE FACT, because three places used to test
+# `$ENCRYPT` -- the REASON -- and RFC 0018's encrypted layout was the
+# only reason there had ever been. RFC 0041's --ab is the second: it
+# also puts /boot on its own partition, with no encryption anywhere.
+# With the old test, an --ab install would have written `core.img`,
+# whose prefix is `(hd0,msdos1)/boot/grub`, onto a disk whose partition
+# 1 IS /boot -- so GRUB would have looked for /boot/boot/grub and the
+# machine would not have booted. Caught by reading, before any install.
+#
+# A condition that tests why instead of what breaks the moment a second
+# why turns up.
+separate_boot() { [ -n "$BOOT_PART" ]; }
+
 kernel_dest_dir() {
     if [ "$ENCRYPT" -eq 1 ] && [ "$FIRMWARE" = "uefi" ]; then
         printf '%s' "$MNT/boot/efi"
@@ -899,7 +914,7 @@ kernel_dest_dir() {
 # The same location as GRUB names it: relative to whatever partition
 # GRUB will have set as its root.
 kernel_grub_prefix() {
-    if [ "$ENCRYPT" -eq 1 ]; then
+    if [ "$ENCRYPT" -eq 1 ] || separate_boot; then
         printf ''          # the kernel is at the root of the ESP or of /boot
     else
         printf '/boot'
@@ -1077,7 +1092,7 @@ install_bootloader_bios() {
     # $MNT/boot is the boot partition's mountpoint in the encrypted
     # case, so $MNT/boot/grub is (hd0,msdos1)/grub. The two lines below
     # look identical and mean different things.
-    if [ "$ENCRYPT" -eq 1 ]; then
+    if separate_boot; then
         core="core-boot.img"
     fi
 

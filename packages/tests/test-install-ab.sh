@@ -135,6 +135,30 @@ plain="$(cat "$W/t/etc/fstab" 2>/dev/null || true)"
 has   "plain fstab has a root" "$plain" "LABEL=NOVI_ROOT"
 hasnt "plain fstab has no /state" "$plain" "/state"
 
+echo "== a separate /boot is a FACT, not a reason"
+# Three places used to test $ENCRYPT where they meant "is partition 1
+# the boot partition". RFC 0018's encrypted layout was the only reason
+# there had ever been; --ab is the second. With the old test an --ab
+# install would have written core.img, whose prefix is
+# (hd0,msdos1)/boot/grub, onto a disk whose partition 1 IS /boot -- so
+# GRUB would have looked for /boot/boot/grub and the machine would not
+# have booted.
+{
+    sed -n '/^separate_boot() /p' "$INSTALL"
+    sed -n '/^kernel_grub_prefix() {/,/^}/p' "$INSTALL"
+    echo 'printf "prefix=[%s]\n" "$(kernel_grub_prefix)"'
+} > "$W/pfx.sh"
+out="$(ENCRYPT=0 BOOT_PART=/dev/vda1 sh "$W/pfx.sh" 2>&1)"
+check "unencrypted, separate /boot" "$out" "prefix=[]"
+out="$(ENCRYPT=1 BOOT_PART=/dev/vda1 sh "$W/pfx.sh" 2>&1)"
+check "encrypted, separate /boot"   "$out" "prefix=[]"
+out="$(ENCRYPT=0 BOOT_PART="" sh "$W/pfx.sh" 2>&1)"
+check "plain single-root install"   "$out" "prefix=[/boot]"
+# And the bootloader picks its core.img from the same predicate.
+has "core-boot.img keyed on the fact" \
+    "$(sed -n '/^install_bootloader_bios() {/,/^}/p' "$INSTALL")" \
+    "if separate_boot; then"
+
 echo ""
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
