@@ -279,6 +279,42 @@ check "the help says what it claims" \
 check "and what it does not"  \
     "$($SH_BIN "$TOOL" help 2>&1 | grep -c 'is a judgement')" "1"
 
+part "a slot is a COPY, not the union of every sync into it"
+# `tar -xf` OVERWRITES AND NEVER DELETES. Demonstrated on the host:
+# remove a file from the source, re-sync, and it is still in the
+# target. So without a wipe, `pkg remove` something and sync leaves
+# the slot carrying that package's files while the install database
+# copied beside them says it is gone -- a slot that lies to pkg, which
+# is the hazard /var/lib/pkg is kept slot-local to avoid, arriving
+# from the other direction.
+check "there is a wipe"         "$(grep -c '^wipe_other() {' "$TOOL")" "1"
+check "sync calls it"           "$(grep -c '^    wipe_other$' "$TOOL")" "1"
+# BEFORE the tar, or it deletes the copy it just made.
+WLINE="$(grep -n '^    wipe_other$' "$TOOL" | cut -d: -f1)"
+TLINE="$(grep -n 'cd / && tar -cf -' "$TOOL" | cut -d: -f1)"
+check "and before the copy"     "$([ "$WLINE" -lt "$TLINE" ] && echo yes || echo no)" "yes"
+# It is an `rm -rf` as root, so it checks /proc/mounts rather than
+# this program's own variables -- what would have gone wrong is those
+# variables. Each refusal is driven for real against a loop mount
+# elsewhere; these assert the guards are still present.
+WFN="$(awk '/^wipe_other\(\) \{/,/^}/' "$TOOL" | grep -v '^[[:space:]]*#')"
+check "it asks /proc/mounts"    "$(printf '%s' "$WFN" | grep -c '/proc/mounts')" "1"
+check "it refuses a non-mount"  "$(printf '%s' "$WFN" | grep -c 'is not a mountpoint')" "1"
+# Each refusal is named by its OWN message. Counting the shared
+# "refusing to wipe it" tail matched all three at once, so any one of
+# them could go and the count would still look plausible.
+check "it refuses the wrong device" \
+    "$(printf '%s' "$WFN" | grep -c 'not \${OTHER_DEV}')" "1"
+check "it refuses the running root" \
+    "$(printf '%s' "$WFN" | grep -c 'resolved to the running root')" "1"
+check "it refuses /"            "$(printf '%s' "$WFN" | grep -c "MNT.*!=.*/")" "1"
+# The CONTENTS go, never the directory -- $MNT is the mount point, and
+# removing it would unmake the thing being written to.
+check "mindepth 1 keeps the mount point" \
+    "$(printf '%s' "$WFN" | grep -c 'mindepth 1')" "1"
+check "no bare rm -rf of the mount" \
+    "$(printf '%s' "$WFN" | grep -c 'rm -rf "\$MNT"')" "0"
+
 part "a package name reaches a root sh -c, so it is checked by class"
 # `in_other` runs `chroot "$MNT" /bin/sh -c "pkg install $*"`. The
 # caller is already root at a shell so this is not a privilege

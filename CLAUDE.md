@@ -5394,6 +5394,52 @@ RFC 0041 roadmap 4. `novi-slot` — `status`, `sync`, `install`,
   found` and zero packages -- and `/var/log/carry`, written from slot
   B, still readable, which is the shared state partition doing the job
   item 1 built it for.
+- **A SLOT WAS THE UNION OF EVERY SYNC EVER MADE INTO IT, NOT A
+  COPY.** `tar -xf` OVERWRITES AND NEVER DELETES, and `sync_other`
+  did not empty the target -- demonstrated on the host in four lines:
+  remove a file from the source, re-sync, it is still in the target.
+  Two consequences, and the second is why it is not cosmetic. A
+  `pkg remove` followed by a sync leaves the slot carrying that
+  package's files while the install database copied beside them
+  (slot-local, item 1) says it is gone -- **a slot that lies to
+  `pkg`**, the exact hazard `/var/lib/pkg` is kept slot-local to
+  avoid, arriving from the other direction. And the accumulation can
+  exceed the running system, so "both slots are the same size,
+  therefore the copy fits" -- which the small-disk measurement had
+  just confirmed at 1.8G into 1.9G -- stops being true.
+- **THE WIPE ASKS `/proc/mounts`, NOT THIS PROGRAM'S OWN VARIABLES.**
+  It is an `rm -rf` running as root and the one mistake it must not be
+  able to make is deleting the RUNNING system -- and what would have
+  gone wrong is exactly those variables, so they cannot be the
+  evidence. Three facts are read back: `$MNT` is a mountpoint, the
+  device mounted there IS `$OTHER_DEV`, and `$OTHER_DEV` is not
+  `$RUNNING_DEV`. The CONTENTS go and never the directory
+  (`find -mindepth 1`): `$MNT` is the mount point, and removing it
+  unmakes the thing being written to. Driven for real against a
+  loop-mounted ext4, all five branches -- it empties, and refuses a
+  non-mountpoint, a device that is not what is mounted there, a slot
+  that resolved to the running root, and `/`.
+- **A/B FITS ON 6 GiB AND THE FLOOR IS ABOUT RIGHT** (RFC 0041 item
+  6): at `--slot-mib 2048` the base OS is 780 MB, so a slot is **43%
+  full with nothing installed** -- 487M `/boot`, two 1.9G slots, 1.4G
+  shared state, ~1.0 GB of package headroom per side.
+- **A FULL `/state` IS A LOUD, SAFE REFUSAL, and that is the answer
+  rather than a gap.** The package cache is shared, so with `/state`
+  at 100% `novi-slot install` dies at the FETCH --
+  `wget: write error: No space left on device`, then
+  `nothing was switched` -- with the inactive slot untouched and no
+  switch armed.
+- **A TEST THAT RUNS THE PROGRAM RATHER THAN GREPPING IT MEETS
+  `need_root`, and this container is root while CI is not.** Four
+  checks on `novi-slot install`'s argument handling passed here and
+  failed on the runner, which had only ever seen
+  `ERROR: This operation requires root.` -- the 96 grep-based checks
+  beside them could never have hit it. They drive a copy with
+  `need_root` sed'd out, as test-state-packages.sh already did for the
+  same reason, and the sed is ASSERTED rather than assumed: a
+  substitution that matched nothing would put the dependency straight
+  back. Re-run as uid 65534 to BE what CI is rather than reason about
+  it.
 - **`novi-agent describe` HAS A `slots` SECTION, AND IT READS WHERE
   `novi-slot` MEASURES.** `describe` is the document that says what a
   machine IS, and on an A/B machine "which root am I running, what

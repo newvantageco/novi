@@ -197,6 +197,30 @@ in_other() {
 # leaves slot B formatted and empty on purpose -- it reserves the
 # partition, which is the thing that cannot be done later, and copies
 # nothing. So this is not an optimisation step somebody can skip.
+# EMPTY THE SLOT, AND REFUSE UNLESS IT IS CERTAIN WHAT IT IS EMPTYING.
+# This is an `rm -rf` running as root, and the one mistake it must not
+# be able to make is deleting the RUNNING system. Three facts are
+# checked against /proc/mounts rather than against this program's own
+# variables, because what went wrong would be those variables:
+#   - $MNT is a mount point at all;
+#   - what is mounted there is $OTHER_DEV, the slot resolve_slots
+#     picked -- not the root, not something a stale mount left behind;
+#   - $OTHER_DEV is not the device carrying /.
+# The contents go, never the directory: $MNT is the mount point.
+wipe_other() {
+    local dev
+    [ -n "$MNT" ] && [ "$MNT" != / ] || die "refusing to wipe '${MNT}'"
+    mountpoint -q "$MNT" || die "${MNT} is not a mountpoint; refusing to wipe it"
+    dev="$(awk -v m="$MNT" '$2 == m { d = $1 } END { print d }' /proc/mounts)"
+    [ "$dev" = "$OTHER_DEV" ] ||
+        die "${MNT} holds ${dev:-nothing}, not ${OTHER_DEV}; refusing to wipe it"
+    [ "$OTHER_DEV" != "$RUNNING_DEV" ] ||
+        die "the inactive slot resolved to the running root ${RUNNING_DEV}; refusing to wipe it"
+    info "emptying ${OTHER_LABEL} (a slot is a copy, not an accumulation)"
+    find "$MNT" -mindepth 1 -maxdepth 1 -exec rm -rf {} + ||
+        die "could not empty ${OTHER_LABEL}"
+}
+
 sync_other() {
     msg "Copying the running system into ${OTHER_LABEL} (${OTHER_DEV})"
 
@@ -221,6 +245,28 @@ sync_other() {
     # mark from the copy before it.
     rm -f "$MNT/$SYNC_MARK"
     sync
+
+    # AND THE SLOT IS EMPTIED, because `tar -xf` OVERWRITES AND NEVER
+    # DELETES. Without this a slot is not a copy of the running system
+    # -- it is the UNION of every sync ever made into it. Demonstrated
+    # on the host: remove a file from the source, re-sync, and it is
+    # still in the target.
+    #
+    # Two things follow, and the second is why this is not cosmetic.
+    # `pkg remove` something, sync, and the slot keeps that package's
+    # files while the install database copied beside them (slot-local,
+    # RFC 0041 item 1) says it is gone -- a slot that lies to pkg, the
+    # exact hazard /var/lib/pkg is kept slot-local to avoid, arriving
+    # from the other direction. And the copy can then be LARGER than
+    # the running system, so "both slots are the same size, therefore
+    # it fits" stops being true.
+    #
+    # A slot is disposable by definition -- the whole design is that
+    # nothing here is the running system -- so emptying it costs
+    # nothing an interrupted copy did not already cost: the mark is
+    # already gone by this line, so what a failure leaves reports
+    # itself unfinished either way.
+    wipe_other
 
     # shellcheck disable=SC2086
     ( cd / && tar -cf - $ex . ) | ( cd "$MNT" && tar -xf - ) ||

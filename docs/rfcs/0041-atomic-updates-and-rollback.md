@@ -633,6 +633,55 @@ here would smuggle in the model decision this RFC just declined.
    the machine change its mind; without `sleep` in `core.img` GRUB
    answers *"error: Incorrect command."* right after it. Caught by
    reading the generated menu, not by booting it.
-6. **What it costs on a small disk**, measured rather than assumed —
-   including what happens when the shared partition is full and the
-   inactive slot cannot be written.
+6. **What it costs on a small disk** — measured. **Done.**
+
+   A 6 GiB disk at the `--slot-mib 2048` floor, installed with `--ab`
+   and booted (QEMU/TCG; no physical hardware):
+
+   | | size | used |
+   |---|---|---|
+   | `/boot` (vda1) | 487.2M | 29.8M |
+   | slot A (vda2) | 1.9G | **790.5M — 43%** |
+   | slot B (vda3) | 1.9G | seeded to 762.3M |
+   | `/state` (vda4) | 1.4G | 584K |
+
+   So the base OS is 780 MB and a 2048 MiB slot is **43% full with
+   nothing installed** — about 1.0 GB of headroom for packages, on
+   each side. A/B on 6 GiB is real rather than nominal, and the floor
+   is roughly right: at 1024 MiB it would not fit at all.
+
+   **The full inactive slot is not the interesting failure, because
+   the slots are the same size.** Slot A was filled to 100% (1.8G of
+   1.9G) and `novi-slot sync` still succeeded — 1.8G copied, exit 0,
+   `status` reporting `ready (1.8G)`. That is structural, not luck:
+   the partition table gives both slots the same extent, so a copy of
+   one fits in the other.
+
+   **It was structural until this measurement found that it was not.**
+   `tar -xf` overwrites and never deletes, and `sync_other` did not
+   empty the target — so a slot was the UNION of every sync ever made
+   into it, not a copy. Demonstrated on the host: remove a file from
+   the source, re-sync, and it is still in the target. Two
+   consequences, and the second is why it is not cosmetic: a
+   `pkg remove` followed by a sync leaves the slot carrying that
+   package's files while the install database copied beside them
+   (slot-local, item 1) says it is gone — **a slot that lies to
+   `pkg`**, which is the exact hazard `/var/lib/pkg` is kept
+   slot-local to avoid, arriving from the other direction; and the
+   accumulated copy can exceed the running system, so "both slots are
+   the same size, therefore it fits" stops being true. `sync_other`
+   empties the slot first now, behind a guard that asks
+   `/proc/mounts` what is mounted there rather than trusting this
+   program's own variables — it is an `rm -rf` as root, and what
+   would have gone wrong is those variables.
+
+   **What a full `/state` costs is a loud, safe refusal**, which is
+   the answer this item asked for. The package cache is shared
+   (`/state/var/cache/pkg`), so with `/state` at 100%
+   `novi-slot install sqlite` dies at the fetch —
+   `wget: write error: No space left on device`, then
+   `could not fetch sqlite-…`, then
+   `pkg install failed in the slot; nothing was switched`. The
+   inactive slot is left as it was and no switch is armed. Watched,
+   then the filler removed and `/state` back to 0%.
+
