@@ -1362,6 +1362,50 @@ static bool watchdog_client_progressed(struct novi_server *server,
 	if (toplevel->client_pid <= 0) {
 		return true;
 	}
+	/* DID THE CLIENT ASK TO DRAW AND GET NO ANSWER? That is a
+	 * different question from "did it draw", and it is the one that
+	 * survives a window being hidden -- RFC 0038 roadmap 1.
+	 *
+	 * switch_workspace() disables the scene node of a window that
+	 * leaves the active workspace, and a disabled node never reaches
+	 * wlr_scene_output_commit(), so nothing ever calls
+	 * wlr_surface_send_frame_done() for it. A client that throttles on
+	 * frame callbacks -- which is nearly all of them -- therefore
+	 * renders once more, requests a callback, and waits forever. It
+	 * commits nothing from then on while its own process may be as
+	 * busy as it likes, which is EXACTLY the pair this watchdog looks
+	 * for.
+	 *
+	 * Reproduced on a booted machine before it was fixed, with a base
+	 * image client and no browser involved: `foot -e sh -c yes` parses
+	 * a torrent of text at 75% of a processor, sits at `unresponsive
+	 * 0` while visible, and is reported `window <pid> 75 28 foot`
+	 * twenty-four seconds after Super+2. foot is doing its job
+	 * perfectly; it stopped drawing because this compositor stopped
+	 * asking.
+	 *
+	 * `current.frame_callback_list` is the callbacks the client has
+	 * requested and we have not fired. Non-empty means the client is
+	 * waiting on US, so whatever else is true it is not stuck.
+	 *
+	 * ONE RULE RATHER THAN A WORKSPACE BRANCH, and that is deliberate:
+	 * the same reasoning covers minimize, and it stays correct for a
+	 * VISIBLE window because a genuinely wedged client has already
+	 * CONSUMED its callback -- we fired it, its handler never
+	 * returned, and the list is empty. The window being on screen is
+	 * not what makes the verdict valid; being answered is.
+	 *
+	 * It is bounded in the direction that matters too. For a visible
+	 * surface the list is emptied at every output commit, i.e. at
+	 * refresh rate, so it cannot stay non-empty across the five
+	 * consecutive ticks a verdict needs -- except while the outputs
+	 * are off, which `server->blanked` already handles above for the
+	 * same reason. */
+	struct wlr_surface *surface = toplevel->xdg_toplevel->base->surface;
+	if (surface != NULL &&
+			!wl_list_empty(&surface->current.frame_callback_list)) {
+		return true;
+	}
 	struct novi_toplevel *other;
 	wl_list_for_each(other, &server->toplevels, link) {
 		if (other != toplevel && other->client_pid == toplevel->client_pid &&
