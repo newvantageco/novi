@@ -306,12 +306,21 @@ if [[ -d "${GRUB_LIB_DIR}" ]] && command -v grub-mkimage &>/dev/null; then
     # The module list is the minimum needed to get from the gap to a
     # kernel: read an msdos partition table, read the ext2/4 filesystem
     # on it, then run a normal menu and boot Linux.
+    #
+    # `loadenv` is RFC 0041's (roadmap 2). It is what gives GRUB
+    # `load_env`, and without it a boot cannot be steered from userland
+    # at all -- the installed menu would be three static entries and an
+    # update could never say "boot the other slot next". It is a module
+    # rather than a separate image because the post-MBR gap is 2047
+    # sectors and core.img is under 300 of them; novi-install refuses
+    # a core.img that does not fit rather than discovering the overlap
+    # later as filesystem corruption (RFC 0003).
     grub-mkimage \
         -O i386-pc \
         -o "${NOVI_BOOT_DIR}/core.img" \
         -p '(hd0,msdos1)/boot/grub' \
         biosdisk part_msdos ext2 normal linux configfile search \
-        search_fs_uuid search_label echo test ls boot
+        search_fs_uuid search_label echo test ls boot loadenv
 
     # A SECOND core.img, for the encrypted layout (RFC 0018).
     #
@@ -329,7 +338,7 @@ if [[ -d "${GRUB_LIB_DIR}" ]] && command -v grub-mkimage &>/dev/null; then
         -o "${NOVI_BOOT_DIR}/core-boot.img" \
         -p '(hd0,msdos1)/grub' \
         biosdisk part_msdos ext2 normal linux configfile search \
-        search_fs_uuid search_label echo test ls boot
+        search_fs_uuid search_label echo test ls boot loadenv
 
     mkdir -p "${NOVI_BOOT_DIR}/i386-pc"
     cp "${GRUB_LIB_DIR}"/*.mod "${GRUB_LIB_DIR}"/*.lst "${NOVI_BOOT_DIR}/i386-pc/" 2>/dev/null || true
@@ -358,7 +367,7 @@ if [[ -d "${GRUB_LIB_DIR}" ]] && command -v grub-mkimage &>/dev/null; then
             part_gpt part_msdos fat ext2 normal linux configfile \
             search search_fs_uuid search_label search_fs_file \
             echo test ls boot gzio all_video efi_gop efi_uga \
-            serial terminal minicmd reboot halt
+            serial terminal minicmd reboot halt loadenv
         echo ">>> UEFI boot artifact: bootx64.efi $(stat -c%s "${NOVI_BOOT_DIR}/bootx64.efi")B"
 
         # ── Secure Boot ──────────────────────────────────────────────

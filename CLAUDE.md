@@ -5228,6 +5228,91 @@ machine boots from slot A and slot B is empty. BIOS and UEFI, opt-in.
   wait for `root@<hostname>`, which appears in the shell prompt and in
   nothing else.
 
+## Architecture: a boot that can be steered from userland
+
+RFC 0041 roadmap 2. `loadenv` is baked into all three GRUB images, an
+`--ab` grub.cfg reads `novi_slot` out of the environment block, and
+`packages/novi-grubenv` writes that block from the running system.
+`packages/tests/test-grubenv.sh`, 49 checks.
+
+- **`grub-editenv` IS NOT ON THIS SYSTEM, AND THE MISSING HALF IS A
+  SCRIPT.** The environment block is a fixed 1024 bytes: the signature
+  `# GRUB Environment Block\n` byte for byte, then `name=value` lines,
+  then `#` padding (GRUB skips a line beginning `#`, which is what
+  makes padding work). That is a format, not a program, so the answer
+  is the same split RFC 0003 already made for `grub-install` --
+  generate on the build host, place on the target. Base content in
+  `/usr/sbin`, because a machine whose update went wrong is exactly the
+  machine that cannot install a package to fix it.
+- **THE PATH IS DERIVED FROM WHERE grub.cfg IS, NOT FROM
+  `/sys/firmware/efi`.** Those answer different questions: the firmware
+  node says how this machine booted, and what is wanted is where its
+  GRUB reads -- and GRUB looks for grubenv beside grub.cfg, at the
+  prefix baked into core.img or bootx64.efi. A UEFI machine whose ESP
+  did not mount (fstab says `nofail`) still has `/sys/firmware/efi` and
+  has nowhere GRUB will read; writing a block into a directory nothing
+  reads is the silent failure the ordering avoids. It refuses instead.
+- **`load_env` NAMES THE VARIABLES IT WILL ACCEPT.** Called bare it
+  imports EVERYTHING in the file into GRUB's environment, `prefix` and
+  `root` included -- so a block somebody appended to could redirect the
+  bootloader itself. `load_env novi_slot`, guarded by
+  `[ -s ${prefix}/grubenv ]` so a missing or truncated block is silence
+  rather than an error on a machine that is fine, with `novi_slot=a`
+  set beforehand: an unset variable reads as slot A, which is the right
+  answer to "I cannot tell".
+- **EVERY WAY TO GET THE FORMAT WRONG IS SILENT, and the first one bit
+  immediately.** Without a newline between the last variable and the
+  padding, GRUB reads a record with no terminator and **DISCARDS it** --
+  from a file that is 1024 bytes, carries the right signature and looks
+  correct in an editor. So the oracle is `grub-editenv` reading what we
+  wrote and us reading what it wrote, never a second implementation of
+  `envblk.c` in the test. CI installs `grub-common` for it, on the
+  argument `libxkbcommon-dev` already won.
+- **A `die` INSIDE A PIPELINE DOES NOT END THE SCRIPT.**
+  `printf ... | write_block "$f"` put the writer in a SUBSHELL, so its
+  `exit 1` ended only the subshell and the caller went on to print
+  "wrote" about a file it had not touched -- a refused write reporting
+  success. The body is an argument now. **Putting the pipe back to
+  check the test catches it found a second reason**: `create` passes an
+  empty body, and `body="$(cat)"` with nothing on the other end reads
+  the TERMINAL and hangs forever. No amount of reading would have shown
+  that; one provocation did.
+- **AND THE NEWLINE GUARD COULD NOT FIRE.**
+  `case "$value" in *"$(printf '\n')"*)` -- a command substitution
+  strips trailing newlines, so the pattern was `**` and it refused
+  every value, including every correct one. The same dead branch as
+  RFC 0031's unreachable `''` case. Count the newlines instead.
+- **`strings` CANNOT SEE INTO `core.img`.** grub-mkimage LZMA-
+  compresses the i386-pc payload, so grepping the artifact for
+  `loadenv` returns nothing whether or not the module is there --
+  another probe that answers a different question. What proves it is
+  RECONSTRUCTION: the same module list with `loadenv` produces a file
+  byte-identical to the shipped one, 284 sectors against 278 without.
+  The post-MBR gap is 2047 sectors, so six is affordable, and
+  `novi-install` already refuses a `core.img` that does not fit.
+- **THE OTHER SLOT IS A MENU ENTRY, NOT ONLY A VARIABLE.** If the slot
+  grubenv names will not boot there is no userland to run
+  `novi-grubenv` in, so without an entry the recovery path for a failed
+  update is a rescue medium. Verified: picking it booted slot A while
+  `novi_slot` still read `b` -- a menu choice is a one-off and does not
+  rewrite the document, the same separation novi-state keeps between
+  the running system and the declared one.
+- **Verified by three boots of one disk** (QEMU/TCG; no physical
+  hardware), with nothing changed between them but 1024 bytes:
+  `novi_slot=a` gives `Novi Linux (slot A)` and
+  `root=LABEL=NOVI_ROOT_A`; after `novi-grubenv set novi_slot=b` the
+  menu says `(slot B)` and `/init` resolves `LABEL=NOVI_ROOT_B` to
+  `/dev/vda3`; the escape-hatch entry then returns to slot A. Boot 2
+  gets no further than resolving the device because slot B is a
+  formatted filesystem with nothing in it until roadmap item 4 -- that
+  is the steer working, not failing.
+- **A machine with ONE slot is byte-unchanged.** No `load_env`, no
+  `novi_slot`, three menu entries and a plain title, because a
+  `load_env` with no grubenv and no second slot is wiring with nothing
+  on the other end. The grubenv is still written, so `novi-grubenv`
+  behaves the same everywhere -- 1 KiB, and a machine that later gains
+  a use for it does not need the file to appear from somewhere.
+
 ## Architecture: two firmware paths, one installer
 
 RFC 0008 (`docs/rfcs/0008-uefi-and-journalled-root.md`). `novi-install`

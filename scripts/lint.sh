@@ -176,6 +176,22 @@ fi
 # the OTHER slot. That is a one-word edit somebody could make in good
 # faith with nothing else in the tree complaining.
 #
+# test-grubenv.sh is the eleventh, and its oracle is GRUB's own
+# tools. RFC 0041 needs a boot that can be steered from userland, which
+# means writing GRUB's environment block -- a fixed 1024 bytes with a
+# byte-exact signature and `#` padding, normally written by
+# `grub-editenv`, which belongs to a GRUB userland this system does not
+# have. So `packages/novi-grubenv` writes the format itself, and every
+# way to get it wrong is SILENT: GRUB reports nothing and boots with
+# whatever it managed to parse. A missing newline on the last line made
+# GRUB discard that variable from a file that was 1024 bytes and looked
+# perfectly right -- found by this test, in its own subject, before it
+# found anything else. The check is therefore grub-editenv reading what
+# we wrote and us reading what grub-editenv wrote, plus
+# grub-script-check on the generated menu; `grub-common` is installed in
+# CI for the same reason libxkbcommon-dev is, because a test that skips
+# itself where its tool is missing skips itself where it is needed.
+#
 # test-dead-applets.sh is the ninth, and its subject is a table of
 # CLAIMS about a kernel. `kernel/dead-applets` says which busybox
 # applets need which CONFIG_ symbol, and the removal is derived from
@@ -237,6 +253,7 @@ for t in packages/tests/test-lib-json.sh packages/tests/test-agent-verbs.sh \
          packages/tests/test-pkg-conflicts.sh \
          packages/tests/test-dead-applets.sh \
          packages/tests/test-install-ab.sh \
+         packages/tests/test-grubenv.sh \
          packages/tests/test-pkg-lifecycle.sh \
          packages/tests/test-pkg-cache-hash.sh; do
     echo ">>> ${t##*/}"

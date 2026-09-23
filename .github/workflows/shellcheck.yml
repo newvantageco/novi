@@ -31,8 +31,13 @@ jobs:
       # keysym with xkb_keysym_from_name(). A test that skipped itself
       # where the header is missing would skip itself here, which is
       # the one place it needs to run.
-      - name: Install shellcheck and the headers the host tests need
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck libxkbcommon-dev
+      # grub-common gives grub-editenv and grub-script-check, which are
+      # test-grubenv.sh's oracle: novi-grubenv writes GRUB's 1024-byte
+      # environment block by hand, and the only check worth having is
+      # GRUB's own reader agreeing with it in both directions. Same
+      # argument as libxkbcommon-dev above.
+      - name: Install shellcheck and the tools the host tests need
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck libxkbcommon-dev grub-common
 
       # Exactly the command a contributor runs locally. This replaces a
       # third-party action that was pinned to a commit SHA which does

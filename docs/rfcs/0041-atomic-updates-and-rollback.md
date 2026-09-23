@@ -400,6 +400,66 @@ here would smuggle in the model decision this RFC just declined.
 2. **`loadenv` in `core.img` and in `bootx64.efi`**, and a `grubenv`
    the installed system can write. Small, and nothing else can start
    until a boot can be steered from userland.
+
+   **DONE, AND VERIFIED BY THREE BOOTS.** `loadenv` is in all three
+   images; an `--ab` grub.cfg reads `novi_slot` out of the environment
+   block; and `novi-grubenv` writes that block from the running system.
+   The demonstration is one disk and three boots with nothing changed
+   between them but 1024 bytes:
+
+   | | menu title | kernel command line |
+   |---|---|---|
+   | boot 1, `novi_slot=a` | `Novi Linux (slot A)` | `root=LABEL=NOVI_ROOT_A` |
+   | boot 2, after `novi-grubenv set novi_slot=b` | `Novi Linux (slot B)` | `root=LABEL=NOVI_ROOT_B` |
+   | boot 3, "the other root slot: A" chosen at the menu | — | `root=LABEL=NOVI_ROOT_A` |
+
+   Boot 2 reached `/init` and resolved `LABEL=NOVI_ROOT_B` to
+   `/dev/vda3`, which is as far as it can get: slot B is a formatted
+   filesystem with nothing in it until item 4. That is the steer
+   working, not failing.
+
+   **THE OTHER SLOT IS A MENU ENTRY, NOT ONLY A VARIABLE.** If the slot
+   grubenv names will not boot, there is no userland to run
+   `novi-grubenv` in — so without an entry the recovery path for a
+   failed update would be a rescue medium. Boot 3 is that entry, and it
+   left `novi_slot` reading `b`: a menu choice is a one-off and does
+   not rewrite the document, which is the same separation `novi-state`
+   keeps between the running system and the declared one.
+
+   **`grub-editenv` IS NOT ON THIS SYSTEM AND SHOULD NOT BE.** The
+   environment block is a fixed 1024 bytes — a byte-exact signature,
+   `name=value` lines, `#` padding — so the missing half is a script,
+   not a package. `novi-grubenv` is base content in `/usr/sbin`, and
+   the installer calls it rather than writing the format a second time.
+   RFC 0003 already splits `grub-install` into "generate on the build
+   host" and "place on the target"; this is that split for the
+   environment block.
+
+   **`load_env` NAMES THE VARIABLES IT WILL ACCEPT.** Called bare it
+   imports everything in the file into GRUB's environment, `prefix` and
+   `root` included — so a block somebody appended to could redirect the
+   bootloader itself. The whitelist form reads `novi_slot` and nothing
+   else, guarded by `[ -s ${prefix}/grubenv ]` so a missing or
+   truncated block is silence rather than an error message on a machine
+   that is fine. An unset `novi_slot` reads as slot A, which is the
+   right answer to "I cannot tell".
+
+   **EVERY WAY TO GET THIS FORMAT WRONG IS SILENT**, which is why it
+   has 49 host checks against GRUB's own reader rather than against a
+   second implementation of `envblk.c`. The first bug it found was in
+   its own subject: a missing newline between the last variable and the
+   padding produced a file that was 1024 bytes, had the right
+   signature, looked right in an editor, and made GRUB **discard that
+   variable**. `grub-editenv` reading it is what said so.
+
+   **`strings` CANNOT SEE INTO `core.img`** — grub-mkimage LZMA-
+   compresses the i386-pc payload — so the obvious check that the
+   module went in proves nothing. What proves it is reconstruction:
+   the same module list with `loadenv` produces a file byte-identical
+   to the shipped one, and without it a 278-sector image instead of a
+   284-sector one. The post-MBR gap is 2047 sectors, so the six it
+   costs are affordable, and `novi-install` already refuses a
+   `core.img` that does not fit (RFC 0003).
 3. *(folded into item 1 — see decision 5. A partition table is written
    once, so reserving the second slot cannot be a later step.)*
 4. **`chroot <inactive> pkg update`**, then a switch, then a boot from

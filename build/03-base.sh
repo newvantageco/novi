@@ -199,6 +199,20 @@ install -D -m 755 "${REPO_ROOT}/rootfs/etc/acpi/LID/00000080"  "${ROOTFS}/etc/ac
 # be told to sleep, is not usable enough to go install something that
 # fixes that.
 install -D -m 755 "${REPO_ROOT}/packages/novi-power" "${ROOTFS}/usr/bin/novi-power"
+
+# GRUB's environment block, read and written (RFC 0041 roadmap 2).
+# /usr/sbin, not /usr/bin: reading is harmless but every write is to a
+# file the bootloader reads, so it belongs beside the other things only
+# root does. Base content rather than a package for the reason RFC 0041
+# gives -- a machine whose update went wrong is exactly the machine
+# that cannot install a package to fix it.
+#
+# This is the half of `grub-editenv` an installed Novi needs. The GRUB
+# userland is not on this system and is not wanted: RFC 0003 already
+# splits `grub-install` into "generate on the build host" and "place on
+# the target", and this is the same split for the environment block.
+install -D -m 755 "${REPO_ROOT}/packages/novi-grubenv" "${ROOTFS}/usr/sbin/novi-grubenv"
+
 mkdir -p "${ROOTFS}/etc/profile.d"
 
 # ── Copy musl libc into rootfs ────────────────────────────

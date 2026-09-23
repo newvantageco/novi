@@ -998,7 +998,8 @@ install_kernel() {
 # baked-in prefix) or /boot/efi/EFI/BOOT/grub.cfg for UEFI (bootx64.efi's).
 write_grub_cfg() {
     local dest="$1" search_line="$2"
-    local kroot rootspec cryptline=""
+    local kroot rootspec cryptline="" envblock="" otherentry=""
+    local maintitle="Novi Linux"
 
     # Where the kernel is, from GRUB's point of view, and what to tell
     # the kernel its root is. On an encrypted install the root is the
@@ -1010,6 +1011,64 @@ write_grub_cfg() {
         cryptline="novi.luks=UUID=${LUKS_UUID}"
     else
         rootspec="LABEL=${ROOT_LABEL}"
+    fi
+
+    # RFC 0041 roadmap 2: on an A/B machine the root is not a constant.
+    # `novi_slot` in GRUB's environment block decides it, and
+    # novi-grubenv writes that block from the running system.
+    #
+    # `load_env` NAMES THE VARIABLES IT WILL ACCEPT. Called bare it
+    # imports everything in the file into GRUB's environment, `prefix`
+    # and `root` included -- so a block somebody appended to could
+    # redirect the bootloader itself. The whitelist form reads
+    # novi_slot and nothing else.
+    #
+    # The `-s` guard is not decoration either: `load_env` on a missing
+    # or truncated file prints an error and leaves novi_slot unset,
+    # which the `else` below reads as slot A. Booting slot A is the
+    # right answer to "I cannot tell"; the guard is so the person does
+    # not get an error message about it on a machine that is fine.
+    if [ "$AB" -eq 1 ]; then
+        envblock="$(cat <<ENVBLOCK
+# RFC 0041: which slot boots is a variable, not a constant. It is set
+# by \`novi-grubenv set novi_slot=<a|b>\` on the running system.
+set novi_slot=a
+if [ -s \${prefix}/grubenv ]; then
+    load_env novi_slot
+fi
+if [ "\${novi_slot}" = "b" ]; then
+    set novi_root=LABEL=${SLOT_B_LABEL}
+    set novi_other=LABEL=${SLOT_A_LABEL}
+    set novi_this_name="B"
+    set novi_other_name="A"
+else
+    set novi_root=LABEL=${SLOT_A_LABEL}
+    set novi_other=LABEL=${SLOT_B_LABEL}
+    set novi_this_name="A"
+    set novi_other_name="B"
+fi
+ENVBLOCK
+)"
+        rootspec='${novi_root}'
+        # On a machine with one slot the name would render empty --
+        # "Novi Linux (slot )" -- so the title is a variable too.
+        maintitle='Novi Linux (slot ${novi_this_name})'
+
+        # THE OTHER SLOT NEEDS A MENU ENTRY, not just a variable. If
+        # the slot grubenv names will not boot, the person at the
+        # keyboard has no userland to run novi-grubenv in -- so
+        # without this the recovery path for a failed update would be
+        # a rescue medium. One keypress instead.
+        otherentry="$(cat <<OTHERENTRY
+
+menuentry "Novi Linux (the other root slot: \${novi_other_name})" --class linux {
+    linux  ${kroot}/vmlinuz root=\${novi_other} rw \\
+           loglevel=7 \\
+           console=tty0 console=ttyS0,115200n8
+    initrd ${kroot}/initramfs.cpio.gz
+}
+OTHERENTRY
+)"
     fi
 
     mkdir -p "$(dirname "$dest")"
@@ -1035,8 +1094,9 @@ terminal_input console serial
 terminal_output console serial
 
 ${search_line}
+${envblock}
 
-menuentry "Novi Linux" --class linux {
+menuentry "${maintitle}" --class linux {
     linux  ${kroot}/vmlinuz root=${rootspec} ${cryptline} rw \\
            quiet loglevel=3 \\
            console=tty0 console=ttyS0,115200n8 \\
@@ -1059,7 +1119,45 @@ menuentry "Novi Linux (skip declared-state convergence)" --class linux {
            console=tty0 console=ttyS0,115200n8
     initrd ${kroot}/initramfs.cpio.gz
 }
+${otherentry}
 GRUBCFG
+}
+
+# GRUB's environment block, written beside grub.cfg (RFC 0041 roadmap
+# 2). This is what lets a running system say "boot the other slot next
+# time" -- `load_env` in the menu reads exactly this file.
+#
+# IT GOES THROUGH novi-grubenv RATHER THAN A HEREDOC HERE. The format
+# is a fixed 1024 bytes with a byte-exact signature and `#` padding,
+# and a second implementation of it in the installer would be a second
+# thing to get wrong -- with the failure being a block GRUB rejects
+# silently on a machine nobody can log into yet. Same argument as
+# `/usr/lib/novi/json.sh` being the one escaper and `/usr/lib/novi/
+# resolv.sh` the one resolver writer.
+#
+# It is written on EVERY install, not only `--ab` ones. The block costs
+# 1 KiB, `novi-grubenv` then works the same everywhere, and a machine
+# that gains a use for it later does not need the file to appear from
+# somewhere. Only an --ab grub.cfg reads `novi_slot`.
+write_grubenv() {
+    local dir="$1"
+
+    command -v novi-grubenv >/dev/null 2>&1 || {
+        warn "novi-grubenv not found; no GRUB environment block written."
+        warn "the system boots, but a slot switch will have nothing to write to."
+        return 0
+    }
+    mkdir -p "$dir"
+    if [ "$AB" -eq 1 ]; then
+        NOVI_GRUBENV_DIR="$dir" novi-grubenv create >/dev/null &&
+        NOVI_GRUBENV_DIR="$dir" novi-grubenv set "novi_slot=a" >/dev/null ||
+            { warn "could not write ${dir}/grubenv"; return 0; }
+        info "grubenv written: novi_slot=a (slot ${SLOT_A_LABEL})"
+    else
+        NOVI_GRUBENV_DIR="$dir" novi-grubenv create >/dev/null ||
+            { warn "could not write ${dir}/grubenv"; return 0; }
+        info "grubenv written (empty; this machine has one root slot)"
+    fi
 }
 
 install_bootloader_uefi() {
@@ -1100,6 +1198,8 @@ install_bootloader_uefi() {
             "search --no-floppy --label ${ROOT_LABEL} --set=root"
     fi
 
+    write_grubenv "$MNT/boot/efi/EFI/BOOT"
+
     sync
     info "bootx64.efi and grub.cfg installed on the ESP"
 }
@@ -1127,6 +1227,7 @@ install_bootloader_bios() {
     # No search either way: the kernel is on the same partition
     # core.img's prefix already points at.
     write_grub_cfg "$grubdir/grub.cfg" ""
+    write_grubenv "$grubdir"
 
     if [ ! -d "$src" ]; then
         warn "no staged GRUB artifacts at $src"
