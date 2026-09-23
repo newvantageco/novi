@@ -279,6 +279,33 @@ check "the help says what it claims" \
 check "and what it does not"  \
     "$($SH_BIN "$TOOL" help 2>&1 | grep -c 'is a judgement')" "1"
 
+part "a package name reaches a root sh -c, so it is checked by class"
+# `in_other` runs `chroot "$MNT" /bin/sh -c "pkg install $*"`. The
+# caller is already root at a shell so this is not a privilege
+# boundary, but running `foo; rm -rf /` inside a chroot is a surprise
+# nobody asked for.
+check "there is a name check" "$(grep -c '^valid_pkg_name() {' "$TOOL")" "1"
+OUT="$($SH_BIN "$TOOL" install 'foo; rm -rf /' 2>&1)"
+check "a metacharacter is refused" "$(printf '%s' "$OUT" | grep -c 'not a usable package name')" "1"
+OUT="$($SH_BIN "$TOOL" install -- 2>&1)"
+check "a leading dash is refused"  "$(printf '%s' "$OUT" | grep -c 'not a usable package name')" "1"
+# EVERY REFUSAL BEFORE ANY WORK. `install` with no arguments used to
+# mount the slot, seed it (47 seconds, 760 MB) and bind three
+# filesystems into it before printing a usage line -- the same lesson
+# as the --ab --encrypt refusal that sat after the "is that a block
+# device" test. These run on a host with no slots at all, so reaching
+# the name check at all proves it comes first: resolve_slots would
+# have died with "one root slot" otherwise.
+OUT="$($SH_BIN "$TOOL" install 2>&1)"
+check "no arguments is refused"    "$(printf '%s' "$OUT" | grep -c 'usage: novi-slot install')" "1"
+check "and before resolve_slots"   "$(printf '%s' "$OUT" | grep -c 'one root slot')" "0"
+# A name that is FINE must get past the check and reach the real
+# refusal, or the guard is just rejecting everything (RFC 0031's dead
+# `''` branch, and this file's own newline guard).
+OUT="$($SH_BIN "$TOOL" install sqlite 2>&1)"
+check "a real name gets through"   "$(printf '%s' "$OUT" | grep -c 'not a usable package name')" "0"
+check "and reaches the slot check" "$(printf '%s' "$OUT" | grep -c 'one root slot')" "1"
+
 part "novi-agent describes the slots, and READS to do it"
 AGENT="packages/novi-agent"
 check "there is a slots section"   "$(grep -c '^describe_slots() {' "$AGENT")" "1"

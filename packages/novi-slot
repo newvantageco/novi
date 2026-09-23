@@ -399,9 +399,39 @@ cmd_confirm() {
     msg "trial boot confirmed; this slot is now the plain default"
 }
 
+# A PACKAGE NAME REACHES A ROOT `sh -c` INSIDE THE SLOT, so it is
+# checked by class before it gets there. The caller is already root at
+# a shell, so this is not a privilege boundary -- but `novi-slot
+# install "foo; rm -rf /"` running that in a chroot is a surprise
+# nobody asked for, and the set of characters a package name may
+# contain is the one `pkg` and RFC 0029's `pkg.install` verb already
+# agree on.
+valid_pkg_name() {
+    case "$1" in
+        ''|-*) return 1 ;;
+        *[!A-Za-z0-9._+-]*) return 1 ;;
+    esac
+    return 0
+}
+
 cmd_pkg() {
-    local what="$1"; shift
+    local what="$1" p; shift
     need_root
+
+    # EVERY REFUSAL BEFORE ANY WORK. `install` with no arguments used
+    # to mount the slot, seed it -- 47 seconds and 760 MB -- bind three
+    # filesystems into it and THEN print a usage line. Same lesson as
+    # the `--ab --encrypt` refusal that lived after the "is that a
+    # block device" test and answered about /dev/null.
+    if [ "$what" = install ]; then
+        [ $# -gt 0 ] || die "usage: ${PROG} install <package>..."
+        for p in "$@"; do
+            valid_pkg_name "$p" ||
+                die "not a usable package name: '${p}'
+       (letters, digits and . _ + - , not starting with -)"
+        done
+    fi
+
     resolve_slots
     command -v chroot >/dev/null 2>&1 || die "no chroot on this system"
     mount_other
@@ -420,7 +450,6 @@ cmd_pkg() {
             in_other "pkg update" || die "pkg update failed in the slot; nothing was switched"
             ;;
         install)
-            [ $# -gt 0 ] || die "usage: ${PROG} install <package>..."
             msg "Installing into slot $(other_slot_letter) (${OTHER_LABEL}): $*"
             in_other "pkg sync" || warn "pkg sync failed in the slot; using the index it has"
             in_other "pkg install $*" || die "pkg install failed in the slot; nothing was switched"
