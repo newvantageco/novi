@@ -2110,13 +2110,22 @@ RFC"*. The measurement says there is no RFC to write.
   *"unknown errror in id (1)"* for the life of the project, beside
   `hwclock`, `rtcwake`, `nbd-client`, five `ubi*` and `vconfig`.
   Same complaint as `idle3`, `bashbug` and busybox's own `man`.
-- **THE REMOVAL IS DERIVED, WHICH IS THE ONLY REASON IT IS SAFE.**
+- **THE DECISION IS DERIVED, WHICH IS THE ONLY REASON IT IS SAFE.**
   `kernel/dead-applets` is a table of `<applet> <CONFIG_SYMBOL>
   <reason>`; `scripts/prune-dead-applets.sh` reads the **generated**
-  config and removes an applet only when its symbol is absent, so
-  turning a symbol on restores the command with no edit to the table.
-  A list of removals would need editing by whoever next changes the
-  kernel, with nothing to tell them.
+  config and CONVERGES each row against it. A list of removals would
+  need editing by whoever next changes the kernel, with nothing to
+  tell them.
+- **IT RESTORES AS WELL AS REMOVES, and that is not symmetry for its
+  own sake.** Without it "turning a symbol on brings the command back"
+  is true only of a FULL build -- `03-base.sh` creates the symlinks and
+  `--from 05` never reaches it -- so enabling `CONFIG_RTC_CLASS` and
+  rebuilding the kernel gives a working RTC and no `hwclock`. Watched
+  live: that is exactly what the RTC change did here. **Where the link
+  goes is ASKED, not written down**: `busybox --list-full` prints each
+  applet at the path busybox's own installer would use
+  (`sbin/hwclock`, `usr/sbin/rtcwake`, `usr/bin/ipcs`), so the two
+  cannot disagree.
 - **IT RUNS IN `05-kernel.sh`, NOT `03-base.sh`, AND THEN AGAIN IN
   16.** 03 installs the symlinks but the answer comes from the
   generated config, which does not exist until 05 on a clean build --

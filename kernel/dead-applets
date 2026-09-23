@@ -14,10 +14,13 @@
 # Format:  <applet>  <CONFIG_SYMBOL>  <one line: what it needs the symbol for>
 #
 # The DECISION is derived, not written here: scripts/prune-dead-applets.sh
-# reads the GENERATED kernel config and removes an applet's symlink only
-# when its symbol is absent. So turning a symbol on restores the command
-# on the next build with no edit to this file -- which is the whole
-# reason it is a table of dependencies rather than a list of removals.
+# reads the GENERATED kernel config and CONVERGES each row against it.
+# A symbol that is absent loses the symlink; a symbol that is set gets
+# it back, at the path `busybox --list-full` itself names. So turning a
+# symbol on restores the command with no edit to this file -- which is
+# the whole reason it is a table of dependencies rather than a list of
+# removals, and the restore half is what makes that claim true of a
+# `--from 05` rebuild and not only of a full one.
 #
 # NEVER answer this question from kernel/config-x86_64. That file is a
 # ~280-option SUBSET, so a symbol it does not mention is not thereby

@@ -120,6 +120,40 @@ check "exit status" "$rc" "0"
 check "kept $first" "$(here "$W/r5/sbin/$first")" "present"
 case "$out" in *"no generated kernel config"*) ok ;; *) bad "it did not say why it did nothing" ;; esac
 
+echo "== a symbol turned ON puts the command BACK"
+# Without this the table's own claim -- "turning a symbol on restores
+# the command" -- is only true of a FULL build, because 03-base.sh is
+# what creates the symlinks and `--from 05` never reaches it. Watched
+# live on the RTC change: a working /dev/rtc0 and no hwclock.
+seed_rootfs "$W/r7"
+printf '# %s is not set\n' "$firstsym" > "$W/off.config"
+bash "$PRUNE" "$W/r7" "$W/off.config" >/dev/null 2>&1
+check "removed first" "$(here "$W/r7/sbin/$first")" "gone"
+# Restoring needs busybox to say where the applet goes, so this half
+# only runs against the shipped binary.
+if [ -x "$BB" ]; then
+    # `cp` onto an EXISTING file keeps the DESTINATION's mode, and
+    # seed_rootfs made that file with `: >` -- so without the chmod the
+    # copy is 644, `[ -x ]` in the script says no, and the restore half
+    # silently never runs. Eighth time in this project that the probe
+    # was the broken thing; it reported the feature missing.
+    cp "$BB" "$W/r7/bin/busybox"; chmod 755 "$W/r7/bin/busybox"
+    rel="$("$BB" --list-full 2>/dev/null | grep -x -- "[a-z/]*/$first" | head -1)"
+    printf '%s=y\n' "$firstsym" > "$W/back.config"
+    out="$(bash "$PRUNE" "$W/r7" "$W/back.config" 2>&1)"
+    check "restored at busybox's own path ($rel)" "$(here "$W/r7/$rel")" "present"
+    # The LINK, not a copy, and pointing where busybox's installer points.
+    check "it is a symlink" "$([ -L "$W/r7/$rel" ] && echo yes || echo no)" "yes"
+    tgt="$(readlink "$W/r7/$rel" 2>/dev/null || true)"
+    case "$tgt" in busybox|*../bin/busybox) ok ;; *) bad "target is '$tgt'" ;; esac
+    case "$out" in *restored*) ok ;; *) bad "the run said nothing about restoring" ;; esac
+    # AND IT MUST NOT CLOBBER. A second pass has nothing to do.
+    out2="$(bash "$PRUNE" "$W/r7" "$W/back.config" 2>&1)"
+    case "$out2" in *"restored 0"*) ok ;; *) bad "a second pass restored again: $out2" ;; esac
+else
+    echo "  (no shipped busybox at $BB -- skipping the restore checks)"
+fi
+
 echo "== the config in the image is found without being named"
 # The kernel build copies its .config to ${ROOTFS}/boot/config-*, so a
 # caller with no build tree (16-s6-rc-db.sh) still gets a real answer.
