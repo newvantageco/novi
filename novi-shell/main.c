@@ -4457,13 +4457,19 @@ int main(int argc, char *argv[]) {
 	 * key does nothing needs somewhere to find out that their line was
 	 * not understood, and `novi-launcher --keys` says so too. */
 	novi_keys_defaults(&server.keys);
-	novi_keys_load(&server.keys, NOVI_KEYS_PATH);
+	novi_keys_load_default(&server.keys);
 	if (server.keys.overridden > 0 || server.keys.unreadable > 0 ||
 			server.keys.conflicts > 0) {
+		/* Both files are named, because "which of the two said this"
+		 * is the first question somebody has when a shortcut is not
+		 * what they expected -- and on a session with no config home
+		 * the second name is absent rather than wrong. */
+		const char *user = novi_keys_user_path();
 		wlr_log(WLR_INFO, "keys: %d rebound, %d line(s) not understood, "
-			"%d disabled for clashing (%s)",
+			"%d disabled for clashing (%s%s%s)",
 			server.keys.overridden, server.keys.unreadable,
-			server.keys.conflicts, NOVI_KEYS_PATH);
+			server.keys.conflicts, NOVI_KEYS_PATH,
+			user != NULL ? " then " : "", user != NULL ? user : "");
 	}
 	/* The Wayland display is managed by libwayland. It handles accepting
 	 * clients from the Unix socket, manging Wayland globals, and so on. */

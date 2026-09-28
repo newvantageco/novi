@@ -2119,11 +2119,14 @@ int main(int argc, char *argv[]) {
 	 * everyone except the person who does not yet know any of them --
 	 * which is exactly who it is for. */
 	state.keys_mode = argc > 1 && strcmp(argv[1], "--keys") == 0;
-	/* Same two calls the compositor makes, over the same file, so the
-	 * sheet is a view of what will actually fire rather than of what
-	 * was compiled (RFC 0037). */
+	/* Same two calls the compositor makes, over the same two files and
+	 * in the same order, so the sheet is a view of what will actually
+	 * fire rather than of what was compiled (RFC 0037). One of them
+	 * being the per-user file makes that sharing load-bearing rather
+	 * than tidy: a sheet resolving `$HOME` differently from the
+	 * compositor would list somebody else's shortcuts. */
 	novi_keys_defaults(&state.keys);
-	novi_keys_load(&state.keys, NOVI_KEYS_PATH);
+	novi_keys_load_default(&state.keys);
 	state.notif_cleared = novi_hist_seen_read(NOVI_HIST_CLEARED_PATH);
 	state.themes_mode = argc > 1 && strcmp(argv[1], "--themes") == 0;
 	state.notif_mode = argc > 1 && strcmp(argv[1], "--notifications") == 0;

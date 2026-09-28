@@ -365,6 +365,13 @@ struct novi_settings {
 	 * inside layout_taskbar(): a read belongs where the state is
 	 * gathered, not where it is drawn. */
 	bool keys_mine[NOVI_BINDINGS_COUNT];
+	/* And which the MACHINE's file sets that yours does not (RFC 0037
+	 * roadmap 3). Two arrays rather than one, because "not the
+	 * compiled default" and "something this panel can undo" stopped
+	 * being the same question the moment there were two files: a row
+	 * `/etc/novi/keys.conf` sets on an account that cannot write it is
+	 * a customisation `d` must not claim to have removed. */
+	bool keys_machine[NOVI_BINDINGS_COUNT];
 
 	/* ── Network panel ── */
 	char wifi_iface[32];             /* "" = no wireless device */
@@ -1776,10 +1783,14 @@ static void keys_refresh(struct novi_settings *state) {
 	 * stale view recreates exactly the two-sources-of-truth problem
 	 * the System panel's own refresh exists to prevent. */
 	novi_keys_defaults(&state->keys);
-	novi_keys_load(&state->keys, NOVI_KEYS_PATH);
+	novi_keys_load_default(&state->keys);
+	const char *mine = novi_keys_write_path();
+	bool layered = strcmp(mine, NOVI_KEYS_PATH) != 0;
 	for (size_t i = 0; i < NOVI_BINDINGS_COUNT; i++) {
-		state->keys_mine[i] =
-			novi_keys_is_set(NOVI_KEYS_PATH, state->keys.v[i].name);
+		const char *action = state->keys.v[i].name;
+		state->keys_mine[i] = novi_keys_is_set(mine, action);
+		state->keys_machine[i] = layered && !state->keys_mine[i] &&
+			novi_keys_is_set(NOVI_KEYS_PATH, action);
 	}
 	if (state->keys_selected >= (int)NOVI_BINDINGS_COUNT) {
 		state->keys_selected = (int)NOVI_BINDINGS_COUNT - 1;
@@ -1828,11 +1839,11 @@ static void keys_report(struct novi_settings *state, int rc, const char *did) {
 		set_status(state, "Not a binding this desktop can use", true);
 	} else if (rc == EACCES || rc == EPERM) {
 		snprintf(buf, sizeof(buf), "Cannot write %s -- needs root",
-			NOVI_KEYS_PATH);
+			novi_keys_write_path());
 		set_status(state, buf, true);
 	} else {
 		snprintf(buf, sizeof(buf), "Could not write %s: %s",
-			NOVI_KEYS_PATH, strerror(rc));
+			novi_keys_write_path(), strerror(rc));
 		set_status(state, buf, true);
 	}
 }
@@ -1864,7 +1875,7 @@ static void keys_commit_edit(struct novi_settings *state) {
 		set_status(state, NULL, false);
 		return;
 	}
-	int rc = novi_keys_write(NOVI_KEYS_PATH, action, b);
+	int rc = novi_keys_write(novi_keys_write_path(), action, b);
 	keys_cancel_edit(state);
 	keys_refresh(state);
 	keys_report(state, rc, "Saved");
@@ -1876,16 +1887,35 @@ static void keys_reset_selected(struct novi_settings *state) {
 		return;
 	}
 	const char *action = state->keys.v[state->keys_selected].name;
-	if (!novi_keys_is_set(NOVI_KEYS_PATH, action)) {
-		/* Nothing to undo. Said rather than silently succeeding: a key
-		 * that appears to do nothing is how somebody concludes the
-		 * panel is broken. */
-		set_status(state, "That shortcut is already the default", false);
+	const char *path = novi_keys_write_path();
+	if (!novi_keys_is_set(path, action)) {
+		/* Nothing to undo HERE. Said rather than silently succeeding:
+		 * a key that appears to do nothing is how somebody concludes
+		 * the panel is broken -- and "already the default" would be a
+		 * lie about a row the machine's file sets, which is the one
+		 * case where this panel genuinely cannot help. */
+		if (state->keys_machine[state->keys_selected]) {
+			char buf[160];
+			snprintf(buf, sizeof(buf),
+				"That shortcut comes from %s -- edit it as root",
+				NOVI_KEYS_PATH);
+			set_status(state, buf, false);
+		} else {
+			set_status(state, "That shortcut is already the default", false);
+		}
 		return;
 	}
-	int rc = novi_keys_write(NOVI_KEYS_PATH, action, NULL);
+	int rc = novi_keys_write(path, action, NULL);
 	keys_refresh(state);
-	keys_report(state, rc, "Back to the default");
+	/* And what "the default" means depends on what is left underneath.
+	 * Removing your line on a machine whose own file sets this row
+	 * hands the row back to THAT file, not to the compiled table --
+	 * reporting otherwise would be a panel confidently describing a
+	 * binding it did not produce. */
+	keys_report(state, rc,
+		state->keys_machine[state->keys_selected]
+			? "Removed yours -- the machine's file still sets this"
+			: "Back to the default");
 }
 
 static void render_keys(struct novi_settings *state, uint32_t *px,
@@ -1897,9 +1927,20 @@ static void render_keys(struct novi_settings *state, uint32_t *px,
 	/* The file is named on screen for the same reason the System panel
 	 * names system.conf: the claim is that this panel and $EDITOR are
 	 * aimed at one document, and the way to make that credible is to
-	 * say which one. */
+	 * say which one. BOTH are named when there are two (RFC 0037
+	 * roadmap 3), in the order they are applied and with the one this
+	 * panel writes first -- a header naming only `/etc` on a session
+	 * that writes `~/.config` would send somebody to edit the file
+	 * their own is shadowing. */
+	char head[256];
+	const char *write_to = novi_keys_write_path();
+	if (strcmp(write_to, NOVI_KEYS_PATH) != 0) {
+		snprintf(head, sizeof(head), "%s, then %s", NOVI_KEYS_PATH, write_to);
+	} else {
+		snprintf(head, sizeof(head), "%s", NOVI_KEYS_PATH);
+	}
 	novi_text_draw(dest, state->font_small, CONTENT_X,
-		52 + state->font_small->ascent, NOVI_KEYS_PATH, LABEL_PIX);
+		52 + state->font_small->ascent, head, LABEL_PIX);
 
 	int list_y = 84;
 	int count = (int)NOVI_BINDINGS_COUNT;
@@ -1961,10 +2002,17 @@ static void render_keys(struct novi_settings *state, uint32_t *px,
 		 * table: setting a shortcut to what it already was is a real
 		 * thing somebody does, and the file is what says so. */
 		bool mine = state->keys_mine[i];
+		bool set_somewhere = mine || state->keys_machine[i];
 		novi_text_draw(dest, state->font_small, val_x,
 			y + state->font_small->ascent, text,
-			mine ? ACCENT_PIX : (sel ? TEXT_PIX : LABEL_PIX));
-		if (mine) {
+			set_somewhere ? ACCENT_PIX : (sel ? TEXT_PIX : LABEL_PIX));
+		if (set_somewhere) {
+			/* ONE marker for both files. Which of the two set a row is
+			 * a real difference and it belongs in the footer for the
+			 * row you are on, beside the key that acts on it -- a
+			 * second glyph in the grid would make nineteen rows carry
+			 * a distinction that matters on the one you are about to
+			 * press `d` at. */
 			novi_text_draw(dest, state->font_small, val_x - 18,
 				y + state->font_small->ascent, "*", ACCENT_PIX);
 		}
@@ -1988,8 +2036,8 @@ static void render_keys(struct novi_settings *state, uint32_t *px,
 		/* First, because a line the loader threw away is a shortcut
 		 * somebody thinks they set. */
 		snprintf(buf, sizeof(buf),
-			"%d line(s) in %s could not be understood",
-			state->keys.unreadable, NOVI_KEYS_PATH);
+			"%d line(s) in the keys files could not be understood",
+			state->keys.unreadable);
 		novi_text_draw(dest, state->font_small, CONTENT_X,
 			standing_y + state->font_small->ascent, buf, ERROR_PIX);
 	} else if (state->keys.conflicts > 0) {
@@ -2016,6 +2064,11 @@ static void render_keys(struct novi_settings *state, uint32_t *px,
 		novi_text_draw(dest, state->font_small, CONTENT_X,
 			footer_y + state->font_small->ascent, state->status,
 			state->status_is_error ? ERROR_PIX : SUCCESS_PIX);
+	} else if (state->keys_machine[state->keys_selected]) {
+		snprintf(buf, sizeof(buf), "%s -- set by %s; e edits yours",
+			state->keys.v[state->keys_selected].name, NOVI_KEYS_PATH);
+		novi_text_draw(dest, state->font_small, CONTENT_X,
+			footer_y + state->font_small->ascent, buf, LABEL_PIX);
 	} else {
 		snprintf(buf, sizeof(buf), "%s -- e edits, d restores the default",
 			state->keys.v[state->keys_selected].name);

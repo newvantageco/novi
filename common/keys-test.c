@@ -486,6 +486,256 @@ int main(void) {
 		}
 	}
 
+	/* ── Two layers, and which one wins (RFC 0037 roadmap 3) ──────────
+	 *
+	 * The machine's file and the user's, applied in that order. Almost
+	 * everything here is a thing a booted desktop shows you only as
+	 * "that shortcut is not what I set" -- an environment variable
+	 * that should not have been believed, a row disabled against a
+	 * clash that the NEXT file was about to resolve.
+	 */
+	{
+		char *saved_home = getenv("HOME");
+		char *home_copy = saved_home != NULL ? strdup(saved_home) : NULL;
+		char *saved_xdg = getenv("XDG_CONFIG_HOME");
+		char *xdg_copy = saved_xdg != NULL ? strdup(saved_xdg) : NULL;
+
+		unsetenv("XDG_CONFIG_HOME");
+		setenv("HOME", "/home/someone", 1);
+		const char *up = novi_keys_user_path();
+		ok(up != NULL &&
+			strcmp(up, "/home/someone/.config/novi/keys.conf") == 0,
+			"HOME alone gives ~/.config/novi/keys.conf");
+		ok(strcmp(novi_keys_write_path(), up) == 0,
+			"and that is where a panel writes");
+
+		setenv("XDG_CONFIG_HOME", "/elsewhere", 1);
+		up = novi_keys_user_path();
+		ok(up != NULL && strcmp(up, "/elsewhere/novi/keys.conf") == 0,
+			"XDG_CONFIG_HOME beats HOME, with no .config inserted");
+
+		/* An EMPTY value is how a shell spells "unset", and joining it
+		 * would name /novi/keys.conf -- a path in the root directory,
+		 * belonging to nobody. */
+		setenv("XDG_CONFIG_HOME", "", 1);
+		up = novi_keys_user_path();
+		ok(up != NULL &&
+			strcmp(up, "/home/someone/.config/novi/keys.conf") == 0,
+			"an empty XDG_CONFIG_HOME counts as unset");
+
+		/* A RELATIVE one is refused rather than resolved: the spec
+		 * requires absolute, and resolving against the launching
+		 * directory would make a desktop's shortcuts depend on
+		 * somebody's shell history. */
+		setenv("XDG_CONFIG_HOME", "config", 1);
+		up = novi_keys_user_path();
+		ok(up != NULL &&
+			strcmp(up, "/home/someone/.config/novi/keys.conf") == 0,
+			"and so does a relative one");
+
+		unsetenv("XDG_CONFIG_HOME");
+		setenv("HOME", "", 1);
+		ok(novi_keys_user_path() == NULL, "an empty HOME gives no user file");
+		setenv("HOME", "relative/home", 1);
+		ok(novi_keys_user_path() == NULL, "nor does a relative one");
+		unsetenv("HOME");
+		ok(novi_keys_user_path() == NULL,
+			"nor does an environment naming no config home at all");
+		ok(strcmp(novi_keys_write_path(), NOVI_KEYS_PATH) == 0,
+			"and then a panel writes the machine's file");
+
+		/* A truncated path names a DIFFERENT file. No answer is the
+		 * honest one, and silently writing to the truncation is the
+		 * failure worth ruling out. */
+		char *huge = malloc(5000);
+		if (huge != NULL) {
+			huge[0] = '/';
+			memset(huge + 1, 'x', 4998);
+			huge[4999] = '\0';
+			setenv("HOME", huge, 1);
+			ok(novi_keys_user_path() == NULL,
+				"a HOME too long to hold the leaf gives no user file");
+			free(huge);
+		}
+
+		char dir[] = "/tmp/novi-keys-layer-XXXXXX";
+		if (mkdtemp(dir) == NULL) {
+			ok(false, "a temp directory for the layering checks");
+		} else {
+			char machine[256], user[256];
+			snprintf(machine, sizeof machine, "%s/etc.conf", dir);
+			snprintf(user, sizeof user, "%s/user.conf", dir);
+			const char *layers[] = { machine, user };
+			struct novi_keys k;
+
+			/* The machine's file alone. */
+			write_file(machine, "find.themes = Super+Y\n");
+			unlink(user);
+			novi_keys_defaults(&k);
+			novi_keys_load_layers(&k, layers, 2);
+			ok(row(&k, "find.themes")->sym == XKB_KEY_y,
+				"the machine's file applies with no user file beside it");
+			ok(k.unreadable == 0,
+				"and a user file that is not there is not an error");
+
+			/* The user's alone. */
+			unlink(machine);
+			write_file(user, "find.themes = Super+Z\n");
+			novi_keys_defaults(&k);
+			novi_keys_load_layers(&k, layers, 2);
+			ok(row(&k, "find.themes")->sym == XKB_KEY_z,
+				"the user's file applies with no machine file beside it");
+
+			/* Both, same action: YOURS WINS, because it is last. */
+			write_file(machine, "find.themes = Super+Y\n");
+			write_file(user, "find.themes = Super+Z\n");
+			novi_keys_defaults(&k);
+			novi_keys_load_layers(&k, layers, 2);
+			ok(row(&k, "find.themes")->sym == XKB_KEY_z,
+				"the user's file wins over the machine's on the same action");
+
+			/* Both, different actions: it layers PER ACTION. A user
+			 * file with one line in it changes one shortcut and
+			 * inherits every other, which is the whole reason this is
+			 * not "whichever file exists is the answer". */
+			write_file(machine,
+				"find.themes = Super+Y\nwindow.close = Super+W\n");
+			write_file(user, "find.notifications = Super+B\n");
+			novi_keys_defaults(&k);
+			novi_keys_load_layers(&k, layers, 2);
+			ok(row(&k, "find.themes")->sym == XKB_KEY_y &&
+				row(&k, "window.close")->sym == XKB_KEY_w,
+				"a user file with one line leaves the machine's other lines");
+			ok(row(&k, "find.notifications")->sym == XKB_KEY_b,
+				"and its own line is applied on top");
+			ok(row(&k, "session.lock")->sym == XKB_KEY_l,
+				"with everything neither file mentions still compiled-in");
+
+			/* Restating a value is not an override, in either file --
+			 * `overridden` counts rows a line MOVED, and a second
+			 * layer agreeing with the first has moved nothing. */
+			write_file(machine, "find.themes = Super+Y\n");
+			write_file(user, "find.themes = Super+Y\n");
+			novi_keys_defaults(&k);
+			novi_keys_load_layers(&k, layers, 2);
+			ok(k.overridden == 1,
+				"a user line restating the machine's counts as one override");
+
+			/* THE COLLISION PASS RUNS ONCE, AFTER THE LAST LAYER, and
+			 * this is the check that says so. The machine moves
+			 * find.notifications onto find.themes' default key -- a
+			 * clash, and find.notifications is the later row, so a
+			 * pass run per FILE disables it here. The user's file then
+			 * moves find.themes away, resolving the clash that the
+			 * disabling was for: one pass at the end leaves both
+			 * bound, a pass per file leaves a shortcut silently doing
+			 * nothing with no line anywhere to explain it. */
+			write_file(machine, "find.notifications = Super+T\n");
+			write_file(user, "find.themes = Super+Y\n");
+			novi_keys_defaults(&k);
+			novi_keys_load_layers(&k, layers, 2);
+			ok(k.conflicts == 0,
+				"a clash the NEXT layer resolves is not counted as one");
+			ok(row(&k, "find.notifications")->sym == XKB_KEY_t,
+				"and the row a per-file pass would have disabled still fires");
+			ok(row(&k, "find.themes")->sym == XKB_KEY_y,
+				"beside the line that resolved it");
+
+			/* A clash NOTHING resolves is still a clash. Without this
+			 * the check above passes just as well on a loader that
+			 * never resolves anything at all. */
+			write_file(machine, "find.notifications = Super+T\n");
+			write_file(user, "window.close = Super+W\n");
+			novi_keys_defaults(&k);
+			novi_keys_load_layers(&k, layers, 2);
+			ok(k.conflicts == 1 &&
+				row(&k, "find.notifications")->sym == XKB_KEY_NoSymbol,
+				"a clash neither layer resolves still unbinds the later row");
+
+			/* An unreadable line is counted wherever it is. */
+			write_file(machine, "nonsense\n");
+			write_file(user, "find.themes = Ctrl+T\n");
+			novi_keys_defaults(&k);
+			novi_keys_load_layers(&k, layers, 2);
+			ok(k.unreadable == 2,
+				"bad lines are counted across both layers");
+
+			/* A NULL or empty layer is skipped rather than opened --
+			 * novi_keys_load_default() passes novi_keys_user_path()
+			 * straight through, and that is NULL on a session with no
+			 * config home. */
+			const char *with_hole[] = { machine, NULL, user, "" };
+			write_file(machine, "find.themes = Super+Y\n");
+			write_file(user, "window.close = Super+W\n");
+			novi_keys_defaults(&k);
+			novi_keys_load_layers(&k, with_hole, 4);
+			ok(row(&k, "find.themes")->sym == XKB_KEY_y &&
+				row(&k, "window.close")->sym == XKB_KEY_w,
+				"a NULL or empty layer is skipped, not opened");
+
+			/* And novi_keys_load() is still one file: a caller naming
+			 * a path means that path and not that path plus whatever
+			 * the environment says. */
+			setenv("HOME", dir, 1);
+			novi_keys_defaults(&k);
+			novi_keys_load(&k, machine);
+			ok(row(&k, "window.close")->sym == XKB_KEY_q,
+				"novi_keys_load() applies the one file it was given");
+
+			unlink(machine);
+			unlink(user);
+			rmdir(dir);
+		}
+
+		/* The writer creates the directories above the user file. A
+		 * fresh account has no ~/.config, so without this the FIRST
+		 * shortcut anybody sets from the panel fails with ENOENT --
+		 * which reads as a broken panel rather than a missing
+		 * directory. */
+		char home[] = "/tmp/novi-keys-home-XXXXXX";
+		if (mkdtemp(home) == NULL) {
+			ok(false, "a temp HOME for the writer check");
+		} else {
+			unsetenv("XDG_CONFIG_HOME");
+			setenv("HOME", home, 1);
+			const char *path = novi_keys_user_path();
+			ok(path != NULL, "a temp HOME names a user file");
+			if (path != NULL) {
+				char keep[512];
+				snprintf(keep, sizeof keep, "%s", path);
+				ok(novi_keys_write(keep, "find.themes", "Super+Y") == 0,
+					"writing it creates ~/.config/novi on the way");
+				char *got = read_file(keep);
+				ok(got != NULL &&
+					strcmp(got, "find.themes = Super+Y\n") == 0,
+					"and the line is there to read back");
+				free(got);
+				ok(novi_keys_is_set(keep, "find.themes"),
+					"and is_set sees it");
+				unlink(keep);
+				char d[512];
+				snprintf(d, sizeof d, "%s/.config/novi", home);
+				rmdir(d);
+				snprintf(d, sizeof d, "%s/.config", home);
+				rmdir(d);
+			}
+			rmdir(home);
+		}
+
+		if (home_copy != NULL) {
+			setenv("HOME", home_copy, 1);
+			free(home_copy);
+		} else {
+			unsetenv("HOME");
+		}
+		if (xdg_copy != NULL) {
+			setenv("XDG_CONFIG_HOME", xdg_copy, 1);
+			free(xdg_copy);
+		} else {
+			unsetenv("XDG_CONFIG_HOME");
+		}
+	}
+
 	if (failures > 0) {
 		fprintf(stderr, "keys: %d of %d checks FAILED\n", failures, checks);
 		return 1;

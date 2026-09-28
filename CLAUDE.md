@@ -3143,6 +3143,76 @@ applies it over the compiled table and BOTH binaries load it.
   skips itself where the header is missing skips itself exactly where
   it would have caught something.
 
+## Architecture: two keys files, and a session with no HOME
+
+RFC 0037 roadmap 3. `$XDG_CONFIG_HOME/novi/keys.conf` (or
+`~/.config/novi/keys.conf`) is applied AFTER `/etc/novi/keys.conf`, so
+yours wins, a line at a time.
+
+- **YOURS IS LAST AND THEREFORE WINS**, which is the question the
+  roadmap item said was the interesting one. Same argument as
+  `/etc/novi/themes` shadowing `/usr/share/novi/themes`. It layers per
+  ACTION, not per file: one line in your file changes one shortcut and
+  inherits the rest, or a machine-wide binding added later would never
+  reach anybody who had ever set one.
+- **THE COLLISION PASS RUNS ONCE, AFTER THE LAST LAYER, and per-file
+  is wrong in a way nothing announces.** `/etc` moves
+  `find.notifications` onto `find.themes`' default `Super+T`; a
+  per-file pass sees the clash and disables the later row; your file
+  then moves `find.themes` away, resolving the clash the disabling was
+  for -- and the row stays off. One shortcut silently does nothing
+  with no line anywhere to explain it. `apply_file()` applies a layer,
+  `resolve_conflicts()` runs after the last. The test needs BOTH
+  halves: a clash the next layer resolves is not counted, AND a clash
+  nothing resolves still is -- without the second, the first passes on
+  a loader that never resolves anything.
+- **NOTHING IN THE DESKTOP SESSION HAD A `HOME`, for the life of the
+  project, and only this found it.** `init/services/novi-shell/run`
+  exported `XDG_RUNTIME_DIR` and never `HOME`. Invisible until a
+  per-user file made it a WRONG-KEY document: novi-settings from the
+  Apps grid inherits the compositor's environment (no HOME, writes
+  `/etc`), from a foot terminal it inherits a login shell's (writes
+  `~/.config/novi/keys.conf`, which the compositor would never read) --
+  so the panel reports a shortcut saved and the desktop goes on
+  dispatching the old one. `export HOME=/root` beside the
+  `mkdir -p /run/user/0` that already hardcodes uid 0. **A session and
+  the clients it spawns have to agree about where a config home is,
+  and only the session can make them.**
+- **THE PANEL WRITES YOUR FILE, and that is a decision rather than a
+  fallback.** A settings window editing a machine-wide file changes
+  every account on behalf of whoever opened it -- and needs root, so
+  on a machine with a real login it just fails.
+  `novi_keys_write_path()` is yours when there is one and `/etc`
+  otherwise, so a single-user machine is unchanged.
+- **`d` CANNOT ALWAYS RESTORE THE DEFAULT, and must not claim to.** A
+  row `/etc` sets and you have not is a customisation the panel cannot
+  undo (*"comes from /etc/novi/keys.conf -- edit it as root"*), and
+  removing your line from a row `/etc` also sets hands the row back to
+  THAT file, not to the compiled table (*"removed yours -- the
+  machine's file still sets this"*). `keys_mine` and `keys_machine`
+  are two arrays because "not the compiled default" and "something
+  this panel can undo" stopped being one question. The grid keeps ONE
+  marker; which file set a row lives in the footer beside the key that
+  acts on it.
+- **An EMPTY `$XDG_CONFIG_HOME` counts as unset** (that is how a shell
+  spells "I did not set this", and joining it names `/novi/keys.conf`),
+  a RELATIVE one is refused rather than resolved (shortcuts would
+  depend on somebody's shell history), and a path too long for the
+  leaf gives no user file -- a truncation names a DIFFERENT file.
+- **`novi_keys_write()` creates the directories above the user file**,
+  because a fresh account has no `~/.config` and the first shortcut
+  anybody sets would fail with ENOENT -- which reads as a broken
+  panel. Only for that path: creating `/etc/novi` at 0700 would take
+  `system.conf` away from every non-root reader on the way past.
+- **`novi.keys=off` turns off BOTH**, or the escape hatch is no escape
+  for the person most likely to need it.
+- **The layer is verified on the build host and NOT on a booted
+  machine.** 80 checks over the real loader and the real writer, each
+  provoked; what they cannot show is the session, so the `HOME` export
+  and the panel writing the file the compositor reads are reasoned
+  from the mechanism. `init/` changed, so that boot needs
+  `bash build/16-s6-rc-db.sh` and a fresh image.
+
 ## Architecture: nothing reaped the compositor's children
 
 `spawn()` forked and never waited, and novi-shell installed no SIGCHLD

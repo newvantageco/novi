@@ -4,6 +4,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <limits.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
@@ -276,17 +277,72 @@ static bool disabled_on_cmdline(void) {
 	return off;
 }
 
-int novi_keys_load(struct novi_keys *k, const char *path) {
-	if (disabled_on_cmdline()) {
-		return 0;
+/* ── The second layer ─────────────────────────────────────────────────
+ *
+ * RFC 0037 roadmap 3. `/etc/novi/keys.conf` is the machine's and
+ * `$XDG_CONFIG_HOME/novi/keys.conf` (or `~/.config/novi/keys.conf`) is
+ * yours, and yours is read LAST, so yours wins. Same argument as
+ * `/etc/novi/themes` shadowing `/usr/share/novi/themes`: the more
+ * specific owner of the two is the one who should not have to fight
+ * the other for a shortcut on their own account.
+ *
+ * NOT CACHED. It is three getenv()s and a snprintf, and the one thing
+ * a cache would buy -- answering the same after the environment
+ * changes -- is exactly what a test must not be told.
+ *
+ * An EMPTY value counts as unset, because `XDG_CONFIG_HOME=` is how a
+ * shell spells "I did not set this" and joining it would produce
+ * `/novi/keys.conf`. A RELATIVE value is refused rather than resolved:
+ * the spec requires an absolute path, and resolving one against
+ * whatever directory a client happened to be launched from would make
+ * a desktop's shortcuts depend on somebody's shell history.
+ */
+static const char *env_dir(const char *name) {
+	const char *v = getenv(name);
+	if (v == NULL || v[0] != '/') {
+		return NULL;
 	}
+	return v;
+}
+
+const char *novi_keys_user_path(void) {
+	static char path[PATH_MAX];
+	const char *xdg = env_dir("XDG_CONFIG_HOME");
+	int n;
+	if (xdg != NULL) {
+		n = snprintf(path, sizeof path, "%s/" NOVI_KEYS_USER_LEAF, xdg);
+	} else {
+		const char *home = env_dir("HOME");
+		if (home == NULL) {
+			return NULL;
+		}
+		n = snprintf(path, sizeof path, "%s/.config/" NOVI_KEYS_USER_LEAF,
+			home);
+	}
+	/* A truncated path names a DIFFERENT file, and one nobody meant.
+	 * No answer is the honest one. */
+	if (n < 0 || (size_t)n >= sizeof path) {
+		return NULL;
+	}
+	return path;
+}
+
+const char *novi_keys_write_path(void) {
+	const char *user = novi_keys_user_path();
+	return user != NULL ? user : NOVI_KEYS_PATH;
+}
+
+/* One layer, applied over whatever is already in `k`. No collision
+ * pass: that runs ONCE, after the last layer, and the reason is a real
+ * trap rather than tidiness -- see novi_keys_load_layers(). */
+static void apply_file(struct novi_keys *k, const char *path) {
 	FILE *f = fopen(path, "r");
 	if (f == NULL) {
 		/* No file is not an error and never has been: the compiled
 		 * defaults are a complete answer, and a desktop that refused
 		 * to bind anything because /etc had no opinion would be a
 		 * desktop with no keys. */
-		return 0;
+		return;
 	}
 
 	char line[256];
@@ -353,13 +409,15 @@ int novi_keys_load(struct novi_keys *k, const char *path) {
 		rewrite_text(k, idx);
 	}
 	fclose(f);
+}
 
-	/* Collisions are resolved by DISABLING the later row, not by
-	 * letting the earlier one quietly win. Dispatch stops at its first
-	 * match, so "first wins" is what the loop does on its own -- and
-	 * the cost of leaving it there is a sheet that lists a key for a
-	 * row that can never fire, which is the wrong-key document this
-	 * table exists to prevent. Unbound at least SAYS so. */
+/* Collisions are resolved by DISABLING the later row, not by
+ * letting the earlier one quietly win. Dispatch stops at its first
+ * match, so "first wins" is what the loop does on its own -- and
+ * the cost of leaving it there is a sheet that lists a key for a
+ * row that can never fire, which is the wrong-key document this
+ * table exists to prevent. Unbound at least SAYS so. */
+static void resolve_conflicts(struct novi_keys *k) {
 	for (size_t i = 0; i < NOVI_BINDINGS_COUNT; i++) {
 		bool clash = false;
 		for (size_t j = 0; j < i; j++) {
@@ -380,7 +438,42 @@ int novi_keys_load(struct novi_keys *k, const char *path) {
 		k->conflicts++;
 		rewrite_text(k, i);
 	}
+}
+
+int novi_keys_load_layers(struct novi_keys *k, const char *const *paths,
+		size_t n) {
+	if (disabled_on_cmdline()) {
+		/* Both layers, not just the machine one. An escape hatch that
+		 * left the per-user file in force would be no escape at all
+		 * for the person most likely to need it -- the one who just
+		 * locked themselves out by editing their own copy. */
+		return 0;
+	}
+	for (size_t i = 0; i < n; i++) {
+		if (paths[i] == NULL || paths[i][0] == '\0') {
+			continue;
+		}
+		apply_file(k, paths[i]);
+	}
+	/* ONCE, after the last layer. Per-file it would be wrong in a way
+	 * nothing announces: a user file that SWAPS two shortcuts applies
+	 * its first line, the pass sees it landing on the second row's
+	 * still-default binding, disables the second row -- and then the
+	 * line that was about to move that row away is applied to a row
+	 * this loader has already switched off. One of the two shortcuts
+	 * silently does nothing. */
+	resolve_conflicts(k);
 	return k->unreadable;
+}
+
+int novi_keys_load(struct novi_keys *k, const char *path) {
+	const char *one[] = { path };
+	return novi_keys_load_layers(k, one, 1);
+}
+
+int novi_keys_load_default(struct novi_keys *k) {
+	const char *layers[] = { NOVI_KEYS_PATH, novi_keys_user_path() };
+	return novi_keys_load_layers(k, layers, 2);
 }
 
 /* ── Writing one back ─────────────────────────────────────────────────
@@ -446,6 +539,33 @@ bool novi_keys_is_set(const char *path, const char *action)
 	return found;
 }
 
+/* mkdir -p for the directory holding `path`. 0700 because XDG says a
+ * config home is the user's own; failures are ignored on purpose --
+ * the fopen() that follows is the real answer, and reporting "could
+ * not create a directory" for a directory that already exists is a
+ * worse error than the one it replaces. */
+static void make_parents(const char *path)
+{
+	char buf[PATH_MAX];
+	if ((size_t)snprintf(buf, sizeof buf, "%s", path) >= sizeof buf) {
+		return;
+	}
+	char *slash = strrchr(buf, '/');
+	if (slash == NULL) {
+		return;
+	}
+	*slash = '\0';
+	for (char *p = buf + 1; *p != '\0'; p++) {
+		if (*p != '/') {
+			continue;
+		}
+		*p = '\0';
+		(void)mkdir(buf, 0700);
+		*p = '/';
+	}
+	(void)mkdir(buf, 0700);
+}
+
 int novi_keys_write(const char *path, const char *action, const char *spec)
 {
 	if (path == NULL || action == NULL || !known_action(action)) {
@@ -492,6 +612,17 @@ int novi_keys_write(const char *path, const char *action, const char *spec)
 	char tmp[PATH_MAX];
 	if ((size_t)snprintf(tmp, sizeof tmp, "%s.tmp", path) >= sizeof tmp) {
 		return ENAMETOOLONG;
+	}
+	/* A fresh account has no `~/.config`, let alone `~/.config/novi`,
+	 * so the FIRST shortcut anybody sets from the panel would fail
+	 * with ENOENT -- which reads as the panel being broken rather than
+	 * as a directory being absent. Only for the per-user path: a
+	 * missing `/etc/novi` is a machine with a much larger problem, and
+	 * creating it here at 0700 would take `system.conf` away from
+	 * every non-root reader on the way past. */
+	const char *user = novi_keys_user_path();
+	if (user != NULL && strcmp(path, user) == 0) {
+		make_parents(path);
 	}
 	FILE *out = fopen(tmp, "w");
 	if (out == NULL) {

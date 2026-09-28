@@ -154,10 +154,124 @@ every consumer happened to include `xkbcommon.h` (or wlroots, which
 does) first. A header that only works second breaks the first time
 somebody includes it first — which is exactly what `keys.c` did.
 
+### 9. Yours is read last, so yours wins — and it layers per action.
+
+RFC 0037 roadmap 3. `/etc/novi/keys.conf` is the machine's;
+`$XDG_CONFIG_HOME/novi/keys.conf`, falling back to
+`~/.config/novi/keys.conf`, is yours, and it is applied second.
+
+Same argument as `/etc/novi/themes` shadowing
+`/usr/share/novi/themes`: between two owners of one setting, the more
+specific one should not have to fight the other for a shortcut on
+their own account.
+
+Per ACTION rather than per file, because that is the rule this file
+already follows over the compiled defaults (decision 2). A user file
+that replaced the machine's answer wholesale would mean copying out
+nineteen lines you did not want to change in order to change one —
+and a machine-wide binding added later would never reach anybody who
+had ever set a shortcut.
+
+### 10. The collision pass runs ONCE, after the last layer.
+
+Decision 6 disables the later of two rows that land on one binding.
+Running that pass per FILE is wrong in a way nothing announces, and it
+is the only genuinely subtle thing in this item.
+
+Suppose `/etc` moves `find.notifications` onto `Super+T`, which is
+`find.themes`' default. That is a clash, and `find.notifications` is
+the later row, so a per-file pass disables it *there*. Your file then
+moves `find.themes` to `Super+Y` — resolving the very clash the
+disabling was for — and the row that was switched off stays off. One
+shortcut silently does nothing, with no line in either file to explain
+it.
+
+So `apply_file()` applies a layer and `resolve_conflicts()` runs after
+the last one. The test asserts both halves: a clash the next layer
+resolves is not counted, and a clash **nothing** resolves still is —
+without that second check the first passes just as well on a loader
+that never resolves anything at all.
+
+### 11. The panel writes YOUR file, and says so when `d` cannot help.
+
+A settings window quietly editing a machine-wide file changes every
+account on the machine on behalf of whoever happened to open it. That
+is a thing to ask about rather than a default — and on any machine
+with a real login it simply fails, because `/etc/novi/keys.conf` is
+root-owned. `novi_keys_write_path()` is the user's file when there is
+one and `/etc/novi/keys.conf` otherwise, so a single-user machine
+behaves exactly as it did.
+
+Two consequences the panel has to carry rather than hide:
+
+- **The header names both files**, in the order they are applied. A
+  panel naming only `/etc` on a session that writes `~/.config` would
+  send somebody to edit the file their own is shadowing.
+- **`d` restores the default only if there is a default underneath.**
+  A row `/etc` sets and you have not is a customisation this panel
+  cannot undo, so pressing `d` on it says *"that shortcut comes from
+  /etc/novi/keys.conf — edit it as root"* rather than reporting
+  success; and removing your line from a row `/etc` also sets reports
+  *"removed yours — the machine's file still sets this"*. `keys_mine`
+  and `keys_machine` are two arrays for exactly that reason: "not the
+  compiled default" and "something this panel can undo" stopped being
+  the same question the moment there were two files.
+
+The grid keeps ONE marker for both. Which file set a row is a real
+difference and it belongs in the footer for the row you are on, beside
+the key that acts on it — a second glyph would make nineteen rows
+carry a distinction that matters on one.
+
+### 12. NOTHING IN THIS SESSION HAD A `HOME`, and only this found it.
+
+`init/services/novi-shell/run` exports `XDG_RUNTIME_DIR` and has never
+exported `HOME`. Every program in the desktop session has therefore
+run without one for the life of the project — invisible, because
+nothing looked.
+
+A per-user keys file turns that from an inconvenience into a
+**wrong-key document**, which is the failure this whole RFC exists to
+rule out. `novi-settings` opened from the Apps grid inherits the
+compositor's environment and has no `HOME`, so it writes `/etc`;
+opened from a foot terminal it inherits a login shell's `HOME` and
+writes `~/.config/novi/keys.conf` — which the compositor, started
+without one, would never read. The panel would report a shortcut saved
+and the desktop would go on dispatching the old binding.
+
+So the session says where its config home is: `export HOME=/root`,
+beside the `mkdir -p /run/user/0` that already hardcodes uid 0 for the
+same reason, with a comment saying the two change together the day
+this service runs as somebody else. The rule generalises past this
+file: **a session and the clients it spawns have to agree about where
+a config home is, and the only thing that can make them agree is the
+session.**
+
+A few smaller ones, each a way to be wrong quietly:
+
+- **An empty `$XDG_CONFIG_HOME` counts as unset**, because that is how
+  a shell spells "I did not set this" and joining it names
+  `/novi/keys.conf` — a file in the root directory belonging to
+  nobody.
+- **A relative one is refused rather than resolved.** The spec
+  requires absolute, and resolving against the launching directory
+  would make a desktop's shortcuts depend on somebody's shell history.
+- **A path too long to hold the leaf gives no user file at all**, since
+  a truncated path names a different file and writing to it silently
+  is worse than having none.
+- **`novi_keys_write()` creates the directories above the user file.**
+  A fresh account has no `~/.config`, so without it the first shortcut
+  anybody sets fails with `ENOENT` — which reads as a broken panel.
+  Only for that path: creating a missing `/etc/novi` at 0700 would
+  take `system.conf` away from every non-root reader on the way past.
+- **`novi.keys=off` turns off BOTH.** An escape hatch that left the
+  per-user file in force would be no escape for the person most likely
+  to need it — the one who just locked themselves out by editing their
+  own copy.
+
 ## What is checked without a desktop
 
 `common/keys-test.c`, linking the real loader, run by
-`make -C common check` from `scripts/lint.sh`. **289 checks** (the
+`make -C common check` from `scripts/lint.sh`. **369 checks** (the
 count is pair-wise in places -- every row against every other for the
 collision invariant). The
 interesting ones are all things a running desktop cannot show you: a
@@ -179,6 +293,18 @@ the same way — a row added without a line in the file is a shortcut
 nobody can discover the name of, and a line naming an action that was
 removed is documentation for something that does nothing.
 
+**The two layers are checked here too** (decisions 9 to 12), and
+almost nothing about them is visible on a booted desktop: an
+environment variable that should not have been believed, and a row
+disabled against a clash the next file was about to resolve, both
+present as "that shortcut is not what I set". Each new assertion was
+confirmed the same way as the rest — by breaking what it covers:
+running the collision pass per file (the two rows about a clash the
+next layer resolves fail), believing any non-NULL `$HOME` (the empty
+and relative cases fail), applying the layers in reverse (the user
+file stops winning), and skipping the `mkdir` (the write into a fresh
+`$HOME` fails with the three checks that follow it).
+
 CI installs `libxkbcommon-dev` for this. The test needs a real
 `xkb_keysym_from_name()`, the alternative is a hand-copied table of
 xkbcommon's own, and a test that skips itself where the header is
@@ -186,8 +312,21 @@ missing skips itself exactly where it would have caught something.
 
 ## What was verified, and what could not be
 
-**On the build host:** the 111 checks above; both binaries
+**On the build host:** the checks above; both binaries
 cross-compiled clean at `-O2` with this project's hardening flags.
+
+**The per-user layer (decisions 9 to 12) is verified on the build host
+and NOT on a booted machine.** The 80 new checks drive the real loader
+and the real writer over real files with a real `$HOME`, which is
+where every interesting case lives; what they cannot show is the
+session. So two claims here are reasoned from the mechanism rather
+than watched: that `export HOME=/root` makes the compositor and the
+clients it spawns resolve the same user file, and that the Keys panel
+then writes the file the compositor will read. Both want a live boot,
+and `init/services/novi-shell/run` changed, so that boot needs
+`bash build/16-s6-rc-db.sh` and a fresh image first. Said plainly
+because this RFC's own record above is what a verified claim looks
+like, and these are not that yet.
 
 **On a booted machine, done.** A live image with these five lines
 appended to the shipped `keys.conf`:
@@ -226,6 +365,12 @@ is the same `linux ...` line a person edits for `novi.state=off`.
   that is read at use time by exactly one program.
 - **A change takes effect at the compositor's next start**, like the
   theme's does for open windows. The file says so.
+- **There are two keys files now**, and `/etc/novi/keys.conf`
+  documents the second at the top. The pattern named above holds: the
+  machine's copy is what an administrator writes in `$EDITOR`, and
+  `novi-settings` writes yours.
+- **The desktop session exports `HOME`.** Nothing to do with
+  shortcuts, and true of every program it starts.
 
 ## Roadmap
 
@@ -313,6 +458,20 @@ is the same `linux ...` line a person edits for `novi.state=off`.
    the same argument applies — a shortcut file that can run anything
    is a shell with a config file attached. If it happens, it should
    name things the desktop already knows how to do.
-3. **Per-user bindings.** This is a machine-wide file. A `~/.config`
-   layer over it is a small change to the loader and a real question
-   about which of them wins.
+3. ~~**Per-user bindings.**~~ **Done** — decisions 9 to 12.
+   `$XDG_CONFIG_HOME/novi/keys.conf` (or `~/.config/novi/keys.conf`)
+   over `/etc/novi/keys.conf`, applied second, so yours wins, a line
+   at a time.
+
+   The item was right that it is a small change to the loader and
+   right that the interesting part is which of them wins. It was wrong
+   about the size of the rest: a second file is also a second place a
+   panel can write, a second thing a footer has to name, a row `d`
+   must not claim to have reset, a collision pass that must not run
+   until the last layer is in — and, the one that had to be found
+   rather than reasoned about, **a desktop session with no `HOME` at
+   all**, which had been true since this project started and which
+   only a per-user file could make matter.
+
+**Every item in this roadmap is now closed except item 2**, which is a
+decision not to rather than work outstanding.

@@ -35,6 +35,10 @@
 
 #define NOVI_KEYS_PATH "/etc/novi/keys.conf"
 
+/* And the per-user layer over it (RFC 0037 roadmap 3), under
+ * $XDG_CONFIG_HOME or ~/.config. */
+#define NOVI_KEYS_USER_LEAF "novi/keys.conf"
+
 /* Long enough for "Super + Shift + XF86AudioRaiseVolume". A binding
  * that does not fit is truncated rather than dropped: the sheet is
  * showing a key somebody chose, and half of its name beats none of
@@ -84,6 +88,53 @@ void novi_keys_defaults(struct novi_keys *k);
  * loses a row: a line that cannot be parsed leaves that row alone. */
 int novi_keys_load(struct novi_keys *k, const char *path);
 
+/* ── Two files, and which one wins ────────────────────────────────────
+ *
+ * RFC 0037 roadmap 3. `/etc/novi/keys.conf` is the MACHINE's and
+ * `$XDG_CONFIG_HOME/novi/keys.conf` (falling back to
+ * `~/.config/novi/keys.conf`) is YOURS, and yours is applied LAST, so
+ * yours wins. Same argument as `/etc/novi/themes` shadowing
+ * `/usr/share/novi/themes`: between two owners of one setting, the
+ * more specific one should not have to fight the other for a shortcut
+ * on their own account.
+ *
+ * It layers PER ACTION, not per file: a user file with one line in it
+ * changes one shortcut and inherits every other from `/etc`. That is
+ * the additive rule the whole of this file already follows, and the
+ * alternative -- a user file replacing the machine's answer wholesale
+ * -- would mean copying nineteen lines you did not want to change in
+ * order to change one.
+ *
+ * `novi_keys_load()` is this with one layer, kept because a test
+ * drives one file at a time and because a caller with an explicit
+ * path means exactly that path.
+ */
+int novi_keys_load_layers(struct novi_keys *k, const char *const *paths,
+	size_t n);
+
+/* The two layers above, in that order. What every client calls. */
+int novi_keys_load_default(struct novi_keys *k);
+
+/* The per-user file, or NULL when the environment names no config
+ * home. NOT CACHED, and an empty or relative $XDG_CONFIG_HOME/$HOME
+ * counts as absent -- see keys.c for why each of those is a decision
+ * rather than an oversight. The returned pointer is a static buffer,
+ * valid until the next call. */
+const char *novi_keys_user_path(void);
+
+/* Where a GUI should write: the per-user file when there is one, and
+ * `/etc/novi/keys.conf` otherwise.
+ *
+ * A PANEL WRITES THE USER'S FILE, and that is the decision rather than
+ * a fallback. A settings window quietly editing a machine-wide file
+ * changes every account on the machine on behalf of whoever happened
+ * to open it, which is a thing to ask about rather than a default; and
+ * it needs root, so on any machine with a real login it simply fails.
+ * The machine-wide file stays what an administrator edits in
+ * `$EDITOR`, which is what keys.conf was always for.
+ */
+const char *novi_keys_write_path(void);
+
 /* Where novi_keys_load() looks for the escape hatch. */
 #define NOVI_KEYS_CMDLINE "/proc/cmdline"
 
@@ -129,7 +180,14 @@ void novi_keys_format(unsigned mods, xkb_keysym_t sym, unsigned flags,
  *
  * Returns 0, or an errno: EINVAL for a bad action or spec, and
  * whatever open/write/rename gave otherwise (EACCES is the ordinary
- * one — this file is root-owned).
+ * one — the machine-wide file is root-owned).
+ *
+ * When `path` is the per-user file it CREATES THE DIRECTORIES above
+ * it. A fresh account has no `~/.config`, so without that the first
+ * shortcut anybody sets from the panel fails with ENOENT — which
+ * reads as the panel being broken. Only for that path: creating a
+ * missing `/etc/novi` at 0700 would take `system.conf` away from
+ * every non-root reader on the way past.
  */
 int novi_keys_write(const char *path, const char *action, const char *spec);
 
