@@ -712,6 +712,32 @@ int main(void) {
 				free(got);
 				ok(novi_keys_is_set(keep, "find.themes"),
 					"and is_set sees it");
+
+				/* THE CALL SHAPE THE PANEL ACTUALLY USES: the result
+				 * of novi_keys_write_path() handed straight in rather
+				 * than copied into a local first, which is what every
+				 * other check here does.
+				 *
+				 * IT DOES NOT COVER THE ALIAS INSIDE THE WRITER, and
+				 * the comment there says why -- putting that alias
+				 * back leaves these three passing. What they do cover
+				 * is that the panel's one-liner works end to end, on
+				 * a fresh $HOME, which nothing else asserted. Said
+				 * plainly because a check whose stated subject is not
+				 * what makes it pass is this repository's most
+				 * repeated mistake. */
+				ok(novi_keys_write(novi_keys_write_path(),
+						"window.close", "Super+W") == 0,
+					"the path novi_keys_write_path() returns can be "
+					"passed straight back in");
+				got = read_file(keep);
+				ok(got != NULL &&
+					strstr(got, "window.close = Super+W\n") != NULL,
+					"and the line lands in the user's file");
+				ok(got != NULL &&
+					strstr(got, "find.themes = Super+Y\n") != NULL,
+					"beside the one that was already there");
+				free(got);
 				unlink(keep);
 				char d[512];
 				snprintf(d, sizeof d, "%s/.config/novi", home);

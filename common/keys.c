@@ -609,20 +609,44 @@ int novi_keys_write(const char *path, const char *action, const char *spec)
 		mode = st.st_mode & 07777;
 	}
 
-	char tmp[PATH_MAX];
-	if ((size_t)snprintf(tmp, sizeof tmp, "%s.tmp", path) >= sizeof tmp) {
-		return ENAMETOOLONG;
-	}
 	/* A fresh account has no `~/.config`, let alone `~/.config/novi`,
 	 * so the FIRST shortcut anybody sets from the panel would fail
 	 * with ENOENT -- which reads as the panel being broken rather than
 	 * as a directory being absent. Only for the per-user path: a
 	 * missing `/etc/novi` is a machine with a much larger problem, and
 	 * creating it here at 0700 would take `system.conf` away from
-	 * every non-root reader on the way past. */
-	const char *user = novi_keys_user_path();
-	if (user != NULL && strcmp(path, user) == 0) {
+	 * every non-root reader on the way past.
+	 *
+	 * THE ANSWER IS TAKEN BEFORE `path` IS COPIED, and the copy exists
+	 * at all because the caller is expected to hand
+	 * novi_keys_write_path() STRAIGHT IN -- which is the static buffer
+	 * novi_keys_user_path() is about to rewrite, and which every use
+	 * of `path` below then depends on.
+	 *
+	 * NO TEST COVERS THAT ALIAS AND NONE CAN: user_path() rewrites the
+	 * buffer with identical bytes unless the environment changed
+	 * mid-call, so putting the alias back leaves all 372 checks
+	 * passing -- confirmed, rather than assumed. This is a latent
+	 * hazard removed on inspection, not a bug that was reachable, and
+	 * saying so is the point: a comment claiming a check that cannot
+	 * fire is worse than no comment. */
+	bool is_user = false;
+	{
+		const char *user = novi_keys_user_path();
+		is_user = (user != NULL && strcmp(path, user) == 0);
+	}
+	char target[PATH_MAX];
+	if ((size_t)snprintf(target, sizeof target, "%s", path) >= sizeof target) {
+		return ENAMETOOLONG;
+	}
+	path = target;
+	if (is_user) {
 		make_parents(path);
+	}
+
+	char tmp[PATH_MAX];
+	if ((size_t)snprintf(tmp, sizeof tmp, "%s.tmp", path) >= sizeof tmp) {
+		return ENAMETOOLONG;
 	}
 	FILE *out = fopen(tmp, "w");
 	if (out == NULL) {
