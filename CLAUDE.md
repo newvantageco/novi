@@ -3206,12 +3206,40 @@ yours wins, a line at a time.
   `system.conf` away from every non-root reader on the way past.
 - **`novi.keys=off` turns off BOTH**, or the escape hatch is no escape
   for the person most likely to need it.
-- **The layer is verified on the build host and NOT on a booted
-  machine.** 80 checks over the real loader and the real writer, each
-  provoked; what they cannot show is the session, so the `HOME` export
-  and the panel writing the file the compositor reads are reasoned
-  from the mechanism. `init/` changed, so that boot needs
-  `bash build/16-s6-rc-db.sh` and a fresh image.
+- **Verified on a booted machine** (`tests/keys-layers/`, 10 checks,
+  QEMU/TCG; no physical hardware), on an image from a clean
+  `--from 06` run: `HOME=/root` in `/proc/<novi-shell>/environ`; the
+  compositor logging both paths in order; **Super+Shift+T (the user's
+  line) opening a terminal while Super+Return opens nothing**;
+  `find.themes` set only in `/etc` still in force; and a panel edit
+  landing in `~/.config/novi/keys.conf` with `/etc` byte-identical.
+- **SIX HARNESS BUGS AND ZERO PRODUCT BUGS, and that ratio is the
+  lesson.** (1) `-nodefaults` means NO KEYBOARD, and QMP `send-key`
+  then returns `{"return": {}}` -- success -- having delivered the
+  keystroke to nothing; two bindings read as broken. (2) A bring-up
+  invented instead of `novi-live-desktop` oscillated forever, because
+  that script declares `services.seatd on` AS WELL -- a harness that
+  invents its own version of a sequence the image ships is measuring
+  the invention. (3) **busybox `pgrep` is `[-flanovx]` and has no
+  `-c`**: it printed its usage, exited non-zero, and `|| printf 0`
+  reported zero terminals two log lines after foot mapped a window.
+  (4) The console speaks **CRLF**, so `1` arrives as `1\r` and
+  `^[0-9]+$` never matches -- the substring greps that passed hid it.
+  (5) A GUI started from the SERIAL shell has no `WAYLAND_DISPLAY`
+  and exits instantly; `/run/novi/display` exists for exactly this and
+  `novi-power` already reads it. (6) `^[a-z.]+ = off` has no HYPHEN
+  and the action is `window.cycle-next`, so a save that had worked was
+  reported as a failure.
+- **A CONTROL IS WHAT STOPS THE FALSE FINDINGS.** "the user's binding
+  fires" and "the default it replaced does not" are BOTH satisfied by
+  a guest where no key arrives, so the run presses Super+Return with
+  the shipped bindings first and aborts if no terminal opens. That
+  turned bug 1 from a wrong conclusion into a loud stop.
+- **And the screendump settled three of them**, where re-reading the
+  harness settled none: the editor is PRE-FILLED with the current
+  binding, so typing `off` into it produces `Alt + Taboff` and the
+  panel correctly refuses -- visible in the footer, invisible in the
+  exit status.
 
 ## Architecture: nothing reaped the compositor's children
 

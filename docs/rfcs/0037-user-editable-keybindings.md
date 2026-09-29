@@ -315,18 +315,38 @@ missing skips itself exactly where it would have caught something.
 **On the build host:** the checks above; both binaries
 cross-compiled clean at `-O2` with this project's hardening flags.
 
-**The per-user layer (decisions 9 to 12) is verified on the build host
-and NOT on a booted machine.** The 80 new checks drive the real loader
-and the real writer over real files with a real `$HOME`, which is
-where every interesting case lives; what they cannot show is the
-session. So two claims here are reasoned from the mechanism rather
-than watched: that `export HOME=/root` makes the compositor and the
-clients it spawns resolve the same user file, and that the Keys panel
-then writes the file the compositor will read. Both want a live boot,
-and `init/services/novi-shell/run` changed, so that boot needs
-`bash build/16-s6-rc-db.sh` and a fresh image first. Said plainly
-because this RFC's own record above is what a verified claim looks
-like, and these are not that yet.
+**The per-user layer (decisions 9 to 12) is verified on a booted
+machine too** — `tests/keys-layers/`, 10 checks, all passing on an
+image built from a clean `--from 06` run. The two claims this section
+briefly recorded as reasoned-from-the-mechanism are watched now:
+
+| | |
+|---|---|
+| the session | `HOME=/root` in `/proc/<novi-shell>/environ`, beside `XDG_RUNTIME_DIR=/run/user/0` |
+| both files | the compositor logs `(/etc/novi/keys.conf then /root/.config/novi/keys.conf)`, and the Keys panel's header reads the same pair |
+| yours wins | `window.terminal = Super+Shift+Y` in `/etc`, `= Super+Shift+T` in `~/.config`: **Super+Shift+T opens a terminal, Super+Return opens nothing** |
+| per action | `find.themes = Super+Y`, set only in `/etc`, is still in force — one action replaced, not the document |
+| the panel writes yours | an edit put `window.cycle-next = off` in `/root/.config/novi/keys.conf` and left `/etc/novi/keys.conf` **byte-identical** |
+
+**SIX HARNESS BUGS AND NO PRODUCT BUGS, which is the part worth
+keeping.** Every one presented as the product failing: a QEMU guest
+with no keyboard (where `send-key` returns success having delivered
+the keystroke to nothing); a desktop bring-up invented instead of
+`novi-live-desktop`, which made the machine oscillate because that
+script declares `services.seatd on` as well; `pgrep -c`, which
+busybox does not have; CRLF defeating an anchored `^[0-9]+$`; a GUI
+launched from the serial shell with no `WAYLAND_DISPLAY`; and a regex
+with no hyphen in it, against the action `window.cycle-next`.
+`tests/keys-layers/README.md` lists them.
+
+Two things made the difference, and both are this repository's own
+standing advice. **A control**: "the user's binding fires" and "the
+default it replaced does not" are together satisfied by a guest where
+no key arrives at all, so the run now presses Super+Return with the
+shipped bindings first and aborts if nothing opens. **A screendump**:
+re-reading the harness did not find the pre-filled edit field or the
+hyphen, and a 1280x800 PPM showed the refusal message and then
+`(unbound)` and "Saved".
 
 **On a booted machine, done.** A live image with these five lines
 appended to the shipped `keys.conf`:
