@@ -867,6 +867,127 @@ observe_package() {
     fi
 }
 
+# The time domain (RFC 0042).
+#
+#   time.timezone    = UTC | Europe/London | America/New_York | ...
+#   time.ntp.servers = none | pool.ntp.org,time.cloudflare.com
+#
+# THERE IS NO `time.ntp` KEY, and its absence is the design. Turning
+# the client on is `services.ntp = on`, because that is how every
+# other daemon on this machine is declared -- a second spelling of one
+# decision is exactly what RFC 0029 decision 10 refused for
+# `firewall.allow` and what RFC 0033's roadmap got wrong about the
+# wired network. The pair here is the pair RFC 0022 already
+# established: `services.sshd` beside `network.firewall.allow`, a
+# service and the one list of values that service reads.
+#
+# A ZONE NAME BECOMES A PATH, so it is validated like RFC 0033
+# validates an address rather than trusted like a label. `time.timezone
+# = ../../../etc/shadow` would otherwise point /etc/localtime at the
+# password file, and musl would read it as a corrupt TZif and fall
+# back to UTC -- a traversal that succeeds quietly and looks like
+# nothing happened.
+# ONE SPELLING OF THE PATH. The validator asks whether a file exists
+# under it and the converger builds a link into it, and those were two
+# string literals until a test noticed they could disagree -- change
+# one and `time.timezone` validates against a database it does not
+# link to, which is a machine that accepts a zone and reads UTC.
+NOVI_ZONEINFO_DIR=/usr/share/zoneinfo
+
+observe_timezone() {
+    local link
+    # The LINK, never its target. `readlink -f` would resolve to
+    # /usr/share/zoneinfo/UTC on a machine whose link is fine and to
+    # nothing at all on one where it dangles, so the two cases -- "set
+    # to UTC" and "set to a zone that is not installed" -- would read
+    # the same. The second is the one worth seeing.
+    if [ -L /etc/localtime ]; then
+        link="$(readlink /etc/localtime)"
+        case "$link" in
+            # Both spellings: this stage writes a relative link (an
+            # absolute one resolves against the RUNNING system rather
+            # than an A/B slot being written, RFC 0041), and a person
+            # who set it by hand very likely wrote an absolute one.
+            */zoneinfo/*) printf '%s' "${link##*/zoneinfo/}" ;;
+            *) printf 'unknown' ;;
+        esac
+    elif [ -f /etc/localtime ]; then
+        # A regular file is a COPY of some zone, and nothing in it
+        # records which. That is a real configuration a person can
+        # make, and this observer cannot name it -- so it says so
+        # rather than guessing from the file's contents.
+        printf 'unknown'
+    else
+        # No file at all: musl answers UTC, and that is what the
+        # machine is actually doing.
+        printf 'UTC'
+    fi
+}
+
+# A zone is valid if a file for it EXISTS, which is the only question
+# that matters and the only one this system can answer offline. There
+# is no list to keep in sync with tzdata -- the database is the list,
+# the same argument novi-launcher's theme picker makes about scanning
+# the directory.
+valid_timezone() {
+    local z="$1"
+    case "$z" in
+        ''|/*|*..*|*' '*) return 1 ;;
+        *[!A-Za-z0-9/_+-]*) return 1 ;;
+    esac
+    [ -f "${NOVI_ZONEINFO_DIR}/${z}" ]
+}
+
+converge_timezone() {
+    local want="$1"
+    [ -d "${NOVI_ZONEINFO_DIR}" ] ||
+        die "time.timezone: no zone database on this machine (${NOVI_ZONEINFO_DIR})"
+    valid_timezone "$want" ||
+        die "time.timezone: '$want' is not a zone in ${NOVI_ZONEINFO_DIR}"
+    # RELATIVE, and derived from the directory above rather than
+    # written out again: an absolute link resolves against the RUNNING
+    # system rather than an A/B slot being written (RFC 0041), and a
+    # second literal is what this variable exists to prevent.
+    #
+    # `ln -sfn` over an existing symlink is a rename, so no reader
+    # ever sees /etc/localtime missing.
+    ln -sfn "../${NOVI_ZONEINFO_DIR#/}/${want}" /etc/localtime
+}
+
+# The server list is read at use time, by init/services/ntp/run, when
+# the service starts -- so nothing holds it, it cannot drift, and
+# `apply` has nothing to converge. Which means converge_key never runs
+# to reject a typo and the observer is the only place one surfaces:
+# the power.lid / agent.allow pattern, for the fourth time.
+#
+# Canonically compared, like network.firewall.allow: `a,b` and `b,a`
+# are one policy and neither should report eternal drift against the
+# other. The declared string is echoed back verbatim when they match,
+# so the document's own formatting is never "corrected".
+observe_ntp_servers() {
+    local want sorted
+    want="$(state_get time.ntp.servers)"
+    case "$want" in
+        # ECHOED BACK VERBATIM, not canonicalised to one word.
+        # Folding `off` into `none` made the key report PERMANENT
+        # DRIFT against itself -- declared `off`, observed `none`,
+        # never equal, and `apply` with nothing it could do about it.
+        # Found by the test, and it is agent.rate's rule: the
+        # document's own wording is not this tool's to correct.
+        none|off) printf '%s' "$want"; return 0 ;;
+        '') printf 'none'; return 0 ;;
+    esac
+    # A server name reaches a command line. Hostnames and addresses
+    # only -- no spaces, no shell metacharacters, nothing that could
+    # become a second argument.
+    sorted="$(printf '%s' "$want" | tr ',' '\n' | sed 's/^ *//; s/ *$//' |
+              grep -v '^$' | sort -u | tr '\n' ',' | sed 's/,$//')"
+    case "$sorted" in
+        *[!A-Za-z0-9.:_-,]*|'') printf 'unsupported'; return 0 ;;
+    esac
+    printf '%s' "$want"
+}
+
 # The power domain (RFC 0011).
 #
 #   power.governor = performance | powersave | schedutil | ...
@@ -951,6 +1072,8 @@ observe_key() {
         network.*)  observe_network "${key#network.}" ;;
         users.*)    observe_user "$key" ;;
         packages.*) observe_package "${key#packages.}" ;;
+        time.timezone) observe_timezone ;;
+        time.ntp.servers) observe_ntp_servers ;;
         power.governor) observe_governor ;;
         # power.lid / power.button are policy with no live counterpart:
         # novi-power reads the declared value at event time, so the
@@ -1489,6 +1612,18 @@ converge_key() {
         network.*)  converge_network "${key#network.}" "$want" ;;
         users.*)    converge_user "$key" "$want" ;;
         packages.*) converge_package "${key#packages.}" "$want" ;;
+        time.timezone) converge_timezone "$want" ;;
+        # Read when the ntp service starts. Nothing to converge; this
+        # is where a typo is reported, and the new list applies at the
+        # service's next start -- display.renderer's shape exactly.
+        time.ntp.servers)
+            case "$want" in
+                ''|none|off) : ;;
+                *[!A-Za-z0-9.:_,-]*)
+                    die "time.ntp.servers: '$want' has a character that is not part of a host name" ;;
+                *) : ;;
+            esac
+            ;;
         power.governor) converge_governor "$want" ;;
         # Nothing to do -- novi-power reads these at event time -- but
         # the value is checked here so that `apply` is where a typo is
@@ -2152,6 +2287,8 @@ Keys:
   users.<name>.shell              /bin/sh | absent  (declares the account)
   users.<name>.groups             wheel,video,input | none
   packages.<name>                 present | absent
+  time.timezone                   UTC | Europe/London | ...  (/etc/localtime)
+  time.ntp.servers                none | pool.ntp.org,...  (services.ntp reads)
   display.renderer                pixman | gles2 | auto  (compositor renderer)
   display.theme                   a file in /usr/share/novi/themes (colours)
   power.blank                     <seconds> | off  (idle screen blank)

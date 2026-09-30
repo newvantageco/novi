@@ -575,6 +575,90 @@ seconds_or_null() {
 # publishes on every tick, and re-deriving any of it here would be a
 # second answer to a question that has one. Same rule as the interface
 # name above.
+# The clock, and where its answer comes from (RFC 0042).
+#
+# IT READS, IT DOES NOT RUN, mostly -- RFC 0029 decision 1. The zone
+# is a symlink and the RTC is a device node, so neither costs a fork;
+# the offset does, and it earns it below.
+#
+# THERE IS NO TIMESTAMP HERE, deliberately. `describe` says what a
+# machine IS, and the reading of its clock at this microsecond is not
+# that -- `date` answers it, on every machine, without this. It would
+# also be the one field in the document that differs between two runs
+# a second apart, which is a property `test-agent-text.sh` compares
+# the two forms on.
+#
+# THE LINK, NOT ITS TARGET, for the reason novi-state's observer reads
+# it the same way: `readlink -f` collapses "set to UTC" and "set to a
+# zone that is not installed" into one answer, and the second is the
+# one worth seeing in a description of a machine.
+#
+# THAT IS NOT A SECOND OBSERVER. `novi-state show --json`, which this
+# document already splices in, reports DECLARED values only, and there
+# is no command here that prints an observed one -- so the zone is
+# read where novi-state's observer reads it, from the one symlink that
+# holds the answer. The two agree by reading the same file rather than
+# by anybody keeping them in step; what would make them a second
+# answer is one of them deciding the zone from somewhere else.
+describe_time() {
+    local zone link offset rtc=false sync=off
+
+    if [ -L /etc/localtime ]; then
+        link="$(readlink /etc/localtime 2>/dev/null || printf '')"
+        case "$link" in
+            */zoneinfo/*) zone="${link##*/zoneinfo/}" ;;
+            *)            zone=unknown ;;
+        esac
+    elif [ -e /etc/localtime ]; then
+        # A copy rather than a link: a real configuration whose zone
+        # nothing on the machine records.
+        zone=unknown
+    else
+        zone=UTC
+    fi
+
+    # THE OFFSET IS WHERE A BROKEN ZONE SHOWS UP, which is the whole
+    # reason a fork is spent on it. `time.timezone = Europe/London`
+    # with no zoneinfo installed leaves musl falling back to UTC:
+    # the link says one thing, every timestamp on the machine says
+    # another, and nothing else in this document can tell them apart.
+    # A zone and an offset that disagree is a reading somebody can
+    # act on.
+    offset="$(date '+%z' 2>/dev/null || printf '')"
+
+    # Whether the clock PERSISTS. Without an RTC a machine comes back
+    # from every power cycle at whatever the kernel decides, so
+    # `sync: on` means something quite different -- and RFC 0042's
+    # hook writes nothing at all here.
+    #
+    # An `if`, not `[ … ] && rtc=true`: under `set -e` an AND-list
+    # whose own status is non-zero ends the script, so a machine
+    # WITHOUT an RTC -- every container this is linted in -- would
+    # have made `describe` produce nothing at all. The same trap
+    # `novi-agent` already records one function up.
+    if [ -e /dev/rtc0 ]; then rtc=true; fi
+
+    # Asked of s6 rather than of the document: "declared on" and
+    # "running" are the two different questions RFC 0014 exists about,
+    # and a description says what the machine is doing.
+    if command -v s6-svstat >/dev/null 2>&1 &&
+       s6-svstat -o up /run/service/ntp 2>/dev/null | grep -q true; then
+        sync=on
+    fi
+
+    if [ "$FMT" = text ]; then
+        t_head time
+        t_row zone "$(t_val "$zone")"
+        t_row offset "$(t_val "$offset")"
+        t_row rtc "$(t_yesno "$rtc")"
+        t_row sync "$(t_yesno "$sync")"
+        return 0
+    fi
+    printf '{"zone": %s, "utc_offset": %s, "rtc": %s, "ntp_sync": %s}' \
+        "$(json_str "$zone")" "$(json_str "$offset")" \
+        "$(json_bool "$rtc")" "$(json_str "$sync")"
+}
+
 describe_idle() {
     local file=/run/novi/idle
     local key value idle='' blanked='' locked='' blank='' suspend=''
@@ -943,6 +1027,7 @@ cmd_describe() {
         describe_identity
         describe_hardware
         describe_network
+        describe_time
         describe_idle
         describe_packages
         describe_slots
@@ -975,10 +1060,11 @@ cmd_describe() {
     # `schema` stays 1 for an ADDED key -- a consumer written against
     # 1 still reads every field it knew. Renaming or removing one is
     # what would make it 2.
-    printf '{"schema": 1, "identity": %s, "hardware": %s, "network": %s, "idle": %s, "state": %s, "drift": %s, "health": %s, "packages": %s, "slots": %s, "sandbox": %s, "agent": %s}\n' \
+    printf '{"schema": 1, "identity": %s, "hardware": %s, "network": %s, "time": %s, "idle": %s, "state": %s, "drift": %s, "health": %s, "packages": %s, "slots": %s, "sandbox": %s, "agent": %s}\n' \
         "$(describe_identity)" \
         "$(describe_hardware)" \
         "$(describe_network)" \
+        "$(describe_time)" \
         "$(describe_idle)" \
         "$state" "$diff" "$health" \
         "$(describe_packages)" \

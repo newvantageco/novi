@@ -6040,6 +6040,123 @@ a pre-existing, repo-wide style pattern, not a regression to fix reflexively
 when touching a file. Treat it as a known baseline; focus review on new
 warnings a change introduces.
 
+## Architecture: the clock nobody could set
+
+RFC 0042 (`docs/rfcs/0042-time-and-timezone.md`). `time.timezone`,
+`time.ntp.servers`, a `services.ntp` longrun and
+`/usr/lib/novi/ntp-hook`.
+
+- **THERE WAS NO ZONE DATA AT ALL**, for the life of the project --
+  no `/usr/share/zoneinfo`, no `/etc/localtime`. musl reads
+  `/etc/localtime` when `TZ` is unset and searches
+  `/usr/share/zoneinfo` for a named zone, so with neither present
+  every conversion falls back to UTC and there was no setting that
+  could change it. **`novi-panel` was already calling
+  `localtime_r(3)`** -- the consumer was there and the data was not,
+  the same shape as `man` shipping with no formatter and RFC 0040's
+  RTC with nothing writing to it.
+- **BASE, AND THE FULL SET, BECAUSE IT IS 203 KB.** `zic -b slim`
+  over the ten primary files gives **598 names over 341 inodes,
+  203,282 bytes** (79 KB gzipped) against a base image the wrong side
+  of 700 MB. No package, no curated subset, no question about whether
+  a console machine has a clock. **`du` says 2.0 MB and is the wrong
+  instrument**: 454 small files against a 4 KiB block is almost
+  entirely slack, and a squashfs carries the apparent size.
+- **`zic` Link ENTRIES ARE HARDLINKS -- 598 names, 341 inodes -- and
+  `cp -a` preserves them only within ONE invocation.** The mandoc
+  lesson (five names, one inode, 2.1 MB of duplicate binary) in a
+  different costume, and 257 duplicate files if a `for` loop copies
+  them. The assertion is DERIVED: the staged tree's name and inode
+  counts must equal the image's. A constant would rot the next time
+  IANA adds a zone.
+- **SLIM VS FAT WAS MEASURED IN TWO DIRECTIONS, because one
+  comparison cannot distinguish "slim is fine" from "both readers are
+  wrong the same way".** slim stops at the last real transition and
+  leaves the future to the POSIX TZ footer. musl(slim) against
+  musl(fat): identical on 35 instants, 1970 to 2035. musl(slim)
+  against glibc(fat): identical on 56 instants across 8 zones, DST
+  boundaries included.
+- **THERE IS NO `time.ntp` ON/OFF KEY, because `services.ntp` already
+  is one.** RFC 0029 decision 10's test -- does it add a capability,
+  or a second path to one that exists -- failed for `firewall.allow`
+  and fails here. The servers are a key because they are
+  configuration; running the client is a service.
+- **NO DEFAULT POOL SHIPS.** A machine that declares nothing asks
+  nobody for the time. Baking in `pool.ntp.org` would have every Novi
+  machine contact a third party on first boot because the
+  distribution decided so -- the firewall-opening-itself argument
+  (RFC 0022) about a different resource.
+- **A ZONE NAMING NO FILE IS REFUSED, and the failure it prevents is
+  silent.** musl falls back to UTC, so the link says `Europe/London`,
+  every timestamp says otherwise, and nothing reports a problem. The
+  validator also refuses an absolute path, `..`, an empty name, a
+  space and anything outside `[A-Za-z0-9/_+-]`: the value is
+  concatenated onto a directory and becomes a symlink target.
+- **THOSE GUARDS OVERLAP AND EACH IS STILL INDIVIDUALLY PROVABLE, and
+  the first reading of that was wrong.** No single clause fails alone
+  -- dropping `*..*` still refuses `../../../etc/shadow` through the
+  character class, and dropping BOTH accepts it -- which read as dead
+  code until it was measured. `/*` is load-bearing only for a name
+  like `/UTC`, which the test had no case for. Measure the clauses
+  together before calling one of them dead.
+- **`time.ntp.servers = off` REPORTED PERMANENT DRIFT AGAINST
+  ITSELF.** The observer folded `off` into `none`, so the document
+  said `off`, the observer said `none`, `diff` called it drift for
+  ever and `apply` could not fix it. Echo the declared word verbatim
+  -- `agent.rate`'s precedent. A real product bug, found by the host
+  test rather than by reading.
+- **TWO SPELLINGS OF THE ZONEINFO PATH** -- one in the validator, one
+  in the converger -- could silently disagree about which directory
+  decides. `NOVI_ZONEINFO_DIR`, once.
+- **`hwclock -u`, ALWAYS.** Without `-u` hwclock writes LOCAL time to
+  the RTC, so on a machine with a declared zone the hardware clock
+  shifts by the offset and the next boot is wrong by exactly that
+  much with nothing to say why. The kernel reads the RTC as UTC and
+  `time.timezone` is applied on top: one convention, stated in the
+  shipped `system.conf`, in `system.conf(5)` and in the hook.
+- **`unsync` WRITES NOTHING, deliberately.** It means ntpd has lost
+  its peers and no longer trusts its own clock, so persisting that
+  reading is the one thing that must not outlive the boot. `stratum`
+  is a change of SOURCE rather than of time and the next `periodic`
+  covers it within 11 minutes.
+- **THE ntp SERVICE DECLARES NO `notification-fd`.** ntpd says nothing
+  when it has a usable peer, and a readiness it can never signal is
+  RFC 0004's `s6-log -d3` bug -- the service reads NOTREADY to its own
+  health check after sixty seconds, for ever. With no servers declared
+  it EXITS with a message rather than starting: a client with no peers
+  will never do its job, and inventing a default is the pool decision
+  from the other side.
+- **`describe` REPORTS NO TIMESTAMP, and the offset is why it is
+  useful.** A wall-clock reading is what `date` is for, and it would
+  be the one field differing between two runs a second apart --
+  `test-agent-text.sh` compares the two output forms. What the offset
+  buys is the ONE reading that catches a broken zone: a zone whose
+  data is missing leaves the link saying one thing and every timestamp
+  saying another, and nothing else in the document can tell them
+  apart. The zone is read from the symlink and NOT resolved, because
+  `readlink -f` collapses "set to UTC" and "set to a zone that is not
+  installed" into one answer.
+- **`[ -e /dev/rtc0 ] && rtc=true` ENDS A `set -e` SCRIPT.** An
+  AND-list whose own status is non-zero is fatal at statement level,
+  so `describe` would have produced nothing at all on every machine
+  without an RTC -- which is every container this is linted in. An
+  `if`.
+- **A MANGLED PROVOCATION PRODUCED 31 MEANINGLESS FAILURES.** An
+  inline python one-liner was broken by shell quoting into a bash
+  syntax error, and the test suite dutifully reported every check
+  failing. `$SCRATCH/provoke.py` asserts the mutation APPLIED, asserts
+  `bash -n` still parses, and only then runs the test. Tenth time in
+  this file that the probe rather than the code was the broken thing,
+  and this one is CLAUDE.md's own rule biting the person who wrote it
+  down.
+- **`STATE_FILE` IS BOUND AT SOURCE TIME** (`packages/novi-state` line
+  33), so `NOVI_STATE_FILE=... observe_ntp_servers` sets it too late
+  and every server case reads an empty document. It goes in the
+  driver's environment. The same test also hardcoded the expected
+  symlink target, which the doctored copy writes relative to its own
+  fixture directory -- derive it (`WANTLINK="../${ZI#/}/Europe/London"`),
+  or the expectation is a second copy of the thing under test.
+
 ## Architecture: a claim of absence is the kind that rots
 
 This file records eleven roadmap items found wrong about what is

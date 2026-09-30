@@ -239,6 +239,12 @@ install -D -m 755 "${REPO_ROOT}/packages/novi-grubenv" "${ROOTFS}/usr/sbin/novi-
 # cannot install anything.
 install -D -m 755 "${REPO_ROOT}/packages/novi-slot" "${ROOTFS}/usr/sbin/novi-slot"
 
+# The RTC hook the ntp service hands to `ntpd -S` (RFC 0042). Under
+# /usr/lib/novi beside json.sh and resolv.sh rather than on PATH: it
+# is named by one run script and is not a command anybody types.
+install -D -m 755 "${REPO_ROOT}/packages/novi-ntp-hook" \
+    "${ROOTFS}/usr/lib/novi/ntp-hook"
+
 mkdir -p "${ROOTFS}/etc/profile.d"
 
 # ── Copy musl libc into rootfs ────────────────────────────

@@ -189,6 +189,45 @@ A CPU frequency governor.
 lists the ones this kernel has.
 Not set by default.
 .El
+.Ss Time
+.Bl -tag -width "network.firewall.allow" -compact
+.It Va time.timezone
+An IANA zone name, as found under
+.Pa /usr/share/zoneinfo
+.Pq for example Ar Europe/London .
+Converging it repoints
+.Pa /etc/localtime ,
+which is what every program on this machine reads to render a local
+time.
+.Cm UTC
+by default.
+A name with no file under
+.Pa /usr/share/zoneinfo
+is refused rather than applied: the alternative is a link to nothing,
+under which the C library silently falls back to UTC and every
+timestamp is quietly wrong.
+.It Va time.ntp.servers
+A comma-separated list of NTP servers, or
+.Cm none .
+This system ships no default pool, so a machine that declares nothing
+asks nobody for the time.
+.Cm none
+by default.
+The list is what
+.Sy services.ntp
+hands to busybox
+.Nm ntpd ;
+declaring servers does not start it, and starting it without servers
+is refused.
+.Pp
+The hardware clock is
+.Sy UTC
+on this system.
+.Sy time.timezone
+is applied on top of it, and the NTP service writes corrections back
+to it in UTC, so a machine that syncs keeps a correct clock across a
+reboot with no network.
+.El
 .Ss Storage
 .Bl -tag -width "network.firewall.allow" -compact
 .It Va storage.automount

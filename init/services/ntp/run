@@ -1,0 +1,73 @@
+#!/bin/sh
+# ============================================================
+# ntp service — run script
+#
+# RFC 0042. Declared by `services.ntp`, off by default. busybox
+# ntpd has shipped as an applet since the first image and nothing
+# ever ran it, so the clock never synced: a machine drifted from
+# whatever the RTC said at boot and stayed there.
+#
+# NO `notification-fd`, deliberately. There is no precondition
+# anything else can race on here -- "the clock is right" is not a
+# thing this service can observe about itself, and declaring a
+# readiness it never signals would make it NOTREADY to
+# `novi-state health` after sixty seconds. The health service made
+# exactly this call for the same reason (RFC 0014).
+# ============================================================
+
+CONF=/etc/novi/system.conf
+
+# The server list is read HERE, at start, rather than converged --
+# nothing holds it, so it cannot drift (RFC 0042). Same shape as
+# display.renderer, whose "use" is also a process launch.
+servers=""
+if [ -f "$CONF" ]; then
+    servers="$(sed -n 's/^[[:space:]]*time\.ntp\.servers[[:space:]]*=[[:space:]]*//p' \
+               "$CONF" | sed 's/[[:space:]]*#.*$//; s/[[:space:]]*$//' | tail -1)"
+fi
+
+case "$servers" in
+    ''|none|off)
+        # THERE IS NO BUILT-IN POOL, and that is a decision rather
+        # than an omission. A machine that silently starts talking to
+        # a third party nobody named is the thing `network.firewall.allow`
+        # exists to prevent one layer down: the set of hosts this
+        # machine contacts has to be one a person chose. So this
+        # refuses, loudly, naming the key.
+        echo "ntp: no servers declared -- set time.ntp.servers in ${CONF}" >&2
+        echo "ntp: e.g. time.ntp.servers = pool.ntp.org" >&2
+        exit 1
+        ;;
+esac
+
+# A server name becomes an argv element. novi-state's observer
+# reports a bad list as drift, but this service can be started by
+# `s6-rc` directly with no apply in between, so the check is here
+# too -- the value crosses a boundary in both paths.
+case "$servers" in
+    *[!A-Za-z0-9.:_,-]*)
+        echo "ntp: time.ntp.servers has a character that is not part of a host name" >&2
+        exit 1
+        ;;
+esac
+
+set -f                          # a server list must not glob
+set --
+OLDIFS="$IFS"; IFS=','
+for s in $servers; do
+    IFS="$OLDIFS"
+    [ -n "$s" ] && set -- "$@" -p "$s"
+    IFS=','
+done
+IFS="$OLDIFS"
+
+[ "$#" -gt 0 ] || {
+    echo "ntp: time.ntp.servers parsed to no servers at all" >&2
+    exit 1
+}
+
+# -n  foreground, so s6 supervises ntpd itself rather than a pid file
+# -S  the hook that writes the corrected time back to the RTC. busybox
+#     runs it after stepping the clock, on a stratum change, and every
+#     11 minutes -- see /usr/lib/novi/ntp-hook for why that matters.
+exec ntpd -n -S /usr/lib/novi/ntp-hook "$@"

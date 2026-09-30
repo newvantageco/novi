@@ -275,6 +275,18 @@ ALSA_VERSION="1.2.12"
 # are what actually fix the code.
 TWEETNACL_VERSION="20140427"
 
+# The IANA time zone database, and the code that compiles it (RFC 0042).
+# One version covers both tarballs -- IANA releases them together and a
+# zic from one release is the right compiler for that release's data.
+#
+# HASH-PINNED in 01-fetch.sh, and the reason is not the trust-root
+# argument TweetNaCl and the CA bundle make. It is that a tzdata
+# release is IMMUTABLE once published, so a pin costs nothing and can
+# never rot on its own -- and what this data decides is every
+# timestamp on the machine, where being silently wrong looks exactly
+# like being right.
+TZDATA_VERSION="2025b"
+
 # Build target
 TARGET_ARCH="x86_64"
 TARGET_TRIPLE="${TARGET_ARCH}-linux-musl"

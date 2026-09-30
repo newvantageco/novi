@@ -391,5 +391,19 @@ mkdir -p "${SOURCES}/tweetnacl-${TWEETNACL_VERSION}"
         "43f29ad721d9927b747b0100ab4160c119e7bb180c7c98a66e4bf79d31244287"
 )
 
+# The IANA time zone database and its compiler (RFC 0042). Two
+# tarballs from one release: `tzdata` is the zone rules as text,
+# `tzcode` carries `zic`, which turns them into the binary TZif files
+# musl reads.
+#
+# zic is built HERE, on the build host, rather than using whatever the
+# distribution installed -- foot's terminfo rule (CLAUDE.md) applied to
+# a second generator. The compiled output would otherwise be a
+# property of the build machine rather than of the pinned source.
+fetch_pinned "https://data.iana.org/time-zones/releases/tzdata${TZDATA_VERSION}.tar.gz" \
+    "11810413345fc7805017e27ea9fa4885fd74cd61b2911711ad038f5d28d71474"
+fetch_pinned "https://data.iana.org/time-zones/releases/tzcode${TZDATA_VERSION}.tar.gz" \
+    "05f8fedb3525ee70d49c87d3fae78a8a0dbae4fe87aa565c65cda9948ae135ec"
+
 echo ""
 echo "All sources downloaded to ${SOURCES}"

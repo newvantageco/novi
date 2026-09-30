@@ -253,6 +253,15 @@ fi
 # an octet of 256, a leading zero, a leading dot whose empty field
 # field-splitting silently drops. None of those need a machine, and
 # none of them would ever be produced by one.
+# test-state-time.sh is the last of the textual ones, and its subject
+# is a value that becomes a SYMLINK TARGET: `time.timezone` is
+# concatenated onto /usr/share/zoneinfo and linked from /etc/localtime,
+# so `../..`, a leading slash and an empty name are all the same class
+# of question `network.address` asks, with the additional property
+# that a zone naming no file leaves the C library silently falling
+# back to UTC -- a wrong clock with nothing to say so. It also drives
+# the observer, which is where a read-at-use-time key's typo has to
+# surface (RFC 0042).
 for t in packages/tests/test-lib-json.sh packages/tests/test-agent-verbs.sh \
          packages/tests/test-agent-secrets.sh packages/tests/test-agent-rate.sh \
          packages/tests/test-agent-socket.sh packages/tests/test-network-static.sh \
@@ -270,7 +279,8 @@ for t in packages/tests/test-lib-json.sh packages/tests/test-agent-verbs.sh \
          packages/tests/test-grubenv.sh \
          packages/tests/test-slot.sh \
          packages/tests/test-pkg-lifecycle.sh \
-         packages/tests/test-pkg-cache-hash.sh; do
+         packages/tests/test-pkg-cache-hash.sh \
+         packages/tests/test-state-time.sh; do
     echo ">>> ${t##*/}"
     if ! bash "$t"; then
         echo ">>> ${t} failed" >&2
