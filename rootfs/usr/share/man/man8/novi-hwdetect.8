@@ -1,0 +1,73 @@
+.Dd September 30, 2026
+.Dt NOVI-HWDETECT 8
+.Os
+.Sh NAME
+.Nm novi-hwdetect
+.Nd load drivers for the hardware in this machine
+.Sh SYNOPSIS
+.Nm
+.Sh DESCRIPTION
+.Nm
+walks
+.Pa /sys/devices/**/modalias
+and hands each string to
+modprobe(8),
+which matches it against the
+.Pa modules.alias
+that
+depmod(8)
+generated at build time.
+That is udev's builtin driver loader in fifteen lines, and it is the
+.Em only
+generic one on this system: every other module load here is a
+hardcoded list, and all three of them were written against QEMU.
+.Pp
+It runs
+.Sy in the initramfs, before the root search .
+That placement is the point: a storage controller nobody listed
+otherwise ends in an emergency shell.
+.Sh FILES
+.Bl -tag -width "/lib/modules/*/modules.alias" -compact
+.It Pa /sys/devices
+Walked for
+.Pa modalias
+files.
+.It Pa /lib/modules/ Ns Ar version Ns Pa /modules.alias
+The table
+modprobe(8)
+matches against.
+.El
+.Sh EXIT STATUS
+.Ex -std
+It exits 0 when a module fails to load: a driver that is absent is
+not a reason to stop booting.
+.Sh SEE ALSO
+.Xr novi-hotplug 8
+.Sh STANDARDS
+RFC 0011.
+.Sh CAVEATS
+.Nm
+is
+.Sy coldplug
+and cannot be anything else.
+It walks
+.Pa /sys
+once, so it answers
+.Dq what is in this machine
+and never
+.Dq what did someone just plug in .
+.Xr novi-hotplug 8
+is the same rule driven by the kernel's uevent stream.
+Two sources, one rule: do not merge them, and do not let either grow
+a device list.
+.Pp
+A script that runs in the initramfs may use only the busybox applets
+.Nm mkinitramfs.sh
+links, and that list is hand-written.
+.Nm
+once loaded every driver correctly and then died on
+.Dq tr: not found .
+.Pp
+None of this has run on physical hardware.
+It is verified on three virtio devices, which is the easiest case
+there is.

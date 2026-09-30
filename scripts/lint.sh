@@ -277,4 +277,16 @@ for t in packages/tests/test-lib-json.sh packages/tests/test-agent-verbs.sh \
         exit 1
     fi
 done
+
+# Every command Novi ships should have a manual page, and every page
+# should be clean mdoc. Two halves with different needs: the command
+# coverage is DERIVED from the built rootfs and is skipped on a runner
+# that has none, the way `novi-state diff` is; the lint runs
+# everywhere, preferring the mandoc this repo builds and falling back
+# to the host's.
+echo ">>> man-coverage"
+if ! bash tests/man-coverage/probe.sh; then
+    echo ">>> tests/man-coverage/probe.sh failed -- run it to see which page" >&2
+    exit 1
+fi
 exit 0

@@ -2352,6 +2352,75 @@ RFC 0040 roadmap 2. `build/47-mandoc.sh`, `pkg install man`.
   build did not produce (`chcon`, `runcon`) does not ship, and nobody
   maintains a second list. Same argument as the binary sweep itself.
 
+## Architecture: the manual Novi never wrote
+
+`rootfs/usr/share/man`, `tests/man-coverage/probe.sh`. Twenty-five
+mdoc pages: every command this image ships, and five configuration
+formats.
+
+- **THE MACHINE COULD READ A MANUAL AND HAD NOTHING OF ITS OWN TO
+  READ.** RFC 0040 roadmap 2 shipped mandoc and 56 pages; not one of
+  them documented anything Novi wrote. So a person who booted the ISO
+  could learn `novi-state`, `novi-slot`, `pkg` or `system.conf` only
+  by reading shell scripts -- and this project's whole claim is that
+  the document is the interface. **A `--help` is not a manual**: it
+  is a reminder for somebody who already knows, and the five
+  `system.conf` keys that were live and absent from `--help`'s own
+  `Keys:` block are what that distinction costs.
+- **THE COVERAGE CHECK IS DERIVED FROM THE BUILT ROOTFS**, not from a
+  list: the command set is `$ROOTFS/{bin,sbin,usr/bin,usr/sbin}/novi-*`
+  plus `pkg`, with section 8 for `*sbin`. A new command arrives in the
+  check by being installed. pkgsplit's argument, and novi-sandbox's
+  "no list of sandboxed programs".
+- **AND SO IS THE INSTALL.** `03-base.sh` walks
+  `rootfs/usr/share/man` and installs what it finds, so writing a page
+  ships it. Two derived halves that cannot disagree about which pages
+  exist.
+- **THE LINT IS THE READER THIS SYSTEM SHIPS**, in a chroot, because
+  that mandoc is the one configured with `OSNAME="Novi Linux"` -- which
+  is why every page writes a bare `.Os` and not `.Os Novi`.
+- **ITS CROSS-REFERENCE CHECK IS THE MOST USEFUL THING IN IT, AND THE
+  FIRST VERSION COULD NOT RUN IT.** mandoc resolves every `.Xr`
+  against the man tree beside the page, so staging only OUR pages made
+  a reference to `amixer(1)` -- which the base image really ships --
+  report "referenced manual not found", exactly like a reference to a
+  page nobody has written. The finding this check exists for, drowned
+  in false ones. The lint tree is the WHOLE shipped tree now, with
+  `makewhatis` run over it, and the remaining warnings were a precise
+  list of the pages still owed.
+- **A REFERENCE TO A PAGE THIS SYSTEM DOES NOT SHIP IS PLAIN TEXT, NOT
+  `.Xr`.** `modprobe(8)`, `fdisk(8)`, `wget(1)`, `nft(8)`, `kill(1)`,
+  `mkpkg(1)`: busybox applets and build-host tools with no page here.
+  An `.Xr` to one is a promise `man` cannot keep.
+- **THE HOST FALLBACK DROPS THAT CHECK AND SAYS SO.** On a runner
+  there is no built mandoc and no rootfs, so the lint runs under the
+  host's -- which resolves `.Xr` against ITS manpath and not a staged
+  tree (tried `-C man.conf` and a `mandoc.db` beside the pages; neither
+  works). Reporting 25 pages each referencing a manual not found would
+  be an instrument answering a different question, so that one class is
+  filtered and the header states the check did not run. Everything else
+  mandoc checks is unaffected. **Provoked**: an `.It` outside a list
+  fails the host path and passes once removed.
+- **`.Sh XXBAD` WAS A BAD PROVOCATION and looked like a broken check.**
+  mdoc permits any section name, so an invented one produces no
+  warning at all -- the probe reported clean and the first reading was
+  that the lint was not running. Ninth time in this file that the
+  probe, rather than the thing probed, was the broken part.
+- **ADDING mandoc TO CI BROKE A TEST THAT HAD PASSED FOR MONTHS, AND
+  THE TEST WAS RIGHT TO BREAK.** `test-pkg-lifecycle.sh` moves its
+  stand-in `makewhatis` aside to mean "this machine has no formatter"
+  -- true only while the HOST has none. With mandoc installed,
+  `command -v makewhatis` finds `/usr/sbin/makewhatis`, the "not
+  indexed yet" directory gets indexed for real, and the failure reads
+  as a bug in `pkg`'s man-index pass. It was debugged as one. The
+  harness filters any PATH entry holding a `makewhatis` -- derived,
+  because the next distribution puts it somewhere else -- and
+  `no_formatter()` asserts the premise at each use, so a premise that
+  is silently false becomes a loud stop.
+- **A LINT-CLEAN PAGE IS NOT A READABLE ONE.** Every page was also
+  rendered through `man` on the shipped mandoc and read. Same rule as
+  screenshotting a GUI change that looks right in the code.
+
 ## Architecture: a process that cannot reach the machine
 
 RFC 0039 (`docs/rfcs/0039-process-isolation.md`). `novi-sandbox` runs a

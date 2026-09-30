@@ -1,0 +1,136 @@
+.Dd September 30, 2026
+.Dt PKG.CONF 5
+.Os
+.Sh NAME
+.Nm pkg.conf
+.Nd where this machine gets software from
+.Sh SYNOPSIS
+.Pa /etc/novi/pkg.conf
+.Sh DESCRIPTION
+.Nm
+tells
+.Xr pkg 1
+which mirror to fetch from and which key to believe.
+Each line is
+.Ar name No = Ar value ;
+.Ql #
+starts a comment.
+.Pp
+It is deliberately
+.Em not
+part of
+.Xr system.conf 5 .
+That file is the declared state of the machine, converged by
+.Nm novi-state apply ;
+this is a bootstrap parameter, and
+.Xr novi-state 1
+cannot install a package from a mirror it would have to read out of
+the file it is in the middle of applying.
+.Ss Settings
+.Bl -tag -width "allow_unsigned"
+.It Va mirror
+A URL, or a local directory.
+The installation medium carries the whole signed repository, so a
+live system can install the desktop with no network at all.
+The same verification runs either way; only the transport differs.
+.Pp
+The shipped value is
+.Pa /run/live/novi-repo ,
+which is the medium.
+On an installed machine that path does not exist, and
+.Xr novi-install 1
+comments the line out unless it was given
+.Fl -mirror :
+there is no public Novi repository yet, and pointing a package
+manager at a host that does not exist is worse than pointing it at
+nothing.
+.It Va key
+The Ed25519 public key the index is verified with.
+.Pp
+This key must reach the machine by
+.Sy some path other than the mirror it is used to check .
+.Nm build/50-repo.sh
+installs a development key into the image at build time, which is the
+right answer when you built both.
+.It Va allow_unsigned
+.Cm no
+by default.
+.Cm yes
+turns off signature checking entirely.
+It exists for bootstrapping a repository you are in the middle of
+creating.
+On a machine you care about it means
+.Dq run whatever the network hands me, as root .
+.It Va allow_stale
+.Cm no
+by default.
+The index carries a
+.Va valid-until
+.Em inside the signed blob ,
+checked after the signature.
+A signature says
+.Dq this is genuine ;
+it does not say
+.Dq this is current .
+Without an expiry, someone who can serve an old but validly signed
+index \(em a hostile mirror, a captive portal, a stale cache \(em can
+hold this machine at a version with a known hole indefinitely, with
+every signature and every hash still checking out.
+.Pp
+.Nm pkg sync
+refuses a stale index;
+.Nm pkg update
+only warns, because a machine that has been offline for a month
+should explain why it has nothing to offer rather than stop working.
+.Pp
+If this machine has no battery-backed clock, fix the clock rather
+than setting this: a wrong clock breaks the check in both directions.
+.It Va timeout
+Seconds a fetch may go with
+.Sy nothing arriving
+before
+.Xr pkg 1
+gives up.
+Default 30.
+.Pp
+A
+.Em read
+timeout, not a total one, so a slow but progressing download of a
+90 MB toolchain package is unaffected.
+It has a value here because BusyBox
+wget(1)'s
+own default is 900 seconds, and that stopped being somebody else's
+problem when
+.Va packages.\& Ns Ar name No = Cm present
+became something boot convergence converges: an unreachable mirror
+would otherwise stall the boot for a quarter of an hour per declared
+package, with nothing on the console to say why.
+.El
+.Sh FILES
+.Bl -tag -width "/var/cache/pkg/archives" -compact
+.It Pa /etc/novi/pkg.conf
+This file.
+Base content, not owned by any package, because
+.Xr pkg 1
+overwrites a package's files on upgrade and this one exists to be
+edited.
+.It Pa /etc/novi/keys/novi-repo.pub
+The default key.
+.It Pa /var/cache/pkg/archives
+Downloaded packages.
+Every archive here is re-hashed against the signed index before it is
+unpacked.
+.El
+.Sh EXAMPLES
+Point at a repository you built and served yourself:
+.Bd -literal -offset indent
+mirror = https://packages.example.org/novi/x86_64
+key    = /etc/novi/keys/novi-repo.pub
+.Ed
+.Sh SEE ALSO
+.Xr novi-install 1 ,
+.Xr novi-verify 1 ,
+.Xr pkg 1 ,
+.Xr system.conf 5
+.Sh STANDARDS
+RFC 0006, RFC 0010.

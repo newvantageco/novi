@@ -37,7 +37,7 @@ jobs:
       # GRUB's own reader agreeing with it in both directions. Same
       # argument as libxkbcommon-dev above.
       - name: Install shellcheck and the tools the host tests need
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck libxkbcommon-dev grub-common
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck libxkbcommon-dev grub-common mandoc
 
       # Exactly the command a contributor runs locally. This replaces a
       # third-party action that was pinned to a commit SHA which does

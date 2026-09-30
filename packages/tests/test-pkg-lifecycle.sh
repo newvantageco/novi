@@ -176,7 +176,41 @@ cat > "$T/bin/makewhatis" <<MW
 echo "makewhatis \$*" >> "$T/log/mw"
 MW
 chmod 755 "$T/bin/makewhatis"
-PATH="$T/bin:$PATH"; export PATH
+
+# THE STAND-IN MUST BE THE ONLY `makewhatis` ON PATH, and prepending
+# $T/bin is not enough to make that true. Two cases below move it
+# aside to mean "this machine has no formatter" -- every machine that
+# has not installed `man`, which is the common one -- and on a HOST
+# that has mandoc installed, `command -v makewhatis` then finds
+# /usr/sbin/makewhatis and indexes for real. The case that wants an
+# unindexed directory gets an indexed one, and the failure reads as a
+# bug in pkg. It cost a debugging round exactly that way, on a runner
+# where mandoc had just been added for the man-page lint.
+#
+# So the host's own PATH is filtered: any directory holding a
+# makewhatis is dropped. Derived rather than a list of paths to avoid,
+# because the next distribution will put it somewhere else.
+_path=""
+_ifs="$IFS"; IFS=:
+for _d in $PATH; do
+    [ -n "$_d" ] || continue
+    [ -x "$_d/makewhatis" ] && continue
+    _path="${_path:+$_path:}$_d"
+done
+IFS="$_ifs"
+PATH="$T/bin:$_path"; export PATH
+command -v makewhatis >/dev/null 2>&1 ||
+    { echo "harness: the stand-in makewhatis is not reachable" >&2; exit 1; }
+
+# Two cases below move the stand-in aside to mean "this machine has no
+# formatter". Say so out loud rather than assuming the filtering
+# above worked: a premise that is silently false produces a failure
+# that reads as a bug in pkg, which is how this was found.
+no_formatter() {
+    command -v makewhatis >/dev/null 2>&1 || return 0
+    echo "harness: 'no formatter' is not true -- $(command -v makewhatis)" >&2
+    exit 1
+}
 mw() { cat "$T/log/mw" 2>/dev/null; }
 mw_reset() { : > "$T/log/mw"; }
 
@@ -242,6 +276,7 @@ check "no pages, no index run" "$(mw)" ""
 # regression here breaks every install rather than none.
 PB="$(echo "$T"/repo/pagesb-1.0-*.pkg.tar.gz)"
 mv "$T/bin/makewhatis" "$T/bin/makewhatis.off"
+no_formatter
 out="$(run_pkg install "$PB")"; rc=$?
 check "install succeeds with no formatter present" "$rc" "0"
 absent "and says nothing about indexing" "$out" "could not index"
@@ -259,6 +294,7 @@ mv "$T/bin/makewhatis.off" "$T/bin/makewhatis"
 # common one.
 rm -rf "$T/root" "$T/db"; mkdir -p "$T/root" "$T/db" "$T/log"
 mv "$T/bin/makewhatis" "$T/bin/makewhatis.off"
+no_formatter
 run_pkg install "$PA" >/dev/null 2>&1          # pages, no formatter
 [ -f "$T/root/usr/gnu/share/man/man1/aa.1" ] && ok \
     || bad "the no-formatter install did not land its page"

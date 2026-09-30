@@ -1,0 +1,79 @@
+.Dd September 30, 2026
+.Dt NOVI-GPT 8
+.Os
+.Sh NAME
+.Nm novi-gpt
+.Nd write the GPT a Novi installation needs
+.Sh SYNOPSIS
+.Nm
+.Ar device
+.Op Fl -esp-mib Ar n
+.Op Fl -slot-mib Ar n
+.Sh DESCRIPTION
+.Nm
+writes one of two partition layouts and
+.Sy destroys everything on Ar device .
+It is called by
+.Xr novi-install 1 ;
+running it by hand is a way to lose a disk.
+.Bl -tag -width "--slot-mib n"
+.It Fl -esp-mib Ar n
+Size of the EFI System partition.
+Default 512, minimum 33 \(em a FAT32 filesystem needs the room.
+.It Fl -slot-mib Ar n
+Write the A/B layout instead, with two root slots of
+.Ar n
+MiB each.
+Minimum 2048: the OS alone is about 800 MB.
+.El
+.Ss The two layouts
+Default, two partitions:
+.Bl -column -offset indent "2" "NOVI_ROOT_A" "Linux filesystem, the rest of the disk"
+.It 1 Ta "" Ta EFI System, Fl -esp-mib No MiB
+.It 2 Ta "" Ta Linux filesystem, the rest of the disk
+.El
+.Pp
+With
+.Fl -slot-mib Ar n :
+.Bl -column -offset indent "2" "NOVI_ROOT_A" "Linux, the rest        shared state"
+.It 1 Ta NOVI_ESP Ta EFI System, Fl -esp-mib No MiB
+.It 2 Ta NOVI_ROOT_A Ta Linux, Ar n No MiB \(em root slot A
+.It 3 Ta NOVI_ROOT_B Ta Linux, Ar n No MiB \(em root slot B, left empty
+.It 4 Ta NOVI_STATE Ta Linux, the rest \(em shared state
+.El
+.Ss Why this exists, and why it writes only these two
+BusyBox
+fdisk(8)
+can read a GPT and cannot create one, and the target has no sfdisk,
+sgdisk or parted.
+So this program is the missing half.
+.Pp
+It writes exactly these layouts
+.Em on purpose :
+a tool that can express every layout is a tool that can express the
+wrong one.
+The contract used to say one layout and now says two, which is a
+change worth making as deliberately as the original rule was.
+.Pp
+An ESP on an MBR label was considered and rejected.
+Plenty of firmware boots it, OVMF included \(em which is the problem:
+it would pass here and fail on somebody's laptop.
+.Sh EXIT STATUS
+.Ex -std
+It exits 2 on a usage error.
+.Sh EXAMPLES
+.Bd -literal -offset indent
+# novi-gpt /dev/vda --esp-mib 512
+# novi-gpt /dev/vda --esp-mib 512 --slot-mib 4096
+.Ed
+.Sh SEE ALSO
+.Xr novi-install 1 ,
+.Xr novi-slot 8
+.Sh STANDARDS
+RFC 0008, RFC 0041.
+.Sh CAVEATS
+The two classic GPT mistakes are handled explicitly and are worth
+knowing before editing this: type GUIDs are byte literals in GPT's
+mixed-endian order, and the header CRC covers
+.Va header_size
+bytes with the CRC field zeroed, not the whole sector.

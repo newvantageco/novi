@@ -1,0 +1,57 @@
+.Dd September 30, 2026
+.Dt NOVI-VERIFY 1
+.Os
+.Sh NAME
+.Nm novi-verify
+.Nd check an Ed25519 signature
+.Sh SYNOPSIS
+.Nm
+.Ar public-key
+.Ar signature
+.Ar file
+.Sh DESCRIPTION
+.Nm
+verifies that
+.Ar signature
+is a valid Ed25519 signature over
+.Ar file
+by the key in
+.Ar public-key .
+It prints nothing on success.
+.Pp
+It is the trust root of the package system:
+.Xr pkg 1
+runs it over the repository index before believing a line of it, and
+every package's SHA-256 is inside that signed index.
+Everything the machine installs depends on this program being right.
+.Ss Why it is static, and why TweetNaCl is pinned
+Checking a signature must not need a TLS stack.
+.Nm
+is statically linked against a hash-pinned TweetNaCl \(em the only
+pinned source in this project.
+Every other dependency is trusted for where it comes from; this one
+.Em is
+the trust, so a modified TweetNaCl would mean signatures verified by
+an implementation an attacker chose.
+.Pp
+A missing signature is not weaker than a wrong one.
+Both fail, and the decision lives in one function, because two places
+that decide it is how one of them ends up more permissive.
+.Sh FILES
+.Bl -tag -width "/etc/novi/keys/novi.pub" -compact
+.It Pa /etc/novi/keys/novi.pub
+The repository signing key.
+.El
+.Sh EXIT STATUS
+.Ex -std
+Exit 0 means the signature is good.
+Any other status means it is not, whatever the reason: a bad
+signature, a missing file, a key of the wrong length.
+.Sh EXAMPLES
+.Bd -literal -offset indent
+$ novi-verify /etc/novi/keys/novi.pub index.sig index && echo good
+.Ed
+.Sh SEE ALSO
+.Xr pkg 1
+.Sh STANDARDS
+RFC 0006.

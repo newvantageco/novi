@@ -1,0 +1,94 @@
+.Dd September 30, 2026
+.Dt NOVI-LIVE-DESKTOP 1
+.Os
+.Sh NAME
+.Nm novi-live-desktop
+.Nd bring up the desktop on a live boot
+.Sh SYNOPSIS
+.Nm
+.Sh DESCRIPTION
+The base image is console-only: the desktop is packages, and the
+installation medium carries the whole signed repository.
+A live boot that wants a desktop therefore
+.Em installs
+one \(em into the tmpfs overlay, from a directory on the medium, with
+the same signature and hash checks a network install gets.
+It takes a couple of seconds, and it is the architecture
+demonstrating itself rather than being described.
+.Pp
+.Nm
+is run from
+.Pa /etc/s6-linux-init/scripts/rc.init
+when
+.Va novi.live.desktop
+is on the kernel command line, which the medium's
+.Dq Live Desktop
+menu entry passes.
+.Pp
+It syncs the index, installs
+.Sy novi-desktop ,
+and then
+.Em declares
+what it did:
+.Bd -literal -offset indent
+novi-state set packages.novi-desktop present
+novi-state set services.seatd on
+novi-state set services.novi-shell on
+novi-state boot
+.Ed
+.Pp
+Declaring rather than merely starting is the point:
+.Nm novi-state diff
+on a live session should say the machine matches its document, and
+the document should say a desktop is what this boot is.
+.Ss Everything here is best-effort
+This runs during boot, and a live session that could not fetch a
+desktop should still get a login prompt.
+So every failure is a message and an exit 0, never a boot that stops.
+.Pp
+Messages go to the console as well as to stderr.
+stderr is the s6 catch-all logger, which is right for a record and
+wrong for a person:
+.Pa rc.init
+runs this
+.Em after
+the gettys are up, so a live user is already looking at a login
+prompt while it works, and the screen would otherwise flip to a
+compositor with no explanation.
+.Sh ENVIRONMENT
+.Bl -tag -width "NOVI_LIVE_REPO" -compact
+.It Ev NOVI_LIVE_REPO
+The repository to install from.
+Default
+.Pa /run/live/novi-repo .
+.El
+.Sh FILES
+.Bl -tag -width "/run/live/novi-repo" -compact
+.It Pa /run/live/novi-repo
+The signed repository on the live medium.
+.El
+.Sh EXIT STATUS
+Always 0.
+.Sh SEE ALSO
+.Xr novi-install 1 ,
+.Xr novi-state 1 ,
+.Xr pkg 1 ,
+.Xr system.conf 5
+.Sh STANDARDS
+RFC 0007.
+.Sh CAVEATS
+The plain console menu entry does
+.Em not
+run this, so it never syncs the on-medium index \(em and
+.Nm pkg install
+there answers
+.Dq Package not found
+about a medium that is carrying the package.
+Run
+.Nm pkg sync
+first on a console live boot.
+.Pp
+Because every step here ends in a fallback, the final
+.Dq desktop ready
+is printed whatever happened before it.
+It means this script finished, not that a compositor is on screen.

@@ -1,0 +1,149 @@
+.Dd September 30, 2026
+.Dt NOVI-INSTALL 1
+.Os
+.Sh NAME
+.Nm novi-install
+.Nd install Novi Linux onto a disk
+.Sh SYNOPSIS
+.Nm
+.Cm list
+.Nm
+.Cm install Fl -disk Ar device Op Ar option ...
+.Sh DESCRIPTION
+.Nm
+runs on the live system and writes Novi to a disk.
+.Cm list
+shows candidate targets;
+.Cm install
+partitions, formats, copies and makes the disk bootable.
+.Pp
+Firmware is detected from
+.Pa /sys/firmware/efi ,
+which is the kernel's own record of how this machine got here, and
+the two paths differ:
+.Bl -column -offset indent "UEFI" "GPT via novi-gpt" "self-contained BOOTX64.EFI"
+.It Sy "" Ta Sy table Ta Sy bootloader
+.It UEFI Ta GPT Ta Pa /EFI/BOOT/BOOTX64.EFI No on the ESP
+.It BIOS Ta MBR Ta Pa boot.img No + Pa core.img No in the post-MBR gap
+.El
+.Ss Options
+.Bl -tag -width "--hostname name"
+.It Fl -disk Ar device
+The target, for example
+.Pa /dev/sda .
+Required.
+.It Fl -hostname Ar name
+Hostname for the installed system.
+The default keeps the current one.
+It is set with
+.Xr novi-state 1 ,
+never by editing the file, so the document keeps its comments.
+.It Fl -firmware Cm uefi | bios
+Default: whatever this machine booted with, which is almost always
+what you want.
+Installing the other one produces a disk this machine cannot boot.
+.It Fl -esp-mib Ar n
+Size of the EFI System partition.
+Default 512.
+.It Fl -encrypt
+LUKS2-encrypt the root filesystem, prompting for a passphrase.
+The kernel, the initramfs and the boot menu stay
+.Sy unencrypted :
+something has to be readable before the initramfs can ask.
+This protects data at rest against someone who takes the disk.
+It is
+.Em not
+protection against someone who can write to the disk and hand it
+back.
+.It Fl -ab
+Lay the disk out for atomic updates: a shared
+.Pa /boot ,
+two root slots, and a shared state partition holding
+.Pa /home ,
+.Pa /var/log ,
+.Pa /var/lib/novi-state ,
+.Pa /var/lib/alsa
+and
+.Pa /var/cache/pkg .
+The machine boots from slot A.
+Slot B is populated by
+.Xr novi-slot 8 .
+.Pp
+It exists at install time because a partition table is written once:
+a layout without the second slot could never gain one without a
+reinstall.
+Refused with
+.Fl -encrypt ,
+because carving three volumes out of one LUKS container is what LVM
+is for and this system has none; leaving
+.Pa /home
+in the clear for somebody who typed
+.Fl -encrypt
+would be a silent, serious regression.
+.It Fl -slot-mib Ar n
+Size of each root slot with
+.Fl -ab .
+Default 4096.
+Measured: the base OS is about 780 MB, so at 2048 a slot is 43% full
+with nothing installed.
+.It Fl -profile Cm desktop | console
+.Cm desktop
+is the default.
+It installs the desktop packages from the repository on this medium
+and declares them, so the installed machine boots into a graphical
+session with no network involved.
+.It Fl -mirror Ar url
+Package mirror for the installed system.
+Without it the shipped
+.Pa pkg.conf
+line is commented out, because the default points at the
+installation medium and every installed machine would otherwise get a
+.Nm pkg sync
+that fails against a directory nobody chose.
+.It Fl -user Ar name
+Create an account.
+It starts locked;
+passwd(1)
+unlocks it.
+A password hash never goes into
+.Xr system.conf 5 .
+.El
+.Sh FILES
+.Bl -tag -width "/run/live/novi-repo" -compact
+.It Pa /run/live/novi-repo
+The signed package repository on the installation medium.
+.It Pa /novi-boot
+The bootloader pieces generated on the build host.
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Sh EXAMPLES
+.Bd -literal -offset indent
+# novi-install list
+# novi-install install --disk /dev/vda --hostname workshop
+.Ed
+.Pp
+An encrypted console machine:
+.Bd -literal -offset indent
+# novi-install install --disk /dev/sda --encrypt --profile console
+.Ed
+.Pp
+A machine that can be updated atomically later:
+.Bd -literal -offset indent
+# novi-install install --disk /dev/sda --ab --slot-mib 4096
+.Ed
+.Sh SEE ALSO
+.Xr novi-state 1 ,
+.Xr pkg 1 ,
+.Xr system.conf 5 ,
+.Xr novi-slot 8
+.Sh STANDARDS
+RFC 0003, RFC 0008, RFC 0018, RFC 0041.
+.Sh CAVEATS
+.Pa bootx64.efi
+is signed by a key this build generated, which no stock machine
+trusts.
+The certificate ships at
+.Pa /novi-boot/novi-secureboot.der
+for somebody who enrolls their own keys.
+This is not Secure Boot support.
