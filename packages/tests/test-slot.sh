@@ -412,6 +412,179 @@ check "no ENCRYPT test decides the kernel's home" \
 check "the search follows the same predicate" \
     "$(grep -c 'if kernel_on_esp; then' "$INSTALLER")" "2"
 
+part "/etc is the slot's own, and switch says what that costs"
+# RFC 0041 item 1 left `/etc` open. The answer is slot-local and the
+# ARGUMENT IS IN THE TREE rather than in anybody's taste:
+# /etc/s6-linux-init/scripts/rc.init is the stage-2 boot script and
+# /etc/s6-rc/compiled is the generated service database beside it. A
+# shared /etc means the old slot boots the NEW slot's rc.init -- so the
+# one boot the rollback exists to rescue would run the failed update's
+# own boot script, and the net would share its single point of failure
+# with the thing it catches (item 5).
+for RFS in build/rootfs /build/rootfs; do
+    [ -d "$RFS/etc" ] || continue
+    check "the boot script is in /etc"   "$([ -f "$RFS/etc/s6-linux-init/scripts/rc.init" ] && echo yes)" "yes"
+    check "so is the compiled s6-rc db"  "$([ -d "$RFS/etc/s6-rc/compiled" ] && echo yes)" "yes"
+    break
+done
+# And the file must no longer claim item 5 is absent -- it is here.
+check "no stale 'not here yet' about the trial rule" \
+    "$(grep -c 'item 5 and is deliberately not here yet' "$TOOL")" "0"
+
+FN="$WORK/etcfn.sh"
+{
+    grep '^info() {' "$TOOL"
+    grep '^warn() {' "$TOOL"
+    sed -n 's/^\(ETC_EXPECTED=.*\)$/\1/p' "$TOOL" | head -1
+    sed -n 's/^\(ETC_REPORT_MAX=.*\)$/\1/p' "$TOOL" | head -1
+    for f in etc_list etc_same etc_diff_list etc_accounts_only_in etc_report; do
+        sed -n "/^${f}() {/,/^}/p" "$TOOL"
+    done
+} > "$FN"
+# SYNC_MARK is what ETC_EXPECTED is built from, so take the real one.
+sed -n 's/^\(SYNC_MARK=.*\)$/\1/p' "$TOOL" | head -1 | cat - "$FN" > "$FN.x" && mv "$FN.x" "$FN"
+check "extracted" "$(grep -c '^etc_report() {' "$FN")" "1"
+# shellcheck disable=SC1090
+. "$FN"
+
+mketc() {  # $1 root
+    mkdir -p "$1/etc/novi"
+    printf 'root:x:0:0:root:/root:/bin/sh\n'      > "$1/etc/passwd"
+    printf '127.0.0.1 localhost\n'                > "$1/etc/hosts"
+    printf 'hostname = axiom\n'                   > "$1/etc/novi/system.conf"
+    printf 'LABEL=NOVI_ROOT_A / ext4 defaults 0 1\n' > "$1/etc/fstab"
+    : > "$1/etc/novi/slot-synced"
+    ln -sf /run/novi/resolv.conf "$1/etc/resolv.conf"
+}
+A="$WORK/etc-a"; B="$WORK/etc-b"; rm -rf "$A" "$B"; mketc "$A"; mketc "$B"
+
+# An absent answer and a negative answer are different things.
+OUT="$(etc_report "$A" "$B" b 2>&1)"
+check "identical trees say so"  "$(printf '%s' "$OUT" | grep -c "/etc matches slot b's copy")" "1"
+check "and name no file"        "$(printf '%s' "$OUT" | grep -c 'differ from slot')" "0"
+
+# The two paths `sync` makes different on purpose are not news.
+printf 'LABEL=NOVI_ROOT_B / ext4 defaults 0 1\n' > "$B/etc/fstab"
+printf '2026-01-01\n' > "$B/etc/novi/slot-synced"
+check "the rewritten fstab is not reported" \
+    "$(etc_diff_list "$A" "$B" | grep -cx 'etc/fstab')" "0"
+check "nor is the sync marker" \
+    "$(etc_diff_list "$A" "$B" | grep -cx 'etc/novi/slot-synced')" "0"
+# ...and the exclusion is doing something, rather than the two files
+# happening to match. Provoked, because a filter that filters nothing
+# reads exactly like one that works.
+check "without the exclusion, both would be" \
+    "$(ETC_EXPECTED="" etc_diff_list "$A" "$B" | grep -cx 'etc/fstab\|etc/novi/slot-synced')" "2"
+
+printf 'hostname = other\n' > "$B/etc/novi/system.conf"
+printf 'secret\n'           > "$A/etc/novi/wifi.conf"
+LIST="$(etc_diff_list "$A" "$B")"
+check "a changed file is named"        "$(printf '%s\n' "$LIST" | grep -cx 'etc/novi/system.conf')" "1"
+check "a file only one side has, too"  "$(printf '%s\n' "$LIST" | grep -cx 'etc/novi/wifi.conf')" "1"
+check "and nothing else is"            "$(printf '%s\n' "$LIST" | grep -c .)" "2"
+
+# A SYMLINK IS COMPARED BY ITS TARGET. /etc/resolv.conf is one, so a
+# comparison that followed links would be reading the running system's
+# runtime state twice and calling it agreement -- and a package that
+# replaced a link with a real file would go unreported.
+rm -f "$B/etc/resolv.conf"; printf 'nameserver 1.1.1.1\n' > "$B/etc/resolv.conf"
+check "a link replaced by a file differs" \
+    "$(etc_diff_list "$A" "$B" | grep -cx 'etc/resolv.conf')" "1"
+rm -f "$B/etc/resolv.conf"; ln -s /run/novi/other "$B/etc/resolv.conf"
+check "two links to different targets differ" \
+    "$(etc_diff_list "$A" "$B" | grep -cx 'etc/resolv.conf')" "1"
+rm -f "$B/etc/resolv.conf"; ln -s /run/novi/resolv.conf "$B/etc/resolv.conf"
+check "two links to the same target do not" \
+    "$(etc_diff_list "$A" "$B" | grep -cx 'etc/resolv.conf')" "0"
+
+# A list that shows a subset must say so.
+for i in 1 2 3 4 5 6 7 8 9 10; do printf 'x\n' > "$A/etc/f${i}"; done
+OUT="$(etc_report "$A" "$B" b 2>&1)"
+check "twelve differences are counted"  "$(printf '%s' "$OUT" | grep -c '12 file(s) differ')" "1"
+check "eight are shown"                 "$(printf '%s' "$OUT" | grep -c '^       etc/')" "8"
+check "and the rest are admitted"       "$(printf '%s' "$OUT" | grep -c '\.\.\. and 4 more')" "1"
+for i in 1 2 3 4 5 6 7 8 9 10; do rm -f "$A/etc/f${i}"; done
+
+# ACCOUNTS GET THEIR OWN SENTENCE, because /home is on the shared
+# partition and /etc/passwd is not: a name on one side only is a home
+# directory the other slot can see with nothing behind it.
+printf 'root:x:0:0:root:/root:/bin/sh\nalice:x:1000:1000::/home/alice:/bin/sh\n' > "$A/etc/passwd"
+check "an account only here is named" "$(etc_accounts_only_in "$A" "$B")" "alice"
+check "the other direction is not"    "$(etc_accounts_only_in "$B" "$A")" ""
+OUT="$(etc_report "$A" "$B" b 2>&1)"
+check "the report says so"            "$(printf '%s' "$OUT" | grep -c 'slot b has no account for: alice')" "1"
+check "and says what it costs"        "$(printf '%s' "$OUT" | grep -c 'shared partition')" "1"
+# A QUERY THAT FAILED IS NOT AN EMPTY ANSWER: with no passwd to read on
+# the far side, claiming every account is about to be orphaned would be
+# the loudest possible wrong answer.
+mv "$B/etc/passwd" "$WORK/passwd.away"
+check "an unreadable far passwd claims nothing" "$(etc_accounts_only_in "$A" "$B")" ""
+mv "$WORK/passwd.away" "$B/etc/passwd"
+
+# A slot that cannot be listed at all is a failed query, not a clean one.
+check "a missing far /etc is a failure" \
+    "$(etc_diff_list "$A" "$WORK/nowhere" >/dev/null 2>&1; echo $?)" "1"
+OUT="$(etc_report "$A" "$WORK/nowhere" b 2>&1)"
+check "and the report says so rather than 'matches'" \
+    "$(printf '%s' "$OUT" | grep -c 'could not compare')" "1"
+
+# THE WIRING, not the mention: the report is only worth anything if the
+# real command calls it, with the running system on one side and the
+# mounted slot on the other.
+CS="$(sed -n '/^cmd_switch() {/,/^}/p' "$TOOL")"
+check "cmd_switch calls it"       "$(printf '%s\n' "$CS" | grep -c 'etc_report "" "\$MNT" "\$want"')" "1"
+check "before it unmounts"        "$([ "$(printf '%s\n' "$CS" | grep -n 'etc_report' | cut -d: -f1)" \
+                                      -lt "$(printf '%s\n' "$CS" | grep -n 'cleanup' | head -1 | cut -d: -f1)" ] && echo yes)" "yes"
+# switch and rollback are one implementation, so one call site serves
+# both -- and the dispatcher is what says so.
+check "rollback reaches the same function" \
+    "$(grep -c 'rollback) cmd_switch' "$TOOL")" "1"
+# IT REFUSES NOTHING. Somebody rolling back is escaping something.
+check "the report cannot end the program" \
+    "$(sed -n '/^etc_report() {/,/^}/p' "$TOOL" | grep -c 'die ')" "0"
+check "nor can the comparison" \
+    "$(sed -n '/^etc_diff_list() {/,/^}/p' "$TOOL" | grep -c 'die ')" "0"
+
+# THE SHELL THAT WILL ACTUALLY RUN IT. Everything above is bash on the
+# build host; `novi-slot` is `#!/bin/sh` and runs under busybox ash
+# against busybox's OWN cmp, readlink, mktemp, find and grep. This repo
+# has been caught testing the shell instead of the image before -- the
+# /dev/fd bug in `pkg`, verified against the right binary in the wrong
+# environment. A busybox-only PATH is the cheap half of that answer.
+BB=""
+for c in build/rootfs/bin/busybox /build/rootfs/bin/busybox; do
+    [ -x "$c" ] && { BB="$(cd "$(dirname "$c")" && pwd)/busybox"; break; }
+done
+if [ -n "$BB" ]; then
+    part "the same comparison under busybox ash, with busybox's applets"
+    mkdir -p "$WORK/bb"
+    for a in cmp readlink mktemp grep cut sort find wc head sed tr rm mkdir cat printf; do
+        check "busybox has ${a}" "$("$BB" --list | grep -cx "$a")" "1"
+        ln -sf "$BB" "$WORK/bb/$a"
+    done
+    # One deterministic fixture, rendered by both shells.
+    rm -rf "$A" "$B"; mketc "$A"; mketc "$B"
+    printf 'hostname = other\n' > "$B/etc/novi/system.conf"
+    printf 'secret\n'           > "$A/etc/novi/wifi.conf"
+    printf 'LABEL=NOVI_ROOT_B / ext4 defaults 0 1\n' > "$B/etc/fstab"
+    printf 'root:x:0:0:root:/root:/bin/sh\nalice:x:1000:1000::/home/alice:/bin/sh\n' > "$A/etc/passwd"
+    BASH_OUT="$(etc_report "$A" "$B" b 2>&1)"
+    cat > "$WORK/bb-drive.sh" <<EOF
+. "$FN"
+etc_report "$A" "$B" b 2>&1
+EOF
+    ASH_OUT="$(PATH="$WORK/bb" "$BB" ash "$WORK/bb-drive.sh" 2>&1)"
+    # THREE: system.conf changed, wifi.conf only here, passwd gained an
+    # account. The first version of this line said two and the failure
+    # read as busybox behaving differently -- it was the expectation.
+    check "ash counts all three"       "$(printf '%s' "$ASH_OUT" | grep -c "3 file(s) differ")" "1"
+    check "ash names the account"      "$(printf '%s' "$ASH_OUT" | grep -c 'no account for: alice')" "1"
+    check "ash excludes the fstab"     "$(printf '%s' "$ASH_OUT" | grep -c 'etc/fstab')" "0"
+    # Byte for byte: an applet that behaves differently is the thing
+    # this block exists to find, and a substring check would miss it.
+    check "and the two shells agree exactly" "$([ "$ASH_OUT" = "$BASH_OUT" ] && echo yes || printf 'ASH[%s] BASH[%s]' "$ASH_OUT" "$BASH_OUT")" "yes"
+fi
+
 echo
 echo "  ${PASS} passed, ${FAIL} failed"
 [ "$FAIL" -eq 0 ]
