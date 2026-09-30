@@ -1,0 +1,82 @@
+.Dd September 30, 2026
+.Dt NOVI-POWER 1
+.Os
+.Sh NAME
+.Nm novi-power
+.Nd battery, AC, CPU frequency and suspend
+.Sh SYNOPSIS
+.Nm
+.Cm status | suspend | governors | idle
+.Nm
+.Cm event Cm lid | Cm button
+.Sh DESCRIPTION
+.Bl -tag -width "event lid|button"
+.It Cm status
+Battery, AC, the current CPU frequency governor, and temperature.
+.It Cm suspend
+Suspend to RAM, using deep sleep or s2idle, whichever the firmware
+offers.
+.It Cm governors
+List the CPU frequency governors this kernel has.
+.It Cm idle
+What the compositor is doing about idling, and which clients, if any,
+are holding the machine awake.
+.It Cm event Cm lid | Cm button
+Act on a hardware event.
+Called by
+acpid(8)
+from
+.Pa /etc/acpi/ ;
+not normally run by a person.
+.El
+.Pp
+Policy is declared state rather than a command here:
+.Bd -literal -offset indent
+# novi-state set power.governor powersave
+# novi-state set power.lid      ignore
+# novi-state set power.button   suspend
+# novi-state apply
+.Ed
+.Ss Locking before sleep
+A lid-close suspend locks the session first when
+.Va power.lid.lock
+is on, waiting about six seconds for the lock screen to appear and
+then sleeping regardless: a closed lid is a machine in a bag, and
+refusing to sleep trades a shoulder-surfing risk for a thermal one.
+An
+.Em idle
+suspend is the opposite call.
+.Va power.suspend.lock
+is on by default and the machine does
+.Em not
+suspend if the lock screen fails to appear, because a machine left
+awake is recoverable by anyone who walks up to it and one that
+suspended unlocked is not.
+.Pp
+A machine with no root password therefore never idle-suspends with the
+lock on:
+.Xr novi-lockscreen 1
+refuses to run without a password.
+.Sh FILES
+.Bl -tag -width "/run/novi/display" -compact
+.It Pa /run/novi/display
+Published by the compositor so that a tool started from
+acpid(8)
+can find the Wayland session.
+Absent means there is nothing to lock.
+.It Pa /etc/acpi/PWRF/00000080
+.It Pa /etc/acpi/LID/00000080
+Named by busybox
+acpid(8) Ns 's
+compiled-in table, not by Novi.
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Sh SEE ALSO
+.Xr novi-state 1 ,
+.Xr system.conf 5
+.Sh STANDARDS
+RFC 0013 and RFC 0035.
+.Sh CAVEATS
+No suspend or resume on this system has been verified on physical
+hardware.

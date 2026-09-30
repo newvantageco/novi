@@ -130,6 +130,25 @@ install -D -m 644 "${REPO_ROOT}/rootfs/etc/profile" "${ROOTFS}/etc/profile"
 # asserts -- see the file's own header.
 install -D -m 644 "${REPO_ROOT}/rootfs/etc/services" "${ROOTFS}/etc/services"
 
+# ---------------------------------------------------------------------------
+# Manual pages for Novi's own commands
+# ---------------------------------------------------------------------------
+# Base content: a machine whose package manager or update tool is the
+# thing going wrong is exactly the machine that cannot install a
+# package to read about it -- the same argument that puts novi-grubenv
+# and novi-slot in the base.
+#
+# ONE DERIVED LOOP, not a list per tool. A page appears in the image
+# because it exists under rootfs/usr/share/man, so adding one is
+# writing it; there is no second place to remember. Reading them needs
+# `pkg install man` (RFC 0040 roadmap 2) -- busybox's own `man` applet
+# is a pipeline over tbl/nroff/col, none of which busybox provides.
+find "${REPO_ROOT}/rootfs/usr/share/man" -type f -name '*.[0-9]' 2>/dev/null |
+while read -r page; do
+    rel="${page#"${REPO_ROOT}"/rootfs/}"
+    install -D -m 644 "$page" "${ROOTFS}/${rel}"
+done
+
 # The generic driver loader (RFC 0011). Base image, not a package: a
 # machine that cannot load the driver for its own disk or NIC cannot
 # install a package to fix that.
