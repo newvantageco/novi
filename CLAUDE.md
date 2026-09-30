@@ -6013,6 +6013,61 @@ worth writing down as a method.
   shipped a lifecycle script (checked with `find`, not assumed). A
   sweep that rewrote those would be making the documents worse.
 
+## Architecture: a glibc binary needs a loader, not a container
+
+`tests/glibc-gap/`. PLATFORM-ROADMAP §2 proposes an OCI/Flatpak tier so
+upstream glibc apps run without a musl port, §11 calls it *the actual
+unlock*, and status rows 6, 7, 9 and 12 all wait on it. Measured before
+writing the RFC, which is RFC 0040 roadmap 3's method.
+
+- **THE ITEM STATES ONE PROBLEM AND IT IS TWO.** An ELF names its own
+  interpreter in `PT_INTERP`, so a glibc binary and a musl binary
+  **never share a loader -- they cannot, by construction**. That splits
+  the item into EXECUTION (can it run here?) and DISTRIBUTION (where
+  does the bundle come from, who signed it, how is it updated, what may
+  it reach?). The framing assumes the first is the hard part.
+- **IT IS NOT.** A dynamically linked glibc binary runs in the shipped
+  musl rootfs beside a dynamic musl binary in the same root -- no
+  container, no OCI, no Flatpak, no shim -- with **C++ and threads**,
+  for **5.9 MB** of loader + libc + libm + libgcc_s + libstdc++. The
+  glibc interpreter path is `/lib64/...` and **the Novi rootfs has no
+  `/lib64` at all**, so the path is free.
+- **NSS WAS NOT THE OBSTACLE IT IS SUPPOSED TO BE, and the reason is
+  checkable rather than lucky.** `getpwnam` and real DNS work with NO
+  `nsswitch.conf` and NO `libnss_*.so` present, because **`libc.so.6`
+  exports 83 `_nss_files_*`/`_nss_dns_*` symbols** -- glibc merged
+  those backends into libc, so the version-matched modules everybody
+  warns about are not needed. The separate `libnss_files.so.2` still on
+  a Debian host is a compat stub.
+- **THE CONTROL IS WHAT MAKES THE REST MEAN ANYTHING**, and it runs
+  FIRST: the same binary in the same chroot with no glibc runtime
+  staged is refused. Without it a pass proves only that something
+  somewhere could run it.
+- **THE KERNEL WAS READY ALREADY** -- every cgroup controller,
+  `OVERLAY_FS`, every namespace but `IPC_NS` (RFC 0039 explained that
+  one), `SQUASHFS`, `FUSE_FS`, veth/bridge/NAT as modules. Read from
+  the GENERATED config, never the ~280-line curated subset. **Third
+  time a blocking claim here was a true statement about something
+  else**, after RFC 0031's browser and RFC 0039's namespaces.
+- **SAY WHAT IT DOES NOT SAY, every time.** A `printf` is not a desktop
+  app: a real one's GTK/Qt/dbus tree is more megabytes of the same
+  mechanism, which is bundle CONTENTS and not a different question.
+  Nothing here is about confinement -- RFC 0039's `novi-sandbox` is,
+  and is **not** this tier. Nothing here is about distribution, which
+  is most of what an OCI tier is actually for. A real locale returns
+  NULL without `locale-archive`. And it was measured in a chroot on the
+  BUILD HOST's kernel, not on a booted Novi. Same discipline as not
+  letting "Mesa" imply a gaming stack.
+- **`cp -a` ON THE GLIBC LOADER COPIES A DANGLING SYMLINK.** On Debian
+  `/lib64/ld-linux-x86-64.so.2` points into a directory the chroot does
+  not have, and the symptom is `chroot: failed to run command: No such
+  file or directory` **about a binary that is plainly there** -- it is
+  the INTERPRETER that is missing and nothing says so. `cp -L`. Three
+  more probe bugs in the same measurement: direct `NEEDED` is not the
+  closure (twice -- the musl binary died on its grandchild, libstdc++
+  on libm), and `find -printf '%d'` is DEPTH, so the size table read
+  `3 KB` for a 2 MB library beside a total that was correct.
+
 ## Contribution conventions
 
 Conventional Commits (`docs/branch-strategy.md`, `CONTRIBUTING.md` have the
