@@ -1,0 +1,18 @@
+<!DOCTYPE html><html><head><title>bench</title></head><body>
+<h1 id="out">running</h1>
+<script>
+function fib(n){ return n < 2 ? n : fib(n-1) + fib(n-2); }
+var t0 = Date.now();
+var v = fib(24);
+var t1 = Date.now();
+var s = 0, i;
+for (i = 0; i < 2000000; i++) { s += i % 7; }
+var t2 = Date.now();
+var a = [];
+for (i = 0; i < 50000; i++) { a.push('x' + i); }
+var j = a.join(',').length;
+var t3 = Date.now();
+document.getElementById('out').textContent =
+  'fib24=' + v + ' ' + (t1-t0) + 'ms | loop2M ' + (t2-t1) + 'ms | str50k ' + (t3-t2) + 'ms';
+</script>
+</body></html>

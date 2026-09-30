@@ -1,0 +1,150 @@
+.Dd September 30, 2026
+.Dt PKG-FORMAT 5
+.Os
+.Sh NAME
+.Nm pkg-format
+.Nd the Novi package format
+.Sh SYNOPSIS
+.Ar name Ns - Ns Ar version Ns - Ns Ar arch Ns .pkg.tar.gz
+.Sh DESCRIPTION
+A Novi package is a gzipped tar archive holding a
+.Pa MANIFEST ,
+a
+.Pa files/
+tree that mirrors the root filesystem, and optionally a
+.Pa scripts/
+directory.
+.Bd -literal -offset indent
+MANIFEST
+files/usr/bin/curl
+files/usr/lib/libcurl.so.4
+scripts/post-install
+.Ed
+.Ss MANIFEST
+Lines of
+.Ar field Ns = Ns Ar value .
+Required:
+.Bl -tag -width "description" -compact
+.It Va name
+Lowercase, no spaces.
+.It Va version
+.It Va arch
+.It Va description
+One line.
+.El
+.Pp
+Optional:
+.Bl -tag -width "replaces-files"
+.It Va depends
+.Sy Comma Ns -separated
+package names.
+Not spaces \(em
+mkpkg(1)
+refuses a space outright, because a package written from the wrong
+belief builds, indexes and signs perfectly and then fails at install
+naming the whole list as one imaginary package.
+.It Va replaces-files
+Space-separated root-relative paths this package knowingly takes over
+from
+.Em no other package .
+.It Va size
+Installed size in KB.
+Set by
+mkpkg(1).
+.It Va url
+.It Va license
+An SPDX identifier.
+.It Va maintainer
+.El
+.Pp
+.Va provides ,
+.Va conflicts
+and
+.Va replaces
+appear in the spec and are
+.Sy not implemented .
+Note that
+.Va replaces
+is
+.Em not
+.Va replaces-files :
+the first is the conventional dpkg meaning and does nothing here.
+.Ss Who owns a file
+.Xr pkg 1
+refuses to install a path another package owns, refuses a path
+.Em nothing
+owns, and takes over an unowned one only on an explicit
+.Va replaces-files= .
+The original is saved, so
+.Nm pkg remove
+puts it back \(em which is the whole reason a declared takeover is
+worth having.
+The harm was never the overwrite; it was that the machine could not
+be put back.
+.Pp
+.Fl -overwrite
+is the operator's answer to whatever is in the way, and deliberately
+not something a MANIFEST can ask for.
+.Ss Lifecycle scripts
+Each runs as root with
+.Ar name Ar version
+as its arguments.
+.Bl -column -offset indent "post-install" "aborts the install"
+.It Sy script Ta Sy a failure
+.It Pa pre-install Ta Sy aborts the install
+.It Pa post-install Ta warns; the install stands
+.It Pa pre-remove Ta warns; removal proceeds
+.It Pa post-remove Ta warns; removal stands
+.El
+.Pp
+Only
+.Pa pre-install
+is fatal, and that is the design: it runs before anything has moved,
+so refusing leaves the machine exactly as it was.
+The other three run once files are already on or off the disk, where
+aborting would leave a half-installed package \(em worse than either
+outcome.
+.Pp
+.Sy A script runs unattended, as root, at boot .
+.Va packages.\& Ns Ar name
+means boot convergence can install a package.
+Prefer shipping a file to running code, and keep what runs
+idempotent, because an upgrade runs it again.
+.Ss Trust
+The repository index is signed once, with Ed25519, and every
+package's SHA-256 is inside it.
+.Nm pkg sync
+verifies the signature with
+.Xr novi-verify 1
+before believing a line;
+.Nm pkg install
+re-checks each archive's hash before unpacking,
+.Em cached archives included .
+.Pp
+The index format forbids
+.Ql \&|
+in every field rather than escaping it: an escaping scheme in a
+format parsed by
+.Ic read
+is a bug waiting to happen.
+.Sh FILES
+.Bl -tag -width "/var/lib/pkg/installed/<name>" -compact
+.It Pa /var/lib/pkg/installed/ Ns Ar name Ns Pa /MANIFEST
+.It Pa /var/lib/pkg/installed/ Ns Ar name Ns Pa /FILES
+.It Pa /var/lib/pkg/installed/ Ns Ar name Ns Pa /scripts/
+Copied in, because
+.Pa pre-remove
+runs long after the archive is gone.
+.El
+.Sh SEE ALSO
+.Xr novi-state 1 ,
+.Xr novi-verify 1 ,
+.Xr pkg 1 ,
+.Xr pkg.conf 5
+.Sh STANDARDS
+RFC 0006, RFC 0040.
+.Sh CAVEATS
+Version comparison is
+.Nm sort Fl V ,
+never a string equality: a string comparison says 1.9.2 is newer than
+1.10.0, which is the kind of wrong that ships a downgrade.

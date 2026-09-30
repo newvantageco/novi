@@ -55,6 +55,13 @@ $ novi-state rollback                # and stops. reversibly.
 One plain-text file. Real `diff`. Real rollback. Every setting visible,
 greppable, and committable to git.
 
+Installed software is in there too — `packages.foot = present`, and an
+`apply` fetches, verifies and installs it. The document is **additive**,
+not exhaustive: a package it never mentions is one nothing touches, so
+`pkg install` by hand is not something the next apply quietly undoes.
+A removal that would break another installed package is refused and
+named rather than done behind your back.
+
 And the Settings app is a front-end to *that same file* — it shows you
 which settings the running system doesn't currently match, writes your
 changes back into the file (comments and all), and picks up edits you
@@ -255,6 +262,8 @@ novi-hwdetect --report            # what hardware was found, what loaded
 pkg install novi-desktop          # the Wayland desktop, offline from the ISO
 pkg install novi-devel            # gcc, make, pkg-config, headers
 pkg install python                # CPython 3.11, with ssl (RFC 0026, 0027)
+pkg install novi-recon            # DNS, WHOIS, TLS, headers, ports (RFC 0028)
+pkg install netsurf               # a web browser: HTML + CSS, no JS (RFC 0031)
 novi-install install --disk /dev/vda   # install to the qcow2 (with --disk)
 ```
 
@@ -471,7 +480,7 @@ graph, not listed by hand, and the build fails if anything left behind
 still links against something being moved out — see
 [RFC 0007](docs/rfcs/0007-base-desktop-split.md).
 
-Build your own repository with `bash build/40-repo.sh` and serve the
+Build your own repository with `bash build/50-repo.sh` and serve the
 directory over HTTP, or point `mirror` at a local directory. There is
 no default public mirror: there is no public Novi repository yet, and
 pointing a package manager at a host that does not exist is worse than
@@ -596,6 +605,7 @@ small static GPT writer) and e2fsprogs' `mke2fs`. See
 | TLS | mbedTLS 3.6.2 + curl 8.11.1 | Packages, not base; CA bundle hash-pinned |
 | WiFi | wpa_supplicant 2.11 + wolfSSL 5.7.6 | WPA2 and WPA3-SAE; no OpenSSL |
 | Remote access | sshd 9.9p2 | A package; host key made on first start; root refused |
+| Web browser | NetSurf 3.11 | A package; own layout engine, **no JavaScript**; one patch for xdg-shell |
 
 ## OS Identity
 
@@ -666,6 +676,60 @@ BUG_REPORT_URL="https://github.com/newvantageco/novi/issues"
       language this system has had (RFC 0026)
 - [x] `import ssl` — OpenSSL 3.5 LTS as a package, the base image still
       TLS-free and the package trust root still static (RFC 0027)
+- [x] `novi-recon` — DNS, WHOIS, TLS certificates, HTTP security headers,
+      robots.txt, breached passwords, a connect scan. Standard library
+      only, and the first Python program in this OS (RFC 0028). It does
+      **no DNSSEC validation** and says so on every `dns` run — what it
+      reports is the resolver's own AD bit, which is worth exactly the
+      path to the resolver
+- [x] `/etc/services` — 77 curated entries, so `getservbyport(3)` finally
+      answers and a scan names what it finds. The firewall still names
+      ports as **numbers**: a rule that resolves through a name table
+      means something different on a machine whose table differs
+- [x] Themes — Super+T picks one, the panel follows live and everything
+      else at its next start. Four palettes, one of them light, which
+      found two real bugs no dark theme could have (RFC 0030)
+- [x] An interface for automated actors — `novi-agent describe` is one
+      JSON document (`--text` prints the same thing as a table);
+      `novi-agent do` changes the machine only within a
+      list you declared, and every attempt is audited (RFC 0029)
+- [x] Asking a machine not to sleep — **Super + A** for a person, and
+      `zwp_idle_inhibit_manager_v1` for a program. Honoured only while
+      the asking client's window is on screen, and never while the
+      session is locked; the keypress survives a lock, because a person
+      asked. `novi-power idle` says which. Verified by leaving a machine
+      with a ten-second blank timeout untouched for thirty seconds and
+      watching it stay lit, then blank twenty seconds after the toggle
+      went off. Nothing in this image speaks the protocol yet (RFC 0036)
+- [x] The keys are yours — `/etc/novi/keys.conf`, one line per shortcut
+      you want moved, everything else left as it ships. The sheet
+      (Super + /) reads the same file, so it always lists the key that
+      will actually fire (RFC 0037)
+- [x] Unread notifications — a bell and a count on the panel while
+      something has happened that the list has not been opened since.
+      Super+N opens it and the bell goes out; Ctrl+L clears it
+      (RFC 0034)
+- [x] ...and saying so — a coffee cup on the panel while anything is
+      holding the machine awake, and an `idle` object in
+      `novi-agent describe` so an automated actor can ask why a machine
+      will not sleep. One glyph for both askers: the panel raises the
+      question, `novi-power idle` answers which (RFC 0036)
+- [x] Idle-suspend — `power.suspend = <seconds>`, off by default. The
+      trigger is verified; the resume is not, because S3 does not come
+      back under TCG and this container has no KVM. It locks the screen
+      first and waits for the surface to map, and refuses to suspend if
+      it never does (RFC 0035)
+- [x] Notification history — Super + N, or the Apps grid. A toast is up
+      for five seconds; before this, so was the fact of it (RFC 0034)
+- [x] A static address — `network.address = 192.168.1.50/24` and
+      `network.gateway`, converged like everything else. Before this a
+      machine on a segment with no DHCP server could not be addressed
+      by the document at all (RFC 0033)
+- [x] A non-root path for that interface — `novi-agentd` takes the same
+      verbs on a unix socket, so the big untrusted program runs as
+      nobody in particular while a small reviewed one holds root.
+      Membership of the `agent` group is the grant; the audit records
+      the caller's uid, not the daemon's (RFC 0032)
 - [x] The design language, implemented — Inter for language and JetBrains
       Mono for machine values, one shared token header, a real desktop
       background instead of a flat fill
@@ -673,8 +737,8 @@ BUG_REPORT_URL="https://github.com/newvantageco/novi/issues"
 - [ ] A published repository + offline release key
 - [ ] A Microsoft-signed shim (real Secure Boot); OWE and SAE-PK
       (compiled in, untested)
-- [ ] Idle-suspend and low-battery; Mesa; notification history
-- [ ] More state domains: keybindings, static IP
+- [ ] Low-battery
+- [ ] More state domains: keybindings
 - [ ] Boot splash
 
 See [`docs/PLATFORM-ROADMAP.md`](docs/PLATFORM-ROADMAP.md) for the full

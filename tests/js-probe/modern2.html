@@ -1,0 +1,26 @@
+<!DOCTYPE html><html><head><title>modern2</title></head><body>
+<div id="root">loading...</div>
+<script>
+var out = [];
+function probe(name, src) {
+  try { var r = eval(src); out.push(name + ': ' + r); }
+  catch (e) { out.push(name + ': FAIL (' + e.name + ')'); }
+}
+probe('getElementsByTagName', 'typeof document.getElementsByTagName');
+probe('addEventListener',  'typeof document.addEventListener');
+probe('element.onclick',   '(function(){var d=document.createElement("div"); d.onclick=function(){}; return typeof d.onclick;})()');
+probe('localStorage',      'typeof localStorage');
+probe('XMLHttpRequest',    'typeof XMLHttpRequest');
+probe('setTimeout',        'typeof setTimeout');
+probe('canvas getContext', 'typeof document.createElement("canvas").getContext');
+probe('window.location',   'typeof window.location.href');
+probe('navigator.userAgent', 'typeof navigator.userAgent');
+probe('Array.map',         'typeof [].map');
+probe('Object.assign',     'typeof Object.assign');
+probe('String.includes',   'typeof "".includes');
+document.getElementById('root').textContent = 'features 2:';
+for (var i = 0; i < out.length; i++) {
+  var p = document.createElement('p'); p.textContent = out[i]; document.body.appendChild(p);
+}
+</script>
+</body></html>

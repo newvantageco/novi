@@ -1,20 +1,21 @@
 #!/bin/bash
 # ============================================================
 # restore-build-inputs.sh — put the desktop's libraries and headers
-# back into the rootfs after 41-desktop-split.sh has removed them.
+# back into the rootfs after 51-desktop-split.sh has removed them.
 #
 #   bash scripts/restore-build-inputs.sh
 #
 # Why this exists
 # ---------------
-# 41-desktop-split.sh deletes everything 40-repo.sh packaged, which
+# 51-desktop-split.sh deletes everything 50-repo.sh packaged, which
 # includes every desktop library and (since RFC 0015) every header. So
 # after a full build, the rootfs cannot compile a GUI client: change
 # one line in novi-files/main.c and `bash build/20-novi-files.sh`
 # stops at `wayland-util.h: No such file or directory`.
 #
-# The documented answer is "re-running stages 06..14 puts the files
-# back", and that is correct and takes fifteen minutes. This does the
+# The documented answer is "re-run the content stages
+# (bash build.sh --from 06 --to 49) to put the files back", and that is
+# correct and takes the better part of an hour. This does the
 # same thing in a second, by unpacking the packages those stages
 # already produced -- which is exactly what the split removed, so it
 # restores precisely what was taken and nothing else.
@@ -37,13 +38,13 @@ source "${SCRIPT_DIR}/../build/00-versions.sh"
 
 REPO_OUT="${BUILD_DIR}/repo"
 [ -d "${REPO_OUT}" ] || {
-    echo "ERROR: no repository at ${REPO_OUT} -- run build/40-repo.sh first." >&2
+    echo "ERROR: no repository at ${REPO_OUT} -- run build/50-repo.sh first." >&2
     exit 1
 }
 
 # WHAT GETS RESTORED IS DERIVED, NOT LISTED.
 #
-# 40-repo.sh writes ${MANIFEST} -- every file pkgsplit moved out of the
+# 50-repo.sh writes ${MANIFEST} -- every file pkgsplit moved out of the
 # base image -- so "put back what the split took" is a question that
 # already has a written answer. Restoring exactly those paths cannot go
 # wrong as the repository grows.
@@ -52,7 +53,7 @@ REPO_OUT="${BUILD_DIR}/repo"
 # hand-maintained blocklist of toolchain names. That was right until
 # the repository gained a package that was neither desktop nor
 # toolchain. RFC 0019 added `git` and `openssh`, this script cheerfully
-# installed them into the console base image, and the next 40-repo.sh
+# installed them into the console base image, and the next 50-repo.sh
 # failed with pkgsplit's straddle check -- "usr/lib/libz.so.1 stays,
 # usr/lib/libz.so moves" -- because a base binary now linked zlib. The
 # error was correct and named nothing that would lead you here. A
@@ -62,7 +63,7 @@ MANIFEST="${BUILD_DIR}/repo-desktop-files.list"
 
 [ -s "${MANIFEST}" ] || {
     echo "ERROR: no split manifest at ${MANIFEST}." >&2
-    echo "       It is written by build/40-repo.sh; run that first." >&2
+    echo "       It is written by build/50-repo.sh; run that first." >&2
     exit 1
 }
 
@@ -100,7 +101,7 @@ while IFS= read -r rel; do
 done < "${MANIFEST}"
 
 echo "Restored ${restored} file(s) into ${ROOTFS} from ${count} package(s)"
-echo "  (the manifest 40-repo.sh wrote: $(wc -l < "${MANIFEST}") path(s))"
+echo "  (the manifest 50-repo.sh wrote: $(wc -l < "${MANIFEST}") path(s))"
 if [ "${missing}" -gt 0 ]; then
     echo "  WARNING: ${missing} manifest path(s) were in no package -- the" >&2
     echo "           manifest and the repository are out of step." >&2
@@ -108,5 +109,5 @@ fi
 echo "  headers : $(find "${ROOTFS}/usr/include" -type f 2>/dev/null | wc -l) file(s)"
 echo "  pkgconfig: $(find "${ROOTFS}/usr/lib/pkgconfig" -type f 2>/dev/null | wc -l) file(s)"
 echo ""
-echo "This is for rebuilding a client in place. Run build/40-repo.sh and"
-echo "build/41-desktop-split.sh again before making an image."
+echo "This is for rebuilding a client in place. Run build/50-repo.sh and"
+echo "build/51-desktop-split.sh again before making an image."

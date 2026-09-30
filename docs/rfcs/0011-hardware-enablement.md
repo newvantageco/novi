@@ -258,9 +258,16 @@ listed. The mechanism is the same one udev uses and there is no reason
 it should behave differently, but "no reason it should" is not a test.
 
 The firmware is present but no device has ever requested a byte of it.
-The I2C-HID and platform drivers cannot be tested here at all. Suspend
-was never actually entered, and `bootx64.efi` has never been presented
-to a firmware that enforces Secure Boot.
+The I2C-HID and platform drivers cannot be tested here at all.
+~~Suspend was never actually entered~~ — **it has been since RFC 0013**
+(`PM: suspend entry (deep)` and `PM: suspend exit`, resumed via QMP
+`system_wakeup` with the shell alive afterwards), and RFC 0035 built
+`power.suspend` on top of it. That correction was written in RFC 0013,
+quoting this sentence; this sentence was not struck, so a reader
+landing here went on believing it. **A correction made in the RFC that
+did the work does not reach the RFC that made the claim.** Still true:
+`bootx64.efi` has never been presented to a firmware that enforces
+Secure Boot.
 
 This RFC makes a real machine much more likely to work. It does not
 demonstrate that one does, and no amount of further QEMU work would.

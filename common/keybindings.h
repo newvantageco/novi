@@ -37,7 +37,14 @@
 #ifndef NOVI_KEYBINDINGS_H
 #define NOVI_KEYBINDINGS_H
 
-#include <xkbcommon/xkbcommon-keysyms.h>
+/* The full header, not just xkbcommon-keysyms.h: `xkb_keysym_t` is
+ * declared here and the keysym constants are in the other one, and
+ * this file uses both. It compiled with only the constants because
+ * every consumer happened to include xkbcommon.h (or wlroots, which
+ * does) first -- a header that only works second is a header that
+ * breaks the first time somebody includes it first, which is exactly
+ * what keys.c did. */
+#include <xkbcommon/xkbcommon.h>
 
 #define NOVI_MOD_NONE  0u
 #define NOVI_MOD_ALT   (1u << 0)
@@ -50,12 +57,16 @@ enum novi_action {
 	NOVI_ACT_LAUNCHER,
 	NOVI_ACT_TERMINAL,
 	NOVI_ACT_CLOSE,
+	NOVI_ACT_FORCE_QUIT,
 	NOVI_ACT_WORKSPACE,
 	NOVI_ACT_WORKSPACE_MOVE,
 	NOVI_ACT_LOCK,
 	NOVI_ACT_POWER_MENU,
 	NOVI_ACT_SYMBOLS,
 	NOVI_ACT_SHORTCUTS,
+	NOVI_ACT_THEMES,
+	NOVI_ACT_NOTIFICATIONS,
+	NOVI_ACT_STAY_AWAKE,
 	NOVI_ACT_SCREENSHOT,
 	NOVI_ACT_VOLUME_UP,
 	NOVI_ACT_VOLUME_DOWN,
@@ -107,11 +118,27 @@ struct novi_binding {
 	xkb_keysym_t sym;
 	unsigned flags;
 	enum novi_action action;
+	/* What this row is CALLED in /etc/novi/keys.conf -- the one string
+	 * a person writes to rebind it, and the only part of this table
+	 * that is a promise to anybody outside this repository. Renaming
+	 * one silently stops honouring a line somebody wrote, so treat
+	 * these the way `system.conf`'s key names are treated: additive.
+	 *
+	 * Dotted and lowercase, grouped by the same word the sheet groups
+	 * by, so `novi-launcher --keys` and the config file agree about
+	 * what kind of thing a binding is. */
+	const char *name;
 	/* Shown by novi-launcher --keys. `group` sorts the sheet and is
 	 * searchable, so typing "window" finds the window bindings even
 	 * when the word is in none of their descriptions. */
 	const char *group;
-	const char *keys;
+	/* What to call this binding on the sheet is NOT stored here. It is
+	 * generated from `mods`/`sym` by novi_keys_format(), because a
+	 * hand-written string beside the binding it describes is a second
+	 * copy of a derived answer -- the exact thing the top of this file
+	 * says a sheet must never be. It was hand-written once, and the
+	 * formatter reproduced all nineteen strings character for
+	 * character, which is what made deleting them safe. */
 	const char *what;
 };
 
@@ -124,50 +151,71 @@ struct novi_binding {
  * that one) and a thin ellipsis for the digit ranges. */
 static const struct novi_binding NOVI_BINDINGS[] = {
 	{ NOVI_MOD_ALT, XKB_KEY_Tab, 0, NOVI_ACT_CYCLE_NEXT,
-	  "Windows", "Alt + Tab", "Switch to the next window" },
+	  "window.cycle-next", "Windows", "Switch to the next window" },
 	/* Most layouts report Shift+Tab as ISO_Left_Tab rather than as Tab
 	 * with the shift bit set, which is why this row's modifier is Alt
 	 * alone and its keysym carries the shift. */
 	{ NOVI_MOD_ALT, XKB_KEY_ISO_Left_Tab, 0, NOVI_ACT_CYCLE_PREV,
-	  "Windows", "Alt + Shift + Tab", "Switch to the previous window" },
+	  "window.cycle-prev", "Windows", "Switch to the previous window" },
 	{ NOVI_MOD_LOGO, XKB_KEY_Return, 0, NOVI_ACT_TERMINAL,
-	  "Windows", "Super + Return", "Open a terminal" },
+	  "window.terminal", "Windows", "Open a terminal" },
 	{ NOVI_MOD_LOGO, XKB_KEY_q, 0, NOVI_ACT_CLOSE,
-	  "Windows", "Super + Q", "Close the focused window" },
+	  "window.close", "Windows", "Close the focused window" },
+	/* RFC 0038. One key with one rule -- ask the program to close, and
+	 * signal it instead when the watchdog has already established that
+	 * it cannot hear the request. That is what makes it safe a shift
+	 * away from window.close: pressing it by accident on a healthy
+	 * window does exactly what window.close does, prompt to save and
+	 * all. Press it again on a window that is still there and it
+	 * escalates. */
+	{ NOVI_MOD_LOGO | NOVI_MOD_SHIFT, XKB_KEY_q, 0, NOVI_ACT_FORCE_QUIT,
+	  "window.force-quit", "Windows", "End a window that is not responding" },
 
 	{ NOVI_MOD_LOGO, XKB_KEY_1, NOVI_BIND_DIGIT_RANGE, NOVI_ACT_WORKSPACE,
-	  "Workspaces", "Super + 1…9", "Switch to a workspace" },
+	  "workspace.switch", "Workspaces", "Switch to a workspace" },
 	{ NOVI_MOD_LOGO | NOVI_MOD_SHIFT, XKB_KEY_1, NOVI_BIND_DIGIT_RANGE,
 	  NOVI_ACT_WORKSPACE_MOVE,
-	  "Workspaces", "Super + Shift + 1…9", "Move the window to a workspace" },
+	  "workspace.move", "Workspaces", "Move the window to a workspace" },
 
 	{ NOVI_MOD_ALT, XKB_KEY_space, 0, NOVI_ACT_LAUNCHER,
-	  "Finding things", "Alt + Space", "Search apps, or do a sum" },
+	  "find.launcher", "Finding things", "Search apps, or do a sum" },
 	{ NOVI_MOD_LOGO, XKB_KEY_period, 0, NOVI_ACT_SYMBOLS,
-	  "Finding things", "Super + .", "Pick a symbol to copy" },
+	  "find.symbols", "Finding things", "Pick a symbol to copy" },
 	{ NOVI_MOD_LOGO, XKB_KEY_slash, 0, NOVI_ACT_SHORTCUTS,
-	  "Finding things", "Super + /", "Show this list" },
+	  "find.shortcuts", "Finding things", "Show this list" },
+	{ NOVI_MOD_LOGO, XKB_KEY_t, 0, NOVI_ACT_THEMES,
+	  "find.themes", "Finding things", "Change the colour theme" },
+	{ NOVI_MOD_LOGO, XKB_KEY_n, 0, NOVI_ACT_NOTIFICATIONS,
+	  "find.notifications", "Finding things", "Show recent notifications" },
 	{ NOVI_MOD_NONE, XKB_KEY_Print, 0, NOVI_ACT_SCREENSHOT,
-	  "Finding things", "Print Screen", "Save a screenshot" },
+	  "find.screenshot", "Finding things", "Save a screenshot" },
 
 	{ NOVI_MOD_NONE, XKB_KEY_XF86AudioRaiseVolume, NOVI_BIND_WHEN_LOCKED, NOVI_ACT_VOLUME_UP,
-	  "Sound", "Volume Up", "Louder" },
+	  "sound.up", "Sound", "Louder" },
 	{ NOVI_MOD_NONE, XKB_KEY_XF86AudioLowerVolume, NOVI_BIND_WHEN_LOCKED, NOVI_ACT_VOLUME_DOWN,
-	  "Sound", "Volume Down", "Quieter" },
+	  "sound.down", "Sound", "Quieter" },
 	{ NOVI_MOD_NONE, XKB_KEY_XF86AudioMute, NOVI_BIND_WHEN_LOCKED, NOVI_ACT_VOLUME_MUTE,
-	  "Sound", "Mute", "Mute or unmute" },
+	  "sound.mute", "Sound", "Mute or unmute" },
 
 	{ NOVI_MOD_LOGO, XKB_KEY_l, 0, NOVI_ACT_LOCK,
-	  "Session", "Super + L", "Lock the screen" },
+	  "session.lock", "Session", "Lock the screen" },
+	/* The person's own idle inhibitor (RFC 0035). A client can ask to
+	 * stay awake through zwp_idle_inhibit_manager_v1, and nothing in
+	 * this image does yet -- but the thing somebody actually wants
+	 * ("do not sleep, I am building") has no window to ask from, so
+	 * they need a key. Toggle, not hold: an hour-long build is not a
+	 * thing to keep a finger on. */
+	{ NOVI_MOD_LOGO, XKB_KEY_a, 0, NOVI_ACT_STAY_AWAKE,
+	  "session.stay-awake", "Session", "Keep this machine awake (on/off)" },
 	{ NOVI_MOD_LOGO, XKB_KEY_Escape, 0, NOVI_ACT_POWER_MENU,
-	  "Session", "Super + Escape", "Lock, suspend, restart or shut down" },
+	  "session.power-menu", "Session", "Lock, suspend, restart or shut down" },
 	/* Listed even though it is a development convenience rather than
 	 * part of RFC 0001's spec. A key that ends your session without
 	 * warning is exactly the key a sheet must not omit -- leaving it
 	 * out does not stop anyone pressing it, it only stops them
 	 * understanding what happened. */
 	{ NOVI_MOD_ALT, XKB_KEY_Escape, 0, NOVI_ACT_QUIT,
-	  "Session", "Alt + Escape", "Quit the desktop (returns to a console)" },
+	  "session.quit", "Session", "Quit the desktop (returns to a console)" },
 };
 
 #define NOVI_BINDINGS_COUNT \

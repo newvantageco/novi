@@ -79,6 +79,11 @@ static const struct icon_job JOBS[] = {
 	 * same reason the calculator is: it appears as a RESULT ROW beside
 	 * app icons, not as chrome. */
 	{ "ICON_KEYBOARD",      "icon_keyboard_px",      "svg/keyboard.svg",      24 },
+	/* RFC 0038's "not responding" notification. 24 px, because a
+	 * notification's icon column is 24 (novi-notifyd's ICON_SIZE) and
+	 * the history list draws the same glyph in a result row beside
+	 * the app icons. */
+	{ "ICON_HOURGLASS",     "icon_hourglass_px",     "svg/hourglass.svg",     24 },
 };
 
 /* nanosvg parses colors from a fixed keyword/hex table and has no notion

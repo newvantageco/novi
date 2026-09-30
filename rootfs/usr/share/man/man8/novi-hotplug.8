@@ -1,0 +1,85 @@
+.Dd September 30, 2026
+.Dt NOVI-HOTPLUG 8
+.Os
+.Sh NAME
+.Nm novi-hotplug
+.Nd handle a kernel uevent
+.Sh SYNOPSIS
+.Nm
+.Sh DESCRIPTION
+.Nm
+is the handler busybox
+.Nm uevent
+runs for each event on the kernel's netlink stream.
+It applies the same modalias-to-
+modprobe(8)
+rule
+.Xr novi-hwdetect 8
+applies to a directory walk, initialises a sound card that has just
+appeared, and calls
+.Xr novi-mount 8
+for a block device.
+.Pp
+It reads the environment the kernel supplies
+.Pf ( Ev ACTION ,
+.Ev SUBSYSTEM ,
+.Ev DEVPATH ,
+.Ev MODALIAS )
+and is not run by hand.
+.Ss Nothing in the handler may block
+The listener runs the handler with
+.Fn spawn_and_wait ,
+so a slow handler stalls the queue but loses nothing \(em which is
+the right trade, and the reason the listener forces a 128 MB netlink
+receive buffer: events queue in the kernel during a burst rather
+than being dropped.
+But a handler that
+.Em blocks
+stops the queue indefinitely, which is why the
+.Xr alsactl 1
+call and the mount are backgrounded.
+.Ss What it does not do
+.Nm
+does not touch networking.
+An interface that appears after boot gets a driver and no lease,
+because the network service picks one interface at start.
+Per-interface DHCP is the network service's problem; reaching into it
+from a uevent handler is split-brain.
+.Pp
+.Nm mdev
+is deliberately unused.
+devtmpfs creates the device nodes in the kernel before any of this
+runs, and mdev would be a second creator with its own rule file to
+keep in sync.
+.Sh ENVIRONMENT
+Set by the kernel:
+.Ev ACTION ,
+.Ev SUBSYSTEM ,
+.Ev DEVPATH ,
+.Ev DEVNAME ,
+.Ev MODALIAS .
+.Sh EXIT STATUS
+.Ex -std
+.Sh SEE ALSO
+.Xr novi-hwdetect 8 ,
+.Xr novi-mount 8
+.Sh STANDARDS
+RFC 0012.
+.Sh CAVEATS
+.Nm alsactl init
+exits
+.Sy 99
+on success.
+.Dq Hardware is initialized using a generic method
+plus exit 99 is the documented path for a card no ruleset matches,
+and it did initialise.
+Do not
+.Dq fix
+the 99.
+.Pp
+It also knows only standard mixer control names, so a card that
+invents its own \(em QEMU's emulated USB audio does \(em stays muted.
+That is why the handler
+.Em logs
+that it called alsactl: whether it ran and whether it worked are
+separate questions.

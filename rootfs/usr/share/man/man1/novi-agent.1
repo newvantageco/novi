@@ -1,0 +1,164 @@
+.Dd September 30, 2026
+.Dt NOVI-AGENT 1
+.Os
+.Sh NAME
+.Nm novi-agent
+.Nd the interface an automated actor uses to this machine
+.Sh SYNOPSIS
+.Nm
+.Cm describe Op Fl -text
+.Nm
+.Cm capabilities | audit Oo Fl n Ar count Oc
+.Nm
+.Cm do | send Ar verb Op Ar argument ...
+.Sh DESCRIPTION
+.Nm
+answers what this machine is, and changes it within a list somebody
+declared.
+.Bl -tag -width "describe --text"
+.It Cm describe
+One JSON document: hardware, firmware, block devices, network, state,
+drift, health, packages, idle, sandboxed programs and, on an A/B
+machine, the root slots.
+.It Cm describe Fl -text
+The same document as a table.
+It is a
+.Em view
+of the JSON rather than a second answer: each gatherer reads its
+sources once and branches only at the point of printing.
+.It Cm capabilities
+Whether
+.Cm do
+is enabled, and which verbs are permitted.
+.It Cm audit Op Fl n Ar count
+What has been attempted, refusals included.
+.It Cm do Ar verb Op Ar argument ...
+Change the machine.
+.It Cm send Ar verb Op Ar argument ...
+The same, over
+.Nm novi-agentd Ns 's
+socket, for a caller who is not root but is in the
+.Sy agent
+group.
+.El
+.Ss Reading is free, writing is declared
+.Cm describe ,
+.Cm capabilities
+and
+.Cm audit
+are a formatted view of files any user can already read, so they need
+no permission and grant none.
+.Pp
+.Cm do
+needs
+.Em two
+keys in
+.Xr system.conf 5 :
+.Va agent.enabled = on
+and the verb named in
+.Va agent.allow .
+One key would mean a machine that grants powers because a program was
+installed, which is a service registry with a policy file attached.
+.Ss Verbs
+.Bl -tag -width "state.rollback [gen]" -compact
+.It Cm state.set Ar key Ar value
+Declare a value.
+Does not apply it.
+.It Cm state.apply
+Converge the machine to the document.
+.It Cm state.rollback Op Ar generation
+Restore a previous generation and re-apply.
+.It Cm pkg.sync
+Refresh the signed package index.
+.It Cm pkg.install Ar name ...
+Install packages.
+.It Cm wifi.join Ar ssid
+Join a network.
+The passphrase is read from standard input and never appears in
+.Ar argv ,
+so the verb is not available over
+.Cm send :
+a one-line request has nowhere to put a secret.
+.El
+.Pp
+There is deliberately no
+.Cm exec
+verb and no
+.Cm service.start .
+The first is the absence of a boundary wearing a policy file; the
+second is drift by construction, and an agent that produces drift on
+purpose defeats the engine it is talking to.
+Services are reached with
+.Cm state.set
+and
+.Cm state.apply ,
+like everything else.
+.Ss The rate limit is not a security control
+.Va agent.rate
+bounds an
+.Em accident .
+Anything that can run
+.Nm
+can run
+.Xr pkg 1
+directly, so the limit stands between nobody and nothing.
+What it buys is legibility: a buggy actor looping on one install
+becomes a run of
+.Dq rate limit
+refusals in the audit log, where a thousand successes would say
+nothing.
+Only
+.Em allowed
+calls count toward it; counting refusals would make it
+self-sustaining.
+.Sh ENVIRONMENT
+.Bl -tag -width "NOVI_AGENT_PEER_UID" -compact
+.It Ev NOVI_AGENT_VIA
+Set by
+.Nm novi-agent-serve
+so a request that arrived over the socket is audited as such.
+.It Ev NOVI_AGENT_PEER_UID
+The peer's uid, from
+.Dv SO_PEERCRED .
+Identity comes from the kernel, never from the request.
+.El
+.Sh FILES
+.Bl -tag -width "/var/log/novi-agent.jsonl" -compact
+.It Pa /var/log/novi-agent.jsonl
+The audit log, mode 0600, one JSON object per line.
+Refusals are recorded as well as successes: a boundary that records
+only what it let through tells you nothing about what was tried.
+.It Pa /run/novi/agent/sock
+The socket, when
+.Va services.novi-agentd
+is on.
+.El
+.Sh EXIT STATUS
+.Ex -std
+A refused verb exits non-zero and says which key would permit it.
+.Sh EXAMPLES
+Look at the machine:
+.Bd -literal -offset indent
+$ novi-agent describe --text
+.Ed
+.Pp
+Permit two verbs and use one:
+.Bd -literal -offset indent
+# novi-state set agent.enabled on
+# novi-state set agent.allow "state.set state.apply"
+# novi-state apply
+# novi-agent do state.set hostname workshop
+# novi-agent do state.apply
+.Ed
+.Pp
+What has been tried, including what was refused:
+.Bd -literal -offset indent
+# novi-agent audit -n 20
+.Ed
+.Sh SEE ALSO
+.Xr novi-state 1 ,
+.Xr novi-wifi 1 ,
+.Xr pkg 1 ,
+.Xr system.conf 5
+.Sh STANDARDS
+RFC 0029, RFC 0032.

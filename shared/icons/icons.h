@@ -35,6 +35,7 @@ enum novi_icon_id {
 	ICON_SEARCH,         /* launcher: the input line */
 	ICON_CALCULATOR,     /* launcher: an expression that evaluated */
 	ICON_KEYBOARD,       /* launcher: the keyboard-shortcut sheet */
+	ICON_HOURGLASS,      /* a window that stopped answering (RFC 0038) */
 	NOVI_ICON_COUNT,
 };
 

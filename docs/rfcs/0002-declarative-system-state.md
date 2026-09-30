@@ -360,7 +360,124 @@ anything whose confidentiality matters keeps its own storage with its
 own permissions. A future `users.*` domain can declare that a user
 exists without declaring their secret.
 
+### `packages.*`, and the removal it refuses
+
+`packages.<name> = present | absent`, observed from the install
+database and converged with `pkg`. This is the domain this RFC's own
+roadmap called "the one that makes *commit your machine, reproduce it
+elsewhere* literally true", and the observer and converger had in fact
+been written some time ago — **the roadmap simply never said so, and
+nothing had ever tested them.** A roadmap that is wrong about what is
+already built is the same defect as one that is wrong about what is
+possible (RFC 0031's browser, from the other direction).
+
+Testing them found the interesting half.
+
+**The document is ADDITIVE, not exhaustive.** A package nobody
+mentions is a package nothing touches. The alternative — unlisted
+means absent — is what a strict reading of "declarative" suggests, and
+it would make `pkg install` by hand an act the next `apply` silently
+undoes. `users.<name>.shell` set the precedent: declaring the anchor
+key creates the account, and nothing manages accounts that are not
+declared.
+
+**A removal that would break another package is REFUSED.** `pkg
+remove` warns about reverse dependencies and proceeds, which is right
+for a person who typed it and is reading the warning. This path is a
+document being applied, at boot, with nobody watching, and "remove
+libpng" quietly taking the image viewer's only decoder with it is not
+a decision an unattended converger gets to make. It refuses, names
+what is in the way, and leaves the key as **permanent drift** — the
+honest report: the machine does not match the document and this engine
+will not make it. Declaring the dependants absent as well is how the
+document says "yes, really"; `pkg remove` by hand still does what it
+always did.
+
+The list comes from `pkg rdeps <name>`, a new subcommand, rather than
+from a second scan written in novi-state: one implementation of "what
+depends on this", in the tool that owns the database. It is also
+useful on its own — nothing could answer that question before.
+
+**A query that failed is not an empty answer**, and getting that wrong
+is how the refusal becomes permission. A `pkg` too old to know the
+subcommand exits non-zero; reading that as "nothing depends on it"
+removes the package at exactly the moment there is least justification
+for it. The converger refuses on a failed query too. Both the bug and
+its first fix were found by the test rather than by reading: the fix
+was written as `if ! rdeps="$(pkg rdeps … | tr …)"`, and **a pipeline
+reports the status of its last command**, so `tr` succeeding reported
+the whole substitution as success and handed back the empty answer
+anyway. That is the third time this repository has been caught by a
+pipeline's exit status.
+
+**`pkg`'s fetch timeout is now bounded, and this domain is why.**
+BusyBox wget's default is 900 seconds of silence before it gives up.
+Nothing cared while every fetch was a person waiting at a prompt; a
+declared package is fetched by boot convergence, so an unreachable
+mirror — a laptop opened on a different network, a mirror that moved —
+would have stalled the boot for a quarter of an hour per package, with
+nothing on the console to say why. 30 seconds, configurable in
+`pkg.conf`, and a *read* timeout rather than a total one, so a slow but
+progressing download of a 90 MB toolchain package is unaffected.
+
+**A failed key is retried in the next pass now, if the pass made
+progress** — and that change came out of watching this domain on a
+booted machine. Declaring a package and the package that depends on it
+absent in one edit is the obvious way to say "take both of these off".
+The dependency sorts first, so its removal is refused; the dependant is
+then removed; and the first version left the dependency behind, because
+a key that failed was struck off for the rest of the apply. `diff`
+reported the drift and a second `apply` fixed it, which is honest and
+is still one apply too many — the passes exist for exactly this shape
+of dependency, and that rule defeated them. The skip was there to stop
+one permanently-bad key printing the same error three times; it now
+costs one extra error line in that case, because nothing else converges
+on the retry pass and the loop ends there.
+
+**Verified on a booted machine** (live image, mirror on the
+installation medium):
+
+| | |
+|---|---|
+| present | `packages.fontconfig = present` → apply installed fontconfig **and its two dependencies**; `pkg list` shows all three |
+| refused | `packages.expat = absent` with fontconfig installed → `ERROR: refusing to remove 'expat': fontconfig still depend(s) on it`, apply exits 1, expat still installed, and `diff` goes on reporting the drift |
+| both | declaring expat and fontconfig absent together → **one** apply removes both, exit 0, `diff` clean. Before the retry fix, the same edit took two |
+| additive | freetype, installed as a dependency and never declared, is still there afterwards — nothing manages what the document does not mention |
+| the timeout | `timeout = 30` is in the shipped `/etc/novi/pkg.conf` |
+
+### The GUI no longer blocks on an apply
+
+Roadmap item 2 named this in the same breath as the domain above, and
+correctly: "it stops being fine the first time a domain converges
+something slow — a package install." That is now a thing an apply can
+do, so the System panel's Enter runs `novi-state apply` through the
+job runner the Network panel brought for WiFi scans, instead of
+forking and waiting inside the Wayland event loop.
+
+Nothing new was needed: `JOB_APPLY` already existed, because turning
+the radio on restarts the supplicant. **Not separately verified in a
+running window**: it compiles clean and it is the same runner RFC 0017
+put through a live WiFi scan, but nobody has watched this particular
+Enter key with a slow install behind it. Say that rather than implying
+otherwise. The System panel's Enter was
+simply the last path that could freeze the window, and the one that
+could freeze it longest. A side effect worth having — the job
+runner captures the child's stderr, so a failed apply now shows
+novi-state's own `ERROR:` line in the status bar instead of the word
+"failed".
+
 ---
+
+**The lock, on a booted machine** (roadmap item 4). Two concurrent
+`novi-state set` calls on different keys: both land. A lock directory
+carrying an earlier boot's time and a pid that is *currently alive*:
+cleared, with `WARN: clearing a stale lock ... (held by pid 674 of an
+earlier boot or a dead process)`, and the write goes through — which
+is the case a pid check alone cannot see, and the reason the boot time
+is in the owner file. A lock held by a live process of *this* boot:
+obeyed, `ERROR: timed out waiting for /etc/novi/system.conf.lock ...
+(pid 3035)`, and the document unchanged. A fix that cleared every lock
+it met would have passed the first two and failed the third.
 
 ## Roadmap
 
@@ -372,21 +489,124 @@ hatch.
 
 **Next, in dependency order:**
 
-1. **More domains:** `packages.*` (declare installed packages, converge
-   via `pkg`), `users.*`, `network.*`, `desktop.*` (keybindings, theme
-   — RFC 0001 already calls for keybindings to move to a user-editable
-   config file; this is that file). `packages.*` is the one that makes
-   "commit your machine, reproduce it elsewhere" literally true.
-2. **Move the subprocess calls off the GUI event loop.** They block it
-   today. Fine at this scale (an `apply` is a couple of s6-rc
-   transitions) and noted in a comment where someone will hit it, but
-   it stops being fine the first time a domain converges something slow
-   — a package install.
-3. **`novi-state diff` in CI**, and a `--json` projection for tooling.
-4. **Concurrent-edit safety.** Two writers racing on `system.conf`
-   (the GUI and an editor) can currently lose one side's change; the
-   atomic `mv` keeps the file well-formed but does not detect a
-   conflict. A generation counter or mtime check on write would.
+1. ~~**More domains.**~~ Largely **done**, and this entry was stale for
+   most of that: `packages.*` (see above), `users.*` (RFC 0005),
+   `network.*` (RFC 0009, RFC 0033), `power.*` (RFC 0013, RFC 0035),
+   `agent.*` (RFC 0029) and `display.theme` (RFC 0030) all landed
+   without it being updated. What is left of it is **`desktop.*`** —
+   keybindings as a user-editable file, which RFC 0001 asks for and
+   `common/keybindings.h` currently answers at compile time.
+2. ~~**Move the subprocess calls off the GUI event loop.**~~ **Done**
+   for the one that mattered — see above. `novi-state set` and
+   `novi-state diff` are still synchronous, deliberately: a `set` is
+   one awk pass and a `diff` is a directory walk and an `s6-rc -a
+   list`. Neither can grow slow without something else changing first,
+   and an apply is where the slow thing lives.
+3. ~~**`novi-state diff` in CI**, and a `--json` projection for
+   tooling.~~ **Half of this was already built when it was written,
+   and the other half cannot be what it says.**
+
+   **The `--json` projection exists.** `show --json`, `diff --json`
+   and `health --json` were added for RFC 0029's agent interface,
+   which composes its whole document out of them — so the item asked
+   for something the code had. **Fourth roadmap item in this
+   repository found to be wrong about what is already built**, after
+   this RFC's own `packages.*`, RFC 0030's "a re-render there is not
+   one function call", and RFC 0033's wired-network GUI. Check the
+   code before believing an item, including one in your own RFC.
+
+   **`diff` itself cannot run in CI**, and that is a property of what
+   it is rather than a gap: it observes a RUNNING machine — s6-rc's
+   service list, `/run/novi`, `/proc` — and a runner has none of that.
+   Making it run there would mean faking the machine, and a test
+   against a fake machine tests the fake.
+
+   What a runner *can* do is `packages/tests/test-state-document.sh`:
+   drive the observer over the **shipped** `/etc/novi/system.conf` and
+   assert that no key comes back `unmanaged`. That is worth having
+   because the failure is silent by design — an unrecognised key
+   observes as `unmanaged` on purpose, for forward compatibility — so
+   a typo in the shipped document, or a key whose domain was renamed,
+   ships as a line that reads declarative, looks converged to anyone
+   skimming, and converges nothing. Same class as the
+   `power.governor = schedutil` line that got accidentally
+   uncommented and cost five boots.
+
+   It checks **three lists** against each other, the discipline
+   `common/keybindings.h` already follows: the DOCUMENT, the
+   DISPATCHER, and the HELP TEXT — which is the only place a person
+   learns what a key is called. **Its first run found `power.lid`,
+   `power.button` and `agent.enabled` declared in the shipped document
+   and missing from that reference**, along with `agent.allow` and
+   `agent.rate`. Five live keys nobody could look up.
+
+   It also asserts the `--json` modes parse, because `novi-agent
+   describe` splices them into its own document — a `--json` mode that
+   emits something unparseable breaks the agent interface rather than
+   just the command. `health --json` needs `s6-svstat`, which a
+   runner does not have, so what is checked there is that it fails
+   **cleanly**, with nothing on stdout, and that `novi-agent` still
+   substitutes `{}` for the empty answer.
+4. ~~**Concurrent-edit safety.**~~ **Done for the writers this engine
+   owns, and honestly scoped for the one it does not.**
+
+   The bug was real and reproducible: `state_set` is a read-modify-
+   write of the whole document, the `mv` is atomic so the file is
+   never half-written, and that was the *whole* of the protection — so
+   two overlapping writers produced a well-formed document containing
+   one of the two changes, **with no error from either side**. The
+   losing caller was told `declared: hostname = one` and the document
+   still said `start`. That is the exact failure this engine exists to
+   abolish, committed by the engine itself, and it is invisible in any
+   single run.
+
+   `apply` had the same problem one level up. `next_generation()`
+   takes the highest existing number and adds one, so two applies
+   racing choose the same number and one snapshot overwrites the other
+   — the record a rollback would restore, replaced by a different
+   machine's idea of the past.
+
+   **`mkdir(2)` is the lock**, because BusyBox has no `flock(1)`:
+   creating a directory that exists fails, atomically, on every
+   filesystem this system can keep `/etc` on. Same mechanism
+   `novi-mount` uses (RFC 0023). `state_set` holds it across its
+   read-modify-write; `apply` holds it for its whole run, so a `set`
+   arriving mid-apply waits rather than changing the document an apply
+   is in the middle of reading; `rollback` holds it across the `cp`
+   *and* the apply, because that `cp` is the one write in this program
+   that does not go through `state_set`. It is **reentrant within one
+   process** — without that, rollback → apply → set is a program that
+   hangs on its own correctness, and the symptom would be a boot that
+   never finishes.
+
+   **A stale lock is a fact, not a timeout.** The owner file records
+   the boot time as well as the pid. A different boot time means the
+   machine restarted and whatever held this is gone *whether or not
+   something now has that pid* — without which a lock that survived a
+   crash could be held permanently by an innocent process that
+   inherited the number. Same boot and no `/proc/<pid>` means the
+   holder died. A timeout would be a guess about how long the work
+   takes, and this work takes milliseconds except when the machine is
+   busy, which is exactly when the guess is wrong.
+
+   **The test has to prove the race before it can prove the fix**, so
+   it runs the same scenario against a doctored copy with the locking
+   removed and fails if that copy ever stops losing a write. A green
+   test over a race that no longer reproduces is a test that has
+   stopped watching. The window is widened deliberately with a spliced
+   `sleep` rather than hoped for: a race you must run a thousand times
+   to see is one a test cannot depend on, and widening changes the
+   timing, not the two orderings.
+
+   **What is still not protected, and cannot be from here:** a person
+   with `system.conf` open in an editor who saves the whole buffer
+   clobbers anything written since they opened it. No lock novi-state
+   takes can see that, because the editor's read happened before
+   novi-state was involved. What *is* now safe is every writer that
+   goes through this tool — which is the GUI, the installer, the
+   agent, boot convergence and `rollback` — and the editor case is one
+   `novi-edit` would have to answer with a "changed on disk" check of
+   its own.
 
 **Deliberately out of scope for now:** atomic rootfs A/B switching (§3)
 — this RFC gives that a spine to hang from (generations are already the

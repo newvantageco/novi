@@ -42,8 +42,8 @@ wlr-layer-shell-unstable-v1-protocol.c: $(LAYER_SHELL_XML)
 xdg-shell-protocol.c: $(XDG_SHELL_XML)
 	$(WAYLAND_SCANNER) private-code $< $@
 
-novi-bg: main.c wlr-layer-shell-unstable-v1-protocol.c wlr-layer-shell-unstable-v1-protocol.h xdg-shell-protocol.c
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ main.c wlr-layer-shell-unstable-v1-protocol.c xdg-shell-protocol.c $(LDLIBS)
+novi-bg: main.c ../common/theme.c wlr-layer-shell-unstable-v1-protocol.c wlr-layer-shell-unstable-v1-protocol.h xdg-shell-protocol.c
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ main.c ../common/theme.c wlr-layer-shell-unstable-v1-protocol.c xdg-shell-protocol.c $(LDLIBS)
 
 install: novi-bg
 	install -D -m 755 novi-bg "$(DESTDIR)$(PREFIX)/bin/novi-bg"

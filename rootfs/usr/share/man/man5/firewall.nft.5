@@ -1,0 +1,139 @@
+.Dd September 30, 2026
+.Dt FIREWALL.NFT 5
+.Os
+.Sh NAME
+.Nm firewall.nft
+.Nd the one packet filter Novi ships
+.Sh SYNOPSIS
+.Pa /etc/novi/firewall.nft
+.Sh DESCRIPTION
+.Nm
+is an ordinary
+nft(8)
+ruleset in nftables' own format \(em not a serialisation of a
+settings panel.
+It is loaded when
+.Va network.firewall = on
+in
+.Xr system.conf 5 :
+.Nm novi-state apply
+runs
+.Nm nft Fl f
+on it, and
+.Cm off
+deletes the table.
+.Pp
+Nothing supervises it.
+The kernel holds the ruleset, so there is no daemon, and boot
+convergence reloads it like any other declared state.
+.Pp
+It is repo content rather than something generated, for the same
+reason
+.Pa /etc/passwd
+is: it is policy, and policy should show up in a diff.
+Edit it if you need something else.
+.Ss What the shipped ruleset does
+.Bl -tag -width "forward" -compact
+.It Sy input
+Policy
+.Cm drop .
+Accepts established and related flows, drops invalid ones, accepts
+loopback, accepts ICMP and ICMPv6, accepts DHCP replies, and accepts
+the declared holes.
+.It Sy forward
+Policy
+.Cm drop .
+Nothing here forwards.
+If Novi ever routes for anything, that is a deliberate change to this
+file, not a default.
+.It Sy output
+Absent, deliberately.
+A desktop that cannot make connections is not usable, and a filter
+constraining processes run by the user who can also edit the filter
+is theatre.
+.El
+.Pp
+The table is called
+.Sy novi
+on purpose: the observer asks the kernel whether a table by that name
+exists, so this ruleset can be turned on and off without touching
+\(em or claiming \(em anything else somebody has installed in another
+table.
+.Ss ICMP is accepted, not dropped
+A host that black-holes ICMP breaks path-MTU discovery for everyone
+talking to it and is a worse neighbour than one that answers a ping.
+.Dq Stealth
+is not a security property when the packets that reveal you are the
+ones your own TCP needs.
+.Ss DHCP needs its own rule
+Replies arrive before conntrack has anything to match:
+udhcpc(8)
+sends from 0.0.0.0:68 to 255.255.255.255:67, and the reply is a
+broadcast that is not
+.Dq related
+to anything.
+On a machine that gets its address by DHCP \(em the default \(em
+leaving those two lines out means the firewall comes up and the lease
+never renews.
+.Ss The holes are configuration, and live elsewhere
+.Va open_tcp
+and
+.Va open_udp
+are
+.Sy sets ,
+empty in this file.
+.Va network.firewall.allow
+in
+.Xr system.conf 5
+fills them, and
+.Xr novi-state 1
+is the only thing that writes them.
+.Pp
+A port list belongs in the same document as the hostname, where
+.Nm novi-state diff
+can see it and a generation can roll it back; the shape of the filter
+belongs here.
+Empty sets match nothing, so on a machine that has declared nothing
+those two lines are the same as not being here.
+.Pp
+.Sy Enabling a daemon does not open a port .
+That something listens and that the world may reach it are two
+decisions, and a firewall that opens itself because a service started
+is a service registry with a policy file attached.
+.Nm novi-state apply
+says so out loud when it starts a service whose port is closed \(em
+which is not drift, because both keys are exactly as declared.
+.Sh FILES
+.Bl -tag -width "/etc/novi/firewall.nft" -compact
+.It Pa /etc/novi/firewall.nft
+This file.
+.El
+.Sh EXAMPLES
+Turn the filter on and open ssh:
+.Bd -literal -offset indent
+# novi-state set network.firewall on
+# novi-state set network.firewall.allow "22/tcp"
+# novi-state apply
+.Ed
+.Sh SEE ALSO
+.Xr novi-state 1 ,
+.Xr system.conf 5
+.Sh STANDARDS
+RFC 0016, RFC 0022.
+.Sh CAVEATS
+Ports are written as
+.Sy numbers ,
+never names.
+nft(8)
+resolves a name through
+.Pa /etc/services ,
+so a rule written with one means something different on a machine
+whose table differs.
+That rule could not be written wrongly before this system shipped a
+services table; it can now, and a test enforces it.
+.Pp
+.Nm nft Fl f
+is additive, so the converger deletes the table before reloading.
+Without that, an edit which
+.Em removed
+a rule would leave the removed rule in place.

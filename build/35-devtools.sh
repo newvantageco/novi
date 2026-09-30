@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-# 35-devtools.sh — git and an ssh client, as packages
+# 35-devtools.sh — the packaged tools: git, ssh, curl, and a browser
 #
 # RFC 0019. RFC 0015 put gcc, binutils, make and the musl headers on a
 # running Novi and stopped one step short of usefulness: there is no
@@ -10,11 +10,11 @@
 #
 # NEITHER GOES IN THE BASE IMAGE. Same rule as the toolchain: built
 # once here, staged, and published into the signed repository by
-# 43-devtools-repo.sh -- because 40-repo.sh wipes and recreates the
+# 53-devtools-repo.sh -- because 50-repo.sh wipes and recreates the
 # repository, so anything that adds to it has to run after, and this
 # build has to run long before.
 #
-#   bash build/35-devtools.sh [openssh|ca|curl|git|repo|all]
+#   bash build/35-devtools.sh [openssh|ca|curl|git|netsurf|repo|all]
 #
 # Phase order matters when run by hand: `git` links the curl that the
 # `curl` phase staged, and `curl` links the mbedTLS that
@@ -67,7 +67,7 @@ ONLY="${1:-all}"
 mkdir -p "${WORK}" "${STAGE_DIR}"
 
 # Both of these link zlib, which lives in the rootfs and which
-# 41-desktop-split.sh moves out of it. Same guard as
+# 51-desktop-split.sh moves out of it. Same guard as
 # require_desktop_headers(), and for the same reason: in any tree where
 # a full build has already run, this stage otherwise stops with
 # "zlib.h: No such file or directory" and no clue what to do about it.
@@ -77,13 +77,13 @@ require_zlib() {
     fi
     echo "ERROR: zlib is not in ${ROOTFS} (headers or library missing)." >&2
     echo "" >&2
-    echo "  41-desktop-split.sh has moved it out -- zlib is a package." >&2
+    echo "  51-desktop-split.sh has moved it out -- zlib is a package." >&2
     echo "  Put it back before building against it:" >&2
     echo "" >&2
     echo "      bash scripts/restore-build-inputs.sh" >&2
     echo "" >&2
-    echo "  Then re-run this stage, and re-run 40-repo.sh," >&2
-    echo "  41-desktop-split.sh and the 42/43 publish stages." >&2
+    echo "  Then re-run this stage, and re-run 50-repo.sh," >&2
+    echo "  51-desktop-split.sh and the 42/43 publish stages." >&2
     exit 1
 }
 
@@ -499,11 +499,385 @@ DOC
     echo "    git staged ($(du -sh "${files}" | cut -f1))"
 fi
 
-# ── Publish (called by 43-devtools-repo.sh, never by `all`) ───────────
+# ── NetSurf (a web browser) ───────────────────────────────────────────
+if [ "$ONLY" = "all" ] || [ "$ONLY" = "netsurf" ]; then
+    require_zlib
+    echo ">>> Building NetSurf ${NETSURF_VERSION} ..."
+
+    # WHY THIS IS A PHASE OF 35-devtools.sh AND NOT ITS OWN STAGE.
+    #
+    # It wants to be `build/44-netsurf.sh` and it cannot be. The
+    # ordering constraint is real in both directions: it READS
+    # ${ROOTFS} (wayland, libpng, zlib and expat headers), which
+    # 51-desktop-split.sh removes, so it must run before 41; and it
+    # PUBLISHES into a repository 50-repo.sh wipes, so its package must
+    # be written after 40. That is exactly the "build early, publish
+    # late" split 35, 38 and 39 already use -- and when this was
+    # written every number from 01 to 39 was taken, so there was
+    # nowhere for a stage of its own to go.
+    #
+    # That renumber has since happened: the packaging stages are
+    # 50..53 and 40-49 is free. This stays a phase of 35 because
+    # moving it now would be churn -- the build-early/publish-late
+    # constraint is the same either way. A NEW content stage takes a
+    # number in 40-49; do not squeeze another phase in here.
+    NS_SRC="${SOURCES}/netsurf-all-${NETSURF_VERSION}.tar.gz"
+    [ -f "${NS_SRC}" ] || { echo "ERROR: ${NS_SRC} not found -- run build/01-fetch.sh." >&2; exit 1; }
+
+    NS_WORK="${BUILD_DIR}/netsurf-build"
+    NS_TREE="${NS_WORK}/netsurf-all-${NETSURF_VERSION}"
+    NS_INST="${NS_WORK}/inst"
+    rm -rf "${NS_WORK}"
+    mkdir -p "${NS_WORK}" "${NS_INST}"
+    tar xzf "${NS_SRC}" -C "${NS_WORK}"
+
+    # The one patch, and it FAILS THE BUILD if it stops applying.
+    #
+    # libnsfb's Wayland surface binds wl_shell, deprecated in 2016 and
+    # never implemented by wlroots or novi-shell -- so upstream cannot
+    # open a window on this desktop at all. Silently building an
+    # unpatched browser would produce a binary that starts, finds no
+    # shell global and does nothing visible, which is the worst
+    # possible failure to ship. Same rule 23-e2fsprogs.sh applies to
+    # its musl patch.
+    echo "  -> libnsfb: wl_shell -> xdg-shell"
+    ( cd "${NS_TREE}" && patch -p1 --forward --silent \
+        < "${REPO_ROOT}/patches/netsurf-libnsfb-xdg-shell.patch" ) || {
+        echo "ERROR: patches/netsurf-libnsfb-xdg-shell.patch no longer applies to" >&2
+        echo "       netsurf-all-${NETSURF_VERSION}. Do not build without it: the" >&2
+        echo "       result is a browser that cannot open a window, and says" >&2
+        echo "       nothing about why." >&2
+        exit 1
+    }
+
+    # The generated half of that patch. Not in the .patch file because
+    # it is generated rather than written, and a diff of 84 KB of
+    # machine output is not a thing anyone can review.
+    XDG_XML="${ROOTFS}/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml"
+    [ -f "${XDG_XML}" ] || { echo "ERROR: ${XDG_XML} not found -- run build/06-wayland.sh." >&2; exit 1; }
+    wayland-scanner client-header "${XDG_XML}" \
+        "${NS_TREE}/libnsfb/src/surface/xdg-shell-protocol.h"
+    wayland-scanner private-code "${XDG_XML}" \
+        "${NS_TREE}/libnsfb/src/surface/xdg-shell-protocol.c"
+    sed -i 's#+= wld.c$#+= wld.c xdg-shell-protocol.c#' \
+        "${NS_TREE}/libnsfb/src/surface/Makefile"
+    grep -q 'xdg-shell-protocol.c' "${NS_TREE}/libnsfb/src/surface/Makefile" || {
+        echo "ERROR: could not add xdg-shell-protocol.c to libnsfb's surface Makefile." >&2
+        exit 1
+    }
+
+    NS_CURL="${STAGE_DIR}/curl/files/usr"
+    NS_SSL="${BUILD_DIR}/openssl-target/usr"
+    NS_TLS="${BUILD_DIR}/tls-deps"
+    for d in "${NS_CURL}/lib/pkgconfig" "${NS_SSL}/lib/pkgconfig"; do
+        [ -d "$d" ] || { echo "ERROR: $d not found -- run build/35-devtools.sh curl and build/32-openssl.sh first." >&2; exit 1; }
+    done
+
+    # CFLAGS and LDFLAGS go in the ENVIRONMENT, never on the make
+    # command line. NetSurf's buildsystem does `CFLAGS += ...`, and a
+    # variable set on the command line overrides every assignment in
+    # the makefile including `+=` -- so passing them there deletes
+    # NetSurf's own include paths and the build dies on its own
+    # headers. Same trap RFC 0021 records for wolfSSL's generated
+    # .config, one level out.
+    #
+    # -rpath-link for the FIFTH time in this repository: libcurl.so's
+    # DT_NEEDED names libmbedtls.so.21, and -L alone does not let the
+    # linker resolve a shared library's own dependencies. Without it
+    # the link fails on seventeen undefined mbedtls_* symbols from a
+    # library that has none of them in its own source.
+    export PATH="${NS_INST}/bin:${TOOLS}/bin:${PATH}"
+    export PKG_CONFIG_PATH="${NS_INST}/lib/pkgconfig:${NS_CURL}/lib/pkgconfig:${NS_SSL}/lib/pkgconfig:${ROOTFS}/usr/lib/pkgconfig"
+    export CFLAGS="-I${ROOTFS}/usr/include -I${NS_CURL}/include -I${NS_SSL}/include"
+    export LDFLAGS="-L${ROOTFS}/usr/lib -L${NS_CURL}/lib -L${NS_SSL}/lib -L${NS_TLS}/lib -Wl,-rpath-link,${ROOTFS}/usr/lib:${NS_CURL}/lib:${NS_SSL}/lib:${NS_TLS}/lib"
+
+    # nsgenbind is a BUILD-HOST tool (it generates JavaScript bindings),
+    # so it is built for the build machine with the target's flags
+    # unset -- pointing a host compiler at the target's headers is how
+    # you get a host binary that will not link.
+    echo "  -> nsgenbind (build host)"
+    ( cd "${NS_TREE}" && env -u CFLAGS -u LDFLAGS \
+        make -C nsgenbind install HOST="$(gcc -dumpmachine)" \
+            PREFIX="${NS_INST}" NSSHARED="${NS_TREE}/buildsystem" \
+            DESTDIR= Q=@ >/dev/null )
+
+    # The libraries, in dependency order: libcss and libdom need
+    # libparserutils and libwapcaplet installed first, and libsvgtiny
+    # needs libdom.
+    for L in libnslog libwapcaplet libparserutils libcss libhubbub libdom \
+             libnsbmp libnsgif libnsutils libutf8proc libnspsl libsvgtiny libnsfb; do
+        echo "  -> ${L}"
+        ( cd "${NS_TREE}" && make -C "${L}" install HOST="${TARGET_TRIPLE}" \
+            PREFIX="${NS_INST}" NSSHARED="${NS_TREE}/buildsystem" \
+            DESTDIR= Q=@ WARNFLAGS='-Wall -W -Wno-error' >/dev/null )
+    done
+
+    # CC and AR are named EXPLICITLY. The buildsystem derives them from
+    # HOST only when their origin is `default`, and the browser's own
+    # makefile does not take that path -- the first attempt compiled
+    # the whole of NetSurf with the build host's gcc and failed at the
+    # link on /usr/bin/ld.
+    #
+    # A second, quieter consequence: the build directory is named after
+    # HOST and TARGET but NOT after the compiler, so switching
+    # compilers silently reuses objects built by the other one. That
+    # surfaced as undefined references to __snprintf_chk and
+    # __memset_chk -- glibc's fortify symbols -- from a musl link. The
+    # tree is extracted fresh above, which is the fix.
+    #
+    # NETSURF_USE_LIBICONV_PLUG=YES means "iconv is part of libc",
+    # which is true of musl. NO makes it link -liconv, a library that
+    # does not exist here and never will.
+    echo "  -> netsurf (framebuffer frontend, Wayland surface)"
+    # FONTS: freetype against THIS DESKTOP'S OWN FACES, not the
+    # built-in bitmap font.
+    #
+    # NETSURF_FB_FONTLIB=internal is a compiled-in bitmap face, and it
+    # made the one window on this desktop that renders the most text
+    # the one window not drawing it in Inter -- the most visible
+    # violation of the design language in the image. freetype is a
+    # supported fontlib upstream (frontends/framebuffer/font_freetype.c)
+    # and freetype itself has been in this build since stage 06, for
+    # fcft. So this is a new LINK, not a new dependency.
+    #
+    # NETSURF_FB_FONTPATH feeds respaths (frontends/framebuffer/gui.c),
+    # and fb_new_face() resolves each name through filepath_sfind()
+    # against it -- so these are plain filenames, and the directories
+    # are where the fonts-* packages put them.
+    #
+    # THE SERIF IS REAL NOW. It used to be Inter, so `font-family:
+    # serif` and the default serif of an unstyled page both got a
+    # sans and nothing said so -- every other face NetSurf wants
+    # falls back to the one below it, and this one had nothing below
+    # it to fall back to. Source Serif 4 (OFL-1.1, 09-foot.sh) is a
+    # screen serif with the four faces a browser uses.
+    #
+    # WHAT THIS IMAGE STILL DOES NOT HAVE, stated rather than left to
+    # be discovered against a real page:
+    #   * NO CURSIVE OR FANTASY. Both map to Inter, so a page asking
+    #     for either gets the UI sans. They are rare enough that a
+    #     fourth family would be weight for nothing; a page asking for
+    #     a serif is not.
+    #   * NO SERIF ITALIC. This frontend has no option for one --
+    #     SERIF and SERIF_BOLD are the whole set (checked in
+    #     frontends/framebuffer/Makefile), so <em> inside a serif
+    #     paragraph renders upright. That is NetSurf's limit, not a
+    #     missing font, and it is why only two faces are installed.
+    # SemiBold rather than Bold for the sans bold face because
+    # SemiBold is what NOVI_FONT_TITLE uses -- matching the desktop
+    # beats matching the CSS keyword. The SERIF's bold is Bold: it is
+    # not this desktop's typography, it is a document's.
+    NS_FONTS="NETSURF_FB_FONTLIB=freetype
+        NETSURF_FB_FONTPATH=/usr/share/fonts/inter:/usr/share/fonts/jetbrains-mono:/usr/share/fonts/source-serif
+        NETSURF_FB_FONT_SANS_SERIF=Inter-Regular.ttf
+        NETSURF_FB_FONT_SANS_SERIF_BOLD=Inter-SemiBold.ttf
+        NETSURF_FB_FONT_SANS_SERIF_ITALIC=Inter-Italic.ttf
+        NETSURF_FB_FONT_SANS_SERIF_ITALIC_BOLD=Inter-SemiBoldItalic.ttf
+        NETSURF_FB_FONT_SERIF=SourceSerif4-Regular.ttf
+        NETSURF_FB_FONT_SERIF_BOLD=SourceSerif4-Bold.ttf
+        NETSURF_FB_FONT_MONOSPACE=JetBrainsMono-Regular.ttf
+        NETSURF_FB_FONT_MONOSPACE_BOLD=JetBrainsMono-Bold.ttf
+        NETSURF_FB_FONT_CURSIVE=Inter-Regular.ttf
+        NETSURF_FB_FONT_FANTASY=Inter-Regular.ttf"
+
+    # NETSURF_USE_DUKTAPE=NO is a MEASURED decision, not an omission
+    # (RFC 0031 roadmap 2, instrument at tests/js-probe/). Duktape is
+    # vendored in this bundle, so turning it on costs no new upstream
+    # -- it costs +1.34 MB on the binary (+52%) for an engine whose
+    # language is ES5: `let`, arrow functions, template literals,
+    # `class` and `for..of` are each a SyntaxError, and a syntax error
+    # is a WHOLE-SCRIPT failure, so one arrow function in a bundle
+    # means nothing in it runs. There is no Promise, no fetch, no
+    # XMLHttpRequest and no localStorage either, so a page cannot load
+    # anything after its initial HTML. Speed is CPython-class once the
+    # 30x TCG penalty is taken out, which is 60-150x off a JIT.
+    # Revisit when roadmap 6 gives the browser a CPU bound.
+    NS_OPTS="HOST=${TARGET_TRIPLE} TARGET=framebuffer PREFIX=/usr
+        CC=${TARGET_TRIPLE}-gcc AR=${TARGET_TRIPLE}-ar
+        NETSURF_FB_FRONTEND=wld ${NS_FONTS}
+        NETSURF_USE_DUKTAPE=NO NETSURF_USE_HARU_PDF=NO
+        NETSURF_USE_LIBICONV_PLUG=YES NETSURF_USE_JPEG=NO
+        NETSURF_USE_WEBP=NO NETSURF_USE_VIDEO=NO"
+
+    # fonts-inter and fonts-jetbrains-mono are named by hand because
+    # NOTHING CAN DERIVE THEM. pkgsplit reads DT_NEEDED, and a .ttf
+    # opened by path at runtime appears in no ELF header -- the same
+    # blind spot that hides libdrm's dlopen'd drivers, wearing a
+    # different costume. Without them the browser installs, starts,
+    # fails to find its default font and exits: font_freetype.c treats
+    # a missing sans-serif as fatal, correctly.
+    files="$(stage_pkg netsurf "${NETSURF_VERSION}" \
+        "curl,openssl,libpng,zlib,expat,wayland,freetype,fonts-inter,fonts-jetbrains-mono,fonts-source-serif" \
+        "NetSurf ${NETSURF_VERSION} -- a small web browser. Renders HTML and CSS; NO JavaScript in this build")"
+    # shellcheck disable=SC2086
+    ( cd "${NS_TREE}" && make -C netsurf ${NS_OPTS} Q=@ \
+        WARNFLAGS='-Wall -W -Wno-error' >/dev/null )
+    # shellcheck disable=SC2086
+    ( cd "${NS_TREE}" && make -C netsurf install ${NS_OPTS} DESTDIR="${files}" \
+        Q=@ WARNFLAGS='-Wall -W -Wno-error' >/dev/null )
+
+    strip_tree "${files}"
+
+    # ── The address-space bound (RFC 0031 roadmap 5) ──────────────
+    # The corpus in tests/hostile-pages found a page that grows
+    # without bound, and an unbounded browser on a machine with no
+    # per-process limit took the whole guest down twice -- QEMU at
+    # 4.5-4.9 GB against a 4096 MB guest, the console gone, and the
+    # supervising shell too starved to run the kill it was holding.
+    #
+    # So the binary upstream installs moves to /usr/libexec and the
+    # name on PATH becomes a wrapper. Not a shell alias and not a
+    # launcher-only argument: a bound somebody bypasses by typing the
+    # other name is not a bound. Every step is an exec, so there is one
+    # pid and `ps` shows `/usr/libexec/netsurf-fb` -- the path moved,
+    # the process did not gain a layer.
+    #
+    # s6-softlimit is base content (s6 is how this system boots), so
+    # this needs no new depends= entry -- the same reasoning that lets
+    # the wrapper be #!/bin/sh.
+    install -d "${files}/usr/libexec"
+    mv "${files}/usr/bin/netsurf-fb" "${files}/usr/libexec/netsurf-fb"
+    cat > "${files}/usr/bin/netsurf-fb" <<'WRAP'
+#!/bin/sh
+# NetSurf under an address-space bound and a scheduling demotion --
+# RFC 0031 roadmap 5. Both numbers come from measurement on a booted
+# machine; neither is a sandbox, and saying so is roadmap 4's job.
+#
+# THE BOUND. 1 GiB of address space. On this machine a benign page
+# peaks at 21 MB of VIRTUAL size, the heaviest corpus page that
+# finishes at 36 MB, and the worst plateau 517 MB -- so the ceiling
+# sits above every page anyone here has measured. It is not
+# decorative: `unclosed-tags.html` in tests/hostile-pages grows
+# without limit (217 MB at 40s, 484 MB at 180s) and was held at
+# exactly 1048576 kB when it reached it.
+#
+# What that buys is one thing: a page cannot take the machine's
+# memory. NetSurf neither exits nor prints anything when it hits the
+# ceiling -- measured, not hoped for -- so the failure mode this
+# converts an unrecoverable machine into is a hung window.
+#
+# THE NICE. A runaway page pegs a core indefinitely and RLIMIT_AS does
+# nothing about that; three of the five runaways in the corpus are CPU
+# rather than memory. A priority is not a bound and cannot become one,
+# but it is what keeps the rest of the machine usable: eight runaway
+# browsers on this 4-vCPU guest slowed an unrelated shell probe from
+# 17 to 40-43 centiseconds, and at nice 5 that came back to 19-23.
+# (nice 15 recovered all of it and demotes the browser against every
+# background job on the machine, which is a worse trade for a program
+# somebody is looking at.) On an idle machine nice costs nothing at
+# all, which is most of why it is cheap enough to ship.
+#
+# NOVI_BROWSER_AS_LIMIT overrides the bound, in bytes, or `off`.
+# NOVI_BROWSER_NICE overrides the increment, or `off`. A machine with
+# 512 MB of RAM wants a smaller ceiling than a workstation does, and
+# somebody debugging a page that hit it wants to raise it for one run.
+LIMIT="${NOVI_BROWSER_AS_LIMIT:-1073741824}"
+NICE="${NOVI_BROWSER_NICE:-5}"
+REAL=/usr/libexec/netsurf-fb
+
+# NOVI_SANDBOX_DESCRIBE=1 prints the command this would have run and
+# stops. Every exit goes through run(), so the answer is the argv that
+# would really be exec'd -- runtime branches taken, optional binds
+# resolved -- rather than a second description that can drift from it.
+# `novi-agent describe` READS this file instead (RFC 0029 decision 1:
+# describing must not run anything); this is the exact answer, for a
+# person.
+run() {
+    if [ -n "${NOVI_SANDBOX_DESCRIBE:-}" ]; then
+        printf '%s\n' "$*"
+        exit 0
+    fi
+    exec "$@"
+}
+
+
+# No '' alternative in either case: ${VAR:-default} substitutes for an
+# EMPTY value as well as an unset one, so an empty variable is already
+# the default by the time these run. A branch that cannot fire reads
+# as load-bearing -- provoking each one is what found this, exactly as
+# it found the dead ::-guard in RFC 0033's v6 validator.
+case "${LIMIT}" in
+    off|none|0) LIMIT="" ;;
+    *[!0-9]*)
+        echo "netsurf-fb: NOVI_BROWSER_AS_LIMIT must be a byte count or 'off'" >&2
+        exit 2 ;;
+esac
+case "${NICE}" in
+    off|none|0) NICE="" ;;
+    *[!0-9]*)
+        echo "netsurf-fb: NOVI_BROWSER_NICE must be a positive increment or 'off'" >&2
+        exit 2 ;;
+esac
+
+# Built up rather than nested four ways, so each `off` really removes
+# its own step instead of selecting one of four spellings of the line.
+set -- "${REAL}" "$@"
+
+# THE SANDBOX (RFC 0039, and roadmap 7 of the RFC the two numbers
+# above came from). Everything before this line changes what a hostile
+# page can do to the MACHINE and nothing about what it can do inside
+# the process that parsed it. novi-sandbox gives that process a root
+# filesystem containing only what is listed here, its own process
+# table, and a seccomp filter.
+#
+# The list is what a browser needs and nothing else, which is the
+# whole point: /root, /home, /etc/novi, /var and every other package's
+# files are simply not there. Read-only except the three that cannot
+# be -- the Wayland socket it draws through, its own profile, and the
+# directory downloads land in.
+#
+# NOT --no-net: a browser's job is the network, and the sandbox says
+# which of the two kinds it gave you rather than letting the word
+# imply both. NOVI_BROWSER_SANDBOX=off for somebody debugging the
+# difference between a page failing and a bind being missing.
+SANDBOX="${NOVI_BROWSER_SANDBOX:-on}"
+case "${SANDBOX}" in
+    off|none|0) SANDBOX="" ;;
+    on|1) SANDBOX=novi-sandbox ;;
+    *)
+        echo "netsurf-fb: NOVI_BROWSER_SANDBOX must be 'on' or 'off'" >&2
+        exit 2 ;;
+esac
+if [ -n "${SANDBOX}" ] && command -v novi-sandbox >/dev/null 2>&1; then
+    RUNTIME="${XDG_RUNTIME_DIR:-/run/user/0}"
+    set -- novi-sandbox \
+        --ro /usr/libexec --ro /usr/lib --ro /usr/share \
+        --ro /etc/ssl --ro /etc/resolv.conf --ro /etc/hosts \
+        --ro /etc/services \
+        --ro /lib \
+        --rw "${RUNTIME}" \
+        --rw "${HOME:-/root}/.netsurf" \
+        --rw "${HOME:-/root}/Downloads" \
+        -- "$@"
+fi
+
+if [ -n "${LIMIT}" ]; then set -- s6-softlimit -a "${LIMIT}" "$@"; fi
+if [ -n "${NICE}" ];  then set -- nice -n "${NICE}" "$@"; fi
+run "$@"
+WRAP
+    chmod 755 "${files}/usr/bin/netsurf-fb"
+
+    # A launcher entry, so it is reachable with a mouse. The name on
+    # PATH is `netsurf-fb` -- the wrapper above -- because that is what
+    # the framebuffer frontend installs itself as, and a person reading
+    # `ps` should still see the name upstream gave it.
+    install -d "${files}/usr/share/novi/apps"
+    cat > "${files}/usr/share/novi/apps/netsurf.app" <<APP
+name=Web
+exec=/usr/bin/netsurf-fb
+icon=globe
+description=NetSurf -- a small web browser
+APP
+
+    echo "  -> staged $(du -sh "${files}" | cut -f1)"
+    "${CROSS}-readelf" -d "${files}/usr/libexec/netsurf-fb" | grep NEEDED || true
+fi
+
+# ── Publish (called by 53-devtools-repo.sh, never by `all`) ───────────
 if [ "$ONLY" = "repo" ]; then
     REPO_OUT="${BUILD_DIR}/repo"
     KEY_FILE="${BUILD_DIR}/keys/novi-repo.key"
-    [ -d "${REPO_OUT}" ] || { echo "ERROR: ${REPO_OUT} not found -- run build/40-repo.sh first." >&2; exit 1; }
+    [ -d "${REPO_OUT}" ] || { echo "ERROR: ${REPO_OUT} not found -- run build/50-repo.sh first." >&2; exit 1; }
     [ -f "${KEY_FILE}" ] || { echo "ERROR: signing key ${KEY_FILE} not found." >&2; exit 1; }
 
     echo ">>> Packaging the developer tools into ${REPO_OUT} ..."

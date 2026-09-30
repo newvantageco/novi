@@ -1,0 +1,103 @@
+.Dd September 30, 2026
+.Dt NOVI-GRUBENV 8
+.Os
+.Sh NAME
+.Nm novi-grubenv
+.Nd read and write GRUB's environment block
+.Sh SYNOPSIS
+.Nm
+.Cm path | list | create
+.Nm
+.Cm get Ar name
+.Nm
+.Cm set Ar name Ns = Ns Ar value ...
+.Nm
+.Cm unset Ar name ...
+.Sh DESCRIPTION
+.Nm
+is the half of
+.Nm grub-editenv
+an installed Novi needs.
+The GRUB userland is not on this system, so the environment block is
+written here: it is a fixed 1024 bytes beside
+.Pa grub.cfg ,
+in GRUB's own format, and a format is not a program.
+.Bl -tag -width "set name=value..."
+.It Cm path
+Print the block this machine uses.
+.It Cm list
+Print every variable in it.
+.It Cm get Ar name
+Print one value.
+Exits 1 if it is unset.
+.It Cm set Ar name Ns = Ns Ar value ...
+Set one or more variables.
+.It Cm unset Ar name ...
+Remove one or more variables.
+.It Cm create
+Write an empty block.
+.El
+.Ss Which block
+The path is derived from
+.Em where grub.cfg is ,
+not from
+.Pa /sys/firmware/efi .
+Those answer different questions: the firmware node says how this
+machine booted, and what is wanted is where its GRUB reads, which is
+the prefix baked into
+.Pa core.img
+or
+.Pa bootx64.efi .
+A UEFI machine whose ESP did not mount still has
+.Pa /sys/firmware/efi
+and has nowhere GRUB will read, so
+.Nm
+refuses rather than writing a block nothing reads.
+.Ss What the bootloader will accept
+The shipped
+.Pa grub.cfg
+calls
+.Ic load_env Ar novi_slot ,
+naming the variable.
+Called bare,
+.Ic load_env
+imports
+.Em everything
+in the file into GRUB's environment,
+.Va prefix
+and
+.Va root
+included, so a block somebody appended to could redirect the
+bootloader itself.
+Do not remove the argument.
+.Sh FILES
+.Bl -tag -width "/boot/grub/grubenv" -compact
+.It Pa /boot/grub/grubenv
+.It Pa /boot/efi/EFI/BOOT/grubenv
+The block, on a BIOS and a UEFI machine respectively.
+.Cm path
+prints whichever applies.
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Sh EXAMPLES
+Boot the other slot next time:
+.Bd -literal -offset indent
+# novi-grubenv set novi_slot=b
+# reboot
+.Ed
+.Pp
+Prefer
+.Xr novi-slot 8
+for that, which also checks the slot is populated.
+.Sh SEE ALSO
+.Xr novi-slot 8
+.Sh STANDARDS
+RFC 0041.
+.Sh CAVEATS
+The block is 1024 bytes and every way to get the format wrong is
+silent: GRUB discards a record with no terminating newline, from a
+file that is the right size and looks correct in an editor.
+Use
+.Nm
+rather than editing it.

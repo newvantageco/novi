@@ -1,0 +1,126 @@
+.Dd September 30, 2026
+.Dt NOVI-SLOT 8
+.Os
+.Sh NAME
+.Nm novi-slot
+.Nd update the root filesystem that is not running
+.Sh SYNOPSIS
+.Nm
+.Cm status | sync | update | switch | rollback | confirm
+.Nm
+.Cm install Ar package No ...
+.Sh DESCRIPTION
+On a machine installed with
+.Nm novi-install Fl -ab
+there are two root slots and a shared state partition.
+.Nm
+applies a change to the slot that is
+.Em not
+running and points the bootloader at it, so nothing is ever modified
+underneath a running system and undoing a change costs one reboot
+rather than a restore.
+.Bl -tag -width "install pkg ..."
+.It Cm status
+Which slot is running, which boots next, whether the inactive slot is
+populated, and whether a trial boot is in flight.
+.It Cm sync
+Make the inactive slot a copy of the running one.
+The slot is emptied first: a slot is a copy, not the union of every
+sync ever made into it.
+.It Cm install Ar package No ...
+Install packages into the inactive slot, seeding it first if it is
+empty.
+.It Cm update
+Update the inactive slot's packages.
+.It Cm switch
+Boot the inactive slot next time, as a
+.Sy trial :
+if that boot does not reach a userland, the boot after it returns here
+on its own.
+.It Cm rollback
+The same operation, named for the direction somebody is going when
+they need it.
+It does
+.Em not
+arm a trial, because a rollback is a decision rather than an
+experiment, and it clears one that is already armed.
+.It Cm confirm
+Clear a trial in flight.
+.Pa rc.init
+does this on every boot; it is not normally run by hand.
+.El
+.Ss What a confirmed trial claims
+That the slot reached a userland which got as far as boot convergence,
+and no more.
+Whether the update was any
+.Em good
+is a judgement nothing here makes.
+If you boot it and do not like it, roll back.
+.Ss What is shared and what is not
+.Pa /home ,
+.Pa /var/log ,
+.Pa /var/lib/novi-state ,
+.Pa /var/lib/alsa
+and
+.Pa /var/cache/pkg
+are on the shared state partition and survive a switch.
+.Pa /var/lib/pkg
+is the slot's own package database and deliberately is not shared.
+.Pp
+.Pa /etc
+is the slot's own.
+It holds the boot script and the generated service database, so it
+cannot be shared; the cost is that a change made here since the last
+.Cm sync
+is not in the other slot, and
+.Cm switch
+and
+.Cm rollback
+name the files that differ before you reboot.
+Accounts are part of that: a user created on one slot has a home
+directory on the shared partition that the other slot can see and has
+no name for.
+.Sh FILES
+.Bl -tag -width "/etc/novi/slot-synced" -compact
+.It Pa /etc/novi/slot-synced
+Written last by
+.Cm sync ,
+removed first.
+Its presence is what makes a slot bootable rather than half-copied.
+.It Pa /boot/grub/grubenv
+Holds
+.Va novi_slot
+and
+.Va novi_try .
+See
+.Xr novi-grubenv 8 .
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Sh EXAMPLES
+Put two packages on the other slot and boot it:
+.Bd -literal -offset indent
+# novi-slot install sqlite man
+# novi-slot switch
+# reboot
+.Ed
+.Pp
+Go back:
+.Bd -literal -offset indent
+# novi-slot rollback
+# reboot
+.Ed
+.Sh SEE ALSO
+.Xr novi-install 1 ,
+.Xr pkg 1 ,
+.Xr novi-grubenv 8
+.Sh STANDARDS
+RFC 0041,
+.Pa /usr/share/doc/novi/rfcs/0041-atomic-updates-and-rollback.md .
+.Sh CAVEATS
+Encrypted installs cannot use A/B yet:
+.Nm novi-install
+refuses
+.Fl -ab
+together with
+.Fl -encrypt .

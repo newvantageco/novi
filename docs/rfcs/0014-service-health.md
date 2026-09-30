@@ -118,10 +118,18 @@ this project actually had:
 
 ## Roadmap
 
-- **Nothing consumes this yet.** The panel could show a failing
-  service; `novi-install` could check before declaring an install
-  finished; a future `novi-state watch` could poll it. The signal
-  existing is the prerequisite for all of them.
+- ~~**Nothing consumes this yet.**~~ **Three things do now**, and the
+  last of them took the longest because it needed somewhere to exist.
+  `init/services/health` publishes the verdict to `/run/novi/health`;
+  novi-panel draws a warning glyph while it says `degraded`; and
+  **`novi-settings --panel session` is where that glyph now leads**
+  (RFC 0036 roadmap 4) — the failing service names, read from the same
+  one-line file, in a panel that shows and does not edit. The glyph
+  was deliberately not clickable for as long as there was nothing for
+  it to open, which is the sentence this item existed to retire.
+
+  Still open, and worth keeping separate: `novi-install` checking
+  before it declares an install finished, and a `novi-state watch`.
 - **`/run/uncaught-logs/current` is where the *reason* lives**, and
   `health` only points at it. Surfacing the last few lines of a failing
   service's own output would turn "klog is down" into "klog is down

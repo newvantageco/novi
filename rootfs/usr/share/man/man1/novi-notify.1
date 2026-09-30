@@ -1,0 +1,81 @@
+.Dd September 30, 2026
+.Dt NOVI-NOTIFY 1
+.Os
+.Sh NAME
+.Nm novi-notify
+.Nd send a desktop notification
+.Sh SYNOPSIS
+.Nm
+.Op Fl u Ar urgency
+.Op Fl i Ar icon
+.Ar summary
+.Op Ar body
+.Sh DESCRIPTION
+.Nm
+hands a short message to
+.Nm novi-notifyd ,
+which draws it on the desktop, and
+.Sy always
+writes it to the system log as well.
+On a console-only machine that log line is the whole feature, which
+is why the sender is in the base image and the daemon is a package:
+the things with something to say
+.Pf ( Xr novi-mount 8 ,
+.Xr novi-eject 1 )
+are base tools that run on machines with no desktop.
+.Bl -tag -width "-u urgency"
+.It Fl u Ar urgency
+.Cm low ,
+.Cm normal
+(the default) or
+.Cm critical .
+.Cm critical
+.Sy never expires :
+something that matters enough to be called critical should not
+vanish while the person is looking away.
+Use it sparingly.
+.It Fl i Ar icon
+An icon name.
+A name this build does not know draws
+.Em no icon ,
+never a fallback and never an error.
+.El
+.Ss Everything here is untrusted text
+The transport is a world-writable
+.Ux Ns -domain
+datagram socket by design: an unprivileged program has as much
+business notifying as root does, and there is no session bus to
+arbitrate.
+The largest sender announces a volume by its filesystem label, which
+is a string off a stranger's device.
+So control characters are
+.Sy dropped
+rather than escaped, lengths are capped, and urgency and icon are
+matched against fixed lists.
+.Pp
+It is a datagram socket and specifically not a FIFO:
+open(2)
+for writing on a FIFO with no reader blocks forever, and the largest
+caller is a uevent handler, where that would stop the kernel's
+hotplug queue.
+.Sh FILES
+.Bl -tag -width "/run/novi/notifications" -compact
+.It Pa /run/novi/notify.sock
+The socket.
+.It Pa /run/novi/notifications
+The last fifty, republished by the daemon.
+.El
+.Sh EXIT STATUS
+.Ex -std
+Sending to a socket nobody is listening on is not an error: the log
+line still went out.
+.Sh EXAMPLES
+.Bd -literal -offset indent
+$ novi-notify "Backup finished" "412 files, 2.1 GB"
+$ novi-notify -u critical -i drive "Volume removed while mounted"
+.Ed
+.Sh SEE ALSO
+.Xr novi-eject 1 ,
+.Xr novi-mount 8
+.Sh STANDARDS
+RFC 0024, RFC 0034.

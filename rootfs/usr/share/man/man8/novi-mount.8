@@ -1,0 +1,90 @@
+.Dd September 30, 2026
+.Dt NOVI-MOUNT 8
+.Os
+.Sh NAME
+.Nm novi-mount
+.Nd mount removable media
+.Sh SYNOPSIS
+.Nm
+.Cm add | remove Ar device
+.Nm
+.Cm list
+.Sh DESCRIPTION
+.Nm
+is called by the hotplug handler when a block device appears or
+disappears.
+A volume it accepts is mounted at
+.Pa /run/media/ Ns Ar label .
+It is enabled by
+.Va storage.automount
+in
+.Xr system.conf 5 ,
+which
+.Nm
+reads at event time.
+.Bl -tag -width "remove device"
+.It Cm add Ar device
+Mount it, if it is removable media this system should touch.
+.It Cm remove Ar device
+Unmount it, lazily, if we mounted it.
+For a device still present, use
+.Xr novi-eject 1 .
+.It Cm list
+Removable volumes and their mount points.
+.El
+.Ss What it refuses, and why most of it is refusing
+Every wrong answer here is serious, so most of
+.Nm
+is deciding whether to touch the device at all.
+Removable is two tests rather than one, because a USB hard disk
+reports
+.Li removable=0 :
+the medium is not removable, the device is.
+Root, the boot partition, the ESP and the live medium are excluded by
+one already-mounted check with no list to keep in sync, and
+fstab(5)
+is matched on the device node,
+.Li LABEL=
+and
+.Li UUID= ,
+because fstab may use any of the three.
+.Pp
+The filesystem is matched against an
+.Sy allowlist ,
+never
+.Nm mount Fl t Cm auto :
+a filesystem driver parsing a hostile image is one of the larger
+attack surfaces a kernel has.
+Mounts are always
+.Cm nosuid,nodev .
+.Cm noexec
+is deliberately
+.Em not
+set: it would stop you running a script from a stick, which this
+system's own installer does from the live medium, and the attack it
+prevents needs the attacker already running code here.
+.Ss The label is attacker-controlled
+A filesystem label is a string off a stranger's device that is about
+to become a directory name.
+It is filtered to
+.Li [A-Za-z0-9._-] ,
+truncated, and a leading dot is
+.Sy rejected rather than stripped ,
+because
+.Pa ..
+survives a character filter that keeps dots.
+A volume whose label does not survive is mounted under its device
+name.
+.Sh FILES
+.Bl -tag -width "/run/media/<label>" -compact
+.It Pa /run/media/ Ns Ar label
+Where volumes appear.
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Sh SEE ALSO
+.Xr novi-eject 1 ,
+.Xr novi-state 1 ,
+.Xr system.conf 5
+.Sh STANDARDS
+RFC 0023.

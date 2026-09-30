@@ -54,6 +54,17 @@ make clean
 # exactly the person it is for. Apps is a button on the panel, so this
 # is reachable with a mouse and nothing else.
 echo "==> Registering the keyboard-shortcut sheet as a launchable app"
+# The colour palettes (RFC 0030). Installed here rather than in a stage
+# of their own because there is no free stage number below 40 and these
+# are four text files -- but they are their OWN package (novi-themes in
+# pkgsplit's DATA_FILES), because "which package do I uninstall to stop
+# having these" should have an answer that matches what they are.
+THEMES_SRC="${REPO_ROOT}/rootfs/usr/share/novi/themes"
+THEMES_DIR="${ROOTFS}/usr/share/novi/themes"
+mkdir -p "${THEMES_DIR}"
+install -m 644 "${THEMES_SRC}"/*.theme "${THEMES_DIR}/"
+echo "themes: $(ls -1 "${THEMES_DIR}" | tr '\n' ' ')"
+
 APPS_DIR="${ROOTFS}/usr/share/novi/apps"
 mkdir -p "${APPS_DIR}"
 cat > "${APPS_DIR}/shortcuts.app" <<'EOF'
@@ -63,6 +74,37 @@ icon=keyboard
 description=Every keyboard shortcut this desktop has
 EOF
 echo "   done: ${APPS_DIR}/shortcuts.app"
+
+# The notification history (RFC 0034), on the Apps grid for the same
+# reason the shortcut sheet is: Super+N is discoverable only to
+# somebody who already knows it, and the person most likely to want
+# "what did that toast say?" is the person who did not catch it and
+# has no idea a key exists. Never hide a feature behind only the
+# thing that documents it.
+cat > "${APPS_DIR}/notifications.app" <<'EOF'
+name=Notifications
+exec=/usr/bin/novi-launcher --notifications
+icon=shield
+description=What this desktop has told you recently
+EOF
+echo "   done: ${APPS_DIR}/notifications.app"
+
+# Reachable with a mouse and no prior knowledge, like the shortcut
+# sheet. Same argument, recorded in CLAUDE.md as the KDE lesson: never
+# hide a feature behind only the thing that documents it. Super+T is
+# for people who already know; this row is for everyone else.
+#
+# icon=settings rather than a palette glyph, because there is no
+# palette glyph -- new icons go through shared/icons/tools/svg2icon at
+# the pinned Lucide commit, and inventing one inline is exactly what
+# that rule exists to stop.
+cat > "${APPS_DIR}/themes.app" <<'EOF'
+name=Theme
+exec=/usr/bin/novi-launcher --themes
+icon=settings
+description=Change the desktop colour palette
+EOF
+echo "   done: ${APPS_DIR}/themes.app"
 
 echo ""
 echo "novi-launcher installed:"

@@ -1,0 +1,124 @@
+# ============================================================
+#  Novi — /etc/services
+# ============================================================
+#
+#  Port numbers and the names programs ask for them by. BusyBox ships
+#  no such file, so getservbyport(3) and getservbyname(3) returned
+#  nothing on this system and every tool that looks up a port printed
+#  a bare number -- `novi-recon ports` most visibly, which is a tool
+#  whose whole job is telling you what is listening on a machine.
+#
+#  CURATED, NOT IANA's WHOLE REGISTRY. That file is ~14,000 lines
+#  naming services nobody has run this century, and this is the same
+#  call kernel/config-x86_64 makes about Kconfig: a list somebody chose
+#  beats a list nobody has read. What is here is what a person doing
+#  this work actually meets -- the well-known services, the databases,
+#  the management ports, and the handful of high ports that matter
+#  because something is usually listening on them.
+#
+#  A PORT NAME IS NOT A POLICY. RFC 0022's rule stands and this file
+#  does not relax it: /etc/novi/firewall.nft names ports as NUMBERS,
+#  because a rule that reads `ssh` resolves through whatever this file
+#  happens to say on the machine it is applied to -- and a firewall
+#  whose meaning depends on a name table is a firewall that means
+#  something different on two machines. This file is for READING a
+#  port, not for writing one.
+#
+#  Format: name  port/protocol  [aliases...]
+#
+#  TWO LIMITS COME FROM MUSL'S PARSER, not from the format, and both
+#  fail silently. `__lookup_serv()` and `reverse_services()` each read
+#  with `fgets(line, 128, f)`, so a line of 128 bytes or more is split
+#  and its tail is parsed as a record of its own; and
+#  reverse_services() skips any entry whose name is 32 bytes or longer
+#  (`if (p-line > 32) continue`), so a long name still resolves by
+#  NAME and stops resolving by PORT. packages/tests/test-services.sh
+#  asserts both against the shipped file.
+#
+#  ALIASES WORK ONE WAY. The forward lookup searches the whole line, so
+#  getservbyname("www") finds http; the reverse lookup copies the
+#  FIRST field only, so getservbyport(80) is always "http". Put the
+#  name you want printed first.
+#
+#  Sorted by port, then protocol. Nothing parses it in order -- the
+#  order is so that a person reading a diff can see a duplicate, which
+#  the reverse lookup would otherwise resolve to whichever came first.
+# ============================================================
+
+tcpmux             1/tcp
+echo               7/tcp
+echo               7/udp
+discard            9/tcp   sink null
+daytime           13/tcp
+ftp-data          20/tcp
+ftp               21/tcp
+ssh               22/tcp
+telnet            23/tcp
+smtp              25/tcp   mail
+time              37/tcp   timserver
+whois             43/tcp   nicname
+tacacs            49/udp
+domain            53/tcp
+domain            53/udp
+bootps            67/udp   dhcps
+bootpc            68/udp   dhcpc
+tftp              69/udp
+gopher            70/tcp
+finger            79/tcp
+http              80/tcp   www
+kerberos          88/tcp
+kerberos          88/udp
+pop3             110/tcp
+sunrpc           111/tcp   portmapper
+auth             113/tcp   ident
+ntp              123/udp
+epmap            135/tcp   msrpc
+netbios-ns       137/udp
+netbios-dgm      138/udp
+netbios-ssn      139/tcp
+imap             143/tcp
+snmp             161/udp
+snmp-trap        162/udp
+ldap             389/tcp
+https            443/tcp
+microsoft-ds     445/tcp   smb
+kpasswd          464/tcp
+smtps            465/tcp
+rsh              514/tcp
+syslog           514/udp
+printer          515/tcp   spooler
+submission       587/tcp
+ipp              631/tcp
+ldaps            636/tcp
+ldp              646/tcp
+rsync            873/tcp
+imaps            993/tcp
+pop3s            995/tcp
+socks           1080/tcp
+ms-sql-s        1433/tcp
+oracle          1521/tcp   ncube-lm
+nfs             2049/tcp
+zookeeper       2181/tcp
+docker          2375/tcp
+docker-s        2376/tcp
+grafana         3000/tcp
+mysql           3306/tcp
+rdp             3389/tcp   ms-wbt-server
+sip             5060/udp
+postgresql      5432/tcp
+amqp            5672/tcp
+vnc             5900/tcp
+couchdb         5984/tcp
+redis           6379/tcp
+kubernetes      6443/tcp
+irc             6667/tcp
+http-alt        8080/tcp
+http-proxy      8081/tcp
+https-alt       8443/tcp
+prometheus      9090/tcp
+kafka           9092/tcp
+elasticsearch   9200/tcp
+git             9418/tcp
+memcached      11211/tcp
+mongodb        27017/tcp
+wireguard      51820/udp

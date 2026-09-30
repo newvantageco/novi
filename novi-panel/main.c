@@ -86,6 +86,7 @@
 #include "../common/text.h"
 #include "../common/theme.h"
 #include "icons.h"
+#include "../common/notifications.h"
 #include "netstat.h"
 
 #define PANEL_HEIGHT 32
@@ -150,6 +151,10 @@
  * NET_BARS_MAX is 4 and not a number someone picked.
  */
 #define NOVI_DEFAULT_SETTINGS "novi-settings"
+/* The health and stay-awake glyphs open the panel that explains them
+ * (RFC 0036 roadmap 4). A separate default from NOVI_DEFAULT_SETTINGS
+ * because it is a different question being asked. */
+#define NOVI_DEFAULT_SESSION_PANEL "novi-settings --panel session"
 
 
 #define NET_ICON_COLOR (NOVI_TEXT_SECONDARY & 0xffffffu)
@@ -207,6 +212,73 @@
  * the four wifi bars do for signal. */
 #define VOLUME_ARC_LOW 1
 #define VOLUME_ARC_HIGH 50
+/* The stay-awake indicator, leftmost of the status glyphs. novi-shell
+ * publishes /run/novi/idle every tick and on every wake (RFC 0036);
+ * this reads the two lines that say whether anything is holding the
+ * machine awake -- `awake 1` for somebody having pressed Super+A,
+ * `inhibit N` for client surfaces asking. One glyph for both: which
+ * of them is happening has different remedies and `novi-power idle`
+ * is where that is answered, exactly as the health glyph says
+ * "degraded" and leaves `novi-state health` to say which service.
+ *
+ * DISPLAY ONLY, like the health and volume glyphs. Super+A is the
+ * toggle and it is on the shortcut sheet; a click here that turned it
+ * off would be the second way to say one thing.
+ *
+ * LEFTMOST of the three, and that is not arbitrary. Every glyph in
+ * this march shifts the ones left of it when it appears, and this is
+ * the only one a person toggles with a keystroke -- so it goes on the
+ * outside, where its coming and going moves nothing else on the bar.
+ * The volume level changes far more often but the glyph's PRESENCE
+ * does not: it is there for the life of a machine with a sound card. */
+#define IDLE_FILE "/run/novi/idle"
+#define AWAKE_GAP 10
+/* The wedged-window indicator, between the health glyph and the
+ * stay-awake one. RFC 0038 roadmap 3: novi-shell's watchdog notices a
+ * window that has stopped answering, sends one notification and
+ * publishes the verdict here -- and the panel said nothing, so five
+ * seconds after the toast the machine looked exactly like a machine
+ * with nothing wrong with it. That is the argument that put the bell
+ * on this bar, about a fact that lasts far longer than a toast does.
+ *
+ * ONE GLYPH, NO NUMBER, and that is a departure from the bell rather
+ * than an omission. A number beside an hourglass reads as a DURATION
+ * -- the very quantity this glyph is about -- and what the compositor
+ * counts is windows. The Session panel names each of them with its
+ * stall time and its CPU, which is where a count belongs.
+ *
+ * text-secondary, not the warning colour, and RFC 0038 decision 2 is
+ * why: the watchdog CANNOT TELL SLOW FROM STUCK, so the strongest
+ * claim it can make is "this is taking a long time". The health glyph
+ * is the warning colour because a service that has died is a fact.
+ *
+ * It sits beside health deliberately. Those two and the coffee cup
+ * all open the Session panel, so keeping them contiguous means a
+ * click that lands between two of them still opens the window that
+ * explains whichever was aimed at. */
+#define WINDOWS_FILE "/run/novi/windows"
+#define WEDGE_GAP 10
+/* The unread-notification indicator, between the health glyph and the
+ * stay-awake one. RFC 0034 gave this desktop a notification history
+ * and no way to know there was anything in it: a toast is up for five
+ * seconds, and if you were looking at something else it may as well
+ * not have happened. novi-notifyd publishes the list, novi-launcher
+ * writes a marker when it shows it, and this counts what is newer
+ * than the marker -- see common/notifications.h for why that is two
+ * files with one writer each.
+ *
+ * A bell AND a number. The number is what a bare dot cannot say: "one
+ * thing happened" and "eleven things happened" are different states
+ * of a machine, and the second is the one worth interrupting for. It
+ * is drawn in the mono face, like the clock, because it is a machine
+ * value and not language (GUI-DESIGN-LANGUAGE.md §2).
+ *
+ * DISPLAY ONLY, like the glyphs either side of it -- but unlike them
+ * it has somewhere obvious to lead, and Super+N already goes there.
+ * A click would be a second way to say one thing; the sheet
+ * (Super+/) is where a person finds the first. */
+#define BELL_GAP 10
+#define BELL_COUNT_GAP 4
 #define POWER_GAP 8
 #define NOVI_DEFAULT_POWER_MENU "novi-launcher --power"
 #define CLOCK_GAP 12 /* between the status area and the clock */
@@ -231,8 +303,8 @@
  * was written and it was never true -- the panel's accent has been
  * very slightly darker than every other accent on this desktop for the
  * whole life of the file. Never write one of these by hand. */
-static const pixman_color_t TASKBAR_LABEL_COLOR = NOVI_PIX(NOVI_TEXT_SECONDARY);
-static const pixman_color_t TASKBAR_LABEL_ACTIVE_COLOR = NOVI_PIX(NOVI_ACCENT);
+#define TASKBAR_LABEL_COLOR NOVI_PIX(NOVI_TEXT_SECONDARY)
+#define TASKBAR_LABEL_ACTIVE_COLOR NOVI_PIX(NOVI_ACCENT)
 
 struct novi_panel;
 
@@ -280,6 +352,11 @@ struct novi_panel {
 	bool apps_button_hover;
 	bool apps_button_pressed; /* press happened inside the button */
 	bool net_button_hover;
+	/* No hover state for the status glyphs. Hover on the three BUTTONS
+	 * is a background tint on a rectangle that is always there; these
+	 * come and go, and lighting one up on the way past would draw the
+	 * eye to a thing that is not news. The click still works. */
+	bool session_glyph_pressed;
 	bool power_button_hover;
 	/* Read once per repaint from HEALTH_FILE, like the clock reads the
 	 * time: cheap, and the panel already repaints every second. */
@@ -291,6 +368,26 @@ struct novi_panel {
 	bool volume_known;
 	bool volume_muted;
 	int volume_pct;
+	/* Read from IDLE_FILE at the same moment, and true when EITHER
+	 * asker is asking. False when the file is absent, which is the
+	 * honest answer for a machine whose compositor is not publishing:
+	 * "nothing is holding this awake" and "there is no idle clock
+	 * here" both mean there is nothing to draw. */
+	bool holding_awake;
+	/* Read from WINDOWS_FILE at the same moment. False when the file
+	 * is absent -- no compositor, or one too old to publish -- which
+	 * is a different answer from "every window is responding" and
+	 * draws the same as it: nothing. Claiming either way about a
+	 * machine that has not been asked is what novi-settings' Session
+	 * panel refuses to do in words and what this refuses to do in a
+	 * glyph. */
+	bool windows_wedged;
+	/* How many notifications are newer than the marker the launcher
+	 * wrote when it last showed the list. Zero draws nothing at all:
+	 * a bell that is always there, greyed, is the thing that teaches
+	 * people to stop looking at this part of the bar. */
+	int unread;
+	char unread_label[8];
 	bool net_button_pressed;
 	bool power_button_pressed;
 	/* Same press-then-release-in-bounds convention as apps_button_
@@ -394,19 +491,19 @@ static void surface_draw_frame(struct novi_panel *panel);
  * (true for every call site: main() only starts processing events,
  * and only novi-shell can create toplevels to report, after the font
  * is loaded). */
-static void layout_taskbar(struct novi_panel *panel) {
-	int btn_x, btn_y, btn_w, btn_h;
-	apps_button_rect(panel, &btn_x, &btn_y, &btn_w, &btn_h);
-	(void)btn_y; (void)btn_h;
-	int x = btn_x + btn_w + TASKBAR_START_GAP;
-
-	/* The row stops where the status area starts. Before the network
-	 * indicator existed the taskbar simply ran on and the clock was
-	 * drawn over the top of it -- ugly with enough windows open, and
-	 * strictly worse now that there is something clickable on that
-	 * side: an entry drawn under the indicator would still hit-test as
-	 * an entry. An entry that does not fit gets w = 0, and both
-	 * render() and find_taskbar_entry_at() treat that as absent. */
+/* Everything this panel knows that it did not compute itself: three
+ * one-shot reads of files other programs publish under /run/novi.
+ * Called once at the top of render(), BEFORE anything is laid out or
+ * drawn against them.
+ *
+ * They were not always in one place, and the volume read in
+ * particular sat inside layout_taskbar() -- which render() calls
+ * after it has already drawn the status glyphs, so the speaker was
+ * always showing the level from the previous second's file. Harmless
+ * at 1 Hz and invisible in a screenshot, which is why it survived; it
+ * stops being harmless the moment a read decides a LAYOUT, which is
+ * what the taskbar's right-hand limit below now does. */
+static void read_published_state(struct novi_panel *panel) {
 	/* One line, rewritten atomically by novi-volume. sscanf rather
 	 * than strtol-by-hand because the format is fixed and a partial
 	 * match has to leave `volume_known` false: a file with a control
@@ -429,10 +526,221 @@ static void layout_taskbar(struct novi_panel *panel) {
 		}
 	}
 
+	/* A one-line file the health service rewrites atomically, so this
+	 * can never read half of it. Absent (the service off, or the first
+	 * sample not taken yet) means "nothing to say", not "broken" --
+	 * an indicator that lights up because a file has not appeared yet
+	 * would fire on every boot. */
+	panel->health_degraded = false;
+	{
+		FILE *hf = fopen(HEALTH_FILE, "r");
+		if (hf != NULL) {
+			char line[128];
+			if (fgets(line, sizeof(line), hf) != NULL) {
+				panel->health_degraded = strncmp(line, "degraded", 8) == 0;
+			}
+			fclose(hf);
+		}
+	}
+
+	/* `key value` lines, rewritten atomically by novi-shell. Only two
+	 * of them matter here and every other key is skipped rather than
+	 * refused -- a novi-shell newer than this panel must not be able
+	 * to blank its own indicator by adding a line, which is the same
+	 * rule `novi-power idle` follows over the same file. */
+	/* Counted by the shared reader, not by a parser written here: the
+	 * history's record format has one owner (common/notifications.c)
+	 * and three programs that read it. The file is newest-first, so
+	 * this costs the unread count rather than the whole file. */
+	panel->unread = (int)novi_hist_unread(NOVI_HIST_PATH, NOVI_HIST_SEEN_PATH);
+	/* CLAMPED to what the daemon keeps, and the clamp is what makes
+	 * the label's size provable: -Wformat-truncation is right that an
+	 * unbounded int does not fit in eight bytes, and this repository
+	 * has been caught three times by silencing that warning with a
+	 * bigger buffer instead of asking why the value was unbounded.
+	 * novi_hist_unread() counts lines in a file another program
+	 * wrote, so "more than the maximum" is a thing it can return and
+	 * a number wider than the list can hold is not a count of
+	 * anything. */
+	if (panel->unread > NOVI_HIST_MAX) {
+		panel->unread = NOVI_HIST_MAX;
+	}
+	if (panel->unread > 0) {
+		snprintf(panel->unread_label, sizeof(panel->unread_label), "%d",
+			panel->unread);
+	} else {
+		panel->unread_label[0] = '\0';
+	}
+
+	panel->holding_awake = false;
+	{
+		FILE *idf = fopen(IDLE_FILE, "r");
+		if (idf != NULL) {
+			char line[128];
+			while (fgets(line, sizeof(line), idf) != NULL) {
+				int n = 0;
+				if (sscanf(line, "awake %d", &n) == 1 && n != 0) {
+					panel->holding_awake = true;
+				} else if (sscanf(line, "inhibit %d", &n) == 1 && n > 0) {
+					panel->holding_awake = true;
+				}
+			}
+			fclose(idf);
+		}
+	}
+
+	/* `unresponsive <n>` is the FIRST line and the only one read here;
+	 * the `window ...` records after it are for the Session panel,
+	 * which has room to name them. novi-shell writes this once at
+	 * startup with a zero, so an absent file and a present one saying
+	 * `0` are genuinely different answers -- and both draw nothing,
+	 * because there is no glyph for "asked and everything is fine". */
+	panel->windows_wedged = false;
+	{
+		FILE *wf = fopen(WINDOWS_FILE, "r");
+		if (wf != NULL) {
+			char line[256];
+			if (fgets(line, sizeof(line), wf) != NULL) {
+				int n = 0;
+				if (sscanf(line, "unresponsive %d", &n) == 1 && n > 0) {
+					panel->windows_wedged = true;
+				}
+			}
+			fclose(wf);
+		}
+	}
+}
+
+/* How much room the conditional status glyphs take, gaps included --
+ * the width the taskbar must stop short of, and the same quantity the
+ * leftward march in render() consumes. Derived from the identical
+ * flags rather than measured separately, because the hit-test and the
+ * drawing disagreeing by one glyph is a taskbar entry that responds
+ * to a click on a coffee cup. */
+/* Where each status glyph sits, computed ONCE from the same flags in
+ * the same order, because three things need to agree about it: the
+ * drawing, the taskbar's right-hand limit, and -- since RFC 0036
+ * roadmap 4 -- the hit-test for the two glyphs that now open
+ * something. The file already carried the warning: a hit-test that
+ * disagrees with the drawing by one glyph is a taskbar entry that
+ * responds to a click on a coffee cup.
+ *
+ * x is -1 for a glyph that is not on the bar. The march runs LEFTWARD
+ * from the network button, so `total` is what the taskbar must stop
+ * short of. */
+struct status_layout {
+	int volume_x, health_x, wedge_x, awake_x, bell_x;
+	int total;
+};
+
+static void status_layout(const struct novi_panel *panel,
+		struct status_layout *out) {
 	int net_x, net_y, net_w, net_h;
 	net_button_rect(panel, &net_x, &net_y, &net_w, &net_h);
 	(void)net_y; (void)net_w; (void)net_h;
-	int limit = net_x - TASKBAR_ENTRY_GAP;
+
+	out->volume_x = out->health_x = out->wedge_x = -1;
+	out->awake_x = out->bell_x = -1;
+	int x = net_x;
+	if (panel->volume_known) {
+		x -= VOLUME_GAP + VOL_ICON_W;
+		out->volume_x = x;
+	}
+	if (panel->health_degraded) {
+		x -= HEALTH_GAP + WARN_ICON_W;
+		out->health_x = x;
+	}
+	if (panel->windows_wedged) {
+		x -= WEDGE_GAP + WEDGE_ICON_W;
+		out->wedge_x = x;
+	}
+	if (panel->holding_awake) {
+		x -= AWAKE_GAP + AWAKE_ICON_W;
+		out->awake_x = x;
+	}
+	if (panel->unread > 0) {
+		x -= BELL_GAP + BELL_ICON_W + BELL_COUNT_GAP +
+			novi_text_width(panel->font_clock, panel->unread_label);
+		out->bell_x = x;
+	}
+	out->total = net_x - x;
+}
+
+static int status_area_w(const struct novi_panel *panel) {
+	struct status_layout sl;
+	status_layout(panel, &sl);
+	return sl.total;
+}
+
+/* The glyphs that OPEN something (RFC 0036 roadmap 4): health, the
+ * wedged-window hourglass (RFC 0038 roadmap 3) and the coffee cup.
+ * The first two's comments above said the same thing for as long as
+ * they have existed -- there is nowhere for this to lead, and a panel
+ * item that opens a terminal is not a thing this desktop does.
+ * novi-settings has a Session panel now, so there is, and all three of
+ * these lead to it -- which is why they are adjacent in the march.
+ *
+ * NOT the volume glyph and NOT the bell. The bell already has
+ * somewhere to go and a key that goes there (Super+N), so a click
+ * would be a second way to say one thing; the speaker has no audio
+ * panel yet, and its own comment says to wire it when there is one.
+ *
+ * Still not a TOGGLE, which is the part decision 8 was actually
+ * about: Super+A turns stay-awake off and a click that did the same
+ * would be a second spelling of one action. Opening the panel that
+ * ANSWERS the question the glyph raises is the opposite of that. */
+static bool point_in_session_glyph(const struct novi_panel *panel,
+		double px, double py) {
+	struct status_layout sl;
+	status_layout(panel, &sl);
+	int h = (int)panel->height;
+	if (sl.health_x >= 0) {
+		int y = h / 2 - WARN_ICON_H / 2;
+		if (px >= sl.health_x && px < sl.health_x + WARN_ICON_W &&
+				py >= y && py < y + WARN_ICON_H) {
+			return true;
+		}
+	}
+	if (sl.wedge_x >= 0) {
+		int y = h / 2 - WEDGE_ICON_H / 2;
+		if (px >= sl.wedge_x && px < sl.wedge_x + WEDGE_ICON_W &&
+				py >= y && py < y + WEDGE_ICON_H) {
+			return true;
+		}
+	}
+	if (sl.awake_x >= 0) {
+		int y = h / 2 - AWAKE_ICON_H / 2;
+		if (px >= sl.awake_x && px < sl.awake_x + AWAKE_ICON_W &&
+				py >= y && py < y + AWAKE_ICON_H) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static void layout_taskbar(struct novi_panel *panel) {
+	int btn_x, btn_y, btn_w, btn_h;
+	apps_button_rect(panel, &btn_x, &btn_y, &btn_w, &btn_h);
+	(void)btn_y; (void)btn_h;
+	int x = btn_x + btn_w + TASKBAR_START_GAP;
+
+	/* The row stops where the status area starts. Before the network
+	 * indicator existed the taskbar simply ran on and the clock was
+	 * drawn over the top of it -- ugly with enough windows open, and
+	 * strictly worse now that there is something clickable on that
+	 * side: an entry drawn under the indicator would still hit-test as
+	 * an entry. An entry that does not fit gets w = 0, and both
+	 * render() and find_taskbar_entry_at() treat that as absent. */
+	int net_x, net_y, net_w, net_h;
+	net_button_rect(panel, &net_x, &net_y, &net_w, &net_h);
+	(void)net_y; (void)net_w; (void)net_h;
+	/* Short of the STATUS GLYPHS, not merely short of the network
+	 * button. The comment above has claimed this since it was written
+	 * and it was never true: the volume and health glyphs are drawn
+	 * after the taskbar, so a long-enough row ran underneath them --
+	 * and, exactly as that comment says, an entry drawn under an
+	 * indicator still hit-tests as an entry. */
+	int limit = net_x - status_area_w(panel) - TASKBAR_ENTRY_GAP;
 
 	struct taskbar_entry *entry;
 	wl_list_for_each(entry, &panel->taskbar_entries, link) {
@@ -595,22 +903,10 @@ static void render(struct novi_panel *panel, uint32_t *px, uint32_t stride_px) {
 	 * refreshed at exactly the rate the panel already repaints. */
 	novi_netstat_read(&panel->net);
 
-	/* A one-line file the health service rewrites atomically, so this
-	 * can never read half of it. Absent (the service off, or the first
-	 * sample not taken yet) means "nothing to say", not "broken" --
-	 * an indicator that lights up because a file has not appeared yet
-	 * would fire on every boot. */
-	panel->health_degraded = false;
-	{
-		FILE *hf = fopen(HEALTH_FILE, "r");
-		if (hf != NULL) {
-			char line[128];
-			if (fgets(line, sizeof(line), hf) != NULL) {
-				panel->health_degraded = strncmp(line, "degraded", 8) == 0;
-			}
-			fclose(hf);
-		}
-	}
+	/* The volume, the health verdict and whether anything is holding
+	 * this machine awake -- all three at the same moment, all three
+	 * before the taskbar is laid out against them. */
+	read_published_state(panel);
 
 	int pw_x, pw_y, pw_w, pw_h;
 	power_button_rect(panel, &pw_x, &pw_y, &pw_w, &pw_h);
@@ -634,13 +930,34 @@ static void render(struct novi_panel *panel, uint32_t *px, uint32_t stride_px) {
 		&panel->net,
 		panel->net_button_hover ? NET_ICON_HOVER_COLOR : NET_ICON_COLOR);
 
+	/* Wraps the same buffer draw_rect() already filled above -- both
+	 * write into the identical memory in place, no double buffering.
+	 * _no_clear: the background is already painted, no need for
+	 * pixman to zero it again.
+	 *
+	 * Created BEFORE the status march below rather than after it,
+	 * because one of those glyphs comes with a number beside it and
+	 * text needs a pixman image to land in. */
+	pixman_image_t *dest = pixman_image_create_bits_no_clear(
+		PIXMAN_x8r8g8b8, (int)w, (int)h, px, (int)stride_px * 4);
+
 	/* The status glyphs march LEFTWARD from the network button, each
 	 * one placed against a running cursor rather than against a fixed
-	 * offset from net_x. Both of them are conditional, so a fixed
-	 * offset would leave a hole where the absent one would have been
+	 * offset from net_x. EVERY ONE of them is conditional, so a fixed
+	 * offset would leave a hole where an absent one would have been
 	 * -- and worse, would move the health glyph sideways depending on
-	 * whether the machine has a sound card. */
-	int status_x = net_x;
+	 * whether the machine has a sound card.
+	 *
+	 * The order out from the network button is volume, health,
+	 * wedged, stay-awake, unread -- least likely to come and go
+	 * first, so
+	 * that the ones which do come and go move as little else as
+	 * possible. The unread bell is outermost because it is the only
+	 * one that appears without anybody doing anything. Whatever this
+	 * order is, status_area_w() above must consume exactly the same
+	 * widths, or the taskbar's hit-test and this drawing disagree. */
+	struct status_layout sl;
+	status_layout(panel, &sl);
 
 	if (panel->volume_known) {
 		struct vol_glyph vol = { .arcs = 0u, .muted = panel->volume_muted };
@@ -651,14 +968,13 @@ static void render(struct novi_panel *panel, uint32_t *px, uint32_t stride_px) {
 				vol.arcs = 0x1u;
 			}
 		}
-		status_x -= VOLUME_GAP + VOL_ICON_W;
 		/* Muted is text-secondary, not the warning colour: a muted
 		 * machine is a machine doing what it was told, not a machine
 		 * with something wrong with it. Accent is reserved for one
 		 * thing per window (GUI-DESIGN-LANGUAGE.md), and on this bar
 		 * that is the active taskbar entry. */
 		draw_icon(px, stride_px, w, h,
-			status_x, (int)h / 2 - VOL_ICON_H / 2,
+			sl.volume_x, (int)h / 2 - VOL_ICON_H / 2,
 			VOL_ICON_W, VOL_ICON_H, novi_volume_coverage, &vol,
 			NET_ICON_COLOR);
 	}
@@ -667,11 +983,56 @@ static void render(struct novi_panel *panel, uint32_t *px, uint32_t stride_px) {
 	 * shows a warning glyph, greyed out, teaches people to stop
 	 * looking at it. */
 	if (panel->health_degraded) {
-		status_x -= HEALTH_GAP + WARN_ICON_W;
 		draw_icon(px, stride_px, w, h,
-			status_x, (int)h / 2 - WARN_ICON_H / 2,
+			sl.health_x, (int)h / 2 - WARN_ICON_H / 2,
 			WARN_ICON_W, WARN_ICON_H, novi_warn_coverage, NULL,
 			NOVI_STATUS_WARNING);
+	}
+
+	/* Next along from health, and drawn in text-secondary rather than
+	 * the warning colour beside it. The watchdog cannot tell a client
+	 * laying out an enormous document from one that never will (RFC
+	 * 0038 decision 2) -- which is why it kills nothing, and why this
+	 * says "taking a long time" rather than "broken". Making it shout
+	 * would be the glyph claiming a certainty the code that raised it
+	 * has already refused to claim. */
+	if (panel->windows_wedged) {
+		draw_icon(px, stride_px, w, h,
+			sl.wedge_x, (int)h / 2 - WEDGE_ICON_H / 2,
+			WEDGE_ICON_W, WEDGE_ICON_H, novi_wedge_coverage, NULL,
+			NET_ICON_COLOR);
+	}
+
+	/* Outermost, so that toggling it -- the one thing here a person
+	 * does with a keystroke -- moves nothing else along the bar.
+	 * text-secondary, not the warning colour and not the accent: a
+	 * machine being held awake is a machine doing what it was told,
+	 * the same reading the muted speaker gets. */
+	if (panel->holding_awake) {
+		draw_icon(px, stride_px, w, h,
+			sl.awake_x, (int)h / 2 - AWAKE_ICON_H / 2,
+			AWAKE_ICON_W, AWAKE_ICON_H, novi_awake_coverage, NULL,
+			NET_ICON_COLOR);
+	}
+
+	/* Outermost of all, because this is the one that changes without
+	 * anybody doing anything: a notification arrives on its own
+	 * schedule, and a glyph that appears in the middle of the row
+	 * shifts everything left of it while somebody is reading it.
+	 *
+	 * The count sits to the RIGHT of the bell, between the glyph and
+	 * whatever is next along, so the number is nearer the thing it
+	 * counts than the thing it is not. */
+	if (panel->unread > 0) {
+		draw_icon(px, stride_px, w, h,
+			sl.bell_x, (int)h / 2 - BELL_ICON_H / 2,
+			BELL_ICON_W, BELL_ICON_H, novi_bell_coverage, NULL,
+			NET_ICON_COLOR);
+		novi_text_draw(dest, panel->font_clock,
+			sl.bell_x + BELL_ICON_W + BELL_COUNT_GAP,
+			((int)h + panel->font_clock->ascent -
+				panel->font_clock->descent) / 2,
+			panel->unread_label, NOVI_PIX(NOVI_TEXT_SECONDARY));
 	}
 
 	time_t now = time(NULL);
@@ -681,14 +1042,7 @@ static void render(struct novi_panel *panel, uint32_t *px, uint32_t stride_px) {
 	snprintf(clock_str, sizeof(clock_str), "%02d:%02d:%02d",
 		tm_now.tm_hour, tm_now.tm_min, tm_now.tm_sec);
 
-	/* Wraps the same buffer draw_rect() already filled above -- both
-	 * write into the identical memory in place, no double buffering.
-	 * _no_clear: the background is already painted, no need for
-	 * pixman to zero it again. */
-	pixman_image_t *dest = pixman_image_create_bits_no_clear(
-		PIXMAN_x8r8g8b8, (int)w, (int)h, px, (int)stride_px * 4);
-
-	static const pixman_color_t clock_color = NOVI_PIX(NOVI_TEXT_SECONDARY);
+#define clock_color NOVI_PIX(NOVI_TEXT_SECONDARY)
 	int text_x = pw_x - POWER_GAP - panel->clock_w;
 	int baseline_y = ((int)h + panel->font->ascent - panel->font->descent) / 2;
 	int clock_base = ((int)h + panel->font_clock->ascent -
@@ -698,8 +1052,8 @@ static void render(struct novi_panel *panel, uint32_t *px, uint32_t stride_px) {
 
 	/* text-secondary at rest, accent on hover -- GUI-DESIGN-LANGUAGE.md
 	 * §7's stated hover treatment for the apps button. */
-	static const pixman_color_t apps_label_color = NOVI_PIX(NOVI_TEXT_SECONDARY);
-	static const pixman_color_t apps_label_hover_color = NOVI_PIX(NOVI_ACCENT);
+#define apps_label_color NOVI_PIX(NOVI_TEXT_SECONDARY)
+#define apps_label_hover_color NOVI_PIX(NOVI_ACCENT)
 	int label_x = icon_x + APPS_ICON_SIZE + APPS_ICON_TEXT_GAP;
 	novi_text_draw(dest, panel->font, label_x, baseline_y, "Apps",
 		panel->apps_button_hover ? apps_label_hover_color : apps_label_color);
@@ -918,6 +1272,8 @@ static void pointer_button(void *data, struct wl_pointer *pointer,
 			point_in_net_button(panel, panel->pointer_x, panel->pointer_y);
 		panel->power_button_pressed =
 			point_in_power_button(panel, panel->pointer_x, panel->pointer_y);
+		panel->session_glyph_pressed =
+			point_in_session_glyph(panel, panel->pointer_x, panel->pointer_y);
 		panel->taskbar_pressed =
 			find_taskbar_entry_at(panel, panel->pointer_x, panel->pointer_y);
 		return;
@@ -942,6 +1298,17 @@ static void pointer_button(void *data, struct wl_pointer *pointer,
 			point_in_net_button(panel, panel->pointer_x, panel->pointer_y)) {
 		spawn(getenv("NOVI_SETTINGS") ?
 			getenv("NOVI_SETTINGS") : NOVI_DEFAULT_SETTINGS);
+	}
+
+	/* Straight to the panel that answers the question the glyph asks,
+	 * rather than to Settings' front page: a coffee cup that opens the
+	 * Account panel has not answered what was clicked on. */
+	bool session_was_pressed = panel->session_glyph_pressed;
+	panel->session_glyph_pressed = false;
+	if (session_was_pressed &&
+			point_in_session_glyph(panel, panel->pointer_x, panel->pointer_y)) {
+		spawn(getenv("NOVI_SETTINGS_SESSION") ?
+			getenv("NOVI_SETTINGS_SESSION") : NOVI_DEFAULT_SESSION_PANEL);
 	}
 
 	bool power_was_pressed = panel->power_button_pressed;
@@ -1161,6 +1528,11 @@ static const struct wl_registry_listener registry_listener = {
 };
 
 int main(void) {
+	/* Colours are a runtime table now (RFC 0030). Load the active
+	 * theme BEFORE anything computes a colour; on failure the
+	 * compiled-in defaults stay in force, so this cannot leave the
+	 * client worse off than it was. */
+	novi_theme_load();
 	struct novi_panel panel = {0};
 	panel.running = true;
 	wl_list_init(&panel.taskbar_entries);
@@ -1295,6 +1667,14 @@ int main(void) {
 		if (fds[1].revents & POLLIN) {
 			uint64_t expirations;
 			if (read(timer_fd, &expirations, sizeof(expirations)) > 0) {
+				/* One stat(2) per second, and a parse only when the
+				 * published theme actually changed (RFC 0030). The
+				 * panel is the surface a person looks at while
+				 * switching themes, and it is already redrawing here,
+				 * so it is the one client that can follow a switch
+				 * live for the price of a syscall. Everything else
+				 * picks the palette up when it next starts. */
+				novi_theme_reload();
 				surface_draw_frame(&panel);
 			}
 		}

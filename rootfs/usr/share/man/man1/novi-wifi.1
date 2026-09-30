@@ -1,0 +1,92 @@
+.Dd September 30, 2026
+.Dt NOVI-WIFI 1
+.Os
+.Sh NAME
+.Nm novi-wifi
+.Nd the WiFi networks this machine knows
+.Sh SYNOPSIS
+.Nm
+.Cm list | scan | status | iface
+.Nm
+.Cm scan Fl -tsv
+.Nm
+.Cm add Ar ssid Oo Fl -wpa2-only Oc Op Fl -stdin
+.Nm
+.Cm forget Ar ssid
+.Sh DESCRIPTION
+.Nm
+manages the credentials in
+.Pa /etc/novi/wifi.conf ,
+which is
+wpa_supplicant(8) Ns 's
+own format, mode 0600 and root-only.
+.Pp
+Turning the radio on and off is declared state rather than a command
+here:
+.Bd -literal -offset indent
+# novi-state set network.wifi on
+# novi-state apply
+.Ed
+.Bl -tag -width "add ssid --wpa2-only"
+.It Cm list
+Networks this machine has credentials for.
+.It Cm add Ar ssid
+Add one, prompting for the passphrase.
+.It Cm add Ar ssid Fl -stdin
+The same, reading the passphrase from standard input.
+This exists so a GUI can add a network without a terminal.
+The passphrase is never an argument, because an argument is
+world-readable in
+.Pa /proc/ Ns Ar pid Ns Pa /cmdline
+for as long as the process lives.
+.It Cm add Ar ssid Fl -wpa2-only
+Store only the derived PSK.
+.It Cm forget Ar ssid
+Remove one.
+.It Cm scan
+What is on the air now.
+.It Cm scan Fl -tsv
+The same as
+.Ar signal Ns \(ti Ns Ar ssid ,
+signal first, because an SSID may contain spaces and a trailing field
+cannot be found by counting from the left.
+.It Cm status
+What the supplicant is doing.
+.It Cm iface
+The wireless interface's name, if there is one.
+.El
+.Ss WPA3 and the passphrase on disk
+A network added normally works on WPA2, WPA3 transition mode and
+WPA3-only, which means the plaintext passphrase is stored alongside
+the derived PSK: SAE derives from the passphrase, not from the PSK, so
+there is no one-way transform to store instead.
+.Fl -wpa2-only
+stores only the PSK, for anyone who would rather keep a reused
+passphrase out of the file than reach a WPA3-only network.
+.Sh FILES
+.Bl -tag -width "/etc/novi/wifi.conf" -compact
+.It Pa /etc/novi/wifi.conf
+Credentials, mode 0600.
+See
+.Xr wifi.conf 5 .
+.It Pa /run/novi/network.wifi.device
+The interface the service resolved, published for readers such as the
+panel.
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Sh EXAMPLES
+.Bd -literal -offset indent
+# novi-wifi scan
+# novi-wifi add "Cafe WiFi"
+# novi-state set network.wifi on && novi-state apply
+# novi-wifi status
+.Ed
+.Sh SEE ALSO
+.Xr novi-state 1 ,
+.Xr system.conf 5 ,
+.Xr wifi.conf 5
+.Sh STANDARDS
+RFC 0009 and RFC 0021.
+.Sh CAVEATS
+Enterprise (802.1X) networks are not supported.

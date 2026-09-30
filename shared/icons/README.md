@@ -25,9 +25,10 @@ The shared icon set consumed by `novi-shell`, `novi-panel`, and
 
 Stage 1 (the generator) and Stage 2 (`draw_icon()`) are both built and
 verified on the build host: `icons_generated.c` holds real rasterized
-Lucide icons (`terminal`, `folder`, `globe`, `pencil`, `package`,
-`settings`, `shield`, `wifi`, `battery`, `power`, `chevron-right`,
-`chevron-down`), and `draw_icon()`'s compositing math has been checked
+Lucide icons (`terminal`, `folder`, `globe`, `pencil`, `file`,
+`image`, `package`, `settings`, `shield`, `wifi`, `battery`, `power`,
+`chevron-right`, `chevron-down`, `house`, `hard-drive`, `eject`,
+`search`, `calculator`, `keyboard`, `hourglass`), and `draw_icon()`'s compositing math has been checked
 against that real data with a native (non-cross) test harness — not
 QEMU-live-verified, since that needs each client actually calling
 `draw_icon()` and a full cross-compile + boot, neither of which is

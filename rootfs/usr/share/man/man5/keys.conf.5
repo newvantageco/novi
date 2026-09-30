@@ -1,0 +1,166 @@
+.Dd September 30, 2026
+.Dt KEYS.CONF 5
+.Os
+.Sh NAME
+.Nm keys.conf
+.Nd keyboard shortcuts
+.Sh SYNOPSIS
+.Pa /etc/novi/keys.conf
+.Pp
+.Pa ~/.config/novi/keys.conf
+.Sh DESCRIPTION
+Every line is
+.Ar action No = Ar binding ;
+.Ql #
+starts a comment.
+Anything the file does not mention keeps the shortcut Novi ships
+with, so changing one key means writing one line \(em not copying the
+whole list out and keeping it in step forever.
+.Pp
+It is deliberately
+.Em not
+part of
+.Xr system.conf 5 .
+That file is the declared state of the machine, converged by
+.Nm novi-state apply ;
+nothing converges a keyboard shortcut.
+.Nm novi-shell
+reads these files once when it starts, which is also when a change
+takes effect: log out and back in, or Alt+Escape and start the
+desktop again.
+.Ss Two files, and yours wins
+.Pa /etc/novi/keys.conf
+is the machine's and takes root to edit.
+.Pa $XDG_CONFIG_HOME/novi/keys.conf ,
+or
+.Pa ~/.config/novi/keys.conf ,
+is applied after it, so yours is the one that fires.
+.Pp
+It layers
+.Sy a line at a time ,
+exactly as the machine's file layers over the shipped defaults: one
+line in your file changes one shortcut and inherits every other.
+Otherwise a machine-wide binding added later would never reach
+anybody who had ever set one.
+.Pp
+.Nm novi-settings Ns 's
+Keys panel writes
+.Em your
+file, never the machine's \(em a settings window quietly changing
+every account is a thing to ask about rather than a default.
+.Ss Writing a binding
+.Bl -tag -width "Super+Return" -compact
+.It Li Super+Return
+Super, Win and Cmd all mean the same key.
+.It Li Alt+Shift+T
+Modifiers in any order.
+.It Li Meta+Space
+Meta means Alt.
+.It Li Super+\&.
+Punctuation as the character, not its name.
+.It Li Print
+A key with no modifier at all.
+.It Li off
+This shortcut does nothing.
+.El
+.Pp
+Case does not matter:
+.Li Super+Q
+and
+.Li super+q
+are one binding, because the compositor compares lowercased and a
+difference here would describe something that cannot happen.
+.Pp
+.Sy Control is not a modifier Novi binds .
+A line naming Ctrl is
+.Em refused ,
+not half-applied \(em ignoring the word would bind the shortcut to
+the bare letter, which does something far worse than what the line
+says.
+.Ss Actions
+.Bl -tag -width "window.cycle-prev" -compact
+.It Va window.cycle-next
+.It Va window.cycle-prev
+.It Va window.terminal
+.It Va window.close
+.It Va window.force-quit
+Asks the program to close, exactly as
+.Va window.close
+does \(em and signals it instead when the desktop has already
+established it cannot hear the request.
+.It Va workspace.switch
+.It Va workspace.move
+Both take a digit range.
+.It Va find.launcher
+.It Va find.symbols
+.It Va find.shortcuts
+.It Va find.themes
+.It Va find.notifications
+.It Va find.screenshot
+.It Va sound.up
+.It Va sound.down
+.It Va sound.mute
+.It Va session.lock
+.It Va session.stay-awake
+.It Va session.power-menu
+.It Va session.quit
+.El
+.Pp
+The shipped
+.Pa /etc/novi/keys.conf
+names every one of them as a commented example, and is the only place
+a person learns what an action is called.
+.Sh FILES
+.Bl -tag -width "~/.config/novi/keys.conf" -compact
+.It Pa /etc/novi/keys.conf
+The machine's.
+Base content, not owned by any package: a file whose whole purpose is
+to be edited must survive an upgrade.
+.It Pa ~/.config/novi/keys.conf
+Yours.
+Created by the Keys panel if it does not exist.
+.El
+.Sh EXAMPLES
+Move the terminal onto Super+Shift+T and turn off the power menu:
+.Bd -literal -offset indent
+window.terminal    = Super+Shift+T
+session.power-menu = off
+.Ed
+.Sh DIAGNOSTICS
+A line that cannot be parsed leaves
+.Em its
+row alone rather than failing the file: refusing nineteen working
+shortcuts over one typo helps nobody.
+An action name this build has never heard of is counted, not fatal
+\(em one file is read by whatever
+.Nm novi-shell
+is installed.
+.Pp
+.Nm novi-launcher Fl -keys
+(Super+/) shows what is
+.Em in force ,
+generated from the bindings that will actually fire, and says at the
+top if a line could not be understood.
+.Sh SEE ALSO
+.Xr novi-state 1 ,
+.Xr system.conf 5
+.Sh STANDARDS
+RFC 0037.
+.Sh CAVEATS
+Two shortcuts cannot share a binding.
+If a line moves one onto another's key, the one further down is left
+.Sy unbound
+and the sheet says so \(em better than silently never firing.
+The check runs once after the last layer, so a clash your file
+resolves is not counted.
+.Pp
+If this file locks you out, add
+.Va novi.keys=off
+to the kernel command line in the bootloader
+.Pq press Ql e No on the GRUB entry
+and Novi ignores
+.Em both
+files for that boot, exactly as
+.Va novi.state=off
+skips boot convergence.
+The sheet ignores them too, so what you see is what you have.

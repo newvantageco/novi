@@ -1,0 +1,187 @@
+.Dd September 30, 2026
+.Dt NOVI-STATE 1
+.Os
+.Sh NAME
+.Nm novi-state
+.Nd declare system state, and converge the machine to it
+.Sh SYNOPSIS
+.Nm
+.Cm show | diff | health | history
+.Nm
+.Cm get Ar key
+.Nm
+.Cm set Ar key Ar value
+.Nm
+.Cm apply Op Fl -dry-run
+.Nm
+.Cm rollback Op Ar generation
+.Nm
+.Cm boot Op Fl -early
+.Sh DESCRIPTION
+.Pa /etc/novi/system.conf
+is the declared state of this machine.
+.Nm
+reads that file, observes what the running system is actually doing,
+and changes the system until the two agree.
+Nothing caches the observation: service state comes from
+s6-rc(1) ,
+the hostname from
+.Pa /proc/sys/kernel/hostname ,
+and so on, so
+.Cm diff
+reports the machine rather than a record of it.
+.Pp
+The file is meant to be edited by hand.
+.Cm set
+rewrites one value in place, preserving comments and ordering, so a
+file edited in an editor and a file edited through Settings are the
+same document.
+See
+.Xr system.conf 5
+for the keys.
+.Pp
+Declaring a value does not apply it.
+.Cm set
+changes the document;
+.Cm apply
+changes the machine.
+.Pp
+The commands are:
+.Bl -tag -width "rollback [generation]"
+.It Cm show
+Print the declared state.
+.It Cm get Ar key
+Print one declared value.
+.It Cm set Ar key Ar value
+Declare a value.
+Requires root.
+.It Cm diff
+Print declared against actual, one line per key that differs.
+Exits 1 if anything has drifted.
+.It Cm health
+Report supervised services that are not working:
+.Sy DOWN ,
+.Sy CRASHLOOP
+(has died and has been up under a minute), or
+.Sy NOTREADY
+(up over a minute without signalling the readiness it declares).
+Exits 1 if any service is failing.
+This is a different question from
+.Cm diff :
+a crash-looping service matches the document, because it is declared
+on and the supervisor is keeping it up.
+.It Cm apply Op Fl -dry-run
+Converge the machine to the document.
+With
+.Fl -dry-run ,
+print what would change and change nothing.
+Requires root.
+.It Cm history
+List saved generations, newest last.
+.It Cm rollback Op Ar generation
+Restore a generation and apply it.
+With no argument, the previous one.
+Requires root.
+.It Cm boot Op Fl -early
+Converge at boot.
+Called from
+.Pa /etc/s6-linux-init/scripts/rc.init ;
+not normally run by hand.
+It always exits 0.
+.Fl -early
+converges only the keys that must precede services, which today is the
+firewall.
+.El
+.Ss Generations
+.Cm apply
+saves what it observed
+.Em before
+it changed anything, under
+.Pa /var/lib/novi-state/generations .
+A generation is therefore the state the machine was in, not a copy of
+the document that replaced it, which is what makes
+.Cm rollback
+able to undo an apply.
+.Ss Keys that cannot drift
+Some keys are read when they are used rather than held by anything:
+.Va power.blank ,
+.Va power.lid ,
+.Va power.button ,
+.Va storage.automount ,
+and the
+.Va agent.*
+keys.
+Nothing converges them, so
+.Cm apply
+has nothing to do for them and an unusable value is reported by
+.Cm diff
+as
+.Sy unsupported
+rather than being rejected when it is set.
+.Sh FILES
+.Bl -tag -width "/var/lib/novi-state/generations" -compact
+.It Pa /etc/novi/system.conf
+The declared state.
+See
+.Xr system.conf 5 .
+.It Pa /var/lib/novi-state/generations
+Saved generations.
+.It Pa /etc/shadow
+Password hashes.
+Deliberately not part of the declared state:
+.Pa system.conf
+is world-readable and is meant to be committed to version control.
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Cm diff
+exits 1 when the machine has drifted from the document, and
+.Cm health
+exits 1 when a supervised service is failing.
+Neither is an error.
+.Cm boot
+always exits 0.
+.Sh EXAMPLES
+Declare a hostname and a static address, then apply both:
+.Bd -literal -offset indent
+# novi-state set hostname workshop
+# novi-state set network.address 192.168.1.50/24
+# novi-state set network.gateway 192.168.1.1
+# novi-state apply
+.Ed
+.Pp
+See what has drifted without changing anything:
+.Bd -literal -offset indent
+$ novi-state diff
+.Ed
+.Pp
+Undo the last apply:
+.Bd -literal -offset indent
+# novi-state rollback
+.Ed
+.Sh DIAGNOSTICS
+A key this build does not recognise is reported as
+.Sy unmanaged
+rather than refused, so that a document written for a newer Novi still
+applies on an older one.
+A typo therefore reads as a line that does nothing;
+.Cm diff
+is where it shows up.
+.Pp
+One key that cannot converge does not stop the rest.
+.Cm apply
+reports it and continues, and exits non-zero at the end.
+.Sh RECOVERY
+Add
+.Ar novi.state=off
+to the kernel command line to skip boot convergence entirely, for when
+the declared state is what is wrong with the machine.
+.Sh SEE ALSO
+.Xr novi-agent 1 ,
+.Xr novi-wifi 1 ,
+.Xr pkg 1 ,
+.Xr system.conf 5 ,
+.Xr novi-slot 8
+.Sh STANDARDS
+The design is described in RFC 0002,
+.Pa /usr/share/doc/novi/rfcs/0002-declarative-system-state.md .

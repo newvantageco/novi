@@ -1,0 +1,106 @@
+.Dd September 30, 2026
+.Dt NOVI-AGENT-SERVE 1
+.Os
+.Sh NAME
+.Nm novi-agent-serve
+.Nd handle one request on the agent socket
+.Sh SYNOPSIS
+.Nm
+.Sh DESCRIPTION
+.Nm
+is the per-connection handler
+.Nm s6-ipcserver
+runs for the
+.Va services.novi-agentd
+service.
+It reads one line from standard input, checks that it is a request,
+and execs
+.Xr novi-agent 1 .
+It is not run by hand.
+.Pp
+The point of the service is that the privilege moves: a large
+untrusted program runs as nobody in particular, and a small reviewed
+one holds root.
+What may be done is unchanged \(em
+.Va agent.allow
+still decides that.
+.Ss The handler holds no policy
+.Nm
+rejects only a request that is
+.Em not a request :
+no credentials, no line, over 512 bytes, or control characters.
+Every decision about what a verb may do lives in
+.Xr novi-agent 1 .
+.Pp
+That is not tidiness.
+The socket refusal for
+.Cm wifi.join
+was written here first, where it worked and left no trace: the
+handler exits before
+.Xr novi-agent 1
+runs, and
+.Xr novi-agent 1
+is the only thing that writes the audit log \(em so the attempt most
+worth recording was the one that vanished.
+.Ss Identity comes from the kernel
+The peer's uid arrives through
+.Dv SO_PEERCRED
+.Pf ( Nm s6-ipcserver Fl p ) ,
+never from the request, and reaches the audit log as
+.Ev NOVI_AGENT_PEER_UID .
+.Nm id Fl u
+would have recorded root for every request whoever made it, which is
+the one question an audit log exists to answer, with a single wrong
+answer.
+A
+.Va via
+field separates
+.Dq root at a shell
+from
+.Dq root through the socket ,
+which a uid cannot.
+.Sh ENVIRONMENT
+.Bl -tag -width "NOVI_AGENT_PEER_UID" -compact
+.It Ev IPCREMOTEEUID
+Set by
+.Nm s6-ipcserver Fl p .
+.It Ev NOVI_AGENT_PEER_UID
+.It Ev NOVI_AGENT_VIA
+Passed to
+.Xr novi-agent 1 .
+.El
+.Sh FILES
+.Bl -tag -width "/run/novi/agent/sock" -compact
+.It Pa /run/novi/agent
+Mode 2750,
+.Sy root:agent .
+The setgid bit is the whole feature:
+.Nm s6-ipcserver
+binds as root, so without it the socket is created
+.Sy root:root
+and mode 0660 gives the
+.Sy agent
+group nothing.
+.It Pa /run/novi/agent/sock
+The socket.
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Sh SEE ALSO
+.Xr novi-agent 1 ,
+.Xr system.conf 5
+.Sh STANDARDS
+RFC 0032.
+.Sh CAVEATS
+A process reaching the socket must actually
+.Em carry
+the
+.Sy agent
+group.
+BusyBox
+.Nm setuidgid
+drops supplementary groups and is denied;
+.Nm s6-setuidgid
+keeps them and connects.
+That constrains whatever launches an agent here, not just how it was
+tested.

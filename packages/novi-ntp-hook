@@ -1,0 +1,59 @@
+#!/bin/sh
+# ============================================================
+# ntp-hook — write the corrected time back to the RTC (RFC 0042).
+#
+# Installed as /usr/lib/novi/ntp-hook and named by
+# init/services/ntp/run's `ntpd -S`. Never run by hand.
+#
+# WHY THIS EXISTS. RFC 0040 roadmap 6 gave this kernel an RTC and
+# proved a correction survives a reboot -- by typing `hwclock -u -w`
+# at a shell. NOTHING IN THE SYSTEM EVER DID THAT. So a machine that
+# synced by NTP, ran for a week and rebooted with no network came
+# back to whatever the RTC had drifted to, and the sync it did was
+# worth nothing past the next power cycle. The capability was there
+# and no caller was: the same shape as the panel already calling
+# localtime_r(3) with no zoneinfo to resolve.
+#
+# busybox ntpd calls this with one argument: `step` when it jumped
+# the clock, `stratum` when its source changed, `periodic` every 11
+# minutes, and `unsync` when it lost its peers.
+#
+# `-u`, ALWAYS. Without it hwclock writes LOCAL time to the RTC, and
+# the convention this system is built on is that the hardware clock
+# is UTC -- the kernel reads it that way at boot and `time.timezone`
+# is applied on top. A single `hwclock -w` without `-u` on a machine
+# with a declared zone shifts the hardware clock by the offset, and
+# the next boot is wrong by that much with nothing to say why.
+# ============================================================
+set -u
+
+case "${1:-}" in
+    step|periodic)
+        # `unsync` deliberately does NOT write: it means ntpd has
+        # lost its peers and no longer trusts its own clock, so
+        # persisting it would save exactly the reading that should
+        # not outlive this boot. `stratum` is a change of source
+        # rather than of time, and the next `periodic` covers it
+        # within 11 minutes.
+        ;;
+    *)
+        exit 0
+        ;;
+esac
+
+# No RTC is not an error. `CONFIG_RTC_CLASS` is set (RFC 0040
+# roadmap 6) so /dev/rtc0 exists on real hardware and on this QEMU,
+# but a machine without one is a machine whose clock simply does not
+# persist -- which is a fact about it, not a failure of this hook,
+# and ntpd must not be made to look broken by it.
+[ -e /dev/rtc0 ] || exit 0
+
+hwclock -u -w 2>/dev/null || {
+    # Logged and not fatal: ntpd keeps the SYSTEM clock right either
+    # way, and killing the sync because the hardware clock is
+    # read-only would trade the thing that works for the thing that
+    # does not.
+    echo "ntp-hook: could not write the RTC (hwclock -u -w failed)" >&2
+    exit 0
+}
+exit 0

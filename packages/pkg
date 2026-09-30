@@ -52,6 +52,20 @@ PKG_MIRROR=""
 PKG_KEY="/etc/novi/keys/novi-repo.pub"
 PKG_ALLOW_UNSIGNED="no"
 PKG_ALLOW_STALE="no"
+# Network read timeout, in seconds, for every fetch this tool makes.
+#
+# BusyBox wget's own default is 900 -- fifteen minutes of no data before
+# it gives up -- and that is not a number anybody chose for this
+# situation. `packages.<name> = present` is converged by novi-state,
+# which runs at BOOT, so an unreachable mirror (a laptop that opened its
+# lid somewhere else, a mirror that has moved) would stall the boot for
+# a quarter of an hour per declared package, silently, with the console
+# showing nothing.
+#
+# It is a READ timeout, not a total one, so a slow but progressing
+# download of a 90 MB toolchain package is unaffected: the clock only
+# runs while nothing at all is arriving.
+PKG_TIMEOUT="30"
 
 conf_value() {
     [ -r "$PKG_CONF" ] || { printf ''; return 0; }
@@ -65,6 +79,11 @@ load_conf() {
     v="$(conf_value key)";             [ -n "$v" ] && PKG_KEY="$v"
     v="$(conf_value allow_unsigned)";  [ -n "$v" ] && PKG_ALLOW_UNSIGNED="$v"
     v="$(conf_value allow_stale)";     [ -n "$v" ] && PKG_ALLOW_STALE="$v"
+    v="$(conf_value timeout)"
+    case "$v" in
+        ''|*[!0-9]*) ;;   # absent or not a number: keep the default
+        *)           PKG_TIMEOUT="$v" ;;
+    esac
     # The environment wins over the file, so a one-off
     # `PKG_MIRROR=... pkg sync` works without editing anything.
     [ -n "${PKG_MIRROR_ENV:-}" ] && PKG_MIRROR="$PKG_MIRROR_ENV"
@@ -240,7 +259,7 @@ fetch_repo_file() {
     else
         command -v wget >/dev/null 2>&1 ||
             die "wget not found; cannot fetch $rel from $PKG_MIRROR"
-        if ! wget -q -O "$dest.part" "${PKG_MIRROR%/}/$rel"; then
+        if ! wget -q -T "$PKG_TIMEOUT" -O "$dest.part" "${PKG_MIRROR%/}/$rel"; then
             rm -f "$dest.part"
             return 1
         fi
@@ -298,7 +317,9 @@ fetch_from_mirror() {
 $line
 EOF
     [ -n "$i_file" ] || return 1
-    : "$i_arch" "$i_size"
+    # i_sha is read positionally to reach i_file and is checked by
+    # archive_matches_index rather than here.
+    : "$i_arch" "$i_size" "$i_sha"
 
     # The caller asked for a specific version and the index does not
     # have it. Failing here is better than quietly handing back a
@@ -320,15 +341,47 @@ EOF
             die "could not fetch $i_file from $PKG_MIRROR"
     fi
 
-    local got
-    got="$(sha256sum "$dest" | cut -d' ' -f1)"
-    if [ "$got" != "$i_sha" ]; then
+    archive_matches_index "$dest" "$i_name" || {
         rm -f "$dest"
-        die "$i_file failed its SHA-256 check (index says $i_sha, file is $got) -- discarded"
-    fi
-    info "sha256 verified: $i_name $i_ver"
+        die "$i_file failed its SHA-256 check -- discarded"
+    }
 
     FOUND_PKG="$dest"
+    return 0
+}
+
+# archive_matches_index <path> <name>
+#
+# True when the index has nothing to say about <name> (an unindexed
+# local archive is governed by whether there is an index at all, not by
+# a hash nobody published), and true when it does and the file's
+# SHA-256 is the one it published. False otherwise.
+#
+# THIS LIVED INSIDE fetch_from_mirror AND THAT IS WHERE THE HOLE WAS.
+# Its comment there -- "a cached copy still gets hashed; the cache is a
+# directory anything with root can write to" -- was true of that
+# function and false of the program, because `locate_pkg` searches the
+# cache and the on-media repository FIRST and returned a match from
+# either without hashing it. So the one path that verified was the one
+# taken only when nothing local matched: a modified archive in
+# /var/cache/pkg/archives was installed as root, unverified, with a
+# correctly signed index sitting beside it naming a different hash.
+# Found by rebuilding a package at the same version and watching the
+# old bytes install from the cache. A comment asserting the property is
+# not the property -- this repository's oldest recurring bug, here on
+# the one path where it is trust and not tidiness.
+archive_matches_index() {
+    local path="$1" name="$2" line i_sha got
+    line="$(index_line "$name" 2>/dev/null)" || return 0
+    [ -n "$line" ] || return 0
+    i_sha="$(printf '%s' "$line" | cut -d'|' -f5)"
+    [ -n "$i_sha" ] || return 0
+    got="$(sha256sum "$path" | cut -d' ' -f1)"
+    if [ "$got" != "$i_sha" ]; then
+        warn "$(basename "$path") does not match the index (index says $i_sha, file is $got)"
+        return 1
+    fi
+    info "sha256 verified: $name"
     return 0
 }
 
@@ -370,8 +423,21 @@ locate_pkg() {
             | sort -t'-' -k2 -V -r \
             | head -n1)
         if [ -n "$f" ]; then
-            FOUND_PKG="$f"
-            return 0
+            if archive_matches_index "$f" "$name"; then
+                FOUND_PKG="$f"
+                return 0
+            fi
+            # The cache is derived data, so a copy that does not match
+            # the index is deleted and the mirror asked again. A repo
+            # directory is somebody's media -- possibly read-only, and
+            # never ours to edit -- so that one is left alone and
+            # skipped. Either way the archive is not installed.
+            if [ "$dir" = "$PKG_CACHE" ]; then
+                warn "discarding the cached copy and refetching"
+                rm -f "$f"
+            else
+                warn "ignoring $f"
+            fi
         fi
     done
 
@@ -481,10 +547,287 @@ resolve_deps() {
 # ---------------------------------------------------------------------------
 # Extract and install a single package archive
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# File conflicts (RFC 0040 roadmap 1)
+#
+# `pkg install` used to extract an archive over the root filesystem
+# with no owner check, no conflict refusal and no backup. That is not
+# a hypothetical: measured against this project's own repository,
+# exactly one package overlays base content -- `binutils` ships
+# `usr/bin/strings` where the base has a symlink to busybox -- so
+# `pkg install novi-devel` silently replaced it and
+# `pkg remove binutils` then DELETED `/usr/bin/strings`, taking away
+# a command the base image had. Multiply that by ~100 names and it is
+# the reason RFC 0040 put GNU coreutils under /usr/gnu instead.
+#
+# Three answers, by who owns the path:
+#
+#   this package      an upgrade. Fine, and the common case.
+#   another package   REFUSED. Two packages owning one path is a
+#                     database that cannot answer "who owns this",
+#                     and a removal that guts the other one.
+#   nobody            base content, or a file a person made. Refused
+#                     too -- UNLESS the MANIFEST says `replaces-files=`,
+#                     which is the package declaring the takeover
+#                     out loud, in a field a reviewer can see.
+#
+# NOT `replaces`: packages/pkg-format.md already documents that name
+# with the conventional dpkg meaning -- "packages this supersedes on
+# upgrade" -- and nothing implements it. Taking a well-known name for
+# a different idea is how a reader ends up confidently wrong, so this
+# one says what it is about: FILES.
+#
+# A declared takeover SAVES what was there and `pkg remove` puts it
+# back, because the harm was never the overwrite -- it was that the
+# machine could not be returned to the state it was in.
+# ---------------------------------------------------------------------------
+
+# Which installed package owns $1 (a root-relative path), or empty.
+#
+# One pass over the database rather than a grep per file: a package
+# with 101 programs would otherwise be 101 scans of 60 files.
+owner_index_build() {
+    OWNER_INDEX="$PKG_TMP/owner-index"
+    mkdir -p "$PKG_TMP"
+    : > "$OWNER_INDEX"
+    local flist oname
+    for flist in "$PKG_DB"/*/files; do
+        [ -f "$flist" ] || continue
+        oname="$(basename "$(dirname "$flist")")"
+        # "<path> <owner>", so a lookup is one anchored grep.
+        sed "s|\$| $oname|" "$flist" >> "$OWNER_INDEX"
+    done
+}
+
+# ALWAYS SUCCEEDS, and that is the whole of the second line.
+# `grep` exits 1 when it matches nothing, and the caller writes
+# `owner="$(owner_of_path "$rel")"` -- an assignment from a FAILING
+# command substitution ends a `set -e` script on the spot. CLAUDE.md
+# records that trap from novi-agent; here it meant that the first
+# unowned path killed pkg silently, mid-install, with nothing on
+# stderr: the refusal this function exists to produce never printed,
+# and a DECLARED takeover died the same way. Found by the test, not by
+# reading it.
+owner_of_path() {
+    [ -f "${OWNER_INDEX:-}" ] || return 0
+    grep -m1 -- "^$1 " "$OWNER_INDEX" 2>/dev/null | sed "s|^$1 ||" || true
+    return 0
+}
+
+# Does $1 (a root-relative path) appear in the space-separated
+# `replaces` list $2? Leading "./" and "/" are both tolerated, because
+# a MANIFEST is written by a person.
+replaces_declared() {
+    local path="$1" list="$2" entry
+    for entry in $list; do
+        entry="${entry#./}"
+        entry="${entry#/}"
+        [ "$entry" = "$path" ] && return 0
+    done
+    return 1
+}
+
+# Refuse, or record what a declared takeover is about to destroy.
+# Writes the saved originals under $3 (the package's db directory).
+check_conflicts() {
+    local files_dir="$1" name="$2" db_dir="$3" replaces="$4" force="$5"
+    local rel target owner conflicts="" adopted=0
+
+    owner_index_build
+    # STAGED, NOT WRITTEN INTO THE DATABASE YET. Creating $db_dir here
+    # left a registered-looking directory behind for a package that was
+    # then refused -- so `pkg list` and the owner index above would
+    # both have counted a package that is not installed. The records
+    # move into place only once the decision is "install".
+    local stage="$PKG_TMP/conflict-stage"
+    rm -rf "$stage"; mkdir -p "$stage"
+    : > "$stage/adopted"
+
+    ( cd "$files_dir" && find . -not -type d ) | sed "s|^\./||" \
+        > "$PKG_TMP/incoming"
+
+    while IFS= read -r rel; do
+        [ -n "$rel" ] || continue
+        target="${PKG_ROOT:-}/$rel"
+        # Not there: nothing to conflict with. `-e` is false for a
+        # DANGLING symlink, which is still a path in the way, so -L too.
+        [ -e "$target" ] || [ -L "$target" ] || continue
+
+        owner="$(owner_of_path "$rel")"
+        [ "$owner" = "$name" ] && continue          # our own, upgrading
+
+        if [ -n "$owner" ]; then
+            conflicts="$conflicts
+  $rel (owned by $owner)"
+            continue
+        fi
+
+        # Owned by nobody: base content, or somebody's own file.
+        if ! replaces_declared "$rel" "$replaces"; then
+            conflicts="$conflicts
+  $rel (not owned by any package)"
+            continue
+        fi
+
+        # Declared. Save what is there so `remove` can put it back.
+        mkdir -p "$stage/saved/$(dirname "$rel")"
+        if [ -L "$target" ]; then
+            printf 'link %s %s\n' "$rel" "$(readlink "$target")" \
+                >> "$stage/adopted"
+        else
+            cp -a "$target" "$stage/saved/$rel"
+            printf 'file %s\n' "$rel" >> "$stage/adopted"
+        fi
+        adopted=$((adopted + 1))
+    done < "$PKG_TMP/incoming"
+    rm -f "$PKG_TMP/incoming"
+
+    if [ -n "$conflicts" ]; then
+        if [ "$force" = "yes" ]; then
+            warn "$name: overwriting files this package does not own:$conflicts"
+            return 0
+        fi
+        printf 'ERROR: %s would overwrite files it does not own:%s\n' \
+            "$name" "$conflicts" >&2
+        printf '       A package that takes a path another package owns makes\n' >&2
+        printf '       the database unable to say who owns it, and removing\n' >&2
+        printf '       either one guts the other. To take over a path nothing\n' >&2
+        printf '       owns, the package declares `replaces-files=<path>` and pkg\n' >&2
+        printf '       saves the original so `pkg remove` can restore it.\n' >&2
+        printf '       `pkg install --overwrite` does it anyway.\n' >&2
+        exit 1
+    fi
+    # Decision made: the records become the package's.
+    mkdir -p "$db_dir"
+    cp "$stage/adopted" "$db_dir/adopted"
+    [ -d "$stage/saved" ] && cp -a "$stage/saved" "$db_dir/saved"
+    rm -rf "$stage"
+    [ "$adopted" -eq 0 ] || info "$name: taking over $adopted declared path(s); originals saved"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# Derived index refresh
+#
+# WHY THIS IS DERIVED AND NOT A PER-PACKAGE SCRIPT. `pkg` runs
+# `scripts/post-install` as root and three packages ship man pages
+# (`man`, `coreutils`, `bash`), so the obvious answer is a script in
+# each. That is three copies of one `makewhatis` call, and -- worse --
+# the FOURTH package to ship a man page gets a stale index because
+# nobody remembered. This repository's own rule, from pkgsplit and
+# from novi-sandbox's wrapper detection: nobody maintains a second
+# list. So the trigger is what was INSTALLED, and a package that ships
+# a page gets an index because it shipped a page.
+#
+# What pkg learns is ONE rule -- "refresh a stale index when the tool
+# that owns it is present" -- with one entry, inert on any machine
+# without `makewhatis`, which is every machine that has not installed
+# `man`. It is not on the trust path and cannot fail an install.
+#
+# A GENERATED INDEX CANNOT BE PACKAGE-OWNED, which is what rules out
+# the other answers: `mandoc.db` is PER DIRECTORY (measured -- a booted
+# machine had one under /usr/share/man and one under
+# /usr/gnu/share/man), `/usr/gnu/share/man` is shared by coreutils and
+# bash, and the second package to ship a db there would be refused by
+# this program's own conflict check. Correctly.
+#
+# `/usr/share/man` settles it on its own: the base image's 79
+# alsa-utils pages live there, so a db built when the `man` package
+# was made would be stale about pages no package owns.
+
+# Record the man roots a package just installed into. A FILE, not a
+# variable: cmd_install runs install_pkg_file for dependencies inside a
+# `printf | while` pipeline, which is a SUBSHELL, so an accumulating
+# variable would silently lose every dependency's pages and keep only
+# the top-level package's. Same trap novi-state's observer cache hit.
+note_man_dirs() {
+    local list="$1" rel root
+    [ -f "$list" ] || return 0
+    while read -r rel; do
+        case "$rel" in
+            */share/man/man*/*|share/man/man*/*) ;;
+            *) continue ;;
+        esac
+        # usr/gnu/share/man/man1/ls.1 -> /usr/gnu/share/man
+        root="/${rel%/*}"     # drop the filename
+        root="${root%/*}"     # drop manN
+        printf '%s\n' "$root" >> "$PKG_TMP/mandirs"
+    done < "$list"
+    return 0
+}
+
+# Refresh every index a run of installs invalidated. Called ONCE per
+# invocation rather than per package: `pkg install coreutils bash man`
+# touches one directory three times, and makewhatis reads every page in
+# it each time.
+refresh_indexes() {
+    [ -f "$PKG_TMP/mandirs" ] || return 0
+    # No formatter on the machine means nothing owns the index, which
+    # is EVERY machine that has not installed `man` -- so this is the
+    # common case and it must be a silent no-op, not a warning.
+    command -v makewhatis >/dev/null 2>&1 || { rm -f "$PKG_TMP/mandirs"; return 0; }
+
+    # A DIRECTORY WITH NO INDEX AT ALL IS ALSO STALE, and without this
+    # the ordinary ordering stays broken: `pkg install coreutils` on a
+    # machine with no formatter is correctly a no-op, and the later
+    # `pkg install man` only touches /usr/share/man -- so coreutils'
+    # pages under /usr/gnu/share/man would never be indexed and `man
+    # ls` would go on warning. So every man root an INSTALLED package
+    # owns that has no `mandoc.db` joins this pass.
+    #
+    # Derived from the install database rather than from a manpath
+    # this program would otherwise have to know. Bounded: it runs only
+    # when something already put man pages on the machine, and it is
+    # self-limiting, because a directory that has been indexed once
+    # has a db and is skipped.
+    local known dir rel
+    known="$(cat "$PKG_DB"/*/files 2>/dev/null \
+             | grep -E '(^|/)share/man/man[^/]*/' || true)"
+    if [ -n "$known" ]; then
+        printf '%s\n' "$known" | while read -r rel; do
+            dir="/${rel%/*}"; dir="${dir%/*}"
+            [ -d "${PKG_ROOT:-}$dir" ] || continue
+            [ -f "${PKG_ROOT:-}$dir/mandoc.db" ] && continue
+            printf '%s\n' "$dir" >> "$PKG_TMP/mandirs"
+        done
+    fi
+
+    # `${PKG_ROOT:-}`, the same prefix every other path in this program
+    # uses. The first version special-cased PKG_ROOT and skipped
+    # entirely, which was over-clever in the direction that hides
+    # things: it also skipped under the test harness, whose doctored
+    # copy sets PKG_ROOT to a temporary tree -- so the feature was
+    # unreachable in the one place that could check it.
+    sort -u "$PKG_TMP/mandirs" | while read -r dir; do
+        [ -d "${PKG_ROOT:-}$dir" ] || continue
+        # Never fatal: the package's files are installed and correct;
+        # only a lookup cache is behind.
+        makewhatis "${PKG_ROOT:-}$dir" >/dev/null 2>&1 \
+            || warn "could not index manual pages in $dir"
+    done
+    rm -f "$PKG_TMP/mandirs"
+    return 0
+}
+
 install_pkg_file() {
     local archive="$1"
     local force="${2:-no}"
 
+    # WIPED, NOT JUST CREATED, and this was a real bug rather than
+    # tidiness. The cleanup at the bottom of this function only runs on
+    # the success path -- the "already installed at this version" early
+    # return above skips it -- so the next package's `tar -xzf` merged
+    # into a directory still holding the previous one's tree.
+    #
+    # What that cost, before anything checked: `find` over `files/`
+    # then recorded the LEFTOVERS in this package's
+    # /var/lib/pkg/installed/<name>/files, so `pkg remove` would delete
+    # another package's files. It surfaced the moment the conflict
+    # check started reading that same list -- `openssh would overwrite
+    # usr/lib/libsqlite3.so.0 (owned by sqlite)`, about an openssh
+    # archive containing no such file. The check was right about what
+    # it was shown; what it was shown was wrong.
+    rm -rf "$PKG_TMP/extract"
     mkdir -p "$PKG_TMP/extract"
 
     # Extract archive into temp dir
@@ -501,6 +844,8 @@ install_pkg_file() {
     desc="$(manifest_field "$manifest" "description")"
     size="$(manifest_field "$manifest" "size")"
     depends="$(manifest_field "$manifest" "depends")"
+    local replaces
+    replaces="$(manifest_field "$manifest" "replaces-files")"
 
     [ -n "$name" ]    || die "MANIFEST missing 'name' field in $archive"
     [ -n "$version" ] || die "MANIFEST missing 'version' field in $archive"
@@ -517,7 +862,12 @@ install_pkg_file() {
         msg "Installing $name ($version)"
     fi
 
-    # Run pre-install script if present
+    # ONLY `pre-install` IS FATAL, and that asymmetry is the design
+    # rather than an accident: it runs BEFORE anything is extracted, so
+    # refusing leaves the machine exactly as it was. The other three
+    # run after files have already moved, where aborting would leave a
+    # half-installed package -- worse than either outcome. They warn.
+    # `pkg-format.md`'s table did not say this.
     local preinst="$PKG_TMP/extract/scripts/pre-install"
     if [ -f "$preinst" ]; then
         chmod +x "$preinst"
@@ -527,14 +877,23 @@ install_pkg_file() {
 
     # Install files
     local files_dir="$PKG_TMP/extract/files"
+    local db_dir="$PKG_DB/$name"
     if [ -d "$files_dir" ]; then
+        # BEFORE anything is written. A conflict found halfway through
+        # an extraction is a machine with half a package on it, which
+        # is worse than either outcome this is choosing between.
+        # NOT the `force` parameter beside it: that one means "install
+        # even though this version is already here", and reusing it
+        # would make a reinstall quietly also a permission to clobber.
+        # Two questions, two flags.
+        check_conflicts "$files_dir" "$name" "$db_dir" "$replaces" \
+            "${PKG_OVERWRITE:-no}"
         # Use tar to preserve permissions, symlinks, ownership
         ( cd "$files_dir" && tar -cf - . ) | tar -xf - -C "${PKG_ROOT:-/}" \
             || die "Failed to install files for $name"
     fi
 
     # Register package in database
-    local db_dir="$PKG_DB/$name"
     mkdir -p "$db_dir"
     cp "$manifest" "$db_dir/MANIFEST"
 
@@ -552,6 +911,8 @@ install_pkg_file() {
         cp -r "$PKG_TMP/extract/scripts" "$db_dir/scripts"
         chmod +x "$db_dir/scripts/"* 2>/dev/null || true
     fi
+
+    note_man_dirs "$db_dir/files"
 
     # Run post-install script if present
     local postinst="$PKG_TMP/extract/scripts/post-install"
@@ -571,7 +932,23 @@ install_pkg_file() {
 
 cmd_install() {
     need_root
-    [ $# -ge 1 ] || die "Usage: pkg install <package|archive> [...]"
+
+    # --overwrite is the operator's escape hatch from the conflict
+    # check, and it is deliberately not something a MANIFEST can ask
+    # for: a package declaring `replaces-files=` is saying "this path, and
+    # save the original"; a person typing --overwrite is saying "yes,
+    # I know, do it anyway" about whatever is in the way.
+    PKG_OVERWRITE="no"
+    local args="" a
+    for a in "$@"; do
+        case "$a" in
+            --overwrite) PKG_OVERWRITE="yes" ;;
+            *) args="$args $a" ;;
+        esac
+    done
+    [ "$PKG_OVERWRITE" = "yes" ] && set -- $args
+
+    [ $# -ge 1 ] || die "Usage: pkg install [--overwrite] <package|archive> [...]"
 
     mkdir -p "$PKG_DB" "$PKG_CACHE" "$PKG_TMP"
 
@@ -612,6 +989,51 @@ cmd_install() {
 
         install_pkg_file "$archive"
     done
+
+    # ONCE per invocation, not once per package: `pkg install coreutils
+    # bash man` touches one man directory three times and makewhatis
+    # re-reads every page in it each time.
+    refresh_indexes
+}
+
+# Which installed packages name $1 in their `depends`, space-separated
+# and empty when nothing does.
+#
+# Its own function, and a subcommand (`pkg rdeps`), because there are
+# now two callers: `pkg remove` warns with it, and novi-state's
+# packages.* converger REFUSES with it. A second copy of this matching
+# in novi-state would be a second answer to "what depends on this",
+# written in a different language, drifting the first time the depends
+# syntax gains a spelling -- which is what the version-constrained
+# patterns below already are.
+rdeps_of() {
+    local name="$1" rdeps="" other_manifest other_name other_deps
+    for other_manifest in "$PKG_DB"/*/MANIFEST; do
+        [ -f "$other_manifest" ] || continue
+        other_name="$(manifest_field "$other_manifest" "name")"
+        [ "$other_name" = "$name" ] && continue
+        other_deps="$(manifest_field "$other_manifest" "depends")"
+        case ",$other_deps," in
+            *",${name},"*|*",${name}>"*|*",${name}<"*|*",${name}="*|\
+            "${name},"*|"${name}>"*|"${name}<"*|"${name}="*|\
+            *",$name"|"$name")
+                rdeps="$rdeps $other_name";;
+        esac
+    done
+    # Leading space trimmed so a caller can test emptiness with -n and
+    # print the list without a stray gap in the middle of a sentence.
+    printf '%s' "${rdeps# }"
+}
+
+cmd_rdeps() {
+    [ $# -eq 1 ] || die "Usage: pkg rdeps <package>"
+    local list
+    list="$(rdeps_of "$1")"
+    [ -n "$list" ] || return 0
+    local d
+    for d in $list; do
+        printf '%s\n' "$d"
+    done
 }
 
 cmd_remove() {
@@ -623,22 +1045,19 @@ cmd_remove() {
 
         msg "Removing $name"
 
-        # Check reverse dependencies (packages that depend on this one)
-        local rdeps=""
-        for other_manifest in "$PKG_DB"/*/MANIFEST; do
-            [ -f "$other_manifest" ] || continue
-            local other_name
-            other_name="$(manifest_field "$other_manifest" "name")"
-            [ "$other_name" = "$name" ] && continue
-            local other_deps
-            other_deps="$(manifest_field "$other_manifest" "depends")"
-            case ",$other_deps," in
-                *",${name},"*|*",${name}>"*|*",${name}<"*|*",${name}="*|\
-                "${name},"*|"${name}>"*|"${name}<"*|"${name}="*|\
-                *",$name"|"$name")
-                    rdeps="$rdeps $other_name";;
-            esac
-        done
+        # THE LIFECYCLE SCRIPTS ALL TAKE `<name> <version>`. They used
+        # to disagree -- the install pair got both, the remove pair got
+        # only the name -- and `pkg-format.md` said all four got "one
+        # argument: the package version", which was wrong about every
+        # one of them and wrong in the worst direction: a script
+        # written from the spec treats $1 as a version and is handed a
+        # name. Nothing shipped a script yet, so this is the moment to
+        # make the four agree and it will never be cheaper.
+        local rm_version
+        rm_version="$(manifest_field "$(db_path "$name")" version)"
+
+        local rdeps
+        rdeps="$(rdeps_of "$name")"
 
         if [ -n "$rdeps" ]; then
             warn "The following installed packages depend on '$name':$rdeps"
@@ -649,7 +1068,8 @@ cmd_remove() {
         local prerm="$PKG_DB/$name/scripts/pre-remove"
         if [ -f "$prerm" ]; then
             info "Running pre-remove script..."
-            "$prerm" "$name" || warn "pre-remove script exited non-zero"
+            "$prerm" "$name" "$rm_version" \
+                || warn "pre-remove script exited non-zero"
         fi
 
         # Remove installed files (reverse order to clear empty dirs)
@@ -680,11 +1100,37 @@ cmd_remove() {
             rm -f "$files_list_sorted"
         fi
 
+        # PUT BACK WHAT A DECLARED TAKEOVER REPLACED (RFC 0040
+        # roadmap 1). The harm this fixes was never the overwrite --
+        # it was that `pkg remove binutils` left the machine without
+        # a `/usr/bin/strings` the base image had shipped. Restored
+        # AFTER the removal loop above, which has just deleted the
+        # package's own copy of that path.
+        local adopted="$PKG_DB/$name/adopted"
+        if [ -f "$adopted" ]; then
+            local kind rel link
+            while read -r kind rel link; do
+                [ -n "$rel" ] || continue
+                case "$kind" in
+                    link)
+                        ln -sf "$link" "${PKG_ROOT:-}/$rel" \
+                            && info "restored $rel -> $link" ;;
+                    file)
+                        if [ -e "$PKG_DB/$name/saved/$rel" ]; then
+                            mkdir -p "$(dirname "${PKG_ROOT:-}/$rel")"
+                            cp -a "$PKG_DB/$name/saved/$rel" "${PKG_ROOT:-}/$rel" \
+                                && info "restored $rel"
+                        fi ;;
+                esac
+            done < "$adopted"
+        fi
+
         # Run post-remove script
         local postrm="$PKG_DB/$name/scripts/post-remove"
         if [ -f "$postrm" ]; then
             info "Running post-remove script..."
-            "$postrm" "$name" || warn "post-remove script exited non-zero"
+            "$postrm" "$name" "$rm_version" \
+                || warn "post-remove script exited non-zero"
         fi
 
         # Remove database entry
@@ -791,6 +1237,8 @@ cmd_update() {
         install_pkg_file "$archive" force
         upgraded=$(( upgraded + 1 ))
     done
+
+    refresh_indexes
 
     if [ "$upgraded" -eq 0 ]; then
         msg "nothing to upgrade ($checked package(s) checked)"
@@ -1011,6 +1459,7 @@ Usage:
   pkg search  <pattern>                Search for packages
   pkg list    [filter]                 List installed packages
   pkg info    <package>                Show package information
+  pkg rdeps   <package>                List installed packages that need it
 
 `sync` refreshes the index; `update` upgrades installed packages. They
 are different operations and have different names on purpose.
@@ -1020,6 +1469,7 @@ Configuration (/etc/novi/pkg.conf):
   key             = /etc/novi/keys/novi-repo.pub
   allow_unsigned  = no
   allow_stale     = no
+  timeout         = 30                                 (network read, seconds)
 
 The index is signed and `pkg sync` verifies it with novi-verify before
 believing a line of it; every package's SHA-256 comes from that index,
@@ -1044,5 +1494,6 @@ case "$cmd" in
     search)  cmd_search  "$@";;
     list)    cmd_list    "$@";;
     info)    cmd_info    "$@";;
+    rdeps)   cmd_rdeps   "$@";;
     *)       usage;;
 esac

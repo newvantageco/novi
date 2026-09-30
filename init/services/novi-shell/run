@@ -77,4 +77,20 @@ fi
 # dir for root, so create and own the standard path ourselves.
 mkdir -p -m 0700 /run/user/0
 export XDG_RUNTIME_DIR=/run/user/0
+# And HOME, for the same class of reason and with the same hardcoded
+# uid: nothing in this init has ever set it, so every program in this
+# session has run without one. That was invisible while nothing looked
+# -- and RFC 0037 roadmap 3's per-user keys.conf makes it a WRONG-KEY
+# hazard rather than an inconvenience. novi-settings opened from a
+# foot terminal inherits a login shell's HOME and would write
+# ~/.config/novi/keys.conf; the compositor that started without one
+# would never read it, so the panel would report a shortcut saved and
+# the desktop would go on dispatching the old binding. The session and
+# the clients it spawns have to agree about where a config home is,
+# and the only way to make them agree is for the session to say.
+#
+# /root because this service runs as root -- the line above already
+# hardcodes uid 0 for the same reason. The day it runs as somebody
+# else, both change together.
+export HOME=/root
 exec novi-shell

@@ -22,5 +22,32 @@
 # then s6-rc gives up, rc.shutdown exits non-zero, shutdownd warns and
 # carries on to the sweep that ends the machine. Losing a shell rudely
 # at that point is fine. Hanging forever was not.
+#
+# ── TERM, AND WHY IT IS AN ARGUMENT HERE ─────────────────────────────
+#
+# busybox getty takes `BAUD_RATE TTY [TERMTYPE]` and puts TERMTYPE in
+# the environment for login and the shell below it. Without it TERM is
+# EMPTY -- measured on a booted machine, `echo $TERM` printed nothing
+# for the whole life of this project.
+#
+# WHAT THAT COSTS WAS MEASURED, NOT ASSUMED, and the first version of
+# this comment got it wrong: it said an empty TERM leaves the Python
+# REPL printing ^[[A for the up-arrow. It does not. readline's arrow
+# keys are COMPILED-IN bindings, not terminfo-derived, so history
+# recall survives an empty TERM (checked both ways on a booted
+# machine). What does not survive is `curses`:
+# `curses.setupterm()` fails outright with "could not find terminfo
+# database", so half of what RFC 0026 roadmap 2 is for cannot work at
+# all -- and readline gets no cursor capabilities either
+# (`tigetstr("cuu1")` has nothing to return), which is redisplay on a
+# resize and multi-line editing rather than basic recall.
+#
+# The name has to be one ncurses can resolve. build/40-ncurses.sh ships
+# no terminfo database and compiles a named set into the library
+# instead; `linux` is on that list. Changing either without the other
+# gives a terminal description that cannot be found.
+#
+# linux, because that is what this tty IS -- the kernel's own VGA
+# console, whose capabilities the kernel implements itself.
 # ============================================================
-exec s6-setuidgid root /sbin/getty 38400 tty1
+exec s6-setuidgid root /sbin/getty 38400 tty1 linux

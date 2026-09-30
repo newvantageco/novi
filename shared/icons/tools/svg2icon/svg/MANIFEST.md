@@ -36,6 +36,7 @@ icon here was vendored.
 | `eject.svg` | `eject` | files: take a volume out |
 | `search.svg` | `search` | launcher: the input line |
 | `calculator.svg` | `calculator` | launcher: an expression that evaluated |
+| `hourglass.svg` | `hourglass` | notifications: a window that stopped answering |
 
 `house.svg`, `hard-drive.svg` and `eject.svg` were fetched at the same
 pinned commit as everything above, on 2026-09-08, for `novi-files`'
@@ -47,6 +48,15 @@ Lucide renamed `home` to `house` at some point between then and now --
 which is worth recording because "the icon is called what you expect"
 is exactly the kind of assumption that turns into a hand-transcribed
 path nobody can audit.
+
+`hourglass.svg` was fetched at the same pinned commit on 2026-09-17,
+for RFC 0038's "not responding" notification. Worth recording: it is
+the SAME SHAPE as `novi_wedge_coverage()` in `novi-panel/icons.c` --
+two bars and two diagonals meeting at a waist -- and that is a
+coincidence of both being the obvious hourglass rather than one being
+derived from the other. The panel's status glyphs are procedural
+geometry and this set is rasterised SVG; they are two pipelines that
+happen to agree here, as `wifi` and `power` already do.
 
 `layout-grid` (the apps button) is deliberately **not** here — per
 `ICON-PIPELINE.md`'s "First icon shipped" section, that one stayed a

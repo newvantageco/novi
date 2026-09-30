@@ -1,0 +1,83 @@
+.Dd September 30, 2026
+.Dt NOVI-VOLUME 1
+.Os
+.Sh NAME
+.Nm novi-volume
+.Nd change the playback volume
+.Sh SYNOPSIS
+.Nm
+.Cm up | down Op Ar step
+.Nm
+.Cm mute | get | control
+.Nm
+.Cm set Ar percent
+.Sh DESCRIPTION
+.Nm
+is a front end to
+.Xr amixer 1 .
+It is bound to the XF86Audio keys by the compositor, and those
+bindings fire even while the session is locked: changing the volume
+discloses nothing, and refusing would mean you could not silence a
+machine you had just locked and walked away from.
+.Bl -tag -width "up|down [step]"
+.It Cm up | down Op Ar step
+Louder or quieter.
+.Ar step
+is a percentage, 5 by default.
+.Cm up
+unmutes;
+.Cm down
+deliberately does not, because unmuting on the way down makes the
+quiet key briefly loud.
+.It Cm mute
+Toggle mute.
+.It Cm set Ar percent
+Set the volume.
+.It Cm get
+Print
+.Ar percent Ar muted Ar control ,
+where
+.Ar muted
+is 0 or 1.
+.It Cm control
+Print the mixer control this machine uses.
+.El
+.Ss Which control
+The control is chosen rather than assumed.
+.Nm
+prefers Master, PCM, Speaker or Headphone and otherwise takes the
+first control ALSA reports with
+.Sy pvolume
+in its capabilities: a control with only
+.Sy pswitch
+is a mute toggle with nothing to turn.
+Hardcoding
+.Dq Master
+works on every real machine and fails on emulated cards that invent
+their own names.
+.Ss Reading back
+.Cm set Ar n
+does not always read back
+.Ar n .
+A percentage is a position in the card's own raw range, so 40 on a
+64-step control lands on 41.
+.Cm get
+prints what the card holds, never what was asked for.
+.Sh FILES
+.Bl -tag -width "/run/novi/volume" -compact
+.It Pa /run/novi/volume
+The published reading.
+The panel reads this file rather than forking
+.Xr amixer 1
+once a second, so
+.Xr amixer 1
+run by hand is not reflected until the next
+.Nm
+call.
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Sh SEE ALSO
+.Xr novi-state 1
+.Sh CAVEATS
+A machine with no sound card says so and exits non-zero.

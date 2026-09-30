@@ -7,8 +7,8 @@
 # build/14-novi-settings.sh -- see that script's comments.
 #
 # Numbered 29 rather than slotted in beside the other GUI clients so
-# that it lands AFTER 41-desktop-split.sh. Every stage in 06..14 runs
-# before the split and has its output packaged by 40-repo.sh; a new one
+# that it lands AFTER 51-desktop-split.sh. Every content stage runs
+# before the split and has its output packaged by 50-repo.sh; a new one
 # added at the end has to be packaged explicitly, which this does. See
 # the packaging step at the bottom.
 # ============================================================

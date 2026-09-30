@@ -1,0 +1,327 @@
+.Dd September 30, 2026
+.Dt SYSTEM.CONF 5
+.Os
+.Sh NAME
+.Nm system.conf
+.Nd Novi's declared system state
+.Sh DESCRIPTION
+.Pa /etc/novi/system.conf
+is the declared state of the machine: not a cache of the
+configuration and not a hint to it, but the single document
+.Xr novi-state 1
+converges the running system to.
+.Pp
+The format is one
+.Ar key No = Ar value
+per line.
+Blank lines and lines beginning with
+.Sq #
+are ignored.
+Most of the shipped file is commented-out examples, so read a diff of
+it for what it
+.Em uncomments
+as much as for what it adds.
+.Pp
+The file is meant to be edited by hand.
+Settings and
+.Nm novi-state set
+rewrite one value in place and leave comments and ordering alone, so
+an editor and the GUI produce the same document.
+.Pp
+Declaring a value does not apply it:
+.Bd -literal -offset indent
+# novi-state diff     where the machine has drifted from this file
+# novi-state apply    make the machine match it
+# novi-state rollback undo the last apply
+.Ed
+.Pp
+The document is
+.Sy additive .
+A thing nobody mentions is a thing nothing touches: an account not
+named here is not removed, and a package not named here is left as it
+is.
+The anchor key is what brings something under management.
+.Sh KEYS
+.Ss Identity
+.Bl -tag -width "network.firewall.allow" -compact
+.It Va hostname
+The system hostname.
+.El
+.Ss This engine's own behaviour
+.Bl -tag -width "network.firewall.allow" -compact
+.It Va state.apply_on_boot
+.Cm on | off .
+Converge at every boot, not only when asked.
+.El
+.Ss Services
+.Bl -tag -width "network.firewall.allow" -compact
+.It Va services.\& Ns Ar name
+.Cm on | off .
+An
+s6-rc(8)
+service.
+.El
+.Ss Network
+.Bl -tag -width "network.firewall.allow" -compact
+.It Va network.dhcp
+.Cm on | off .
+The DHCP client
+.Em service .
+A machine may have this on and run no DHCP client: the key predates
+static addressing and names the service rather than the protocol.
+.It Va network.interface
+.Cm auto | Ar name .
+Which interface to use.
+.It Va network.address
+.Cm dhcp | Ar addr Ns / Ns Ar prefix .
+A bare address without a prefix is refused rather than assumed to be
+/24: the prefix decides which hosts this machine believes are local,
+and guessing produces a machine that reaches some destinations and not
+others.
+.It Va network.gateway
+.Cm auto | Cm none | Ar addr .
+.It Va network.address6
+.Cm auto | Cm none | Ar addr Ns / Ns Ar prefix .
+.Cm auto
+is SLAAC.
+There is deliberately no
+.Cm dhcp :
+DHCPv6 is a different protocol that the shipped client does not speak,
+and a word that reads as supported and does nothing is worse than its
+absence.
+.It Va network.gateway6
+.Cm auto | Cm none | Ar addr .
+.It Va network.dns
+.Cm auto | Ar addr Ns Oo , Ns Ar addr Oc Ns ... .
+A declared list beats the lease.
+With a static address and
+.Cm auto
+there is no lease, so there is no resolver; the service says so on
+startup.
+.It Va network.wifi
+.Cm on | off .
+The supplicant.
+Credentials are not declared here \(em see
+.Xr novi-wifi 1 .
+.It Va network.wifi.interface
+.Cm auto | Ar name .
+.It Va network.firewall
+.Cm on | off .
+Loads
+.Pa /etc/novi/firewall.nft .
+.It Va network.firewall.allow
+.Cm none | Ar port Ns Oo , Ns Ar port Ns Oo / Ns Ar proto Oc Oc Ns ... .
+Ports let in.
+This is a
+.Sy separate key
+from
+.Va services.\& Ns Ar name
+on purpose: a firewall that opens itself because a daemon started is a
+service registry with a policy file attached.
+The set of things reachable from the network has to be one list a
+person chose.
+Ports are numbers, never names.
+.El
+.Ss Users
+.Bl -tag -width "network.firewall.allow" -compact
+.It Va users.\& Ns Ar name Ns Va .shell
+A path, or
+.Cm absent .
+This is the anchor key: declaring it creates the account, and
+.Cm absent
+removes it.
+Removing an account never deletes the home directory.
+.It Va users.\& Ns Ar name Ns Va .groups
+A comma-separated list, or
+.Cm none .
+.El
+.Ss Packages
+.Bl -tag -width "network.firewall.allow" -compact
+.It Va packages.\& Ns Ar name
+.Cm present | absent .
+A removal another installed package still depends on is
+.Sy refused ,
+which is permanent drift and the honest report: the machine does not
+match the document and this engine will not make it.
+.El
+.Ss Display
+.Bl -tag -width "network.firewall.allow" -compact
+.It Va display.renderer
+.Cm pixman | gles2 | auto .
+Measured under identical load in QEMU, pixman used 363 CPU ticks
+against gles2's 1998, because software rasterisation through a GL API
+is more work than drawing 2D directly.
+On hardware with a real driver the answer inverts, which is why this
+is a key.
+.It Va display.theme
+A file in
+.Pa /usr/share/novi/themes ,
+shadowed by one of the same name in
+.Pa /etc/novi/themes .
+Colour only.
+.El
+.Ss Power
+.Bl -tag -width "network.firewall.allow" -compact
+.It Va power.blank
+.Ar seconds | Cm off .
+Idle screen blank.
+.It Va power.suspend
+.Ar seconds | Cm off .
+Idle suspend.
+Off by default: blanking a screen is undone by moving the mouse,
+suspending only by a working wake path.
+.It Va power.suspend.lock
+.Cm on | off .
+Lock before an idle suspend.
+On by default, and the machine does not suspend if the lock screen
+fails to appear.
+.It Va power.lid.lock
+.Cm on | off .
+Lock before a lid-close suspend.
+This one sleeps either way after waiting: a closed lid is a machine in
+a bag.
+.It Va power.lid
+.It Va power.button
+.Cm suspend | poweroff | ignore .
+.It Va power.governor
+A CPU frequency governor.
+.Nm novi-power governors
+lists the ones this kernel has.
+Not set by default.
+.El
+.Ss Time
+.Bl -tag -width "network.firewall.allow" -compact
+.It Va time.timezone
+An IANA zone name, as found under
+.Pa /usr/share/zoneinfo
+.Pq for example Ar Europe/London .
+Converging it repoints
+.Pa /etc/localtime ,
+which is what every program on this machine reads to render a local
+time.
+.Cm UTC
+by default.
+A name with no file under
+.Pa /usr/share/zoneinfo
+is refused rather than applied: the alternative is a link to nothing,
+under which the C library silently falls back to UTC and every
+timestamp is quietly wrong.
+.It Va time.ntp.servers
+A comma-separated list of NTP servers, or
+.Cm none .
+This system ships no default pool, so a machine that declares nothing
+asks nobody for the time.
+.Cm none
+by default.
+The list is what
+.Sy services.ntp
+hands to busybox
+.Nm ntpd ;
+declaring servers does not start it, and starting it without servers
+is refused.
+.Pp
+The hardware clock is
+.Sy UTC
+on this system.
+.Sy time.timezone
+is applied on top of it, and the NTP service writes corrections back
+to it in UTC, so a machine that syncs keeps a correct clock across a
+reboot with no network.
+.El
+.Ss Storage
+.Bl -tag -width "network.firewall.allow" -compact
+.It Va storage.automount
+.Cm on | off .
+Removable media appear under
+.Pa /run/media .
+.El
+.Ss Agent
+.Bl -tag -width "network.firewall.allow" -compact
+.It Va agent.enabled
+.Cm on | off .
+Whether
+.Xr novi-agent 1
+may
+.Em change
+anything.
+Reading is always allowed.
+.It Va agent.allow
+.Cm none | Ar verb Ns Oo , Ns Ar verb Oc Ns ... .
+Two keys rather than one, for the same reason as the firewall.
+.It Va agent.rate
+.Ar calls-per-minute | Cm off .
+This bounds an accident and is not a security control: anything that
+can run
+.Xr novi-agent 1
+can run
+.Xr pkg 1
+directly.
+.El
+.Sh KEYS THAT CANNOT DRIFT
+.Va power.blank ,
+.Va power.lid ,
+.Va power.button ,
+.Va storage.automount
+and the
+.Va agent.*
+keys are read when they are used rather than held by anything.
+Nothing converges them, so
+.Nm novi-state apply
+has nothing to do for them and an unusable value is reported by
+.Nm novi-state diff
+as
+.Sy unsupported .
+That report is where a typo in one of them surfaces.
+.Sh FILES
+.Bl -tag -width "/var/lib/novi-state" -compact
+.It Pa /etc/novi/system.conf
+This file.
+.It Pa /etc/shadow
+Password hashes.
+Deliberately not declared here: this file is world-readable and is
+meant to be committed to version control.
+Configuration is declared; secrets are not.
+.It Pa /etc/novi/wifi.conf
+WiFi passphrases, for the same reason.
+.El
+.Sh EXAMPLES
+A machine with a static address, a firewall hole for ssh, and no idle
+suspend:
+.Bd -literal -offset indent
+hostname               = workshop
+network.address        = 192.168.1.50/24
+network.gateway        = 192.168.1.1
+network.dns            = 1.1.1.1,9.9.9.9
+network.firewall       = on
+network.firewall.allow = 22
+services.sshd          = on
+power.suspend          = off
+.Ed
+.Sh DIAGNOSTICS
+A key this build does not recognise is reported as
+.Sy unmanaged
+rather than refused, so a document written for a newer Novi still
+applies on an older one.
+A misspelled key therefore reads as declarative, looks converged to
+anyone skimming, and converges nothing.
+.Nm novi-state diff
+is where it shows up.
+.Sh SEE ALSO
+.Xr novi-agent 1 ,
+.Xr novi-power 1 ,
+.Xr novi-state 1 ,
+.Xr novi-wifi 1 ,
+.Xr pkg 1
+.Sh STANDARDS
+RFC 0002,
+.Pa /usr/share/doc/novi/rfcs/0002-declarative-system-state.md .
+.Sh CAVEATS
+Adding a
+.Va network.firewall.allow
+port does not start a service, and enabling a service does not open a
+port.
+Both keys are exactly as declared, so
+.Nm novi-state diff
+cannot report the mismatch;
+.Nm novi-state
+prints a note about it instead.

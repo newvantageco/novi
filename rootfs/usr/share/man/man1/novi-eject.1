@@ -1,0 +1,40 @@
+.Dd September 30, 2026
+.Dt NOVI-EJECT 1
+.Os
+.Sh NAME
+.Nm novi-eject
+.Nd unmount removable media that is still plugged in
+.Sh SYNOPSIS
+.Nm
+.Ar device | Ar mountpoint
+.Sh DESCRIPTION
+.Nm
+unmounts a volume
+.Xr novi-mount 8
+mounted, flushes it, and is safe to run before pulling the device out.
+.Pp
+It
+.Sy refuses
+a busy mount rather than detaching the tree underneath it.
+That is the entire difference between this and
+.Nm novi-mount remove :
+.Cm remove
+runs when the device is already gone, where a plain unmount would
+block on writeback to hardware that is not there, so it is lazy.
+.Nm
+runs while the device is still present, where
+.Dq busy
+means a program is genuinely still writing, and losing that data is
+exactly what the command exists to prevent.
+.Sh EXIT STATUS
+.Ex -std
+It exits non-zero if the volume is in use, naming what is holding it.
+.Sh EXAMPLES
+.Bd -literal -offset indent
+$ novi-eject /run/media/PHOTOS
+.Ed
+.Sh SEE ALSO
+.Xr system.conf 5 ,
+.Xr novi-mount 8
+.Sh STANDARDS
+RFC 0023.

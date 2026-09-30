@@ -1,0 +1,8 @@
+<!DOCTYPE html><html><head><title>onlyjs</title></head><body>
+<div id="app"></div>
+<script>
+var rows = '';
+for (var i = 1; i <= 5; i++) { rows += '<li>row ' + i + ' rendered by script</li>'; }
+document.getElementById('app').innerHTML = '<h1>RENDERED FROM SCRIPT</h1><ul>' + rows + '</ul>';
+</script>
+</body></html>

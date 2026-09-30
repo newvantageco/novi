@@ -16,7 +16,7 @@
 #
 # Desktop package, not base: it links Mesa, and Mesa is a package
 # (RFC 0007 keeps the base console-only). The stage number puts it
-# after the other clients and well before packaging at 40+, so
+# after the other clients and well before packaging at 50+, so
 # pkgsplit sees the binary in the rootfs and moves it out.
 # ============================================================
 set -euo pipefail

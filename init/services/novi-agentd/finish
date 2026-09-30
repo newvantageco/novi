@@ -1,0 +1,19 @@
+#!/bin/sh
+# ============================================================
+# novi-agentd service — finish script
+#
+# RFC 0032. s6-ipcserver does not unlink the socket when it exits, so
+# a stopped novi-agentd leaves a socket FILE behind that nothing is
+# listening on. That is not cosmetic: `novi-agent send` tests for the
+# socket to tell "the daemon is not running" from "you are not in the
+# group", and a stale node makes the first case answer with
+# s6-ipcclient's raw `Connection refused` instead of the sentence
+# naming the key that starts it. A caller looking at a service they
+# turned OFF is told nothing about how to turn it on.
+#
+# The run script already removes it before binding, for the EADDRINUSE
+# hazard. This is the same removal from the other side, and it is the
+# only `finish` script in this repo -- s6-rc compiles one for a
+# longrun that has it, and nothing here had needed one before.
+# ============================================================
+rm -f /run/novi/agent/sock

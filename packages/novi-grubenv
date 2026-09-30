@@ -1,0 +1,245 @@
+#!/bin/sh
+# ============================================================
+# novi-grubenv — read and write GRUB's environment block.
+#
+#   novi-grubenv path                 print the block this machine uses
+#   novi-grubenv list                 print every variable in it
+#   novi-grubenv get <name>           print one value (exit 1 if unset)
+#   novi-grubenv set <name>=<value>…  set one or more
+#   novi-grubenv unset <name>…        remove one or more
+#   novi-grubenv create               write an empty block
+#
+# WHY THIS EXISTS. RFC 0041 needs a boot that can be steered from
+# userland: an update writes "boot slot B next", the machine reboots,
+# and GRUB obeys. GRUB's mechanism for that is the environment block,
+# and the tool every other distribution uses to write one is
+# `grub-editenv` — which is part of the GRUB userland, which this
+# system does not have and does not want (the installed userland is a
+# static BusyBox; RFC 0003 already splits `grub-install` in half for
+# exactly this reason). The format is a fixed-size text file, so the
+# missing half is this script rather than a package.
+#
+# THE FORMAT, from grub-core/lib/envblk.c, not from memory:
+#
+#   - Exactly 1024 bytes. `load_env` reads whatever size the file is,
+#     but GRUB's own `save_env` rewrites it IN PLACE and cannot change
+#     the length, so a block of any other size is one GRUB can read and
+#     never write. 1024 is what grub-editenv creates.
+#   - It begins with the signature `# GRUB Environment Block\n`,
+#     byte for byte. GRUB refuses the file outright without it.
+#   - Then `name=value\n` lines.
+#   - A line beginning `#` is skipped, which is what makes the trailing
+#     run of `#` padding work.
+#
+# THE PATH IS DERIVED FROM WHERE grub.cfg IS, NOT FROM
+# /sys/firmware/efi. Those answer different questions: the firmware
+# node says how this machine booted, and what is needed is where this
+# machine's GRUB reads its configuration — and GRUB looks for grubenv
+# beside grub.cfg, at the prefix baked into core.img or bootx64.efi
+# (RFC 0003, RFC 0008). A UEFI machine whose ESP failed to mount
+# (fstab says `nofail`) still has /sys/firmware/efi and has no grubenv
+# reachable at all; writing one into a directory GRUB will not read is
+# the silent failure this ordering exists to avoid.
+# ============================================================
+set -u
+
+PROG="novi-grubenv"
+SIG="# GRUB Environment Block"
+SIZE=1024
+
+# Both firmware paths put grub.cfg somewhere different, and the
+# encrypted and A/B BIOS layouts put /boot on its own partition — but
+# that partition is MOUNTED at /boot, so the path is the same one.
+# Two candidates, ESP first: only one of them is ever present on a
+# given machine, because an install writes one grub.cfg.
+GRUBENV_CANDIDATES="/boot/efi/EFI/BOOT /boot/grub"
+
+die() { echo "ERROR: $*" >&2; exit 1; }
+
+find_dir() {
+    [ -n "${NOVI_GRUBENV_DIR:-}" ] && { printf '%s' "$NOVI_GRUBENV_DIR"; return 0; }
+    for d in $GRUBENV_CANDIDATES; do
+        [ -f "${d}/grub.cfg" ] && { printf '%s' "$d"; return 0; }
+    done
+    return 1
+}
+
+envblk_path() {
+    local d
+    d="$(find_dir)" || die "no grub.cfg found in: ${GRUBENV_CANDIDATES}.
+       On a UEFI machine the ESP may simply not be mounted -- fstab
+       mounts it nofail. Without it there is no environment block GRUB
+       will read, so there is nowhere for this to write."
+    printf '%s/grubenv' "$d"
+}
+
+# Read the block into `name=value` lines on stdout. A line starting `#`
+# is padding or a comment; anything with no `=` is not a variable.
+read_vars() {
+    local f="$1"
+    [ -f "$f" ] || return 0
+    head -c 1 "$f" >/dev/null 2>&1 || return 0
+    # Drop the signature and any comment/padding line, keep every line
+    # that has a name and an `=`. Deliberately as lax as GRUB's own
+    # parser: a stricter pattern here would make a variable written by
+    # grub-editenv invisible to `list` while GRUB still acted on it.
+    sed -e '/^#/d' -e '/^$/d' -n -e '/^[^=][^=]*=/p' "$f"
+}
+
+# Write `name=value` lines (in $2) as a well-formed block.
+#
+# THE BODY IS AN ARGUMENT, NOT STDIN, AND THAT IS NOT A STYLE CHOICE.
+# `printf '%s\n' "$cur" | write_block "$f"` puts this function in a
+# SUBSHELL, so its `die` -- which ends in `exit 1` -- ended only the
+# subshell: a refused write returned to a caller that carried on and
+# printed "wrote", about a file it had not touched. The pipeline trap
+# this repository keeps meeting, in its fourth costume.
+#
+# Putting the pipe back to check the test catches it found the SECOND
+# reason: `create` passes an empty body, and a `body="$(cat)"` with
+# nothing on the other end of the pipe reads the TERMINAL and hangs
+# forever. So the stdin form is not merely unsafe, it is unusable for
+# one of the three callers -- which no amount of reading would have
+# shown, and which provoking it showed in one run.
+#
+# Atomically: a reader that caught a half-written file would see 1024
+# bytes of something GRUB cannot parse, and the reader here is the
+# bootloader. Same temp-and-rename as everything else that publishes a
+# file in this system -- and then `sync`, because the whole point of
+# this file is to survive the reboot that is about to happen.
+write_block() {
+    local f="$1" body="$2" tmp pad n
+
+    # Command substitution strips trailing newlines, so the body is now
+    # newline-SEPARATED and not newline-terminated. That distinction is
+    # the whole of a bug this had: written out as-is, the last variable
+    # ran straight into the `#` padding (`boot_try=2####...`), which
+    # GRUB reads as a record with no terminator and DISCARDS -- so the
+    # file was 1024 bytes, looked right, and silently lost its last
+    # variable. Every line gets its newline back below.
+    n=$(( ${#SIG} + 1 ))
+    [ -n "$body" ] && n=$(( n + ${#body} + 1 ))
+    pad=$(( SIZE - n ))
+    [ "$pad" -ge 0 ] ||
+        die "the variables do not fit in a ${SIZE}-byte block (need ${n})"
+
+    tmp="${f}.new.$$"
+    # Not `{ ...; } > "$tmp" || die`: a compound group returns its LAST
+    # command's status, so a false `[ "$pad" -gt 0 ]` reported "cannot
+    # write" about a redirection that had worked perfectly. The size
+    # check below is what actually says the file is right.
+    : > "$tmp" || die "cannot create ${tmp}"
+    {
+        printf '%s\n' "$SIG"
+        [ -n "$body" ] && printf '%s\n' "$body"
+        [ "$pad" -gt 0 ] && printf '%*s' "$pad" '' | tr ' ' '#'
+        true
+    } >> "$tmp"
+    n="$(wc -c < "$tmp")"
+    [ "$n" -eq "$SIZE" ] || { rm -f "$tmp"; die "produced ${n} bytes, not ${SIZE}"; }
+    mv "$tmp" "$f" || { rm -f "$tmp"; die "cannot replace ${f}"; }
+    sync
+}
+
+need_root() {
+    [ "$(id -u)" -eq 0 ] || die "This operation requires root."
+}
+
+valid_name() {
+    case "$1" in
+        ''|*[!A-Za-z0-9_]*) return 1 ;;
+        [0-9]*) return 1 ;;
+    esac
+    return 0
+}
+
+usage() {
+    cat <<USAGE
+${PROG} — read and write GRUB's environment block (RFC 0041)
+
+  ${PROG} path                    print the block this machine uses
+  ${PROG} list                    print every variable in it
+  ${PROG} get <name>              print one value; exit 1 if unset
+  ${PROG} set <name>=<value>...   set one or more variables
+  ${PROG} unset <name>...         remove one or more variables
+  ${PROG} create                  write an empty block
+
+The block is a fixed 1024 bytes beside grub.cfg, in GRUB's own format.
+This is the half of grub-editenv that an installed Novi needs; the
+GRUB userland is not on this system (RFC 0003).
+USAGE
+}
+
+cmd="${1:-}"
+[ $# -gt 0 ] && shift
+
+case "$cmd" in
+    path)
+        envblk_path; echo
+        ;;
+    list)
+        read_vars "$(envblk_path)"
+        ;;
+    get)
+        [ $# -eq 1 ] || die "usage: ${PROG} get <name>"
+        v="$(read_vars "$(envblk_path)" | sed -n "s/^$1=//p" | head -1)"
+        [ -n "$v" ] || exit 1
+        printf '%s\n' "$v"
+        ;;
+    set)
+        [ $# -ge 1 ] || die "usage: ${PROG} set <name>=<value> ..."
+        need_root
+        f="$(envblk_path)"
+        cur="$(read_vars "$f")"
+        for a in "$@"; do
+            case "$a" in
+                *=*) ;;
+                *) die "not a name=value pair: $a" ;;
+            esac
+            name="${a%%=*}"; value="${a#*=}"
+            valid_name "$name" ||
+                die "not a usable variable name: '${name}' (letters, digits and _, not starting with a digit)"
+            # A newline would end the record and make every byte after
+            # it a variable of somebody else's choosing. Nothing in
+            # this format escapes, so the answer is refusal.
+            #
+            # COUNTED, NOT PATTERN-MATCHED. The obvious
+            # `case "$value" in *"$(printf '\n')"*)` cannot fire: a
+            # command substitution strips trailing newlines, so the
+            # pattern is `**` and every value matches. That guard read
+            # as load-bearing and refused everything -- the same dead
+            # branch as RFC 0031's `''` case, found the same way, by
+            # provoking it.
+            [ "$(printf '%s' "$value" | wc -l)" -eq 0 ] ||
+                die "a value may not contain a newline"
+            cur="$(printf '%s\n' "$cur" | sed "/^${name}=/d")"
+            cur="$(printf '%s\n%s=%s\n' "$cur" "$name" "$value")"
+        done
+        write_block "$f" "$(printf '%s\n' "$cur" | sed '/^$/d')"
+        echo "${PROG}: wrote ${f}"
+        ;;
+    unset)
+        [ $# -ge 1 ] || die "usage: ${PROG} unset <name> ..."
+        need_root
+        f="$(envblk_path)"
+        cur="$(read_vars "$f")"
+        for name in "$@"; do
+            cur="$(printf '%s\n' "$cur" | sed "/^${name}=/d")"
+        done
+        write_block "$f" "$(printf '%s\n' "$cur" | sed '/^$/d')"
+        echo "${PROG}: wrote ${f}"
+        ;;
+    create)
+        need_root
+        f="$(envblk_path)"
+        write_block "$f" ""
+        echo "${PROG}: created ${f}"
+        ;;
+    -h|--help|help|'')
+        usage
+        ;;
+    *)
+        usage >&2
+        die "unknown command: ${cmd}"
+        ;;
+esac

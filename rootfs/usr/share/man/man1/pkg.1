@@ -1,0 +1,136 @@
+.Dd September 30, 2026
+.Dt PKG 1
+.Os
+.Sh NAME
+.Nm pkg
+.Nd install, remove and update packages
+.Sh SYNOPSIS
+.Nm
+.Cm sync
+.Nm
+.Cm install Ar package | Ar archive No ...
+.Nm
+.Cm remove Ar package No ...
+.Nm
+.Cm update Ar package | Cm all No ...
+.Nm
+.Cm search Ar pattern
+.Nm
+.Cm list Op Ar filter
+.Nm
+.Cm info Ar package
+.Nm
+.Cm rdeps Ar package
+.Sh DESCRIPTION
+.Nm
+is Novi's package manager.
+Packages are
+.Pa .pkg.tar.gz
+archives with a MANIFEST; the format is described in
+.Xr pkg-format 5 .
+.Pp
+.Cm sync
+refreshes the index and
+.Cm update
+upgrades installed packages.
+They are different operations and have different names deliberately.
+.Bl -tag -width "install pkg|archive"
+.It Cm sync
+Fetch the repository index and verify its signature.
+.It Cm install
+Install packages, by name from the index or from a local archive.
+Dependencies are resolved and installed first.
+.It Cm remove
+Remove packages.
+Warns if something still depends on them and proceeds; see
+.Cm rdeps .
+.It Cm update
+Upgrade installed packages, or all of them.
+.It Cm search
+Search the index.
+.It Cm list
+List what is installed.
+.It Cm info
+Print a package's MANIFEST.
+.It Cm rdeps
+List installed packages that depend on this one.
+.El
+.Ss Trust
+The index is signed with Ed25519 and
+.Cm sync
+verifies it with
+.Xr novi-verify 1
+before believing a line of it.
+Every package's SHA-256 comes from that index, so one signature covers
+the whole repository, and the hash is checked again before an archive
+is unpacked
+.Em including
+one already in the cache.
+The index carries a
+.Va valid-until
+inside the signature, because a signature says genuine, not current.
+.Pp
+An archive whose hash does not match is refused.
+A cached copy that fails is deleted; one in a repository directory is
+skipped but left alone, because that is somebody's media.
+.Ss File ownership
+.Cm install
+refuses a path another package owns, and refuses a path nothing owns.
+A package may take over an unowned path only by declaring
+.Va replaces-files=
+in its MANIFEST, in which case the original is saved and
+.Cm remove
+puts it back.
+.Fl -overwrite
+is the operator's override and is deliberately not something a MANIFEST
+can ask for.
+.Sh ENVIRONMENT
+.Bl -tag -width PKG_MIRROR -compact
+.It Ev PKG_MIRROR
+Override the configured mirror for one invocation.
+.It Ev PKG_REPO
+Directory of available archives.
+Default
+.Pa /var/cache/pkg/repo .
+.It Ev PKG_ROOT
+Alternate install root.
+Note that this relocates where files land but not the install
+database, so it is for building images, not for installing into
+another running system.
+.El
+.Sh FILES
+.Bl -tag -width "/var/lib/pkg/installed" -compact
+.It Pa /etc/novi/pkg.conf
+Configuration.
+See
+.Xr pkg.conf 5 .
+.It Pa /etc/novi/keys/novi-repo.pub
+The repository public key.
+.It Pa /var/lib/pkg/installed
+The install database: one directory per package.
+.It Pa /var/cache/pkg/archives
+Downloaded archives.
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Sh EXAMPLES
+Install the desktop from the repository on the installation medium:
+.Bd -literal -offset indent
+# pkg sync
+# pkg install novi-desktop
+.Ed
+.Pp
+Find what would break before removing something:
+.Bd -literal -offset indent
+$ pkg rdeps zlib
+.Ed
+.Sh SEE ALSO
+mkpkg(1),
+.Xr novi-state 1 ,
+.Xr novi-verify 1 ,
+.Xr pkg-format 5 ,
+.Xr pkg.conf 5 ,
+.Xr novi-slot 8
+.Sh STANDARDS
+RFC 0006 describes the trust model,
+.Pa /usr/share/doc/novi/rfcs/0006-package-repository-and-signing.md .

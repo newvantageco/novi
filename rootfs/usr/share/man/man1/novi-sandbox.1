@@ -1,0 +1,145 @@
+.Dd September 30, 2026
+.Dt NOVI-SANDBOX 1
+.Os
+.Sh NAME
+.Nm novi-sandbox
+.Nd run a program that cannot reach the machine
+.Sh SYNOPSIS
+.Nm
+.Op Fl -ro Ar path ...
+.Op Fl -rw Ar path ...
+.Op Fl -no-net
+.Op Fl -profile Ar name
+.Op Fl -
+.Ar command Op Ar argument ...
+.Sh DESCRIPTION
+.Nm
+runs
+.Ar command
+with a root filesystem containing only the paths named on its command
+line, its own process table, and a seccomp filter.
+It needs no privilege: the other namespaces are created as a side
+effect of a user namespace the caller owns.
+.Bl -tag -width "--profile name"
+.It Fl -ro Ar path
+Make
+.Ar path
+visible, read-only.
+.It Fl -rw Ar path
+Make
+.Ar path
+visible and writable.
+.It Fl -no-net
+An empty network namespace.
+.Sy Not the default :
+a browser needs the network, and a tool that quietly took it away
+would break the first caller.
+.It Fl -profile Ar name
+An
+.Sy allowlist
+filter instead of the default denylist, for a program whose syscall
+set somebody measured.
+.Nm
+with no arguments lists the profiles and their sizes.
+.El
+.Ss Default deny, named on the command line
+The new root is an empty
+tmpfs;
+a path nobody named is not there.
+The alternative
+.Pf \(em Nm mount No the real root and over-mount the sensitive parts
+\(em is a denylist of
+.Em directories ,
+so every future package that puts something private somewhere new is
+a hole nobody opens a file to notice.
+.Ss What the filter is, and is not
+The default filter is a
+.Sy denylist ,
+and that is a deliberate limit rather than an oversight.
+An allowlist is stronger and has to know every syscall the program
+and its libc will ever make; being wrong turns a working browser into
+a crash on a page nobody tested.
+A refused call returns
+.Er EPERM
+rather than killing the process, because a killed process tells the
+person nothing.
+.Pp
+So: this is confinement, not a proof.
+Do not let the word
+.Dq seccomp
+supply the stronger meaning.
+.Ss Two layers, two errnos
+A bind mount cannot say
+.Dq writable but not executable ,
+so Landlock is the second layer: it grants execute on the
+.Fl -ro
+paths and never on the
+.Fl -rw
+ones, and the mounts this program makes itself carry
+.Dv MS_NOEXEC .
+Measured, same file, one flag apart: a
+.Fl -rw
+path reads and writes and cannot exec
+.Pq Er EACCES ;
+a
+.Fl -ro
+path reads and execs and cannot write
+.Pq Er EROFS .
+Neither layer can state the other's rule, which is the argument for
+both.
+.Ss Signals
+The program is pid 1 of its own PID namespace, and the kernel gives
+such a process the protection it gives the machine's own init: a
+signal still at
+.Dv SIG_DFL
+coming from outside the namespace is
+.Sy discarded ,
+and
+kill(1)
+returns 0 regardless.
+.Nm
+therefore supervises: it forwards signals, and makes the
+.Em second
+one
+.Dv SIGKILL ,
+because a first forward may be thrown away and from outside that is
+indistinguishable from a clean shutdown.
+.Sh ENVIRONMENT
+.Bl -tag -width "NOVI_SANDBOX_DESCRIBE" -compact
+.It Ev NOVI_SANDBOX_DESCRIBE
+Set to 1 in front of a sandboxed program's
+.Em wrapper
+to print the argv that wrapper would build, with every runtime branch
+taken, instead of running it.
+This is what
+.Nm novi-agent describe
+reads, so its answer cannot drift from what actually execs.
+.El
+.Sh EXIT STATUS
+.Nm
+exits with the program's status.
+It exits 2 on a usage error and 125 if the sandbox could not be set
+up, naming which step failed.
+.Sh EXAMPLES
+Read one file and nothing else, off the network:
+.Bd -literal -offset indent
+$ novi-sandbox --no-net --ro /usr/bin/novi-view --ro /lib \e
+      --ro "$(readlink -f photo.png)" -- novi-view photo.png
+.Ed
+.Pp
+See what a sandboxed program is actually run with:
+.Bd -literal -offset indent
+$ NOVI_SANDBOX_DESCRIBE=1 novi-recon
+.Ed
+.Sh SEE ALSO
+.Xr novi-agent 1
+.Sh STANDARDS
+RFC 0039.
+.Sh CAVEATS
+A sandbox changes what a failing program can
+.Em reach ,
+not whether it fails or what failing costs.
+Measured against a hostile-page corpus: identical survival, identical
+peak memory.
+What a layout engine allocates is its own heap and no mount list
+touches it.

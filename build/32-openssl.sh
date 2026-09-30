@@ -33,9 +33,9 @@
 # Two outputs, like 31-mbedtls.sh:
 #
 #   ${BUILD_DIR}/openssl-target   headers + libraries, for LINKING
-#                                 (38-python.sh points at this)
+#                                 (43-python.sh points at this)
 #   ${BUILD_DIR}/stage-devtools/openssl   the package, published by
-#                                 43-devtools-repo.sh
+#                                 53-devtools-repo.sh
 #
 # Never ${ROOTFS}. A TLS stack in the base image is the thing RFC 0020
 # is careful to avoid, and nothing about needing one in Python changes
@@ -64,6 +64,70 @@ mkdir -p "${WORK}" "${PREFIX}" "${STAGE_DIR}"
 
 echo ">>> Unpacking OpenSSL ${OPENSSL_VERSION} ..."
 tar xf "${SOURCES}/openssl-${OPENSSL_VERSION}.tar.gz" -C "${WORK}"
+
+# ── What is turned OFF, and why each one (RFC 0027 roadmap 4) ─────────
+#
+# The build was near-stock -- no-tests, no-docs, enable-ktls and
+# nothing else -- so the legacy provider, every algorithm OpenSSL has
+# ever shipped and the deprecated API surface all rode along in 8.0 MB.
+# That is on EVERY machine that installs this, which since RFC 0031 is
+# every machine with a browser and since RFC 0026 every machine with
+# Python.
+#
+# The rule for this list is the one RFC 0007 states about dead weight:
+# it is not inert. Each entry is something nothing in this system uses,
+# and the ones that could plausibly be used are NOT here -- see the
+# bottom of this comment for what was considered and kept.
+#
+#   no-legacy       The legacy PROVIDER (MD4, RC4, DES-in-CBC, RC2,
+#                   Blowfish, CAST, IDEA, SEED, Whirlpool...). It is
+#                   not loaded unless openssl.cnf activates it, and
+#                   this one does not -- so it shipped as 171 KB that
+#                   could not be reached without editing a config file
+#                   nobody edits.
+#   no-md2/mdc2/rc5 Algorithms OpenSSL itself disables by default in
+#   no-idea/seed    some builds, or which no TLS suite and nothing in
+#   no-whirlpool    this image uses.
+#   no-rc2/rc4/bf/cast
+#   no-camellia     A real cipher nothing negotiates here: TLS 1.2/1.3
+#                   suites in use are AES-GCM and ChaCha20-Poly1305.
+#   no-ssl3         SSLv3 is broken (POODLE) and its methods are a
+#   no-ssl3-method  liability rather than a compatibility story.
+#   no-weak-ssl-ciphers
+#                   EXPORT and low-strength suites.
+#   no-comp         TLS compression is CRIME.
+#   no-dtls         Datagram TLS. Nothing here speaks it: curl is built
+#                   against mbedTLS, and Python 3.11's ssl exposes no
+#                   DTLS protocol constant at all.
+#   no-srp/psk      Password-authenticated suites nothing here offers.
+#   no-engine       The pre-3.0 plugin mechanism, superseded by
+#                   providers and deprecated upstream. CPython guards
+#                   every ENGINE call with #ifndef OPENSSL_NO_ENGINE.
+#   no-quic         Server and client QUIC. Nothing here speaks it --
+#                   and HTTP/3 would be curl's business, on the other
+#                   TLS stack.
+#
+# CONSIDERED AND KEPT, because guessing wrong here is a runtime
+# failure on somebody else's machine:
+#
+#   no-deprecated   Would compile the deprecated API surface out of the
+#                   library. CPython's _ssl and _hashlib still use
+#                   parts of it, and the failure is a build error here
+#                   or a missing module there. Worth trying on its own,
+#                   not folded into a size trim.
+#   no-des          3DES is gone from TLS but DES still appears in
+#                   PKCS#12 and older key encryption, which `openssl`
+#                   the CLI is exactly the tool somebody reaches for.
+#   no-sm2/3/4      Small, and the one set where "nobody here uses it"
+#                   is a statement about who is holding the machine.
+#   no-ec/dh/dsa    Load-bearing for TLS itself.
+#
+# The saving is MEASURED at the end of this stage rather than claimed:
+# a trim that removes nothing is a trim that should be deleted.
+OPENSSL_TRIM="no-legacy no-md2 no-mdc2 no-rc5 no-idea no-seed
+    no-whirlpool no-rc2 no-rc4 no-bf no-cast no-camellia
+    no-ssl3 no-ssl3-method no-weak-ssl-ciphers no-comp
+    no-dtls no-srp no-psk no-engine no-quic"
 
 echo ">>> Configuring ..."
 (
@@ -95,7 +159,7 @@ echo ">>> Configuring ..."
     # -DOPENSSL_NO_BUFFER_OVERFLOW... is deliberately NOT set, and
     # neither is any -O3: the flags are this repo's ordinary hardening
     # set, minus the -pie/-fPIE pair, because most of what is built here
-    # is a shared object (the same constraint 38-python.sh hits).
+    # is a shared object (the same constraint 43-python.sh hits).
     CFLAGS="-O2 -fstack-protector-strong -D_FORTIFY_SOURCE=2" \
     ./Configure linux-x86_64 \
         --cross-compile-prefix="${TARGET_TRIPLE}-" \
@@ -105,6 +169,7 @@ echo ">>> Configuring ..."
         shared \
         no-tests \
         no-docs \
+        ${OPENSSL_TRIM} \
         enable-ktls >"${WORK}/configure.log" 2>&1 \
         || { tail -40 "${WORK}/configure.log" >&2; exit 1; }
 )
@@ -134,7 +199,12 @@ rm -rf "${D}"; mkdir -p "${D}/files"
 mkdir -p "${D}/files/usr/lib" "${D}/files/usr/bin" "${D}/files/etc/ssl"
 cp -a "${PREFIX}/usr/lib/"libcrypto.so* "${D}/files/usr/lib/"
 cp -a "${PREFIX}/usr/lib/"libssl.so*    "${D}/files/usr/lib/"
-if [ -d "${PREFIX}/usr/lib/ossl-modules" ]; then
+# ossl-modules holds the loadable providers. With no-legacy there are
+# none, and `make install` still creates the directory -- so the test
+# is whether it has anything IN it, not whether it exists. An empty
+# directory in a package is dead weight of the purest kind: it is a
+# statement that something loadable lives there.
+if [ -n "$(ls -A "${PREFIX}/usr/lib/ossl-modules" 2>/dev/null)" ]; then
     cp -a "${PREFIX}/usr/lib/ossl-modules" "${D}/files/usr/lib/"
 fi
 cp -a "${PREFIX}/usr/bin/openssl" "${D}/files/usr/bin/openssl"
@@ -161,4 +231,4 @@ echo ">>> Linking prefix : ${PREFIX}/usr"
 echo ">>> Staged under   : ${D}  ($(du -sh "${D}/files" | cut -f1))"
 "${CROSS}-readelf" -d "${D}/files/usr/bin/openssl" | grep NEEDED || true
 echo ""
-echo "Publish it with:  bash build/43-devtools-repo.sh"
+echo "Publish it with:  bash build/53-devtools-repo.sh"

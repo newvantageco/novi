@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-# 38-python.sh — CPython, as a package
+# 43-python.sh — CPython, as a package
 #
 # Until this stage there was NO SCRIPTING LANGUAGE ON THIS SYSTEM. Not
 # a slow one, not an old one -- none. No Python, no Perl, no Ruby.
@@ -13,19 +13,19 @@
 # automation tooling that exists is Python, and so is most of what a
 # person writes for themselves on a machine they control.
 #
-#   bash build/38-python.sh
+#   bash build/43-python.sh
 #
 # A PACKAGE, NEVER THE BASE IMAGE. ~32 MB installed. RFC 0007 keeps
 # the base console-only and small; a language runtime is exactly the
 # kind of thing that belongs behind `pkg install`. It stages into
 # ${BUILD_DIR}/stage-devtools alongside git and the ssh client, so
-# 43-devtools-repo.sh publishes it with no change to that stage --
+# 53-devtools-repo.sh publishes it with no change to that stage --
 # its repo phase globs every directory there that has a MANIFEST.
 #
-# WHY THE STAGE NUMBER IS 38: 40+ is packaging, and 40-repo.sh must
+# WHY THE STAGE NUMBER IS 38: 50+ is packaging, and 50-repo.sh must
 # see a finished tree. This builds nothing into ${ROOTFS} at all, but
 # it does READ from it (zlib, libffi, expat), so it has to run while
-# those are still there -- i.e. before 41-desktop-split.sh takes them
+# those are still there -- i.e. before 51-desktop-split.sh takes them
 # out.
 #
 # ── ssl comes from OpenSSL, which is a package of its own ─────────────
@@ -95,7 +95,7 @@ fi
 
 # ── zlib, libffi and expat come out of ${ROOTFS} ──────────────────────
 #
-# All three are packages, so 41-desktop-split.sh moves them out and in
+# All three are packages, so 51-desktop-split.sh moves them out and in
 # any tree where a full build has run this stage would otherwise stop
 # on "zlib.h: No such file or directory" with no clue what to do.
 # Same guard, same wording, as 35-devtools.sh's require_zlib().
@@ -106,18 +106,71 @@ require_lib() {
     fi
     echo "ERROR: ${what} is not in ${ROOTFS} (header or library missing)." >&2
     echo "" >&2
-    echo "  41-desktop-split.sh has moved it out -- it is a package." >&2
+    echo "  51-desktop-split.sh has moved it out -- it is a package." >&2
     echo "  Put it back before building against it:" >&2
     echo "" >&2
     echo "      bash scripts/restore-build-inputs.sh" >&2
     echo "" >&2
-    echo "  Then re-run this stage, and re-run 40-repo.sh," >&2
-    echo "  41-desktop-split.sh and the 42/43 publish stages." >&2
+    echo "  Then re-run this stage, and re-run 50-repo.sh," >&2
+    echo "  51-desktop-split.sh, 52-toolchain-repo.sh and" >&2
+    echo "  53-devtools-repo.sh." >&2
     exit 1
 }
 require_lib zlib.h   libz.so     "zlib"
 require_lib ffi.h    libffi.so   "libffi"
 require_lib expat.h  libexpat.so "expat"
+
+# ── ncurses and readline come out of their own prefix ─────────────────
+#
+# Not ${ROOTFS}: neither belongs in the base image, and 40-ncurses.sh
+# builds them into ${BUILD_DIR}/ncurses-target for linking and into
+# their own packages for the target -- the same arrangement
+# 32-openssl.sh uses, for the same reason.
+#
+# CPython decides AT CONFIGURE TIME whether `readline` and `_curses`
+# exist. Missing headers here do not fail the build: they produce an
+# interpreter without them, which prints its missing modules and exits
+# 0 (see the module check at the end of this file). So this is a hard
+# stop rather than a warning.
+#
+# The header is FOUND, not assumed: whether a widec ncurses installs
+# curses.h at the top of the include directory or under ncursesw/ is a
+# configure-time decision, and the first version of this guard asserted
+# the second and stopped a build whose headers were all present.
+NCURSES_PREFIX="${BUILD_DIR}/ncurses-target"
+NCURSES_INCLUDE=""
+for d in "${NCURSES_PREFIX}/usr/include" "${NCURSES_PREFIX}/usr/include/ncursesw"; do
+    [ -f "${d}/curses.h" ] && NCURSES_INCLUDE="${d}"
+done
+if [ ! -f "${NCURSES_PREFIX}/usr/include/readline/readline.h" ] ||
+   [ -z "${NCURSES_INCLUDE}" ]; then
+    echo "ERROR: ncurses and readline are not in ${NCURSES_PREFIX}." >&2
+    echo "" >&2
+    echo "  CPython detects them at configure time and builds the" >&2
+    echo "  'readline' and '_curses' modules or does not build them at" >&2
+    echo "  all -- and a Python without readline is an interpreter whose" >&2
+    echo "  up-arrow prints ^[[A, which is not a build failure anybody" >&2
+    echo "  would notice here." >&2
+    echo "" >&2
+    echo "      bash build/40-ncurses.sh" >&2
+    exit 1
+fi
+
+# SQLite, same shape and the same trap (RFC 0026 roadmap 3). CPython
+# probes for sqlite3.h at configure time and builds `_sqlite3` or does
+# not; a Python whose `import sqlite3` fails is not a build failure
+# here, it is a paragraph in a log and exit 0.
+SQLITE_PREFIX="${BUILD_DIR}/sqlite-target"
+if [ ! -f "${SQLITE_PREFIX}/usr/include/sqlite3.h" ]; then
+    echo "ERROR: SQLite is not in ${SQLITE_PREFIX}." >&2
+    echo "" >&2
+    echo "  It is what most local-state Python assumes exists, and a" >&2
+    echo "  missing _sqlite3 surfaces at the first import on somebody" >&2
+    echo "  else's machine rather than here." >&2
+    echo "" >&2
+    echo "      bash build/41-sqlite.sh" >&2
+    exit 1
+fi
 
 # OpenSSL is not in ${ROOTFS} and must not be: it lives in its own
 # linking prefix, like mbedTLS. A different message, because the fix is
@@ -155,13 +208,21 @@ tar xf "${SOURCES}/Python-${PYTHON_VERSION}.tar.xz" -C "${WORK}"
 export CFLAGS="-O2 -fstack-protector-strong -D_FORTIFY_SOURCE=2"
 export CPPFLAGS="-I${ROOTFS}/usr/include"
 export CPPFLAGS="${CPPFLAGS} -I${OPENSSL_PREFIX}/include"
+# CPython's setup looks for <readline/readline.h> and for curses.h.
+# NCURSES_INCLUDE is whichever directory the build actually put the
+# latter in, found above rather than assumed.
+export CPPFLAGS="${CPPFLAGS} -I${NCURSES_PREFIX}/usr/include -I${NCURSES_INCLUDE}"
+export CPPFLAGS="${CPPFLAGS} -I${SQLITE_PREFIX}/usr/include"
 # -rpath-link for BOTH prefixes, and this is the fifth time in this
 # repository. -L is consulted only for a library named directly with
 # -l; the linker will not use it to resolve a shared library's own
 # DT_NEEDED entries, and libssl.so names libcrypto.so.3.
 export LDFLAGS="-L${ROOTFS}/usr/lib -L${OPENSSL_PREFIX}/lib \
+    -L${NCURSES_PREFIX}/usr/lib -L${SQLITE_PREFIX}/usr/lib \
     -Wl,-z,relro,-z,now -Wl,-z,noexecstack \
-    -Wl,-rpath-link,${ROOTFS}/usr/lib -Wl,-rpath-link,${OPENSSL_PREFIX}/lib"
+    -Wl,-rpath-link,${ROOTFS}/usr/lib -Wl,-rpath-link,${OPENSSL_PREFIX}/lib \
+    -Wl,-rpath-link,${NCURSES_PREFIX}/usr/lib \
+    -Wl,-rpath-link,${SQLITE_PREFIX}/usr/lib"
 
 # -pie is deliberately NOT in LDFLAGS, and there is no variable it
 # could go in. Read Makefile.pre.in: LDSHARED and BLDSHARED -- the
@@ -180,6 +241,50 @@ export LDFLAGS="-L${ROOTFS}/usr/lib -L${OPENSSL_PREFIX}/lib \
 # through, not replaced -- dropping it would leave C extensions unable
 # to resolve symbols back into the interpreter.
 LINKFORSHARED="-Xlinker -export-dynamic -pie"
+
+# ── One narrow source patch, and it decides whether binary wheels work ─
+#
+# CPython computes PLATFORM_TRIPLET by preprocessing a file full of
+# `#if defined(__GLIBC__)` tests, which on any Linux answers
+# `x86_64-linux-gnu`, and then corrects it for musl with:
+#
+#     case "$build_os" in
+#     linux-musl*) ... sed 's/linux-gnu/linux-musl/' ;;
+#
+# `build_os` is the BUILD machine's -- this Debian host. In a NATIVE
+# musl build it is musl and the fix-up runs; in a CROSS build to musl
+# it is glibc and the fix-up never runs, so the triplet stays
+# `x86_64-linux-gnu` on a libc that is nothing of the kind. It should
+# read `host_os`.
+#
+# THAT IS NOT COSMETIC, AND THIS REPOSITORY HAS ALREADY WRITTEN DOWN
+# THAT IT WAS. PLATFORM_TRIPLET becomes SOABI, and SOABI becomes
+# EXT_SUFFIX -- the ONLY extension-module filename this interpreter
+# will import. A musllinux wheel from PyPI ships
+# `_speedups.cpython-311-x86_64-linux-musl.so`; an interpreter whose
+# EXT_SUFFIX says `-linux-gnu.so` cannot see that file at all. Measured
+# on a booted machine before this line existed: `pip install
+# MarkupSafe` fetched the correct musllinux wheel, installed the
+# correct .so, and the package silently used its pure-Python fallback
+# because nothing could import it. A package with no fallback fails
+# with ImportError instead, after installing successfully.
+#
+# One word, in the generated `configure` (which is what runs) and in
+# `configure.ac` beside it (which is where it came from, and a derived
+# file fixed without its source is a fix that evaporates the next time
+# anybody regenerates).
+# `  case "$build_os" in` appears exactly once in each file -- checked,
+# not assumed, which is why the sed is anchored to the whole line and
+# the result is verified rather than the exit status of sed believed.
+for f in configure configure.ac; do
+    sed -i 's/^  case "\$build_os" in$/  case "$host_os" in/' "${SRC}/${f}"
+    if grep -q '^  case "\$build_os" in$' "${SRC}/${f}" ||
+            ! grep -q '^  case "\$host_os" in$' "${SRC}/${f}"; then
+        echo "ERROR: the cross-musl triplet patch did not apply to ${f} --" >&2
+        echo "       upstream changed. Binary wheels would silently not load." >&2
+        exit 1
+    fi
+done
 
 echo ">>> Configuring ..."
 (
@@ -201,10 +306,24 @@ echo ">>> Configuring ..."
     #                         the socket module's getaddrinfo entirely.
     #
     # --disable-test-modules drops Lib/test, ~25 MB of the standard
-    # library that exists to test CPython itself. --without-ensurepip
-    # because there is no pip: pip fetches over https, which this build
-    # has none of (see the header), so shipping it would be shipping a
-    # tool that cannot do its one job.
+    # library that exists to test CPython itself.
+    #
+    # --with-ensurepip=no, AND THE REASON IT ONCE HAD IS DEAD. It used
+    # to read "there is no pip: pip fetches over https, which this
+    # build has none of" -- true when it was written and false since
+    # RFC 0027 put OpenSSL under CPython's `ssl`. pip works here; it is
+    # measured, against PyPI, in RFC 0026 roadmap 4.
+    #
+    # What the flag does NOT do is withhold pip. ensurepip is part of
+    # the standard library and its bundled wheels ship with it -- pip
+    # 24.0 and setuptools 79.0.1, 3.3 MB -- so `python3 -m ensurepip
+    # --default-pip` installs pip on the target, offline, in one
+    # command. What the flag decides is whether that happens WITHOUT
+    # ANYBODY ASKING, and the answer is no: pip writes into
+    # /usr/lib/python3.11/site-packages, which is a directory the
+    # `python` package owns, so a second package manager arrives in
+    # pkg'"'"'s territory the moment somebody installs an interpreter.
+    # That is a decision a person should take on purpose.
     ./configure \
         --build="$(gcc -dumpmachine)" \
         --host="${TARGET_TRIPLE}" \
@@ -223,6 +342,21 @@ echo ">>> Configuring ..."
         ac_cv_buggy_getaddrinfo=no >"${WORK}/configure.log" 2>&1 \
         || { tail -40 "${WORK}/configure.log" >&2; exit 1; }
 )
+
+# The patch above is an INTENT; this is the result. configure prints
+# what it decided, and what it decided is what every extension module
+# on this system will be named -- so it is asserted rather than hoped
+# for. The same rule 41-sqlite.sh follows about asking the binary for
+# its SONAME instead of reading the log for a flag.
+TRIPLET="$(sed -n 's/^checking for the platform triplet.*\.\.\. //p' \
+    "${WORK}/configure.log" | tail -1)"
+if [ "${TRIPLET}" != "x86_64-linux-musl" ]; then
+    echo "ERROR: configure decided the platform triplet is '${TRIPLET}'," >&2
+    echo "       not x86_64-linux-musl. Every musllinux wheel from PyPI" >&2
+    echo "       would install correctly and fail to import." >&2
+    exit 1
+fi
+echo ">>> platform triplet: ${TRIPLET}"
 
 echo ">>> Building (this takes a few minutes) ..."
 make -C "${SRC}" -j"${JOBS}" LINKFORSHARED="${LINKFORSHARED}" \
@@ -244,7 +378,12 @@ make -C "${SRC}" -j"${JOBS}" LINKFORSHARED="${LINKFORSHARED}" \
 # a hard failure -- CPython's module list shifts between point releases
 # and a build that stops because `_dbm` moved would be worse than one
 # that says so.
-EXPECTED_MISSING="_sqlite3 _bz2 _lzma _curses _curses_panel _tkinter _gdbm _dbm _uuid readline nis ossaudiodev spwd _crypt"
+# `_curses`, `_curses_panel` and `readline` came OFF this list when
+# 40-ncurses.sh started building what they need. Leaving them on would
+# have made the one check that could notice a silently
+# readline-less interpreter say nothing -- the list is what this build
+# expects to be missing, so a name on it is a name nobody looks at.
+EXPECTED_MISSING="_bz2 _lzma _tkinter _gdbm _dbm _uuid nis ossaudiodev spwd _crypt"
 # The block ends with a sentence, not a blank line -- "To find the
 # necessary bits, look in setup.py ..." -- and ranging to /^$/ swallows
 # it, so every word of that sentence came back as an unexpected missing
@@ -316,13 +455,147 @@ rm -rf "${D}/files/usr/lib/python${PY_XY}/test" \
        "${D}/files/usr/lib/python${PY_XY}/tkinter" \
        "${D}/files/usr/lib/python${PY_XY}/turtledemo"
 
+# ── The build host must not survive into the package ──────────────────
+#
+# `_sysconfigdata_*.py` is how the interpreter remembers how it was
+# built, and `setuptools` reads it to decide how to compile a C
+# extension. A CROSS build remembers the CROSS toolchain: 207 lines of
+# it named `x86_64-linux-musl-gcc` (a program that exists on no Novi
+# machine) and `-L/build/rootfs/usr/lib` (a directory on THIS host),
+# and the same values sit in `config-*/Makefile` beside it.
+#
+# So `pip install` of anything with no musllinux wheel would have
+# failed with `x86_64-linux-musl-gcc: not found` -- and the mode where
+# it did NOT fail is worse: a machine that happened to have a
+# `/build/rootfs` would have been handed that tree to link against.
+# Found by reading the artifact rather than by running it, which is
+# the only reason it is fixed before anybody met it.
+#
+# The tools are rewritten one at a time rather than with a pattern
+# that strips the triplet: `x86_64-linux-musl` is ALSO the platform
+# triplet, and it has to stay in SOABI, MULTIARCH, the config
+# directory's name and this file's own name. A blanket substitution
+# would rename the interpreter's idea of itself.
+SYSCFG="${D}/files/usr/lib/python${PY_XY}/_sysconfigdata__linux_${TARGET_ARCH}-linux-musl.py"
+SYSMAKE="${D}/files/usr/lib/python${PY_XY}/config-${PY_XY}-${TARGET_ARCH}-linux-musl/Makefile"
+for f in "${SYSCFG}" "${SYSMAKE}"; do
+    [ -f "${f}" ] || { echo "ERROR: ${f} is not where it was expected." >&2; exit 1; }
+    # The recorded names are BARE (`x86_64-linux-musl-gcc`), not the
+    # ${CROSS} paths this stage invokes -- configure records what it was
+    # told, and it was told the triplet-prefixed name on PATH.
+    #
+    # TWO LISTS, because `\b` IS A WORD BOUNDARY AND `+` IS NOT A WORD
+    # CHARACTER: `c++\b` requires a word character after the second
+    # plus, so it can never match at the end of `x86_64-linux-musl-c++`.
+    # The first version had one list and left CXX naming the cross
+    # compiler, silently -- a substitution that cannot fire, found by
+    # reading the artifact afterwards rather than by trusting the loop.
+    for tool in gcc ar readelf ranlib nm strip ld objcopy objdump; do
+        sed -i "s|${TARGET_TRIPLE}-${tool}\b|${tool}|g" "${f}"
+    done
+    for tool in c++ g++; do
+        sed -i "s|${TARGET_TRIPLE}-${tool}|${tool}|g" "${f}"
+    done
+    # Every private prefix this build linked against maps onto the
+    # target's own /usr, which is where those libraries land.
+    sed -i -e "s|${ROOTFS}/usr|/usr|g" \
+           -e "s|${OPENSSL_PREFIX}/usr|/usr|g" \
+           -e "s|${OPENSSL_PREFIX}|/usr|g" \
+           -e "s|${NCURSES_PREFIX}/usr|/usr|g" \
+           -e "s|${SQLITE_PREFIX}/usr|/usr|g" \
+           -e "s|${SRC}|/usr/lib/python${PY_XY}/config-${PY_XY}-${TARGET_ARCH}-linux-musl|g" \
+           "${f}"
+done
+# The ASSERTION, not the sed's exit status: a substitution that missed
+# a prefix leaves a path pointing at a machine the package will never
+# be installed on, and says nothing.
+if grep -l "${BUILD_DIR}/" "${SYSCFG}" "${SYSMAKE}" >/dev/null 2>&1; then
+    echo "ERROR: ${BUILD_DIR} still appears in the shipped sysconfig:" >&2
+    grep -o "${BUILD_DIR}/[^ '\"]*" "${SYSCFG}" "${SYSMAKE}" | sort -u >&2
+    exit 1
+fi
+# Every tool, not just the compiler: the check that named only `gcc`
+# is what let `c++` through.
+for f in "${SYSCFG}" "${SYSMAKE}"; do
+    if grep -qE "${TARGET_TRIPLE}-(gcc|c\+\+|g\+\+|ar|readelf|ranlib|nm|strip|ld|objcopy|objdump)" "${f}"; then
+        echo "ERROR: a cross tool is still named in ${f}:" >&2
+        grep -oE "${TARGET_TRIPLE}-[a-z+]+" "${f}" | sort -u >&2
+        exit 1
+    fi
+done
+# The cached bytecode is a COPY of what was just edited. Left alone it
+# is what `import _sysconfigdata...` actually loads when the source's
+# mtime and size happen to match, and a stale copy of this file is the
+# original bug wearing a different name.
+rm -f "${D}/files/usr/lib/python${PY_XY}/__pycache__/_sysconfigdata_"*.pyc
+"${BUILD_PYTHON}" -m compileall -q \
+    "${D}/files/usr/lib/python${PY_XY}/_sysconfigdata__linux_${TARGET_ARCH}-linux-musl.py" \
+    >/dev/null 2>&1 || true
+
+# ── Where pip looks for certificate authorities ───────────────────────
+#
+# pip DOES NOT USE THE SYSTEM TRUST STORE. It carries a vendored copy
+# of certifi's Mozilla bundle and verifies against that, so on a
+# machine whose operator has added a CA -- a corporate proxy, a local
+# one -- `pip install` fails with a certificate error while `python3 -c
+# "urllib.request.urlopen(...)"` succeeds against the same host.
+# Measured here, not read about: every fetch failed with
+# "self-signed certificate in certificate chain" until `--cert` named
+# the system bundle, on a machine where Python's own ssl module was
+# perfectly happy.
+#
+# Two stores that disagree is the same defect RFC 0027 found in
+# reverse, where Python verified against NOTHING because
+# /etc/ssl/cert.pem was missing while curl was fine. One store, and it
+# is the machine's. Every distribution makes this change; pip reads
+# this file before ~/.config/pip/pip.conf, so a person can still
+# override it per-user without editing a file a package upgrade
+# replaces.
+install -d "${D}/files/etc"
+cat > "${D}/files/etc/pip.conf" <<'PIPCONF'
+# Novi's pip defaults.
+#
+# pip ships its own copy of Mozilla's CA list and would otherwise
+# ignore the machine's. This points it at the store everything else
+# here uses, so a CA you add in one place is trusted in one place.
+#
+# This file belongs to the `python` package and a package upgrade
+# replaces it. Yours is ~/.config/pip/pip.conf, which pip reads after
+# this one and which therefore wins.
+[global]
+cert = /etc/ssl/certs/ca-certificates.crt
+PIPCONF
+
 {
     echo "name=python"
     echo "version=${PYTHON_VERSION}"
     echo "arch=${TARGET_ARCH}"
-    echo "depends=zlib,libffi,expat,openssl"
+    echo "depends=zlib,libffi,expat,openssl,ncurses,readline,sqlite,ca-certificates"
     echo "description=CPython ${PYTHON_VERSION} -- the interpreter and the standard library"
 } > "${D}/MANIFEST"
+
+# ── The two modules this stage exists for ─────────────────────────────
+#
+# The EXPECTED_MISSING sweep above prints a WARNING, deliberately: the
+# module list shifts between point releases and a new name there should
+# not stop a build. These two are different. 40-ncurses.sh exists so
+# that they are built, and an interpreter without them is exactly the
+# "visibly unfinished" REPL RFC 0026 roadmap 2 is about -- shipped
+# silently, because CPython prints its missing modules and exits 0.
+DYNLOAD="${D}/files/usr/lib/python${PY_XY}/lib-dynload"
+for want in readline _curses _curses_panel _sqlite3; do
+    if ! find "${DYNLOAD}" -maxdepth 1 -name "${want}.*.so" | grep -q .; then
+        echo "ERROR: ${want} was not built." >&2
+        echo "       CPython decides this at configure time and says nothing" >&2
+        echo "       afterwards; the interpreter would ship with an up-arrow" >&2
+        echo "       that prints ^[[A, or an import of sqlite3 that fails on" >&2
+        echo "       somebody else's machine. Check ${WORK}/configure.log for" >&2
+        echo "       what it could not find under ${NCURSES_PREFIX} or" >&2
+        echo "       ${SQLITE_PREFIX}." >&2
+        exit 1
+    fi
+done
+echo "   readline, curses and sqlite3 modules built"
 
 # ── Check the artifact, not the flags ─────────────────────────────────
 #
@@ -348,4 +621,4 @@ if [ -n "${MISSING}" ]; then
     echo "    not built   : $(printf '%s' "${MISSING}" | tr '\n' ' ')"
 fi
 echo ""
-echo "Publish it with:  bash build/43-devtools-repo.sh"
+echo "Publish it with:  bash build/53-devtools-repo.sh"

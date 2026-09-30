@@ -1,0 +1,94 @@
+.Dd September 30, 2026
+.Dt WIFI.CONF 5
+.Os
+.Sh NAME
+.Nm wifi.conf
+.Nd saved wireless networks
+.Sh SYNOPSIS
+.Pa /etc/novi/wifi.conf
+.Sh DESCRIPTION
+.Nm
+holds the networks this machine will join, in
+.Nm wpa_supplicant Ns 's
+own configuration format \(em it is passed to the supplicant
+unmodified.
+Manage it with
+.Xr novi-wifi 1
+rather than by hand.
+.Pp
+It does not exist until the first network is added.
+Mode
+.Sy 0600 ,
+owned by root.
+.Ss Configuration is declared; secrets are not
+Only
+.Va network.wifi
+and
+.Va network.wifi.interface
+are in
+.Xr system.conf 5 .
+A passphrase is not, and will not be:
+.Xr system.conf 5
+is world-readable and this project tells people to commit it to git.
+The same rule puts a password hash in
+.Pa /etc/shadow
+and not in the document.
+.Ss The passphrase is on disk in the clear, unavoidably
+A WPA3 network block carries
+.Va sae_password= ,
+which is the plaintext passphrase.
+SAE derives from the passphrase rather than from the PBKDF2 pre-shared
+key, so there is no one-way transform to store \(em which is why this
+file was 0600 and root-only before WPA3 arrived.
+.Pp
+.Nm novi-wifi add Fl -wpa2-only
+is the escape hatch: it writes
+.Va psk=
+only, no plaintext, and no WPA3.
+.Ss WPA2 and WPA3 in one block
+A block written by
+.Xr novi-wifi 1
+carries
+.Va key_mgmt=WPA-PSK SAE
+and
+.Va ieee80211w=1 ,
+so it joins whichever the access point offers.
+.Va ieee80211w=2
+would make every WPA2 access point unjoinable; omitting it entirely
+would make every WPA3 one refuse to associate, because SAE requires
+protected management frames.
+.Sh FILES
+.Bl -tag -width "/etc/novi/wifi.conf" -compact
+.It Pa /etc/novi/wifi.conf
+This file.
+.It Pa /run/novi/network.wifi.device
+The radio the service resolved, published for readers such as the
+panel.
+.El
+.Sh EXAMPLES
+.Bd -literal -offset indent
+network={
+	ssid="example"
+	key_mgmt=WPA-PSK SAE
+	ieee80211w=1
+	psk=<hex>
+	sae_password="the passphrase"
+}
+.Ed
+.Sh SEE ALSO
+.Xr novi-wifi 1 ,
+.Xr system.conf 5
+.Sh STANDARDS
+RFC 0009, RFC 0021.
+.Sh CAVEATS
+.Nm wpa_passphrase Ns 's
+output ends with
+.Ql } ,
+so appending to it puts keys at file scope.
+.Xr novi-wifi 1
+drops the brace, appends, and restores it \(em and refuses rather
+than editing blind if the last line is not a brace.
+Hand-editing this file is where that goes wrong, and the symptom is
+.Nm novi-wifi status
+reporting that the supplicant is not running: a message about a
+service, produced by a syntax error in a file.

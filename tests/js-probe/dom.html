@@ -1,0 +1,10 @@
+<!DOCTYPE html><html><head><title>dom</title></head><body>
+<h1 id="h">NO SCRIPT RAN</h1>
+<p id="p">static paragraph</p>
+<script>
+document.getElementById('h').textContent = 'SCRIPT RAN: DOM WRITE OK';
+var d = document.createElement('p');
+d.textContent = 'created element: ' + (1+1) + ' and ' + typeof window;
+document.body.appendChild(d);
+</script>
+</body></html>
