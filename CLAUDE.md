@@ -5971,6 +5971,48 @@ a pre-existing, repo-wide style pattern, not a regression to fix reflexively
 when touching a file. Treat it as a known baseline; focus review on new
 warnings a change introduces.
 
+## Architecture: a claim of absence is the kind that rots
+
+This file records eleven roadmap items found wrong about what is
+already BUILT, and several sentences found wrong about what is
+POSSIBLE -- RFC 0031's "a browser needs Rust", RFC 0038's "a notion of
+progress NetSurf does not export", RFC 0039's "there is no Landlock",
+RFC 0026's `_multiarch` "harmless until X", RFC 0001's promise that
+the keybindings were already a file. Two more turned up in one sitting
+and were found by GREP rather than by reading, which is what makes it
+worth writing down as a method.
+
+- **SWEEP FOR THE SHAPE, NOT FOR THE SUBJECT.** A claim that something
+  is absent is the only kind that can be falsified by somebody else's
+  work, silently, with nothing to announce it. The patterns that found
+  these: `not implemented`, `not here yet`, `does not exist yet`,
+  `has never been`, `nothing has ever`, `no caller`, `nothing reads`,
+  `never actually`, `cannot be tested`. Run them over `docs/rfcs/` and
+  the shipped scripts' headers, excluding lines already struck.
+- **A CORRECTION MADE IN THE RFC THAT DID THE WORK DOES NOT REACH THE
+  RFC THAT MADE THE CLAIM.** RFC 0011 said *"suspend was never
+  actually entered"*; RFC 0013 QUOTES that sentence and says it has
+  been now -- in RFC 0013. RFC 0011 went on saying it, so a reader
+  landing there believed it. The fix belongs in BOTH documents: the
+  new one records the evidence, the old one gets struck. This is a
+  distinct sub-case from a claim nobody revisited, and it is worse,
+  because somebody already knew.
+- **A SUMMARY GOES STALE INSIDE ITS OWN RFC.** RFC 0041's abstract
+  said the decision *"comes with a precondition that does not exist
+  yet and has to be built first"* -- item 2 built it and the abstract
+  was never touched, while the roadmap item three hundred lines below
+  said DONE. The first paragraph is the one a reader believes.
+- **STRIKE, DO NOT DELETE**, as RFC 0039's Landlock paragraph already
+  does. "Checked, not assumed" was the right habit and the answer
+  changed; a reader who finds the old sentence and believes it is the
+  failure, not the sentence having been written.
+- **A CLAIM THAT IS STILL TRUE IS WORTH LEAVING ALONE, and half of
+  them are.** `bootx64.efi` still has not met a firmware that enforces
+  Secure Boot; no device has ever requested a byte of the firmware;
+  there is still no public Novi repository; no package has ever
+  shipped a lifecycle script (checked with `find`, not assumed). A
+  sweep that rewrote those would be making the documents worse.
+
 ## Contribution conventions
 
 Conventional Commits (`docs/branch-strategy.md`, `CONTRIBUTING.md` have the

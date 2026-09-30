@@ -24,8 +24,12 @@ firmware layouts), RFC 0018 (the encrypted layout)
 > **A/B root slots on ext4, updated by `chroot <inactive> pkg update`
 > and activated by a bootloader variable.** The snapshotting
 > alternatives are rejected for reasons specific to this system, and
-> the decision comes with a precondition that does not exist yet and
-> has to be built first.
+> the decision comes with a precondition that ~~does not exist yet and
+> has to be built first~~ **has since been built** — `loadenv` in all
+> three GRUB images and `novi-grubenv` writing the environment block
+> from the running system (decision 2, roadmap item 2). Struck rather
+> than deleted: a summary is the first thing a reader believes, and
+> this one went stale inside its own RFC.
 
 ## Motivation & Problem Statement
 
